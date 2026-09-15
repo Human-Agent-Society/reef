@@ -173,7 +173,13 @@ class CandidateBackend(CandidateEvaluator, ABC):
     ) -> PreparedStep: ...
 
     @abstractmethod
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult: ...
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        """Measure ``candidate``; the trainer's default plugin calls this with the candidate alone.
+
+        A backend may accept further keyword-only options with defaults (the
+        harness backend's ``sides``) for the plugins it ships; this contract
+        stays the one every plugin can rely on.
+        """
 
     @abstractmethod
     def settle_step(

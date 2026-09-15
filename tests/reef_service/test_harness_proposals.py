@@ -1,4 +1,4 @@
-"""The proposals route and inbox: an agent's proposed tree change is admitted at the route, waits as a file, and the next evolve step takes it into the gate."""
+"""The proposals route and inbox: an agent's proposed tree change is admitted at the route, waits as a file, and the next evolve step takes it into the evaluation."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
-from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
+from reef.train.cordis_backend.contracts import ProposalValidator, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
@@ -31,7 +31,7 @@ def test_proposals_and_step_records_are_independent_opt_in_capabilities() -> Non
         def read_step_records(self, directory, relative):
             return {"files": []}
 
-    class Gate(ProposalGate):
+    class Evaluation(ProposalValidator):
         @property
         def proposals(self):
             return None
@@ -40,9 +40,9 @@ def test_proposals_and_step_records_are_independent_opt_in_capabilities() -> Non
             return [], None
 
     assert isinstance(Records(), StepRecords)
-    assert not isinstance(Records(), ProposalGate)
-    assert isinstance(Gate(), ProposalGate)
-    assert not isinstance(Gate(), StepRecords)
+    assert not isinstance(Records(), ProposalValidator)
+    assert isinstance(Evaluation(), ProposalValidator)
+    assert not isinstance(Evaluation(), StepRecords)
 
 
 def _recipe(
@@ -241,8 +241,8 @@ def test_inference_responses_carry_no_release_header_on_a_scenario_that_serves_n
         plain.close()
 
 
-def test_the_next_step_takes_the_oldest_proposal_first_and_the_verdict_settles_it(tmp_path: Path) -> None:
-    """Two proposals admitted against one head: the first wins the gate and publishes; the second meets the
+def test_the_next_step_takes_the_oldest_proposal_first_and_the_result_settles_it(tmp_path: Path) -> None:
+    """Two proposals admitted against one head: the first passes the checks and publishes; the second meets the
     moved head at the step's own admission and is refused; the method is asked only once the inbox is empty."""
     asked: list[int] = []
     dispatcher = _dispatcher(tmp_path, _recipe(tmp_path, lambda nodes, s, m: asked.append(len(nodes)) or None))
@@ -278,7 +278,7 @@ def test_the_next_step_takes_the_oldest_proposal_first_and_the_verdict_settles_i
         assert [entry["id"] for entry in result.state["entries"]] == ["models", "settings", "r1"]
         settled = json.loads((inbox / "settled" / f"{first['proposal_id']}.json").read_text(encoding="utf-8"))
         assert settled["session"] == "s1"
-        assert settled["verdict"] == {"step": 1, "selected": True, "reason": result.metrics["selection"]["reason"]}
+        assert settled["result"] == {"step": 1, "selected": True, "reason": result.metrics["selection"]["reason"]}
 
         _report_once(scenario, "agents", "2")
         result = scenario.prepare_training_step()
@@ -325,7 +325,7 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
     assert claimed.mutations == (CREATE_RULES,) and claimed.reason == "because" and claimed.release_id == "rel-0"
     assert inbox.pending() == [newer] and (inbox.directory / "claimed" / f"{older}.json").is_file()
     inbox.settle(older, {"step": 1, "selected": False, "reason": "lost"})
-    assert json.loads((inbox.directory / "settled" / f"{older}.json").read_text(encoding="utf-8"))["verdict"] == {
+    assert json.loads((inbox.directory / "settled" / f"{older}.json").read_text(encoding="utf-8"))["result"] == {
         "step": 1,
         "selected": False,
         "reason": "lost",
@@ -338,7 +338,7 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
     )
     assert sorted(path.name for path in inbox.directory.iterdir()) == ["claimed", "refused", "settled"]
     assert list((inbox.directory / "claimed").iterdir()) == []
-    # A claimed file an operator removed by hand still gets its verdict filed, and no staging file stays behind.
+    # A claimed file an operator removed by hand still gets its result filed, and no staging file stays behind.
     third = ProposalInbox.new_id()
     assert inbox.submit(third, _proposal(CREATE_RULES, session="c")) is None
     claimed = inbox.claim()
@@ -347,7 +347,7 @@ def test_the_inbox_claims_oldest_first_and_keeps_a_claimed_file_out_of_the_queue
     inbox.settle(third, {"step": 2, "selected": False, "reason": "lost"})
     assert json.loads((inbox.directory / "settled" / f"{third}.json").read_text(encoding="utf-8")) == {
         "proposal_id": third,
-        "verdict": {"step": 2, "selected": False, "reason": "lost"},
+        "result": {"step": 2, "selected": False, "reason": "lost"},
     }
     assert list(inbox.directory.rglob(".*.part")) == []
 
@@ -411,7 +411,7 @@ def test_an_aborted_step_files_its_claimed_proposal_as_refused(tmp_path: Path, m
             scenario.prepare_training_step()
         inbox = tmp_path / "inbox" / "agents"
         refused = json.loads((inbox / "refused" / f"{proposal_id}.json").read_text(encoding="utf-8"))
-        assert refused["refused"] == "step aborted before a verdict" and refused["session"] == "3f1c2a9d0b7e"
+        assert refused["refused"] == "step aborted before a result" and refused["session"] == "3f1c2a9d0b7e"
         assert list((inbox / "claimed").iterdir()) == [] and list(inbox.glob("*.json")) == []
     finally:
         dispatcher.close()

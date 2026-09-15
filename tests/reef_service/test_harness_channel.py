@@ -221,7 +221,7 @@ async def _gate_step(client: TestClient) -> dict:
         if response.status == 200:
             manifest = await response.json()
             if manifest["release_id"] != previous_version:
-                assert manifest["gate"]["published"] is True
+                assert manifest["evaluation"]["published"] is True
                 return manifest
         else:
             assert response.status == 404
@@ -449,7 +449,7 @@ def test_versions_catalog_carries_the_publishing_steps_gate_metrics(tmp_path) ->
             head = rows[-1]
             assert head["release_id"] == manifest["release_id"]
             assert head["current"] is True
-            assert head["metrics"] == manifest["gate"]
+            assert head["metrics"] == manifest["evaluation"]
             assert head["metrics"]["published"] is True
             assert head["metrics"]["wins"] == 1
             # The stdlib client hands back the same parsed rows.
@@ -513,7 +513,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             assert head["current"] is True
             assert head["release_id"] == first["release_id"]
             assert head["content_id"] == first["content_id"]
-            assert head["metrics"] == first["gate"]
+            assert head["metrics"] == first["evaluation"]
 
             finish_evaluation.set()
             second = await asyncio.wait_for(second_step, _ASYNC_UPDATE_TIMEOUT_S)
@@ -524,7 +524,7 @@ def test_release_reads_stay_responsive_during_evaluation(tmp_path, monkeypatch) 
             assert head["current"] is True
             assert head["release_id"] == second["release_id"] != first["release_id"]
             assert head["content_id"] == second["content_id"]
-            assert head["metrics"] == second["gate"]
+            assert head["metrics"] == second["evaluation"]
             assert second["files"] == render_composition(NODES_V2, get_adapter("pi"))
             assert await read_release("/reef/harness", first["release_id"]) == first
         finally:
@@ -590,7 +590,7 @@ def test_pull_refuses_a_manifest_path_that_escapes_the_destination(tmp_path) -> 
         "content_id": "content-v",
         "parent_release_id": None,
         "files": {"../escape.txt": "x"},
-        "gate": None,
+        "evaluation": None,
     }
     puller = _ReleaseClient("http://127.0.0.1:1")
     puller.get = lambda path, extra_headers=None: escape  # type: ignore[method-assign]
@@ -606,14 +606,14 @@ def test_pull_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -> N
         "release_id": "v2",
         "content_id": "content-v2",
         "parent_release_id": "v1",
-        "gate": None,
+        "evaluation": None,
         "files": {"pi-agent/AGENTS.md": "new rules", "pi-agent/prompts/helper.md": "added in v2"},
     }
     v1 = {
         "release_id": "v1",
         "content_id": "content-v1",
         "parent_release_id": None,
-        "gate": None,
+        "evaluation": None,
         "files": {"pi-agent/AGENTS.md": "old rules"},
     }
     manifests = {None: v2, "v1": v1}
@@ -845,7 +845,7 @@ if mode == "static":
     # The record without the check offs is what RELEASE_FILE_CHECKSUM was baked from.
     record.pop("setup", None)
     print(hashlib.sha256((json.dumps(record, indent=2) + "\n").encode("utf-8")).hexdigest())
-elif mode == "gate":
+elif mode in ("check", "gate"):
     checked = {item["name"]: item for item in setup}
     def met(item):
         # A check off records the check it stood for; one without it (an older release file) counts by name.
@@ -898,8 +898,8 @@ spin() {
 }
 
 echo "reef: harness release v1 for pi"
-# The gate runs first of all: nothing is installed or written while an item is not checked off (reef-pi setup).
-[ "$REQUIRES" = "[]" ] || release_info_tool gate "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
+# Setup is checked first: nothing is installed or written while an item is not checked off (reef-pi setup).
+[ "$REQUIRES" = "[]" ] || release_info_tool check "$DEST/.reef-harness-release" "$REQUIRES" "$FALLBACK" || exit 1
 
 # Ensure the pinned binary (@earendil-works/pi-coding-agent@0.84.2) via the vendor's channel.
 vendor_install() {
@@ -1415,6 +1415,33 @@ def test_install_of_an_older_version_prunes_the_newer_versions_files(tmp_path) -
 
 
 @pytest.mark.unit
+def test_a_reinstall_leaves_the_env_file_and_other_files_the_tree_does_not_own_alone(tmp_path) -> None:
+    """The prune removes what a previous release file recorded and this composition lacks, and nothing else:
+    the env file ``reef-<adapter> setup`` keeps beside the release file, and any other file of the person's at
+    the install root, survive a reinstall and an already current rerun with their bytes and mode."""
+    from reef.harness.client.wrapper import HARNESS_ENV_FILE
+
+    prefix, env = _pinned_env(tmp_path)
+    dest = tmp_path / "dest"
+    v1 = _render_to(tmp_path / "install-v1.sh", {"pi-agent/AGENTS.md": "one\n", "pi-agent/old.md": "old\n"}, "v1")
+    v2 = _render_to(tmp_path / "install-v2.sh", {"pi-agent/AGENTS.md": "two\n", "pi-agent/new.md": "new\n"}, "v2")
+    assert _run_install(v1, dest, prefix, env).returncode == 0
+    env_file = dest / HARNESS_ENV_FILE
+    descriptor = os.open(env_file, os.O_WRONLY | os.O_CREAT, 0o600)
+    os.write(descriptor, b"REEF_AWAY_PHONE=+15550100\n")
+    os.close(descriptor)
+    (dest / "notes.txt").write_text("mine\n", encoding="utf-8")
+    for expect_current in (False, True):
+        result = _run_install(v2, dest, prefix, env)
+        assert result.returncode == 0, result.stderr
+        assert ("already current" in result.stdout) is expect_current
+    assert env_file.read_bytes() == b"REEF_AWAY_PHONE=+15550100\n"
+    assert env_file.stat().st_mode & 0o777 == 0o600
+    assert (dest / "notes.txt").read_text(encoding="utf-8") == "mine\n"
+    assert not (dest / "pi-agent/old.md").exists() and (dest / "pi-agent/new.md").read_bytes() == b"new\n"
+
+
+@pytest.mark.unit
 def test_render_refuses_a_composition_path_that_escapes_the_destination(tmp_path) -> None:
     """The generator applies the same escape rule as the client pull: an
     absolute path or any ``..`` part refuses the render, nothing is written."""
@@ -1729,7 +1756,7 @@ def test_record_only_traffic_fires_a_step_and_publishes(tmp_path) -> None:
                 response = await client.get("/reef/harness", headers={"x-reef-scenario": "delivery"})
                 if response.status == 200:
                     manifest = await response.json()
-                    assert manifest["gate"]["published"] is True
+                    assert manifest["evaluation"]["published"] is True
                     assert "marker rules" in manifest["files"]["pi-agent/AGENTS.md"]
                     break
                 assert response.status == 404
@@ -1884,7 +1911,7 @@ def test_git_install_kind_skips_the_clone_when_the_version_label_matches(tmp_pat
 def test_git_install_kind_reinstalls_when_only_the_ref_moved(tmp_path) -> None:
     """A date-tagged ref bump the package version does not follow still reinstalls.
 
-    hermes pins ``v2026.8.31`` but reports 0.21.0, so gating on the version
+    hermes pins ``v2026.8.31`` but reports 0.21.0, so evaluating on the version
     label alone would leave every existing install on the old checkout.
     """
     script, dest, prefix, env, _ = _git_install_fixture(tmp_path, binary_version="0.21.0", ref="v2026.9.2")
@@ -2140,7 +2167,7 @@ def test_install_script_embeds_requires_with_hostile_text_and_refuses_a_bad_list
 
 @pytest.mark.unit
 def test_install_script_refuses_before_the_vendor_install_naming_the_fallback_and_a_changed_check(tmp_path) -> None:
-    """The gate runs first of all: with the binary absent a refused run calls no vendor install and makes no
+    """Setup is checked first: with the binary absent a refused run calls no vendor install and makes no
     directory, and the refusal's last line names the release that installs with nothing set up. A check off
     whose recorded check is not the item's counts as unmet; the same check, or none recorded, counts by name."""
     prefix = tmp_path / "prefix"

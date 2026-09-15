@@ -4,7 +4,7 @@ A :class:`~reef.core.evaluation.CandidateEvaluationPlugin` is a single
 class that both measures a candidate (``evaluate``) and decides whether to
 publish it (``decide``). Rather than composing an evaluator object with a
 selector object, a plugin mixes in the methods it needs: a *decide* mixin
-(:class:`AlwaysSelectMixin`, :class:`RegressionGateMixin`) and, when the
+(:class:`AlwaysSelectMixin`, :class:`RegressionCheckMixin`) and, when the
 measurement comes from the candidate backend rather than the plugin's own code,
 the :class:`BackendEvaluateMixin`.
 
@@ -12,7 +12,7 @@ Every mixin inherits the plugin contract and implements one half of it, so the
 other half stays abstract: a mixin cannot be instantiated on its own, and a
 plugin is only concrete once both halves are supplied.
 
-    class MyPlugin(RegressionGateMixin):
+    class MyPlugin(RegressionCheckMixin):
         def __init__(self, ...):
             super().__init__(metric="clean_rate", margin=0.17)
             ...
@@ -62,7 +62,7 @@ class AlwaysSelectMixin(CandidateEvaluationPlugin):
         )
 
 
-class RegressionGateMixin(CandidateEvaluationPlugin):
+class RegressionCheckMixin(CandidateEvaluationPlugin):
     """Give a plugin a best-checkpoint ``decide()`` over one scalar metric.
 
     Where :class:`AlwaysSelectMixin` publishes every evaluated candidate, this
@@ -71,19 +71,19 @@ class RegressionGateMixin(CandidateEvaluationPlugin):
     otherwise it rejects, and serving holds the last selected weights. That makes
     it best-checkpoint selection made online: an objective that has passed its
     peak cannot compound regressing steps into serving. The bar is seeded by the
-    first candidate, so the initial climb is always admitted and the gate only
-    bites once a peak exists to regress from.
+    first candidate, so the initial climb is always admitted and the check
+    applies once a peak exists to regress from.
 
     The metric is whatever ``evaluate`` records — a held-out score, an accuracy,
-    a clean-output rate. ``higher_is_better=False`` gates a metric that improves
+    a clean-output rate. ``higher_is_better=False`` checks a metric that improves
     as it falls (a loss, an error rate).
     """
 
     def __init__(self, *, metric: str, margin: float = 0.0, higher_is_better: bool = True) -> None:
         if not isinstance(metric, str) or not metric:
-            raise ValueError("RegressionGateMixin needs a non-empty metric name")
+            raise ValueError("RegressionCheckMixin needs a non-empty metric name")
         if margin < 0:
-            raise ValueError("RegressionGateMixin margin must be non-negative")
+            raise ValueError("RegressionCheckMixin margin must be non-negative")
         super().__init__()
         self._metric = metric
         self._margin = float(margin)
@@ -100,7 +100,7 @@ class RegressionGateMixin(CandidateEvaluationPlugin):
             raw = float(evaluation.metrics[self._metric])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
-                f"the regression gate's metric {self._metric!r} is missing or non-numeric in the evaluation"
+                f"the regression check's metric {self._metric!r} is missing or non-numeric in the evaluation"
             ) from exc
         score = self._oriented(raw)
         bar = score if self._best is None else self._best - self._margin
@@ -111,7 +111,7 @@ class RegressionGateMixin(CandidateEvaluationPlugin):
             new_best_raw = self._best if self._higher_is_better else -self._best
             return SelectionDecision(
                 outcome="select",
-                policy="regression-gate",
+                policy="regression-check",
                 policy_version="1",
                 reason=f"{self._metric} {raw:g} within margin of best {new_best_raw:g}",
                 evaluation=evaluation,
@@ -119,7 +119,7 @@ class RegressionGateMixin(CandidateEvaluationPlugin):
             )
         return SelectionDecision(
             outcome="reject",
-            policy="regression-gate",
+            policy="regression-check",
             policy_version="1",
             reason=(
                 f"{self._metric} {raw:g} regressed past margin {self._margin:g} below best {best_raw:g}; "
@@ -148,7 +148,7 @@ class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
     """The default plugin: evaluate via the candidate backend, publish every candidate.
 
     What a weight-training deployment gets when it configures no evaluation — the
-    same behaviour reef had before candidate gating existed.
+    same behaviour reef had before candidate evaluation existed.
     """
 
     def __init__(self, candidate_backend: Any) -> None:
@@ -163,11 +163,15 @@ class AlwaysSelectPluginFactory(CandidatePluginFactory):
         return BackendAlwaysSelectPlugin(candidate_backend)
 
 
+# Compatibility aliases for existing imports.
+RegressionGateMixin = RegressionCheckMixin
+
 __all__ = [
     "AlwaysSelectMixin",
     "AlwaysSelectPluginFactory",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
     "CandidatePluginFactory",
+    "RegressionCheckMixin",
     "RegressionGateMixin",
 ]

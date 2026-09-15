@@ -117,7 +117,7 @@ def main():
 
     print(f"published: artifact {manifest['release_id']} (parent {manifest['parent_release_id']})")
     print("gate metrics (the evolve step that published this artifact):")
-    print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
+    print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
     print("evolved node files:")
     for path, text in sorted(manifest["files"].items()):
         # Reef's own API reference skill ships in every tree with requests on, so it is never an evolved file.
@@ -320,7 +320,7 @@ def native_main():
     release = manifest["release_id"]
     print(f"published: artifact {release} (parent {manifest['parent_release_id']})")
     print("gate metrics (the evolve step that published this artifact):")
-    print(json.dumps(manifest["gate"], indent=2, sort_keys=True))
+    print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
 
     # The other batched steps run back to back and hold the catalog and the manifest while they do; the process
     # mounts once they are over, so wait for their verdicts first.
@@ -420,7 +420,7 @@ def self_main():
         print(f"no verdict within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh self for another attempt")
         return
     release = manifest["release_id"]
-    gate = manifest["gate"]
+    gate = manifest["evaluation"]
     print(f"published: artifact {release} (parent {manifest['parent_release_id']}); proposal {gate.get('proposal')}")
     print("gate:", {key: gate.get(key) for key in ("wins", "losses", "ties", "candidate_score", "current_score")})
 

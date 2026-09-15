@@ -210,8 +210,8 @@ def _import_check_lines(wrapper_name: str) -> list[str]:
 def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) -> list[str]:
     """The vendor-delegating install step: check the pin, else install through the vendor's channel."""
     prelude: list[str] = []
-    # Extra condition the "already installed" gate ands onto the binary check.
-    gate = ""
+    # Extra condition the "already installed" condition adds to the binary check.
+    pin_check = ""
     if install.kind == "git":
         # A checkout installed editable into a venv; the checkout's .git goes so
         # the agent's own startup update check has nothing to fetch.
@@ -219,14 +219,14 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         # ``--version`` reports the package version, which a git ref moves
         # independently of (hermes pins date tags but reports 0.21.0), so the
         # version match alone would leave a ref-only bump on the old checkout.
-        # The installed ref is recorded beside the prefix and gates too, and is
+        # The installed ref is recorded beside the prefix and must match too, and is
         # cleared before installing so an interrupted install never reads back
         # as current.
         prelude = [
             f"PIN={_single_quoted(f'{install.repository}@{install.ref}')}",
             'PIN_FILE="$PREFIX/.reef-install-pin"',
         ]
-        gate = ' && [ "$(cat "$PIN_FILE" 2>/dev/null || true)" = "$PIN" ]'
+        pin_check = ' && [ "$(cat "$PIN_FILE" 2>/dev/null || true)" = "$PIN" ]'
         steps = [
             '        rm -f "$PIN_FILE"',
             # git clone refuses a non-empty target, so the checkout (and the
@@ -258,7 +258,7 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         *[line.replace("        ", "    ", 1) for line in steps],
         "}",
         'installed=""',
-        f'if [ -x "$BINARY" ]{gate}; then',
+        f'if [ -x "$BINARY" ]{pin_check}; then',
         f'    installed="$({probe} --version 2>/dev/null || true)"',
         "fi",
         'case " $installed " in',
@@ -399,7 +399,7 @@ def _release_info_tool_lines(wrapper_name: str) -> list[str]:
     """The ``release_info_tool`` shell function: the release file's ``requires`` bookkeeping in python.
 
     ``static`` hashes the release file on disk without its check offs, the text
-    ``RELEASE_FILE_CHECKSUM`` was baked from; ``gate`` refuses, naming the setup
+    ``RELEASE_FILE_CHECKSUM`` was baked from; ``check`` refuses, naming the setup
     list and ``FALLBACK``, the release that installs on a machine with
     nothing set up, when an item of ``REQUIRES`` is not checked off there (a
     check off meets an item when it names it and the check it recorded is
@@ -425,7 +425,7 @@ def _release_info_tool_lines(wrapper_name: str) -> list[str]:
         "    # The record without the check offs is what RELEASE_FILE_CHECKSUM was baked from.",
         '    record.pop("setup", None)',
         '    print(hashlib.sha256((json.dumps(record, indent=2) + "\\n").encode("utf-8")).hexdigest())',
-        'elif mode == "gate":',
+        'elif mode in ("check", "gate"):',
         '    checked = {item["name"]: item for item in setup}',
         "    def met(item):",
         "        # A check off records the check it stood for; one without it (an older release file) counts by name.",
@@ -555,8 +555,8 @@ def render_install_script(
         *_spinner_lines(),
         "",
         f'echo "reef: harness release {release_id} for {descriptor.name}"',
-        f"# The gate runs first of all: nothing is installed or written while an item is not checked off ({wrapper_name} setup).",
-        f'[ "$REQUIRES" = "[]" ] || release_info_tool gate "$DEST/{HARNESS_RELEASE_FILE}" "$REQUIRES" "$FALLBACK" || exit 1',
+        f"# Setup is checked first: nothing is installed or written while an item is not checked off ({wrapper_name} setup).",
+        f'[ "$REQUIRES" = "[]" ] || release_info_tool check "$DEST/{HARNESS_RELEASE_FILE}" "$REQUIRES" "$FALLBACK" || exit 1',
         "",
         *_ensure_binary_lines(descriptor, install),
         "",

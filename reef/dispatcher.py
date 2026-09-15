@@ -103,14 +103,15 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     """Why admission refuses an instruction; the reason names the rule, never the text or the item.
 
     The text becomes proposer input and a catalog row, so it meets the
-    screens a promoted task prompt meets; a ``requires`` name or check is
-    shown to the person and recorded in the commit, so it meets them too."""
+    screens a promoted task prompt meets; a ``requires`` name, check or
+    prompt is shown to the person and recorded in the commit, so it meets
+    them too."""
     if secret_shaped(text):
         return "the request text carries a credential shaped literal; a request never holds secrets"
     if directive_shaped(text):
         return "the request text carries an instruction override phrasing or a chat template control token"
     for item in requires:
-        for value in (str(item.get("name", "")), str(item.get("check") or "")):
+        for value in (str(item.get("name", "")), str(item.get("check") or ""), str(item.get("prompt") or "")):
             if secret_shaped(value):
                 return "a requires item carries a credential shaped literal; a request never holds secrets"
             if directive_shaped(value):

@@ -180,6 +180,21 @@ Prefer concrete alternatives such as:
 
 When adding new concepts, reuse existing repository vocabulary before inventing new terminology.
 
+Prefer concrete names over metaphors in code, UI text, logs, and documentation:
+
+- Use `check` for a condition, `validation` for checking validity, and
+  `evaluation` for running and scoring tasks instead of `gate`.
+- Use `result` for an outcome, `selection_result` for a candidate selection,
+  and `review_result` for a review instead of `verdict`.
+- Name the actual operation or quantity: `evaluation_score`, `evaluation_tasks`,
+  `result_html`, and "passed the checks" are clearer than metaphorical names.
+- Apply terminology changes to identifiers, serialized keys, producers, consumers,
+  tests, and documentation. New records should use the preferred keys. Preserve
+  older records and callers with targeted fallback reads or API aliases where
+  compatibility is needed; keep those legacy names at the boundary rather than
+  spreading them through new code or displayed labels.
+- Keep standard technical names such as neural-network gates and third-party identifiers.
+
 ## Tests and checks
 
 Start with the smallest existing suite that exercises the changed behavior.

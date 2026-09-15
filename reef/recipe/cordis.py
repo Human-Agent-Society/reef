@@ -4,7 +4,8 @@
 ``evaluate`` are Python callables, named as dotted ``module:attribute``
 references in YAML or passed directly when registering from code; ``propose``
 returns one ``Mutation``, a sequence of them (one composite proposal under
-one selection decision), or ``None``. ``CordisBackend`` owns the
+one selection decision), a ``StepProposal`` (the mutations plus notes the
+step records), or ``None``. ``CordisBackend`` owns the
 mutation/render/episode/scoring phases; the recipe composes that evaluator
 and its selection policy into the candidate evaluator executed by ``Trainer``.
 """
@@ -37,7 +38,12 @@ from reef.runtime.executor.config import ExecutorSettings, WorkerResources, exec
 from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.cordis_backend.backend import CordisBackend, ScoreComparisonPluginFactory, tree_files
+from reef.train.cordis_backend.backend import (
+    CordisBackend,
+    FloorPluginFactory,
+    ScoreComparisonPluginFactory,
+    tree_files,
+)
 from reef.train.cordis_backend.execution import evaluation_selection, legacy_worker_settings
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import (
@@ -53,6 +59,7 @@ from reef.train.trainer import Trainer
 
 _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
     "score_comparison": ScoreComparisonPluginFactory(),
+    "floor": FloorPluginFactory(),
     "always": AlwaysSelectPluginFactory(),
 }
 
@@ -134,10 +141,12 @@ class CordisRecipe(Recipe):
     loaded into the composition tree on first boot, where an item may also
     be a dotted ``module:attribute`` naming a sequence of them; a recovered
     algorithm state always wins over the seed), optional ``selection`` (the
-    candidate-selection policy: ``score_comparison``, the default; ``always``;
+    candidate-selection policy: ``score_comparison``, the default; ``floor``,
+    which runs the candidate alone and selects it when every task scores at
+    least ``floor_score``, default ``1.0``; ``always``;
     or a dotted reference to a ``CandidatePluginFactory`` subclass or instance),
     optional ``step_record_dir`` (a directory under which every scenario's
-    steps write the proposer's model calls, the parsed proposal and each gate
+    steps write the proposer's model calls, the parsed proposal and each evaluation
     episode's trajectory files, so the decision is reconstructible; off by
     default),
     optional ``client_models`` (further model names the installed client
@@ -211,6 +220,7 @@ class CordisRecipe(Recipe):
     recheck_every: int = 0
     max_rejected_history: int = 25
     min_win_margin: int = 0
+    floor_score: float = 1.0
     publish: str = "auto"
     review_kinds: tuple[str, ...] = ()
     #: Models an installed client may switch to besides the served one, rendered into its config.
@@ -271,6 +281,8 @@ class CordisRecipe(Recipe):
         ):
             if value < 0:
                 raise ValueError(f"{label} must be at least 0 (0 disables the limit)")
+        if self.floor_score <= 0:
+            raise ValueError("floor_score must be positive")
         if self.publish not in ("auto", "review"):
             raise ValueError("publish must be 'auto' or 'review'")
         if not isinstance(self.candidate_plugin, CandidatePluginFactory):
@@ -316,7 +328,7 @@ class CordisRecipe(Recipe):
                 )
             if evolution.get("promote_failures", False):
                 raise RecipeConfigError(
-                    "evolution.promote_failures adds prompts to a gate whose tasks are directories"
+                    "evolution.promote_failures adds prompts to an evaluation whose tasks are directories"
                 )
             try:
                 task_paths = manifest_task_paths(
@@ -395,6 +407,16 @@ class CordisRecipe(Recipe):
             if selection != "score_comparison":
                 raise RecipeConfigError("evolution.min_win_margin applies only to the score_comparison selection")
             candidate_plugin = ScoreComparisonPluginFactory(min_win_margin=budgets["min_win_margin"])
+        floor_score = evolution.get("floor_score", 1.0)
+        if isinstance(floor_score, bool) or not isinstance(floor_score, (int, float)) or floor_score <= 0:
+            raise RecipeConfigError("evolution.floor_score must be a positive number")
+        if "floor_score" in evolution:
+            if selection != "floor":
+                raise RecipeConfigError("evolution.floor_score applies only to the floor selection")
+            candidate_plugin = FloorPluginFactory(floor_score=float(floor_score))
+        # A recheck compares two trees; the floor evaluates one.
+        if selection == "floor" and budgets["recheck_every"]:
+            raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
         publish = evolution.get("publish", "auto")
         if publish not in ("auto", "review"):
             raise RecipeConfigError("evolution.publish must be 'auto' or 'review'")
@@ -504,6 +526,7 @@ class CordisRecipe(Recipe):
             "episode_repeats": repeats,
             "forbid_residue": forbid_residue,
             **budgets,
+            "floor_score": float(floor_score),
             "executor": executor,
             "promote_failures": promote_failures,
             "max_promoted_tasks": max_promoted_tasks,

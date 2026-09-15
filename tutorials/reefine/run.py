@@ -6,9 +6,10 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
               to ``POST /reef/train`` as a training instruction, and the
               deployment, in ``training_mode: manual``, runs one evolve step
               for it at once
-    step    - the service proposer reads the request and writes the change;
-              the gate scores it on the recipe's tasks; the catalog row
-              carries the verdict and the request it answered under
+    step    - the service proposer designs the change, writes it and
+              reviews it; the evaluation runs the candidate on the recipe's
+              health task and the floor decides; the catalog row carries
+              the result, the notes and the request it answered under
               ``metrics.training_request``
     promote - a release that touches a code_extension waits as pending; its
               page says why it exists and what it changed, and the demo
@@ -21,10 +22,10 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
 The measurement (``./run.sh measure``) posts a fixed list of requests one
 after another, each once the step of the one before it settled, and prints
-one row per request and the counts: filed, answered, admitted, won,
-published, pending. The won count is the first of the two things RFC #310's
-stage 6 asks for (requests that won the gate); the held out shapes are not
-here.
+one row per request and the counts: filed, answered, admitted, won (met the
+floor), published, pending. The won count is the first of the two things
+RFC #310's stage 6 asks for (requests that passed the checks); the held out
+shapes are not here.
 
 Start this through ./run.sh: it starts the Reef these constants point at
 from configs/deployment.yaml, installs the served tree, and runs a mode.
@@ -163,8 +164,8 @@ def _ensure_scenario(client):
     return _manifest(client)
 
 
-def verdict_of(row):
-    """The row's verdict as the page words it: pending, selected, rejected, skipped with its reason."""
+def result_of(row):
+    """The row's result as the page words it: pending, selected, rejected, skipped with its reason."""
     if row.get("pending"):
         return "pending"
     metrics = row.get("metrics") or {}
@@ -189,11 +190,15 @@ def kinds_of(metrics):
 
 
 def tally_parts(metrics):
-    """The gate's (wins, losses, ties) over the tasks, or None when no gate ran.
+    """The evaluation's counts over the tasks: the floor's (passed, failed), else (wins, losses, ties); None when no
+    evaluation ran.
 
-    The score comparison selector records the three counts; ``selection:
-    always`` records only the per task scores of both sides, so the counts
-    come from comparing those."""
+    The floor records how many tasks the candidate passed and failed. Before
+    it, the score comparison selector recorded the three counts and
+    ``selection: always`` only the per task scores of both sides, so on those
+    rows the counts come from comparing the scores."""
+    if all(isinstance(metrics.get(key), int) for key in ("passed", "failed")):
+        return metrics["passed"], metrics["failed"]
     if all(isinstance(metrics.get(key), int) for key in ("wins", "losses", "ties")):
         return metrics["wins"], metrics["losses"], metrics["ties"]
     scored = ((metrics.get("selection") or {}).get("evaluation") or {}).get("metrics") or {}
@@ -213,8 +218,20 @@ def tally_parts(metrics):
 
 
 def tally(metrics):
+    """The evaluation's counts as one cell: ``passed / failed`` under the floor, ``wins / losses / ties`` before it,
+    ``-`` when no evaluation ran."""
     parts = tally_parts(metrics)
-    return " / ".join(str(part) for part in parts) if parts else "- / - / -"
+    return " / ".join(str(part) for part in parts) if parts else "-"
+
+
+def evaluation_counts(metrics):
+    """The evaluation's counts by name: ``passed`` and ``failed`` under the floor, ``wins``, ``losses`` and ``ties``
+    on a row from before it; empty when no evaluation ran."""
+    parts = tally_parts(metrics)
+    if parts is None:
+        return {}
+    names = ("passed", "failed") if len(parts) == 2 else ("wins", "losses", "ties")
+    return dict(zip(names, parts, strict=True))
 
 
 def _requires_of(items):
@@ -323,7 +340,7 @@ def wait_for_step(client, text, before, deadline):
             metrics = row.get("metrics") or {}
             whose = "" if _request_text_of(row) in (None, text) else "; an earlier request's step"
             release = str(row.get("release_id"))[:12]
-            say(f"step {metrics.get('steps', '?')}: {verdict_of(row)} (release {release}){whose}")
+            say(f"step {metrics.get('steps', '?')}: {result_of(row)} (release {release}){whose}")
         shown = max(shown, len(steps))
         for row in steps[before:]:
             if _request_text_of(row) == text:
@@ -458,18 +475,31 @@ def _print_table(headers, rows):
         print("| " + " | ".join(str(cell).replace("|", "\\|") for cell in row) + " |")
 
 
+def was_evaluated(result):
+    """Whether the evaluation ran for the row: it carries the floor's counts or the older tally."""
+    return result.get("passed") is not None or result.get("wins") is not None
+
+
+def _won(result):
+    """Whether the row met the floor; on a row from before the floor, whether it had more wins than losses."""
+    if result.get("passed") is not None:
+        return result.get("failed") == 0
+    return result.get("wins") is not None and result["wins"] > (result.get("losses") or 0)
+
+
 def totals_of(results):
-    """The measurement's counts: filed, answered (a mutation came back), admitted (the gate ran), won (more wins
-    than losses in the recorded verdict), published, pending. Under ``selection: always`` a publish says nothing
-    about the gate, so won and published are counted apart."""
+    """The measurement's counts: filed, answered (a mutation came back), admitted (the evaluation ran), won (met the
+    floor; on a row from before the floor, more wins than losses), published, pending. Under ``selection:
+    always`` a publish said nothing about the evaluation, so won and published are counted apart; under the floor a
+    publish is a win, and the two agree unless a release waits as pending."""
     return {
         "filed": sum(1 for r in results if r.get("filed")),
         # A mutation came back: a step that skipped on a refusal or on a failed step carries none.
         "answered": sum(1 for r in results if r.get("filed") and r.get("kinds") not in (None, "-")),
-        "admitted": sum(1 for r in results if r.get("wins") is not None),
-        "won": sum(1 for r in results if r.get("wins") is not None and r["wins"] > (r.get("losses") or 0)),
-        "published": sum(1 for r in results if r.get("verdict") == "selected"),
-        "pending": sum(1 for r in results if r.get("verdict") == "pending"),
+        "admitted": sum(1 for r in results if was_evaluated(r)),
+        "won": sum(1 for r in results if _won(r)),
+        "published": sum(1 for r in results if r.get("result", r.get("verdict")) == "selected"),
+        "pending": sum(1 for r in results if r.get("result", r.get("verdict")) == "pending"),
     }
 
 
@@ -492,9 +522,9 @@ def demo(mode):
         _write_record(record_path, record)
         raise SystemExit(f"no step settled the request within {STEP_TIMEOUT_S:.0f} s; check work/reef.log")
     metrics = row.get("metrics") or {}
-    verdict = verdict_of(row)
+    selection_result = result_of(row)
     mutations = mutations_of(metrics)
-    say(f"verdict: {verdict}; W / L / T {tally(metrics)}; proposer {metrics.get('proposer_seconds', '-')} s")
+    say(f"result: {selection_result}; evaluation {tally(metrics)}; proposer {metrics.get('proposer_seconds', '-')} s")
     say(f"mutations: {'; '.join(mutations) or 'none'}")
     promoted = None
     if row.get("pending"):
@@ -502,8 +532,8 @@ def demo(mode):
     requires, met = setup_if_required(client)
     result = {
         "request": text,
-        "verdict": verdict,
-        "wins_losses_ties": tally(metrics),
+        "result": selection_result,
+        "evaluation": tally(metrics),
         "kinds": ", ".join(kinds_of(metrics)) or "-",
         "pending": bool(row.get("pending")),
         "promoted": promoted or "-",
@@ -514,7 +544,7 @@ def demo(mode):
         record["result"] = {**result, "installed": "-", "setup": "unmet"}
         _write_record(record_path, record)
         raise SystemExit(2)
-    if verdict == "selected" or promoted:
+    if selection_result == "selected" or promoted:
         installed = install()
         if installed is None:
             record["result"] = {**result, "installed": "-", "setup": "refused at install"}
@@ -523,7 +553,7 @@ def demo(mode):
     else:
         say(f"the head did not move: release {installed_before} stays installed")
         installed = installed_before
-    # From the harness call to the end of the install, or to the verdict when nothing new installed.
+    # From the harness call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)
     shown = show(mode, run_dir)
     result.update(
@@ -556,32 +586,28 @@ def measure(n):
         try:
             request_id = ask(text)
         except SystemExit as exc:
-            results.append({"request": text, "filed": False, "verdict": str(exc)})
+            results.append({"request": text, "filed": False, "result": str(exc)})
             continue
         _, row = wait_for_step(client, text, before, started + STEP_TIMEOUT_S)
         seconds = round(time.monotonic() - started, 1)
         if row is None:
-            results.append(
-                {"request": text, "id": request_id, "filed": True, "verdict": "no step", "seconds": seconds}
-            )
+            results.append({"request": text, "id": request_id, "filed": True, "result": "no step", "seconds": seconds})
             continue
         metrics = row.get("metrics") or {}
-        parts = tally_parts(metrics)
         results.append(
             {
                 "request": text,
                 "id": request_id,
                 "filed": True,
                 "kinds": ", ".join(kinds_of(metrics)) or "-",
-                "verdict": verdict_of(row),
-                "wins": parts[0] if parts else None,
-                "losses": parts[1] if parts else None,
-                "ties": parts[2] if parts else None,
+                "result": result_of(row),
+                **evaluation_counts(metrics),
+                "evaluation": tally(metrics),
                 "seconds": seconds,
                 "row": row,
             }
         )
-        say(f"verdict: {verdict_of(row)}; W / L / T {tally(metrics)}; {seconds} s")
+        say(f"result: {result_of(row)}; evaluation {tally(metrics)}; {seconds} s")
         # The record after every request, so a run stopped midway still leaves its rows.
         record_path.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
     totals = totals_of(results)
@@ -589,13 +615,13 @@ def measure(n):
     _write_record(record_path, record)
     print()
     _print_table(
-        ("Request", "Kind proposed", "Verdict", "W / L / T", "Seconds"),
+        ("Request", "Kind proposed", "Result", "Evaluation", "Seconds"),
         [
             (
                 r["request"],
                 r.get("kinds", "-"),
-                r.get("verdict", "-"),
-                f"{r['wins']} / {r['losses']} / {r['ties']}" if r.get("wins") is not None else "- / - / -",
+                r.get("result", r.get("verdict", "-")),
+                r.get("evaluation", r.get("gate", "-")),
                 r.get("seconds", "-"),
             )
             for r in results
@@ -614,7 +640,7 @@ def main(argv=None):
     modes.add_parser("install", help="install the served head into work/harness (run.sh does this first)")
     modes.add_parser("bugfix", help="the bug fix flow demo: demos/bugfix.md")
     modes.add_parser("research", help="the research loop demo: demos/research.md")
-    measured = modes.add_parser("measure", help="file the fixed request list and count what won the gate")
+    measured = modes.add_parser("measure", help="file the fixed request list and count what passed the checks")
     measured.add_argument("--n", type=int, default=10, help="how many of the fixed requests to file (default 10)")
     args = parser.parse_args(argv)
     if args.mode == "install":

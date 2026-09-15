@@ -61,8 +61,11 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases``                         | the harness release catalog, oldest first         |
 +--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, what         |
-|                                                        | changed, verdict, setup, chain                    |
+| ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, design, what |
+|                                                        | changed, review, result, setup, chain             |
++--------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/requests/{record_id}/page``        | one HTML page per filed harness request: its      |
+|                                                        | step's state, then the result; reloads itself     |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``GET /reef/harness/releases/{step}/records``          | retained raw step file inventory or file body     |
 +--------------------------------------------------------+---------------------------------------------------+
@@ -125,19 +128,22 @@ committed state; it does not restore the originating release. The API
 requires no inference receipts or score.
 
 A request may also carry ``requires``: what the change needs from the
-person's machine, at most 8 ``{name, kind, check}`` items, default none.
-``kind`` is ``permission`` (an OS permission the person grants), ``env``
-(a variable the person sets; the extension reads it from the environment,
-and its value never enters a request or the tree) or ``service`` (an
-account or endpoint the person connects). ``name`` matches the entry name
-pattern and is what a check off is recorded under. ``check`` is optional:
-the variable name for ``env``; for ``permission`` and ``service`` a shell
-command whose exit status zero means satisfied. For ``env`` the variable
-named (the check, else the name) is a shell identifier,
-``^[A-Za-z_][A-Za-z0-9_]*$``. The credential and directive screens run
-over every ``name`` and ``check`` as they run over ``text``, with the same
-HTTP 400 and a reason that names the rule; a malformed list is HTTP 400
-naming the first bad item. The method's ``propose`` may add items of its
+person's machine, at most 8 ``{name, kind, check, prompt}`` items, default
+none. ``kind`` is ``permission`` (an OS permission the person grants),
+``env`` (a variable the person sets; the extension reads it from the
+environment, and its value never enters a request or the tree) or
+``service`` (an account or endpoint the person connects). ``name`` matches
+the entry name pattern and is what a check off is recorded under.
+``check`` is optional: the variable name for ``env``; for ``permission``
+and ``service`` a shell command whose exit status zero means satisfied.
+For ``env`` the variable named (the check, else the name) is a shell
+identifier, ``^[A-Za-z_][A-Za-z0-9_]*$``. ``prompt`` is optional: one
+sentence telling the person what to enter or grant, at most 200
+characters, stripped and dropped when blank; ``reef-<adapter> setup`` and
+the pages show it beside the item. The credential and directive screens
+run over every ``name``, ``check`` and ``prompt`` as they run over
+``text``, with the same HTTP 400 and a reason that names the rule; a
+malformed list is HTTP 400 naming the first bad item. The method's ``propose`` may add items of its
 own to the mapping it received (an extension that reads a variable, say);
 the backend merges them by name into the commit's
 ``training_request.requires`` after the same screens (a bad item of the
@@ -195,7 +201,25 @@ that answered a request carries, for example:
 
    {"training_request": {"id": "change-001", "text": "Text me when the run is blocked",
                          "session": "session-1", "release_id": "release-1",
-                         "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"}]}}
+                         "requires": [{"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID",
+                                       "prompt": "The Twilio account SID"}]}}
+
+When the backend dropped an item the method added (malformed, or credential
+or directive shaped), ``training_request.refused_requires`` lists each as
+``{"item": <the item as written>, "reason": "..."}``; the key is absent when
+nothing was dropped. A method may also record notes beside its proposal;
+they land under ``proposal_notes``, a JSON mapping the backend writes as
+given and never reads, present only when non-empty. Reefine writes
+``design`` (the proposer's plan, a few sentences), ``review``
+(``{"result": "complete" | "partial", "covered": [...], "uncovered": [...]}``,
+the proposer's own reading of its entries against the request; absent when
+the review call failed), ``refused_requires`` (the items the method itself
+dropped, in the same ``{item, reason}`` shape) and ``undeclared_env`` (the
+variables a written extension reads through ``process.env`` that no
+``requires`` item names; nothing adds them, the version page shows them).
+A request step that produced nothing records ``failure``, why: the model
+call failed (how long it took, the reply budget and the endpoint's error)
+or the reply held no usable entry. Other methods may write other keys.
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after record compaction; reusing the id with
@@ -470,11 +494,12 @@ Harness artifacts
 +--------------------------------+---------------------------------------------------------------+
 | Route                          | Response                                                      |
 +================================+===============================================================+
-| ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files, gate,    |
-|                                | requires}``, plus an ``x-reef-release-id`` response header    |
+| ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files,          |
+|                                | evaluation, requires}``, plus an ``x-reef-release-id``        |
+|                                | response header                                               |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
-|                                | carrying the gate metrics of the step that published it       |
+|                                | carrying the evaluation metrics of the publishing step        |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
 |                                | binary, writes the tree, and writes the adapter's model       |
@@ -534,7 +559,7 @@ catalog release. An unknown or unrestorable release returns HTTP 404.
 Catalog and manifest reads do not wait for an evolve step's proposer or
 evaluation episodes: they continue serving the existing releases while a
 candidate is being prepared. Reads still serialize with publication and
-rollback so a manifest's artifact and gate metrics come from the same
+rollback so a manifest's artifact and evaluation metrics come from the same
 release: reads do not interleave with head movement and its commit-log
 update.
 
@@ -542,7 +567,7 @@ Proposals
 ~~~~~~~~~
 
 An agent running on the served tree can propose a change to it. The
-proposal enters the same gate as the method's own: nothing it says is served
+proposal enters the same evaluation as the method's own: nothing it says is served
 until paired episodes settle it.
 
 .. code:: bash
@@ -579,7 +604,7 @@ not render, any op on one of reef's own entries: ``reef-version-check``,
 the proposal was admitted against. An admitted proposal waits in the
 scenario's inbox (``evolution.proposals_dir``) until the next evolve step takes
 it, oldest first, before the method's own ``propose`` is asked; the step admits
-it again against its own entries, since the head may have moved, and the gate
+it again against its own entries, since the head may have moved, and the evaluation
 settles it like any mutation. The commit that settles it carries ``proposal:
 {id, session, release_id, reason}`` in its metrics, and the releases row
 carries that commit. When ``evolution.max_pending_proposals`` already
@@ -609,8 +634,10 @@ that error and leave mode switching to the caller.
 The existing trainer delivers the request to a proposer that explicitly
 accepts ``requests``, then evaluates and publishes under the same policy as
 automatic evolution. Its commit metrics carry ``training_request:
-{id, text, session, release_id, requires}``, visible through the release
-catalog.
+{id, text, session, release_id, requires}`` (with ``refused_requires`` when
+the backend dropped an item the method added) and, for a method that records
+notes beside its proposal, ``proposal_notes``, both visible through the
+release catalog.
 
 Rollback
 ~~~~~~~~
@@ -628,7 +655,7 @@ releases marked ``restorable`` can be rolled back.
 Review before serving
 ~~~~~~~~~~~~~~~~~~~~~
 
-With ``evolution.publish: review``, or when a gate win touches a node kind
+With ``evolution.publish: review``, or when a successful evaluation touches a node kind
 listed in ``evolution.review_kinds``, the winning tree is committed to the
 catalog but not served: its row carries ``pending: true``, the manifest and
 install routes keep serving the previous head, and ``?release_id=`` can pull
@@ -645,21 +672,34 @@ page (``text/html``, no asset, its data inline) for one catalog row. ``step``
 is the row's position in ``GET /reef/harness/releases`` oldest first, the
 creation row being 0, which is the commit step: a rejected step publishes
 nothing and its row carries the head's release id, so the step is what names
-it. The page has five sections in this order: Why (the request the step read,
-else the claimed proposal's reason, else a failure in the batch), What changed
-(the step's mutations; an extension's file as text for a create, and for an
-update a line diff against the release the candidate ran on when that release
-is restorable, else the new text), Verdict (the verdict with ``selected``,
-``wins``, ``losses``, ``ties``, ``current_score``, ``candidate_score``,
-``episode_failures``, and the step record directory when
+it. The page has up to seven sections in this order: Why (the request the
+step read, else the claimed proposal's reason, else a failure in the batch),
+Design (the proposer's plan, ``proposal_notes.design``; only when the method
+recorded one), What changed (the step's mutations; an extension's file as
+text for a create, and for an update a line diff against the release the
+candidate ran on when that release is restorable, else the new text), Review
+(``proposal_notes.review``: the proposer's result on its entries against the
+request, ``complete`` or ``partial``, then the points it covered and the ones
+it left uncovered, then one line naming ``proposal_notes.undeclared_env``,
+the variables a written extension reads that no ``requires`` item names;
+only when the row carries a review or that list), Result (the result with
+``selected``, ``wins``, ``losses``, ``ties``, ``passed``, ``failed``,
+``floor_score``, ``evaluation_sides``, ``current_score``, ``candidate_score`` and
+``episode_failures``, each when the row carries it, so a ``floor`` evaluation,
+which runs no current side, shows ``passed``, ``failed`` and ``floor_score``
+and no ``current_score``, ``proposal_notes.failure`` as ``proposer failure``
+when the step recorded one, and the step record directory when
 ``evolution.step_record_dir`` is set), Setup (the request's ``requires`` with
-name, kind and check, then the items the release carries from earlier steps
-in its chain, the same union the install script and ``reef-<adapter> setup``
-read; a rejected or skipped row lists only its own items, since its release
-id is the head's; nothing when both are empty) and Chain (the parent
-release, this release, and its children: the steps gated on it, won, lost or
-pending, and a promote or rollback made on it; a rejected or skipped step
-published nothing, so its Chain names the head it ran on and no children).
+name, kind, check and prompt, then the items the release carries from
+earlier steps in its chain, the same union the install script and
+``reef-<adapter> setup`` read; a rejected or skipped row lists only its own
+items, since its release id is the head's; then, under "refused by the
+step", the items the step dropped from ``training_request.refused_requires``
+and ``proposal_notes.refused_requires``, each as written with its reason;
+nothing when all are empty) and Chain (the parent release, this release,
+and its children: the steps evaluated on it, won, lost or pending, and a promote
+or rollback made on it; a rejected or skipped step published nothing, so its
+Chain names the head it ran on and no children).
 The line under the title marks the served head as ``current``: the newest
 row that is neither pending nor a rejected or skipped step. A pending row
 that a later ``promote`` row names in ``rollback_target_release_id`` reads
@@ -678,6 +718,60 @@ On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
 ``/reef-versions 3`` prints this URL with the promote command, the trial
 install (which replaces the installed tree) and the head's reinstall beside
 it when the release is pending; a promoted release gets none of them.
+
+Request page
+~~~~~~~~~~~~
+
+``GET /reef/harness/requests/{record_id}/page`` answers one self contained
+HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
+harness request, ``record_id`` being the ``agent_record_id`` that
+``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/reef-harness``
+print the link. Until the step settles the page reloads itself every five
+seconds. A four-stage progress strip and a status badge summarize the
+request. The responsive layout places Request beside Progress on desktop
+and stacks them on narrow screens, with automatic light and dark themes.
+Request highlights the instruction; session, release, request ID, submission
+time and machine requirements are available in expandable details.
+Progress shows
+the request's state and what it means: ``queued`` while no step has taken
+the request, ``proposing`` while the served model writes the change,
+``evaluating`` while the candidate's episodes run (with their count and the
+step record directory when the backend reports them, and the time into the
+step), ``running`` while the trainer holds the request and the backend
+reports no phase, and ``settling`` while the row that consumed the record
+lands. The catalog row whose ``metrics.training_request.id`` is the record
+id settles the page: the reload stops and Progress gives way to Result
+(the result as the version page words it, what it means and the next
+action, a failed instruction's ``error``, ``proposal_notes.failure`` as
+``proposer failure``, the release id and a link to the version page), What
+changed (each mutation's op, id and kind; labeled Proposed changes for
+pending, rejected or skipped steps) and, when the step recorded a review,
+Review (its result and the points it left uncovered). Published and pending
+results show the session command to install or promote when the person is
+ready, alongside a link to the version page. An unknown
+id, or one that is not a training instruction, is HTTP 404 naming it.
+
+Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
+``evaluation_task_count`` and ``evaluation_context``. Running episodes use the
+phase ``evaluating``. Reviews and settled proposals store their outcome under
+``result``. New records use these names. Readers also accept the earlier ``verdict``,
+``gate_sides``, ``gated_against`` and ``rollback_gated_against`` fields, and the
+``gating`` phase. Harness manifests expose ``gate`` as an alias of ``evaluation``
+for existing clients.
+
+Both pages are links a person opens in a browser, which sends no header, so
+they also take the scenario and the token as query parameters,
+``?scenario=<name>&token=<token>``, in place of ``x-reef-scenario`` and
+``Authorization: Bearer``; a header wins when present, and the request
+page's link to the version page carries the parameters it was opened with.
+The token then sits in the URL, in the browser's history and in whatever
+logs request lines, so a deployment that hands out such links is a local
+one. Every other route reads the headers alone; a ``?token=`` elsewhere is
+HTTP 401.
+
+.. code:: text
+
+   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&token=<token>
 
 Retained step files
 ~~~~~~~~~~~~~~~~~~~
@@ -761,7 +855,8 @@ Status codes
 |        | scenario-scoped route, or a report violating the recipe's   |
 |        | declared schema                                             |
 +--------+-------------------------------------------------------------+
-| 401    | missing or wrong bearer token                               |
+| 401    | missing or wrong bearer token; the two harness pages also   |
+|        | read ``?token=`` (see Request page)                         |
 +--------+-------------------------------------------------------------+
 | 403    | relayed from the upstream provider. Reef issues none of its |
 |        | own: an unaccepted token is 401, and per-scenario           |
@@ -858,6 +953,6 @@ can change subsequent pages. Reading commit pages may scan the scenario's
 cached commit log; the response is bounded, not a new persisted index.
 
 Reef does not join these endpoints into learning links or assign learning
-states, human-readable explanations, policy capability flags, or gate
-verdicts. The console owns that interpretation. In particular, compaction
+states, human-readable explanations, policy capability flags, or evaluation
+results. The console owns that interpretation. In particular, compaction
 alone is not proof of consumption, and consumption is not proof of promotion.

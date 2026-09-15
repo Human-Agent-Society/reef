@@ -191,43 +191,35 @@ reef.post(
 
 ### Harness 进化部署
 
-使用模型 API 改进 harness 技能，无需 GPU。
+用模型 API（而非 GPU）根据自然语言请求改进编码 harness。
 
-harness 进化 recipe 自带部署配置，只需指定 provider URL 和模型。在 Reef checkout 和已激活的 Python 环境中：
+Reefine 是内置的 harness 改进 recipe，自带部署配置；只需指定 provider URL 和模型。在 Reef checkout 和已激活的 Python 环境中：
 
 ```bash
-reef serve --recipe harness-evolve \
+reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b
 ```
 
 该示例连接本地 Ollama 服务。使用其他 provider 时，修改
 `--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
-`REEF_UPSTREAM_API_KEY`。
-使用此配置时，Reef 监听 `127.0.0.1:8900`，不设 token，状态保存在 `.reef/harness-evolve/`。
-需要修改其他内容时，复制[该部署配置](reef/service/profiles/harness-evolve.yaml) 并用 `-c` 传入你的副本。
+`REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，token 为 `reef-local`，状态保存在
+`.reef/reefine/`（`--recipe harness-evolve` 是旧名称，启动的是同一个配置）。
+需要修改其他内容时，复制[该部署配置](reef/service/profiles/reefine.yaml) 并用 `-c` 传入你的副本。
 
-在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`）安装 harness 并运行任务：
+在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`），创建 scenario、安装 harness 并提出修改请求：
 
 ```bash
-curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
-reef-pi -p "fix the failing test in auth.py"
+export REEF_TOKEN=reef-local
+curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
+curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: my-harness" \
+  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
-# After running your tests, report the actual result:
-reef-pi report --score 0 --feedback "missed the empty-token case"
+reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-要更换模型，用另一个 `--inference.upstream-model` 重启 `reef serve`，并在 `reef-pi` 之前重新执行安装命令：
-安装过程会将模型 ID 写入本地 harness 配置。
-
-失败报告会触发候选技能更新。Reef 会在教程的三个编程任务上对候选技能和当前 harness
-进行评估，仅在候选胜出时才发布。如何自定义任务和评估方式，请参阅
-[教程](tutorials/evolve-your-harness/README.md)。
-
-要用一句话向 harness 提出修改需求，并看到从提出到安装的完整流程，请运行 [Reefine 教程](tutorials/reefine/README.md)。
-
-Reefine 随 `reef-infra` 内置提供：运行 `reef serve --recipe reefine --model ollama/gemma4:26b` 即可启动。
-
+在 `reef-pi` 会话内，`/reef-harness <text>` 提交同样的请求。所服务的模型把修改写成一个 skill、一条 rules 条目、一个 agent 命令或一个 pi extension，下一个会话启动时的更新提示会提供安装；用 `/reef-versions` 查看各版本，extension 需要先用 `/reef-versions <step> promote` 提升后才会被提供安装。要更换模型，用另一个 `--inference.upstream-model` 重启 `reef serve` 并重新执行安装命令：安装过程会将模型 ID 写入本地 harness 配置。脚本化的 bug 修复与研究演示见 [Reefine 教程](tutorials/reefine/README.md)，配置说明见 [Reefine 指南](docs/user-guide/recipes/reefine.rst)。
 
 ## 📚 Recipes 与示例
 

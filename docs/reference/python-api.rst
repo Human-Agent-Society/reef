@@ -34,7 +34,7 @@ Start with Recipe and add only what the method actually needs.
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | propose a harness edit and grade an episode | `Harness method <#harness-method>`__             | harness-evolution methods    |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
-| gate a produced candidate                   | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
+| evaluate a produced candidate               | `Candidate evaluation <#candidate-evaluation>`__ | optional, any recipe         |
 +---------------------------------------------+--------------------------------------------------+------------------------------+
 | a new tensor objective                      | `Loss family                                     | rarely                       |
 |                                             | <../developer-guide/loss-families.rst>`__        |                              |
@@ -852,7 +852,7 @@ snapshot, apply, run the paired episodes, record, publish or revert.
 
 .. code:: python
 
-   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | None: ...
+   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
    def evaluate(task, result) -> float: ...
    class Selection:  # optional
        def decide(self, candidate, evaluation) -> SelectionDecision: ...
@@ -872,15 +872,25 @@ snapshot, apply, run the paired episodes, record, publish or revert.
 |                        | ``FailureManifest``, the per-task record of which        |
 |                        | episodes failed and how                                  |
 +------------------------+----------------------------------------------------------+
+| ``entries``            | optional, keyword-only: the tree as entry options,       |
+|                        | ``{"id", "name", "config"}`` mappings in tree order, so  |
+|                        | an ``update`` or ``remove`` can name its entry           |
++------------------------+----------------------------------------------------------+
 | ``Mutation``           | ``create``, ``update``, or ``remove`` on one root-level  |
 |                        | entry; a sequence applies as one composite proposal      |
++------------------------+----------------------------------------------------------+
+| ``StepProposal``       | the mutations plus ``notes``, a JSON mapping the step    |
+|                        | records under ``proposal_notes`` and never reads; empty  |
+|                        | mutations skip the step                                  |
 +------------------------+----------------------------------------------------------+
 | ``result``             | one finished episode: exit code, stdout, stderr, and the |
 |                        | parsed ``trajectory``                                    |
 +------------------------+----------------------------------------------------------+
 | ``evaluation.metrics`` | guarantees ``candidate_scores`` and ``current_scores``:  |
 |                        | per-task score lists in task order, ``None`` for an      |
-|                        | episode that could not run                               |
+|                        | episode that could not run; ``current_scores`` is empty  |
+|                        | under ``selection: floor``, which runs the candidate     |
+|                        | alone                                                    |
 +------------------------+----------------------------------------------------------+
 
 Returning ``None`` from ``propose`` skips the step. The worked examples are in

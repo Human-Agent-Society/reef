@@ -1,7 +1,7 @@
 """Guarantees of the tutorials/reefine demos, hermetic: the deployment builds in manual mode with the harness
-requests defaults and the gate's selection set to always, the driver parses, the demo requests and the measurement's
-fixed list pass admission's screens on POST /reef/train, the bugfix fixture fails its one test, and the README keeps
-the shape the rows land in."""
+requests defaults and the evaluation's floor over the one health task, the driver parses, the demo requests and the
+measurement's fixed list pass admission's screens on POST /reef/train, the bugfix fixture fails its one test, and the
+README keeps the shape the rows land in."""
 
 from __future__ import annotations
 
@@ -19,15 +19,20 @@ from reef_service.config_helpers import load_harness_deployment as load_config
 from reef.dispatcher import training_request_refusal
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.recipe import reefine
-from reef.recipe.reefine import ReefineRecipe
+from reef.recipe.reefine import ReefineRecipe, evolution
 from reef.service.deploy.service_config import service_config_from_mapping
-from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
+from reef.service.profiles import profile_path
+from reef.train.cordis_backend import FloorPluginFactory
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "reefine"
-METHOD_ROOT = REPO_ROOT / "tutorials" / "evolve-your-harness"
+#: The one evaluation task, the profile's: the floor checks that the tree still runs a shell command and answers.
+HEALTH_TASK = (
+    "[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output as a "
+    "plain word alone on the last line."
+)
 RUNS_HEADER = (
-    "| Demo | Model | Run | Date | Code | Proposal | Verdict | W / L / T | Pending | Promoted | Requires "
+    "| Demo | Model | Run | Date | Code | Proposal | Result | W / L / T | Pending | Promoted | Requires "
     "| Show session | Proposer (s) | Ask to install (s) |"
 )
 RUNS_COLUMNS = 14
@@ -59,10 +64,10 @@ def run_module(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return module
 
 
-def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_selection_always(monkeypatch) -> None:
+def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_floor(monkeypatch) -> None:
     """The demos use the built-in recipe with tutorial-local state, training_mode manual (one step per
-    accepted instruction and no failure driven step between them) and the gate's selection set to always, so a
-    workflow change that ties every task still publishes and a code_extension still waits."""
+    accepted instruction and no failure driven step between them) and the evaluation's floor over the one health task,
+    so a change publishes when the tree still works and a code_extension still waits."""
     from reef.recipe.registry import build_named_recipe
     from reef.service.assembly import _upstream_runtime
 
@@ -76,9 +81,12 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
     section = config["evolution"]
     assert section["requests"] is True and section["version_check"] is True
     assert section["review_kinds"] == ["code_extension"]
-    assert section["selection"] == "always"
+    assert section["selection"] == "floor"
     assert config["data"]["training_mode"] == "manual"
-    assert section["tasks"] == load_config(METHOD_ROOT / "configs" / "deployment.yaml")["evolution"]["tasks"]
+    # The health task alone, the profile's own: the floor checks that the tree still works, not the change.
+    assert section["tasks"] == [HEALTH_TASK]
+    assert load_config(profile_path("reefine"))["evolution"]["tasks"] == [HEALTH_TASK]
+    assert evolution.grade_text(HEALTH_TASK, "$ echo reef-ok\nreef-ok") == 1.0
     assert [service["name"] for service in config["services"]] == ["reef"]
     module_name = section["propose"].partition(":")[0]
     assert module_name == "reef.recipe.reefine.evolution"
@@ -104,7 +112,7 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_select
     assert built.review_kinds == ("code_extension",)
     # Manual mode needs a proposer that names requests, which Reefine does; the build refuses otherwise.
     assert built.training_mode == "manual" and built.propose.reads_requests
-    assert isinstance(built.candidate_plugin, AlwaysSelectPluginFactory)
+    assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
     assert built.model_binding().model == "provider/model-a"
     assert [entry["id"] for entry in built.seed] == [
         "answer-style",
@@ -159,24 +167,32 @@ def test_the_demo_requests_are_the_fenced_text_and_pass_the_request_screens(run_
     assert "answer with citations" in run_module.request_text("research")
 
 
-def test_the_driver_reads_verdicts_and_mutations_as_the_page_does(run_module) -> None:
+def test_the_driver_reads_results_and_mutations_as_the_page_does(run_module) -> None:
     pending = {
         "pending": True,
         "metrics": {"selected": True, "mutation": {"op": "create", "id": "x", "options": {"name": "code_extension"}}},
     }
     rejected = {"metrics": {"selected": False, "wins": 0, "losses": 1, "ties": 2}}
     skipped = {"metrics": {"skipped": "no proposal"}}
-    assert run_module.verdict_of(pending) == "pending"
-    assert run_module.verdict_of(rejected) == "rejected"
-    assert run_module.verdict_of(skipped) == "skipped: no proposal"
-    assert run_module.verdict_of({"operation": "promote"}) == "promote"
+    assert run_module.result_of(pending) == "pending"
+    assert run_module.result_of(rejected) == "rejected"
+    assert run_module.result_of(skipped) == "skipped: no proposal"
+    assert run_module.result_of({"operation": "promote"}) == "promote"
     assert run_module.mutations_of(pending["metrics"]) == ["create x (code_extension)"]
     assert run_module.kinds_of({"mutations": [{"options": {"name": "rules"}}, {"options": {"name": "skill"}}]}) == [
         "rules",
         "skill",
     ]
     assert run_module.tally(rejected["metrics"]) == "0 / 1 / 2"
-    assert run_module.tally(skipped["metrics"]) == "- / - / -"
+    assert run_module.tally(skipped["metrics"]) == "-"
+    # The floor records how many tasks the candidate passed and failed, and runs no current side.
+    met = {"selected": True, "passed": 1, "failed": 0, "floor_score": 1.0, "evaluation_sides": ["candidate"]}
+    missed = {"selected": False, "passed": 0, "failed": 1, "floor_score": 1.0, "evaluation_sides": ["candidate"]}
+    assert run_module.tally_parts(met) == (1, 0) and run_module.tally(met) == "1 / 0"
+    assert run_module.tally_parts(missed) == (0, 1) and run_module.tally(missed) == "0 / 1"
+    assert run_module.evaluation_counts(met) == {"passed": 1, "failed": 0}
+    assert run_module.evaluation_counts(rejected["metrics"]) == {"wins": 0, "losses": 1, "ties": 2}
+    assert run_module.evaluation_counts(skipped["metrics"]) == {}
     # selection: always records the per task scores of both sides and no counts; the counts come from those.
     always = {
         "selected": True,
@@ -215,35 +231,40 @@ def test_the_driver_reads_verdicts_and_mutations_as_the_page_does(run_module) ->
 
 
 def test_the_measurement_counts_won_and_published_apart(run_module) -> None:
-    """Under selection: always a publish says nothing about the gate, so won is the recorded tally and
-    published the verdict; a request that never got a step or a mutation counts as filed only."""
+    """Won is the evaluation's own count: met the floor on a row that carries passed and failed, more wins than losses
+    on an older row, where under selection: always a publish said nothing about the evaluation; published is the
+    result. A request that never got a step or a mutation counts as filed only."""
     results = [
-        {"request": "a", "filed": False, "verdict": "the request was not filed"},
-        {"request": "b", "filed": True, "verdict": "no step"},
-        {"request": "c", "filed": True, "verdict": "skipped: no proposal"},
-        {"request": "d", "filed": True, "kinds": "rules", "verdict": "selected", "wins": 1, "losses": 0, "ties": 2},
-        {"request": "e", "filed": True, "kinds": "skill", "verdict": "selected", "wins": 0, "losses": 0, "ties": 3},
-        {"request": "f", "filed": True, "kinds": "rules", "verdict": "rejected", "wins": 0, "losses": 1, "ties": 2},
+        {"request": "a", "filed": False, "result": "the request was not filed"},
+        {"request": "b", "filed": True, "result": "no step"},
+        {"request": "c", "filed": True, "result": "skipped: no proposal"},
+        {"request": "d", "filed": True, "kinds": "rules", "result": "selected", "wins": 1, "losses": 0, "ties": 2},
+        {"request": "e", "filed": True, "kinds": "skill", "result": "selected", "wins": 0, "losses": 0, "ties": 3},
+        {"request": "f", "filed": True, "kinds": "rules", "result": "rejected", "wins": 0, "losses": 1, "ties": 2},
         {
             "request": "g",
             "filed": True,
             "kinds": "code_extension",
-            "verdict": "pending",
+            "result": "pending",
             "wins": 0,
             "losses": 0,
             "ties": 3,
         },
         # A refusal at admission or a skip after three failed steps carries no mutation: filed, not answered.
-        {"request": "h", "filed": True, "kinds": "-", "verdict": "skipped: entry 'x' already exists"},
-        {"request": "i", "filed": True, "kinds": "-", "verdict": "skipped: instruction failed"},
+        {"request": "h", "filed": True, "kinds": "-", "result": "skipped: entry 'x' already exists"},
+        {"request": "i", "filed": True, "kinds": "-", "result": "skipped: instruction failed"},
+        # Under the floor a row carries passed and failed: met the floor is won, missed is admitted and lost.
+        {"request": "j", "filed": True, "kinds": "rules", "result": "selected", "passed": 1, "failed": 0},
+        {"request": "k", "filed": True, "kinds": "skill", "result": "rejected", "passed": 0, "failed": 1},
+        {"request": "l", "filed": True, "kinds": "code_extension", "result": "pending", "passed": 1, "failed": 0},
     ]
     assert run_module.totals_of(results) == {
-        "filed": 8,
-        "answered": 4,
-        "admitted": 4,
-        "won": 1,
-        "published": 2,
-        "pending": 1,
+        "filed": 11,
+        "answered": 7,
+        "admitted": 7,
+        "won": 3,
+        "published": 3,
+        "pending": 2,
     }
 
 
@@ -307,6 +328,8 @@ def test_the_readme_keeps_the_runs_table_shape_and_the_docs_words() -> None:
         assert heading in readme
     for needle in ("./run.sh bugfix", "REEF_UPSTREAM_URL", "REEF_UPSTREAM_MODEL", "REEF_UPSTREAM_API_KEY"):
         assert needle in readme
+    assert "selection: floor" in readme and "passed / failed" in readme
+    # The historical rows ran under selection: always; the README says so beside them.
     assert "selection: always" in readme and "RFC #308" in readme
     # The rows ran on the request store head; the README names that commit until rows from this path land.
     assert "training_mode: manual" in readme and "7e3982bb" in readme
@@ -340,7 +363,8 @@ def test_the_tutorial_is_listed_beside_the_other() -> None:
 
 def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     """run.sh exports REEF_PROPOSER_TIMEOUT_S because the method package's defaults (60 s for a failure step,
-    120 s for a request) are short of what a local 26B model needs; unset, the defaults stand."""
+    120 s for a request) are short of what a local 26B model needs, and pins REEF_PROPOSER_MAX_TOKENS at the
+    package's request default of 16384, the budget a thinking model needs; unset, the defaults stand."""
     from reef.recipe.reefine import evolution
 
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
@@ -350,11 +374,11 @@ def test_the_proposer_call_budget_follows_the_environment(monkeypatch) -> None:
     monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", " ")
     assert evolution._timeout_s(60.0) == 60.0
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
-    assert evolution._max_tokens(4096) == 4096
-    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16384")
-    assert evolution._max_tokens(4096) == 16384
+    assert evolution._max_tokens(16384) == 16384
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
+    assert evolution._max_tokens(16384) == 32768
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
-    assert evolution._max_tokens(4096) == 4096
+    assert evolution._max_tokens(16384) == 16384
     run_sh = (TUTORIAL / "run.sh").read_text(encoding="utf-8")
     assert 'REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"' in run_sh
     assert 'REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"' in run_sh

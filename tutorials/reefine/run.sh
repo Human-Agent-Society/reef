@@ -21,7 +21,9 @@ export REEF_UPSTREAM_API_KEY="${REEF_UPSTREAM_API_KEY:-dummy}"
 export REEF_TOKEN="${REEF_TOKEN:-reef-local}"
 # A local 26B model answers a request in minutes; the method package's default budget is two.
 export REEF_PROPOSER_TIMEOUT_S="${REEF_PROPOSER_TIMEOUT_S:-900}"
-# A thinking model spends the reply budget on its reasoning first; 4096 tokens came back empty.
+# A thinking model spends the reply budget on its reasoning first: 4096 tokens came back empty, which is why the
+# method package's defaults are 65536 for a request and 16384 for its review now; pinned here so a run does not
+# depend on those defaults.
 export REEF_PROPOSER_MAX_TOKENS="${REEF_PROPOSER_MAX_TOKENS:-16384}"
 
 TUTORIAL="$PWD"

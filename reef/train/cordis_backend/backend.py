@@ -60,13 +60,20 @@ from reef.harness.tree.render import render_composition
 from reef.runtime.executor import Executor, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.train.backend import CandidateBackend, PreparedStep
-from reef.train.cordis_backend.contracts import ProposalGate, StepRecords
+from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
 from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  # re-export: manifest entry type
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
-from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, accepts_keyword, accepts_manifest
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Promoter,
+    Proposer,
+    StepProposal,
+    accepts_keyword,
+    accepts_manifest,
+)
 from reef.train.evaluation.evaluators import BackendEvaluateMixin, CandidatePluginFactory
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
 
@@ -115,7 +122,7 @@ class EpisodeEvaluationWorker:
         that could not run. ``keep_dir`` receives the episode's trajectory
         files before its root is removed; a copy that fails is not an
         episode failure and propagates, so the step aborts instead of
-        scoring a verdict shaped by a disk error."""
+        scoring a result shaped by a disk error."""
         token = EPISODE_OWNER_LEASE.set(self.owner_lease)
         try:
             result = run_episode(
@@ -186,10 +193,12 @@ class HarnessCandidate(UpdateCandidate):
     current_entries: tuple[Mapping[str, Any], ...]
     mutations: tuple[Mutation, ...]
     #: Seed tasks, then promoted traffic prompts; the seed set when promotion is off.
+    evaluation_tasks: tuple[str, ...] = ()
+    #: Legacy constructor keyword; new candidates use evaluation_tasks.
     gate_tasks: tuple[str, ...] = ()
     #: The candidate is the rollback target, so selecting it rolls back.
     recheck: bool = False
-    #: The inbox proposal these mutations came from, settled with the verdict; None for the method's own.
+    #: The inbox proposal these mutations came from, settled with the result; None for the method's own.
     proposal_id: str | None = None
     #: The step record directory claimed for it at prepare time; ``None`` with the record off.
     record_dir: Path | None = None
@@ -205,6 +214,8 @@ RECORD_PROPOSER_FILE = "proposer.json"
 RECORD_MUTATIONS_FILE = "mutations.json"
 RECORD_EPISODES_DIR = "episodes"
 RECORD_EPISODE_FILE = "episode.json"
+#: The trees an evaluation step runs, in pairing order; a policy that evaluates the candidate alone names the first only.
+EVALUATION_SIDES: tuple[str, ...] = ("candidate", "current")
 
 
 def _clip(text: str) -> str:
@@ -238,7 +249,7 @@ def _mutation_record(mutation: Mutation) -> dict[str, Any]:
 
 
 def _episode_name(side: str, task_index: int, repeat: int) -> str:
-    """The record directory of one gate episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
+    """The record directory of one evaluation episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
     return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
 
 
@@ -492,6 +503,65 @@ class ScoreComparisonPluginFactory(CandidatePluginFactory):
         return ScoreComparisonPlugin(candidate_backend, min_win_margin=self.min_win_margin)
 
 
+class FloorMixin(CandidateEvaluationPlugin):
+    """Give a plugin a ``decide()`` that selects when every evaluation task scores at least ``floor_score``.
+
+    A floor is absolute, not a comparison: only the candidate's scores are
+    read, and an episode that could not run (score ``None``) missed it.
+    """
+
+    def __init__(self, *, floor_score: float = 1.0) -> None:
+        if (
+            isinstance(floor_score, bool)
+            or not isinstance(floor_score, (int, float))
+            or not math.isfinite(floor_score)
+            or floor_score <= 0
+        ):
+            raise ValueError("floor_score must be a positive number")
+        super().__init__()
+        self._floor_score = float(floor_score)
+
+    def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
+        scores = tuple(evaluation.metrics.get("candidate_scores", ()))
+        passed = sum(1 for score in scores if score is not None and score >= self._floor_score)
+        failed = len(scores) - passed
+        if not scores:
+            reason = "no evaluation task was scored"
+        elif failed:
+            reason = f"candidate missed the floor on {failed} of {len(scores)} tasks"
+        else:
+            reason = f"candidate met the floor on all {len(scores)} tasks"
+        return SelectionDecision(
+            outcome="select" if scores and not failed else "reject",
+            policy="floor",
+            policy_version="1",
+            reason=reason,
+            evaluation=evaluation,
+            metrics={"passed": passed, "failed": failed, "floor_score": self._floor_score},
+        )
+
+
+class FloorPlugin(FloorMixin, BackendEvaluateMixin):
+    """Evaluate the candidate alone through the candidate backend, decide by the floor; the current release is not run."""
+
+    def __init__(self, candidate_backend: Any, *, floor_score: float = 1.0) -> None:
+        super().__init__(floor_score=floor_score)
+        self._candidate_backend = candidate_backend
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        return self._candidate_backend.evaluate(candidate, sides=("candidate",))
+
+
+@dataclass(frozen=True)
+class FloorPluginFactory(CandidatePluginFactory):
+    """Bind a scenario's floor policy with its configured floor score."""
+
+    floor_score: float = 1.0
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        return FloorPlugin(candidate_backend, floor_score=self.floor_score)
+
+
 def _score_vectors(
     evaluation: EvaluationResult,
 ) -> tuple[tuple[float | None, ...], tuple[float | None, ...]]:
@@ -512,7 +582,7 @@ def _score_comparison_tally(candidate: tuple[float | None, ...], current: tuple[
     return wins, losses
 
 
-class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
+class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgressReader):
     """Settle one proposal per step through episode pairs.
 
     A proposal is one ``Mutation`` or a sequence of them. A sequence applies
@@ -590,6 +660,7 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
         self._propose_accepts_manifest = accepts_manifest(propose.__call__)
         self._propose_accepts_rejected = accepts_keyword(propose.__call__, "rejected")
         self._propose_accepts_sources = accepts_keyword(propose.__call__, "sources")
+        self._propose_accepts_entries = accepts_keyword(propose.__call__, "entries")
         if (
             isinstance(episode_timeout_s, bool)
             or not isinstance(episode_timeout_s, (int, float))
@@ -648,6 +719,9 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
         self._current_step_record: Path | None = None
+        # Written by the training thread, read by the service's request page from another: each write is one
+        # assignment of a frozen value, which is all the synchronization a reader that tolerates a stale phase needs.
+        self._step_progress: StepProgress | None = None
         if self._step_record_dir is not None:
             try:
                 self._step_record_dir.mkdir(parents=True, exist_ok=True)
@@ -728,6 +802,11 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0, "entries": [dict(entry) for entry in self._seed]}
 
+    @property
+    def step_progress(self) -> StepProgress | None:
+        """The running step's phase and start, ``None`` between steps (see ``StepProgress``)."""
+        return self._step_progress
+
     def prepare_step(
         self,
         batch: TrainingBatch,
@@ -735,6 +814,26 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
         scenario_step: int,
     ) -> PreparedStep:
         self._current_step_record = None
+        self._step_progress = None
+        try:
+            prepared = self._prepare_step(batch, state, scenario_step)
+        except BaseException:
+            self._step_progress = None
+            raise
+        progress = self._step_progress
+        if prepared.outcome != "candidate" or progress is None:
+            # A skip ends the step here: neither settle_step nor abort_step follows it.
+            self._step_progress = None
+        else:
+            self._step_progress = replace(progress, phase="evaluating")
+        return prepared
+
+    def _prepare_step(
+        self,
+        batch: TrainingBatch,
+        state: Mapping[str, Any],
+        scenario_step: int,
+    ) -> PreparedStep:
         samples = trajectories(batch)
         if self._model_resolver is not None:
             self._models = self._model_resolver.resolve()
@@ -743,8 +842,8 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
         entries = state.get("entries")
         if entries is not None:
             self._loader.root.update([dict(options) for options in entries])
-            # Recovered state meets the same admission gate as a seed (#476).
-            # A workdir written before the gate may hold entries the plugins
+            # Recovered state meets the same admission check as a seed (#476).
+            # A workdir written before the admission check may hold entries the plugins
             # now refuse, and stepping on would republish them into this
             # step's commit record, snapshot metadata, and artifact tree.
             # The raise lands before any render or commit, so the failure
@@ -755,7 +854,7 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
                     message = f"recovered state entry {options.get('id')!r} rejected: {error}"
                     if "inline credential" in error:
                         message += (
-                            "; this state predates the credential admission gate and the existing "
+                            "; this state predates the credential admission check and the existing "
                             "commit log and snapshot metadata already hold the credential: rotate "
                             "the credential, then edit the entry before resuming"
                         )
@@ -775,10 +874,10 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
             carried["promoted_clients"] = promoted_clients
         # Carried through skips so a no-commit step keeps the rollback target.
         rollback_entries = state.get("rollback_entries")
-        rollback_gated_against = state.get("rollback_gated_against")
+        rollback_evaluation_context = state.get("rollback_evaluation_context", state.get("rollback_gated_against"))
         if rollback_entries is not None:
             carried["rollback_entries"] = rollback_entries
-            carried["rollback_gated_against"] = rollback_gated_against
+            carried["rollback_evaluation_context"] = rollback_evaluation_context
         rejected = list(state.get("rejected_proposals", ()))
         if rejected:
             carried["rejected_proposals"] = rejected
@@ -800,7 +899,7 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
                 },
             )
         manifest = None if previous_manifest is None else FailureManifest.from_state(previous_manifest)
-        # Failing traces become permanent gate tasks; off by default. The method picks which, Reef screens them.
+        # Failing traces become permanent evaluation tasks; off by default. The method picks which, Reef screens them.
         # An instruction step consumes the failures it carries, so it promotes them too or they are lost.
         if self._promote_failures:
             if self._promote_task is None:
@@ -826,16 +925,23 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
             metrics["screened_tasks"] = sum(
                 1 for prompt in candidates if isinstance(prompt, str) and _screened(prompt)
             )
-        gate_tasks = (*self._tasks, *(task for task in promoted if task not in frozenset(self._tasks)))
+        evaluation_tasks = (*self._tasks, *(task for task in promoted if task not in frozenset(self._tasks)))
         if self._promote_failures:
-            metrics["gate_tasks"] = len(gate_tasks)
-            metrics["promoted_tasks"] = len(gate_tasks) - len(self._tasks)
+            metrics["evaluation_task_count"] = len(evaluation_tasks)
+            metrics["promoted_tasks"] = len(evaluation_tasks) - len(self._tasks)
         step_dir = self._claim_step_dir(steps)
         self._current_step_record = step_dir
         if step_dir is not None:
             metrics["step_record"] = str(step_dir)
-        # Re-gate the last-good tree against the published one on cadence or when the served model changed.
-        drifted = rollback_gated_against is not None and rollback_gated_against != self._gated_against()
+        # From here the step is under way for the request page; the proposer runs next.
+        self._step_progress = StepProgress(
+            request_id=None if batch.request is None else batch.request.id,
+            phase="proposing",
+            started_at=time.time(),
+            step_record=None if step_dir is None else str(step_dir),
+        )
+        # Re-evaluate the last-good tree against the published one on cadence or when the served model changed.
+        drifted = rollback_evaluation_context is not None and rollback_evaluation_context != self.evaluation_context()
         due = bool(self._recheck_every) and steps % self._recheck_every == 0
         if batch.request is None and self._recheck_every and rollback_entries is not None and (due or drifted):
             target = [dict(entry) for entry in rollback_entries]
@@ -854,7 +960,7 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
                     candidate_entries=tuple(target),
                     current_entries=tuple(published),
                     mutations=(),
-                    gate_tasks=gate_tasks,
+                    evaluation_tasks=evaluation_tasks,
                     recheck=True,
                     record_dir=step_dir,
                 ),
@@ -896,6 +1002,9 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
                 extra["rejected"] = tuple(rejected)
             if self._propose_accepts_sources:
                 extra["sources"] = tuple(_source_of(sample) for sample in samples)
+            if self._propose_accepts_entries:
+                # The tree as entry options, so a method can name the entry an update or remove targets.
+                extra["entries"] = tuple(dict(entry) for entry in snapshot)
             handed: dict[str, Any] | None = None
             if batch.request is not None:
                 if not self._propose.reads_requests:
@@ -913,11 +1022,16 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
             # Recorded, not charged: the platform meters served traffic, the evolve step only counts its own.
             metrics["proposer_input_tokens"], metrics["proposer_output_tokens"] = _proposer_tokens(record)
             if batch.request is not None and handed is not None:
-                metrics["training_request"] = {
-                    "id": batch.request.id,
-                    **batch.request.to_dict(),
-                    "requires": _merged_requires(batch.request.requires, handed.get("requires")),
-                }
+                requires, refused = _merged_requires(batch.request.requires, handed.get("requires"))
+                metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
+                if refused:
+                    metrics["training_request"]["refused_requires"] = refused
+            if isinstance(proposal, StepProposal):
+                # The notes are the method's own record of the step; the backend writes them and never reads them.
+                notes = _bounded(proposal.notes)
+                if notes:
+                    metrics["proposal_notes"] = notes
+                proposal = proposal.mutations
             mutations = (proposal,) if isinstance(proposal, Mutation) else tuple(proposal or ())
         # The parsed proposal lands before admission, so a refused one is on file too, redacted and clipped
         # like the proposer's traffic: the tree boundary has not seen it yet.
@@ -941,7 +1055,7 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
                 candidate_entries=tuple(dict(entry) for entry in self._entries()),
                 current_entries=snapshot,
                 mutations=mutations,
-                gate_tasks=gate_tasks,
+                evaluation_tasks=evaluation_tasks,
                 proposal_id=None if claimed is None else claimed.id,
                 record_dir=step_dir,
             ),
@@ -949,13 +1063,23 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
             metrics=metrics,
         )
 
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+    def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
+        """Run the evaluation episodes of the named ``sides`` and return their scores.
+
+        The default runs the candidate and the current tree as pairs. A policy
+        that evaluates the candidate alone (a floor) passes ``("candidate",)``: no
+        current episode runs, ``current_scores`` is empty and the other
+        ``current_*`` keys are absent, and ``evaluation_sides`` records the choice.
+        """
         candidate = self._require_harness_candidate(candidate)
+        sides = tuple(sides)
+        if not sides or any(side not in EVALUATION_SIDES for side in sides):
+            raise ValueError(f"sides must name one or both of {EVALUATION_SIDES}, got {sides!r}")
         # Episodes run against the tree plus the model binding. The binding
         # is appended at render time and never enters the candidate's files,
         # so the published artifact carries no endpoint or credential.
-        candidate_files = self._render_for_episode(candidate.candidate_entries)
-        current_files = self._render_for_episode(candidate.current_entries)
+        entries = {"candidate": candidate.candidate_entries, "current": candidate.current_entries}
+        files = {side: self._render_for_episode(entries[side]) for side in sides}
         # Episodes interleave candidate and current inside each pairing, so
         # anything that drifts during the run (upstream load, rate limits)
         # lands on both sides of a pair instead of one whole side. A repeat
@@ -965,52 +1089,50 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
         # worker the pairings run in one pool - a large task set costs one
         # wave instead of a long turn-taking pass - and the results are read
         # back in submission order either way.
-        # An older candidate carries no gate_tasks and falls back to the seed set.
-        gate_tasks = candidate.gate_tasks or self._tasks
+        # An older candidate carries no evaluation_tasks and falls back to the seed set.
+        evaluation_tasks = candidate.evaluation_tasks or candidate.gate_tasks or self._tasks
         episodes_dir = None if candidate.record_dir is None else candidate.record_dir / RECORD_EPISODES_DIR
         pairings = [
-            (files, task, None if episodes_dir is None else episodes_dir / _episode_name(side, index, repeat))
-            for index, task in enumerate(gate_tasks)
+            (files[side], task, None if episodes_dir is None else episodes_dir / _episode_name(side, index, repeat))
+            for index, task in enumerate(evaluation_tasks)
             for repeat in range(self._episode_repeats)
-            for side, files in (("candidate", candidate_files), ("current", current_files))
+            for side in sides
         ]
+        progress = self._step_progress
+        if progress is not None:
+            # The evaluation's size for the page; the pool answers all at once, so no per-episode count is kept.
+            self._step_progress = replace(progress, phase="evaluating", episodes_total=len(pairings))
         scored = self._evaluate_pairings(pairings)
-        candidate_runs = scored[0::2]
-        current_runs = scored[1::2]
-        candidate_scores = tuple(run.score for run in candidate_runs)
-        current_scores = tuple(run.score for run in current_runs)
-        return EvaluationResult(
-            evaluator="harness_episode_pairs",
-            evaluator_version="1",
-            metrics={
-                "candidate_scores": candidate_scores,
-                "current_scores": current_scores,
-                # Failure observations ride the evaluation so settlement can
-                # build the committed side's manifest from the decision alone.
-                "candidate_failures": tuple(
-                    run.failure.to_dict() for run in candidate_runs if run.failure is not None
-                ),
-                "current_failures": tuple(run.failure.to_dict() for run in current_runs if run.failure is not None),
-                "episode_failures": sum(score is None for score in candidate_scores + current_scores),
-                "episode_repeats": self._episode_repeats,
-                "candidate_residue": sum(run.residue for run in candidate_runs),
-                "current_residue": sum(run.residue for run in current_runs),
-                "candidate_score": float(sum(score for score in candidate_scores if score is not None)),
-                "current_score": float(sum(score for score in current_scores if score is not None)),
-                # Per agent sums over the side's episodes, so a verdict says which agent did the work.
-                "candidate_agents": _sum_agents(run.agents for run in candidate_runs),
-                "current_agents": _sum_agents(run.agents for run in current_runs),
-                # Per episode, in pairing order: the root's stage path and how its turn ended.
-                "candidate_paths": tuple(run.path for run in candidate_runs),
-                "current_paths": tuple(run.path for run in current_runs),
-            },
-        )
+        runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
+        scores = {side: tuple(run.score for run in runs[side]) for side in sides}
+        metrics: dict[str, Any] = {
+            "candidate_scores": scores.get("candidate", ()),
+            "current_scores": scores.get("current", ()),
+            "episode_failures": sum(score is None for side in sides for score in scores[side]),
+            "episode_repeats": self._episode_repeats,
+        }
+        for side in sides:
+            # Failure observations ride the evaluation so settlement can
+            # build the committed side's manifest from the decision alone.
+            metrics[f"{side}_failures"] = tuple(run.failure.to_dict() for run in runs[side] if run.failure is not None)
+            metrics[f"{side}_residue"] = sum(run.residue for run in runs[side])
+            metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
+            # Per agent sums over the side's episodes, so a result says which agent did the work.
+            metrics[f"{side}_agents"] = _sum_agents(run.agents for run in runs[side])
+            # Per episode, in pairing order: the root's stage path and how its turn ended.
+            metrics[f"{side}_paths"] = tuple(run.path for run in runs[side])
+        if sides != EVALUATION_SIDES:
+            metrics["evaluation_sides"] = list(sides)
+        return EvaluationResult(evaluator="harness_episode_pairs", evaluator_version="1", metrics=metrics)
 
     def settle_step(
         self,
         prepared: PreparedStep,
         decision: SelectionDecision,
     ) -> TrainStepResult:
+        # The result is in: the page reads the committed row from here on, the trainer's reserved batch covering
+        # the commit window.
+        self._step_progress = None
         candidate = self._candidate_from(prepared)
         metrics = dict(prepared.metrics)
 
@@ -1026,43 +1148,54 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
 
         # The manifest describes the composition this step commits: the
         # candidate when selected, otherwise the retained current tree.
+        committed_side = "candidate" if decision.selected else "current"
         observed = candidate_failures if decision.selected else current_failures
         previous_state = prepared.state.get("failure_manifest")
         previous = None if previous_state is None else FailureManifest.from_state(previous_state)
-        manifest = advance(
-            previous,
-            int(prepared.state["steps"]),
-            tuple(FailureObservation.from_dict(value) for value in observed),
-        )
-        metrics["failures"] = {
-            "new": len(manifest.new),
-            "persisting": len(manifest.persisting),
-            "fixed": len(manifest.fixed),
-        }
+        # A side the evaluation did not run showed nothing, so its manifest carries over untouched, as through a skip.
+        manifest = None
+        if committed_side in evaluation_metrics.get(
+            "evaluation_sides", evaluation_metrics.get("gate_sides", EVALUATION_SIDES)
+        ):
+            manifest = advance(
+                previous,
+                int(prepared.state["steps"]),
+                tuple(FailureObservation.from_dict(value) for value in observed),
+            )
+            metrics["failures"] = {
+                "new": len(manifest.new),
+                "persisting": len(manifest.persisting),
+                "fixed": len(manifest.fixed),
+            }
         # A recheck is not a proposal, so it leaves the failure streak alone.
         if candidate.recheck:
             streak = int(prepared.state.get("failure_streak", 0))
         else:
             streak = 0 if decision.selected else int(prepared.state.get("failure_streak", 0)) + 1
-        metrics["gated_against"] = self._gated_against()
-        # A publish stores the replaced tree and its gate stamp as the rollback target; a rollback consumes it.
+        metrics["evaluation_context"] = self.evaluation_context()
+        # A publish stores the replaced tree and its evaluation stamp as the rollback target; a rollback consumes it.
         rollback_entries = prepared.state.get("rollback_entries")
-        rollback_gated_against = prepared.state.get("rollback_gated_against")
+        rollback_evaluation_context = prepared.state.get(
+            "rollback_evaluation_context", prepared.state.get("rollback_gated_against")
+        )
         if candidate.recheck and decision.selected:
             metrics["rolled_back"] = True
             rollback_entries = None
-            rollback_gated_against = None
+            rollback_evaluation_context = None
         elif candidate.recheck:
             metrics["rolled_back"] = False
         elif decision.selected and self._recheck_every:
             rollback_entries = list(candidate.current_entries)
-            rollback_gated_against = metrics["gated_against"]
-        state = {**prepared.state, "failure_manifest": manifest.to_state(), "failure_streak": streak}
+            rollback_evaluation_context = metrics["evaluation_context"]
+        state = {**prepared.state, "failure_streak": streak}
+        if manifest is not None:
+            state["failure_manifest"] = manifest.to_state()
         state.pop("rollback_entries", None)
+        state.pop("rollback_evaluation_context", None)
         state.pop("rollback_gated_against", None)
         if rollback_entries is not None:
             state["rollback_entries"] = rollback_entries
-            state["rollback_gated_against"] = rollback_gated_against
+            state["rollback_evaluation_context"] = rollback_evaluation_context
         # A real rejection joins a bounded record the proposer can read back, options included.
         if not candidate.recheck and not decision.selected and self._max_rejected_history:
             rejected = list(prepared.state.get("rejected_proposals", ()))
@@ -1092,8 +1225,8 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
             metrics["mutations"] = [_mutation_record(mutation) for mutation in candidate.mutations]
 
         if candidate.proposal_id is not None and self.proposals is not None:
-            verdict = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
-            self.proposals.settle(candidate.proposal_id, verdict)
+            selection_result = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
+            self.proposals.settle(candidate.proposal_id, selection_result)
 
         if decision.selected:
             entries = [dict(entry) for entry in candidate.candidate_entries]
@@ -1125,11 +1258,12 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
             artifact.discard()
 
     def abort_step(self, prepared: PreparedStep) -> None:
+        self._step_progress = None
         candidate = self._candidate_from(prepared)
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
         if candidate.proposal_id is not None and self.proposals is not None:
             # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
-            self.proposals.refuse(candidate.proposal_id, "step aborted before a verdict")
+            self.proposals.refuse(candidate.proposal_id, "step aborted before a result")
 
     @classmethod
     def _candidate_from(cls, prepared: PreparedStep) -> HarnessCandidate:
@@ -1213,8 +1347,8 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
                 kinds.add(str(name))
         return frozenset(kinds)
 
-    def _gated_against(self) -> dict[str, Any]:
-        """The served model and adapter version this step's gate runs against."""
+    def evaluation_context(self) -> dict[str, Any]:
+        """The served model and adapter version this step's evaluation runs against."""
         return {
             "model": self._models.served.model,
             "adapter": self._descriptor.name,
@@ -1242,21 +1376,28 @@ class CordisBackend(CandidateBackend, ProposalGate, StepRecords):
         return _load_error(self._loader, id_, self._descriptor)
 
 
-def _proposer_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[dict[str, Any]]:
+def _proposer_requires(
+    base: Sequence[Mapping[str, Any]], handed: object
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     """The items a proposer added to its request mapping, each under the shape and text screens admission runs.
 
     An item is the proposer's when its name is not among the person's
     ``base`` items, wherever the proposer put it; one that is malformed, or
-    whose name or check is credential or directive shaped, is dropped alone
-    and named once in the log, the rest stand and the mutations stand."""
+    whose name, check or prompt is credential or directive shaped, is
+    dropped alone and named once in the log, the rest stand and the
+    mutations stand.
+    Returns the kept items and the refused ones, each refused as the bounded
+    ``item`` with the ``reason`` it was dropped, so the step can record them."""
     log = logging.getLogger(__name__)
+    added: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
     if handed is None:
-        return []
+        return added, refused
     if not isinstance(handed, Sequence) or isinstance(handed, (str, bytes)):
         log.warning("propose: the requires it added are dropped: not a list")
-        return []
+        refused.append({"item": _bounded(handed), "reason": "not a list"})
+        return added, refused
     names = {str(item.get("name")) for item in base}
-    added: list[dict[str, Any]] = []
     for item in handed:
         # The person's items passed admission and the person's copy wins: an edit of one is not the proposer's.
         if isinstance(item, Mapping) and str(item.get("name")) in names:
@@ -1265,21 +1406,30 @@ def _proposer_requires(base: Sequence[Mapping[str, Any]], handed: object) -> lis
             (parsed,) = parse_requires([item])
         except ValueError as error:
             log.warning("propose: a requires item it added is dropped: %s", error)
+            refused.append({"item": _bounded(item), "reason": str(error)})
             continue
-        texts = (parsed["name"], str(parsed.get("check") or ""))
+        texts = (parsed["name"], str(parsed.get("check") or ""), str(parsed.get("prompt") or ""))
         if any(secret_shaped(text) for text in texts):
             log.warning("propose: a requires item it added carries a credential shaped literal; dropped")
+            refused.append({"item": _bounded(item), "reason": "carries a credential shaped literal"})
             continue
         if any(directive_shaped(text) for text in texts):
             log.warning("propose: a requires item it added carries an instruction override phrasing; dropped")
+            refused.append({"item": _bounded(item), "reason": "carries an instruction override phrasing"})
             continue
         added.append(parsed)
-    return added
+    return added, refused
 
 
-def _merged_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[dict[str, Any]]:
-    """The person's items, then what the proposer added by name, capped at ``MAX_REQUIRES`` naming the dropped."""
-    merged = merge_requires(base, _proposer_requires(base, handed))
+def _merged_requires(
+    base: Sequence[Mapping[str, Any]], handed: object
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """The person's items, then what the proposer added by name, capped at ``MAX_REQUIRES`` naming the dropped.
+
+    Returned with what :func:`_proposer_requires` refused, so the commit
+    records the items the person will not see in the list."""
+    added, refused = _proposer_requires(base, handed)
+    merged = merge_requires(base, added)
     if len(merged) > MAX_REQUIRES:
         logging.getLogger(__name__).warning(
             "propose: requires capped at %d items; dropped: %s",
@@ -1287,7 +1437,7 @@ def _merged_requires(base: Sequence[Mapping[str, Any]], handed: object) -> list[
             ", ".join(str(item["name"]) for item in merged[MAX_REQUIRES:]),
         )
         merged = merged[:MAX_REQUIRES]
-    return merged
+    return merged, refused
 
 
 def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:
@@ -1308,7 +1458,7 @@ def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:
 
 @dataclass(frozen=True)
 class _ScoredEpisode:
-    """One gate episode as the evaluation keeps it: the score, or why it has none, and what the trajectory showed."""
+    """One evaluation episode as the evaluation keeps it: the score, or why it has none, and what the trajectory showed."""
 
     score: float | None
     failure: FailureObservation | None
@@ -1323,7 +1473,7 @@ class _ScoredEpisode:
 def _write_episode_record(
     keep_dir: Path | None, task: str, result: EpisodeResult | None, scored: _ScoredEpisode
 ) -> None:
-    """``episode.json`` beside the kept trajectory: what the scorer saw, so a verdict can be re-derived from the record."""
+    """``episode.json`` beside the kept trajectory: what the scorer saw, so a result can be re-derived from the record."""
     if keep_dir is None:
         return
     record = {
@@ -1383,7 +1533,7 @@ def _stage_path(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     return path
 
 
-#: The counters a verdict carries per agent; the token pair is what the endpoint reported, zero when it reported none.
+#: The counters a result carries per agent; the token pair is what the endpoint reported, zero when it reported none.
 AGENT_COUNTERS = ("turns", "steps", "tool_calls", "tool_errors", "input_tokens", "output_tokens")
 
 

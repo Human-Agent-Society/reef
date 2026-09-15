@@ -1394,7 +1394,7 @@ def test_model_call_budget_caps_the_proposer(tmp_path: Path) -> None:
 def test_settle_records_what_the_gate_ran_against(tmp_path: Path) -> None:
     b = backend(tmp_path, lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}}))
     result = run_backend_step(b, batch(), b.initial_state())
-    stamp = result.metrics["gated_against"]
+    stamp = result.metrics["evaluation_context"]
     assert stamp["model"] == MODEL.model
     assert stamp["adapter"] == "pi"
     assert stamp["adapter_version"] == get_adapter("pi").install.version
@@ -1508,7 +1508,7 @@ def test_promote_failures_grows_the_gate_from_traffic(tmp_path: Path) -> None:
     result = run_backend_step(b, _traced_batch("real request A"), b.initial_state())
     # The gate ran the seed task and the promoted prompt, on both sides.
     assert "task one" in seen and "real request A" in seen
-    assert result.metrics["gate_tasks"] == 2
+    assert result.metrics["evaluation_task_count"] == 2
     assert result.metrics["promoted_tasks"] == 1
     # The promoted tasks persist in the committed state.
     assert result.state["promoted_tasks"] == ["real request A"]
@@ -1664,7 +1664,7 @@ def test_promotion_off_by_default_leaves_the_gate_frozen(tmp_path: Path) -> None
     result = run_backend_step(b, _traced_batch("real request A"), b.initial_state())
     assert set(seen) == {"task one"}
     assert "promoted_tasks" not in result.state
-    assert "gate_tasks" not in result.metrics
+    assert "evaluation_task_count" not in result.metrics
 
 
 def test_recipe_parses_promotion_config(tmp_path: Path, monkeypatch) -> None:
@@ -2056,7 +2056,8 @@ def test_recipe_parses_recheck_config(tmp_path: Path, monkeypatch) -> None:
         CordisRecipe.from_environment({}, config=config(recheck_every=-1))
 
 
-def test_recheck_fires_when_the_served_model_changes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("context_key", ["rollback_evaluation_context", "rollback_gated_against"])
+def test_recheck_fires_when_the_served_model_changes(tmp_path: Path, context_key: str) -> None:
     """A publish is gated against one served model. When the deployment
     serves a different one the recheck runs at once instead of waiting for
     the cadence, so the harness is re-gated on the ground it now runs on."""
@@ -2081,12 +2082,14 @@ def test_recheck_fires_when_the_served_model_changes(tmp_path: Path) -> None:
     b = build(MODEL)
     first = run_backend_step(b, batch(), b.initial_state())
     assert first.metrics["selected"] is True
-    assert first.state["rollback_gated_against"]["model"] == MODEL.model
+    assert first.state["rollback_evaluation_context"]["model"] == MODEL.model
+    context = first.state.pop("rollback_evaluation_context")
+    first.state[context_key] = context
     # Same model, step 2 of a 100 step cadence: no recheck, and the stamp
     # rides through the skipped step.
     same = run_backend_step(b, batch(), first.state)
     assert "recheck" not in same.metrics
-    assert same.state["rollback_gated_against"]["model"] == MODEL.model
+    assert same.state["rollback_evaluation_context"]["model"] == MODEL.model
     # A different served model: the stamp differs, so the recheck fires now.
     moved = ModelBinding(base_url=MODEL.base_url, model="qwen3-32b", api_key=MODEL.api_key)
     drift = run_backend_step(build(moved), batch(), same.state)
@@ -2500,7 +2503,7 @@ def test_the_proposer_cannot_create_update_or_remove_a_reserved_entry(tmp_path: 
     assert not (published / "tree.json").exists()
 
 
-def test_yaml_config_takes_the_gate_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
+def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: Path, monkeypatch) -> None:
     from reef.core.tasks import HarborTask, TaskSplit, write_harbor_task, write_split_manifest
 
     module = tmp_path / "demo_evolution.py"

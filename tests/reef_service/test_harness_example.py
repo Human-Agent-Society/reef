@@ -7,7 +7,10 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+import logging
+import re
 import sys
+import types
 from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
@@ -24,7 +27,7 @@ from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.cordis import CordisRecipe
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.cordis_backend import Mutation
+from reef.train.cordis_backend import Mutation, StepProposal
 from reef.train.trainer import Trainer
 
 EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "tutorials" / "evolve-your-harness"
@@ -67,26 +70,61 @@ def native_evolution(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     return _method(monkeypatch, "native_evolution")
 
 
-class Model:
-    """A ModelBindings stand-in: ``served`` answers one canned reply, or raises."""
+#: What marks the plan call's prompt, the first of a request's calls.
+PLAN_MARKER = '"needs_tool": true or false'
 
-    def __init__(self, reply: str | None = None, failure: Exception | None = None) -> None:
-        self.reply, self.failure, self.calls = reply, failure, 0
-        self.prompt: str | None = None
-        self.params: dict[str, object] = {}
+
+class Model:
+    """A ModelBindings stand-in: ``served`` answers the canned replies in order, the last one again once they run
+    out; a reply that is an exception is raised on its call, and ``failure`` is raised on every call. A request's
+    plan call, which comes first, is answered with ``plan`` (no step by default) and consumes no canned reply."""
+
+    def __init__(self, *replies: str | Exception, plan: str = "[]", failure: Exception | None = None) -> None:
+        self.replies, self.plan, self.failure, self.calls = list(replies), plan, failure, 0
+        self.answered = 0
+        self.prompts: list[str] = []
+        self.params_of: list[dict[str, object]] = []
         self.served = self
+
+    @property
+    def prompt(self) -> str | None:
+        """The write prompt: the second call's on a request (the plan call comes first), the only one otherwise."""
+        return self.prompts[1] if len(self.prompts) > 1 else (self.prompts[0] if self.prompts else None)
+
+    @property
+    def params(self) -> dict[str, object]:
+        """The write call's parameters, chosen as ``prompt`` is."""
+        return self.params_of[1] if len(self.params_of) > 1 else (self.params_of[0] if self.params_of else {})
 
     def chat(self, messages, **params):
         self.calls += 1
-        self.prompt = messages[-1]["content"]
-        self.params = dict(params)
+        prompt = messages[-1]["content"]
+        self.prompts.append(prompt)
+        self.params_of.append(dict(params))
         if self.failure is not None:
             raise self.failure
-        return self.reply
+        if PLAN_MARKER in prompt:
+            return self.plan
+        self.answered += 1
+        reply = self.replies[min(self.answered, len(self.replies)) - 1] if self.replies else None
+        if isinstance(reply, Exception):
+            raise reply
+        return reply
 
 
 def canned(reply: str) -> Model:
     return Model(reply)
+
+
+#: The reasons a request step records when the reply gave nothing to apply.
+NO_ENTRY = "the reply holds no usable entry"
+DROPPED = "every entry in the reply was dropped: a reserved id, or an id another kind holds"
+
+
+def failure_of(proposal) -> str:
+    """The reason a request step recorded for producing nothing: a StepProposal without mutations carries it."""
+    assert isinstance(proposal, StepProposal) and proposal.mutations == ()
+    return proposal.notes["failure"]
 
 
 def proposal(entry_id: str, name: str = "skill", *, config_name: str | None = None) -> str:
@@ -142,17 +180,18 @@ def test_propose_without_failures_skips_without_calling_the_model(evolution) -> 
 
 def test_propose_answers_a_queued_request_with_the_failures_as_context(evolution) -> None:
     model = canned(proposal("run-tests"))
-    (mutation,) = evolution.propose(NODES, SAMPLES, model, requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, SAMPLES, model, requests=(REQUEST,)).mutations
     assert (mutation.op, mutation.id) == ("create", "run-tests")
     assert model.prompt.index(REQUEST["text"]) < model.prompt.index("[fib] compute fib(90)")
-    assert "gives the user what the request names" in model.prompt
+    assert "Design the change before you write it" in model.prompt
 
 
 def test_propose_answers_a_request_alone_without_failures(evolution) -> None:
     model = canned(proposal("answer-style"))
-    (mutation,) = evolution.propose(NODES, (), model, requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, (), model, requests=(REQUEST,)).mutations
     assert (mutation.op, mutation.id) == ("update", "answer-style")
-    assert model.calls == 2  # the plan call, then the entries
+    # The plan call, the entries, then the review of what it wrote.
+    assert model.calls == 3
     assert REQUEST["text"] in model.prompt and "Recent failing requests" not in model.prompt
 
 
@@ -214,11 +253,12 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
     mutations = evolution.propose(
         (*NODES, ("rules", {"text": "Be brief."}), API_SKILL), (), model, requests=(REQUEST,)
-    )
-    assert model.calls == 2  # the plan call, then the entries
+    ).mutations
+    assert model.calls == 3  # the plan call, the entries, then the review
     prompt = model.prompt
     assert REQUEST["text"] in prompt and "[BEGIN user request" in prompt
     assert '"id": "answer-style"' in prompt and '"body": "# answer-style' in prompt
+    # Without the step's entries the listing comes from the nodes, where a rules entry has no id to show.
     assert '"kind": "rules"' in prompt and '"id": null' in prompt
     assert "pi.registerTool" in prompt and "reef-pi-extension-api" in prompt
     for reserved in ("reef-version-check", "reef-requests"):
@@ -237,21 +277,6 @@ def test_propose_answers_a_request_with_the_entries_the_request_and_the_api_skil
     assert "pi.registerTool" not in model.prompt and "code_extension" in model.prompt
 
 
-class Sequenced(Model):
-    """A ModelBindings stand-in whose ``served`` answers one canned reply per call, in order."""
-
-    def __init__(self, *replies: str) -> None:
-        super().__init__(replies[-1])
-        self.replies = list(replies)
-        self.prompts: list[str] = []
-
-    def chat(self, messages, **params):
-        self.prompts.append(messages[-1]["content"])
-        reply = self.replies[len(self.prompts) - 1] if len(self.prompts) <= len(self.replies) else self.replies[-1]
-        self.reply = reply
-        return super().chat(messages, **params)
-
-
 def test_propose_asks_for_a_plan_first_and_demands_a_tool_for_a_step_the_harness_cannot_perform(evolution) -> None:
     """The first call lists the request's steps; the ones the harness cannot perform go into the second
     call's prompt with the demand for a code_extension beside the rule. A plan the model does not give
@@ -263,10 +288,10 @@ def test_propose_asks_for_a_plan_first_and_demands_a_tool_for_a_step_the_harness
         ]
     )
     entries = request_reply({"id": "bug-fix-workflow", "name": "rules", "config": {"text": "# Bug fix\n"}})
-    model = Sequenced(plan, entries)
-    mutations = evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.calls == 2 and [m.id for m in mutations] == ["bug-fix-workflow"]
-    plan_prompt, write_prompt = model.prompts
+    model = Model(entries, plan=plan)
+    mutations = evolution.propose(NODES, (), model, requests=(REQUEST,)).mutations
+    assert model.calls == 3 and [m.id for m in mutations] == ["bug-fix-workflow"]
+    plan_prompt, write_prompt, _review_prompt = model.prompts
     assert REQUEST["text"] in plan_prompt and '"needs_tool": true or false' in plan_prompt
     assert "need a tool the harness does not have" in write_prompt
     assert "- have a second agent review the diff" in write_prompt
@@ -276,12 +301,13 @@ def test_propose_asks_for_a_plan_first_and_demands_a_tool_for_a_step_the_harness
     )
     assert model.params == {"timeout_s": 600.0, "max_tokens": 65536}
     # No step needs a tool: the write prompt carries no plan section.
-    model = Sequenced(json.dumps([{"step": "run the tests", "needs_tool": False}]), entries)
+    model = Model(entries, plan=json.dumps([{"step": "run the tests", "needs_tool": False}]))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
     assert "need a tool the harness does not have" not in model.prompts[1]
     # A plan call that fails, or answers prose, leaves the request answered as before.
-    model = Sequenced("I cannot list steps.", entries)
-    assert [m.id for m in evolution.propose(NODES, (), model, requests=(REQUEST,))] == ["bug-fix-workflow"]
+    model = Model(entries, plan="I cannot list steps.")
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert [m.id for m in proposal.mutations] == ["bug-fix-workflow"]
     assert "need a tool the harness does not have" not in model.prompts[1]
 
 
@@ -298,7 +324,7 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
             "config": {"text": "--- name: test-first-skill ---\nRun the tests."},
         },
     )
-    mutations = evolution.propose(NODES, (), canned(reply), requests=(REQUEST,))
+    mutations = evolution.propose(NODES, (), canned(reply), requests=(REQUEST,)).mutations
     assert [(m.op, m.id, m.options) for m in mutations] == [
         ("update", "answer-style", {"name": "skill", "config": {"name": "answer-style", "text": "# updated"}}),
         ("create", "test-first", {"name": "rules", "config": {"text": "Run the tests first."}}),
@@ -317,11 +343,11 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
     # One fenced object is a proposal too, and a named kind already in the tree updates by its name.
     fenced = f"```json\n{json.dumps({'id': 'notify', 'name': 'code_extension', 'config': {'name': 'notify', 'code': code}})}\n```"
     tree = (*NODES, ("code_extension", {"name": "notify", "code": "old"}))
-    (mutation,) = evolution.propose(tree, (), canned(fenced), requests=(REQUEST,))
+    (mutation,) = evolution.propose(tree, (), canned(fenced), requests=(REQUEST,)).mutations
     assert (mutation.op, mutation.id) == ("update", "notify")
     # The prompt calls the value a kind, and a served model wrote it under that key; both keys read.
     by_kind = request_reply({"id": "bug-fix-workflow", "kind": "rules", "config": {"text": "Reproduce first."}})
-    (mutation,) = evolution.propose(NODES, (), canned(by_kind), requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, (), canned(by_kind), requests=(REQUEST,)).mutations
     assert (mutation.op, mutation.id, mutation.options) == (
         "create",
         "bug-fix-workflow",
@@ -330,59 +356,68 @@ def test_propose_parses_every_request_kind_from_one_reply(evolution) -> None:
     # The config fields written beside the id instead of under "config" read the same; a config that is
     # present but not an object still fails.
     flat = request_reply({"id": "arithmetic-questions", "kind": "rules", "text": "Answer in one sentence."})
-    (mutation,) = evolution.propose(NODES, (), canned(flat), requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, (), canned(flat), requests=(REQUEST,)).mutations
     assert (mutation.id, mutation.options) == (
         "arithmetic-questions",
         {"name": "rules", "config": {"text": "Answer in one sentence."}},
     )
     broken = request_reply({"id": "x", "name": "rules", "config": "Answer in one sentence."})
-    assert evolution.propose(NODES, (), canned(broken), requests=(REQUEST,)) is None
+    assert failure_of(evolution.propose(NODES, (), canned(broken), requests=(REQUEST,))) == NO_ENTRY
     # A flattened named kind carries both keys: "kind" is the kind and "name" the entry's own name.
     flat_skill = request_reply({"id": "plan-first", "kind": "skill", "name": "plan-first", "text": "# plan-first\n"})
-    (mutation,) = evolution.propose(NODES, (), canned(flat_skill), requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, (), canned(flat_skill), requests=(REQUEST,)).mutations
     assert (mutation.id, mutation.options) == (
         "plan-first",
         {"name": "skill", "config": {"name": "plan-first", "text": "# plan-first\n"}},
     )
-    # The tree lists a rules entry with a null id and a model copies that: the text gives the entry its id.
-    # A named kind with a null id stays refused.
+    # A model may leave a rules entry without an id, as the tree listing once showed one: the text gives the
+    # entry its id. A named kind with a null id stays refused.
     null_rules = request_reply({"id": None, "name": "rules", "config": {"text": "Show the command first."}})
-    (mutation,) = evolution.propose(NODES, (), canned(null_rules), requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, (), canned(null_rules), requests=(REQUEST,)).mutations
     assert mutation.id == "rules-" + hashlib.sha256(b"Show the command first.").hexdigest()[:8]
     assert mutation.op == "create"
     assert mutation.options == {"name": "rules", "config": {"text": "Show the command first."}}
     null_skill = request_reply({"id": None, "name": "skill", "config": {"text": "# x\n"}})
-    assert evolution.propose(NODES, (), canned(null_skill), requests=(REQUEST,)) is None
+    assert failure_of(evolution.propose(NODES, (), canned(null_skill), requests=(REQUEST,))) == NO_ENTRY
     # An id that is another kind's name would be refused at admission as an existing entry: a rules entry
     # takes its text's id instead, a named kind is dropped.
     reused = request_reply({"id": "answer-style", "kind": "rules", "config": {"text": "One sentence."}})
-    (mutation,) = evolution.propose(NODES, (), canned(reused), requests=(REQUEST,))
+    (mutation,) = evolution.propose(NODES, (), canned(reused), requests=(REQUEST,)).mutations
     assert (mutation.op, mutation.id) == ("create", "rules-" + hashlib.sha256(b"One sentence.").hexdigest()[:8])
     reused_named = request_reply({"id": "answer-style", "kind": "agent_command", "config": {"text": "Review."}})
-    assert evolution.propose(NODES, (), canned(reused_named), requests=(REQUEST,)) is None
+    assert failure_of(evolution.propose(NODES, (), canned(reused_named), requests=(REQUEST,))) == DROPPED
 
 
 def test_propose_passes_the_budgets_of_the_environment_to_the_model_call(evolution, monkeypatch) -> None:
-    """The request path asks with 600 s and 65536 tokens (its plan call before that with 60 s and 4096), the
-    failure path with 60 s and 2048, unless REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS say
-    otherwise; a value that is not a number is ignored rather than turning the step into an error."""
+    """The request path asks with 600 s and 65536 tokens (its plan call before that with 60 s and 4096, its
+    review after with 120 s and 16384), the failure path asks with 60 s and 8192 (a thinking model spends part
+    of each budget on its reasoning before the JSON), unless REEF_PROPOSER_TIMEOUT_S and REEF_PROPOSER_MAX_TOKENS
+    say otherwise; a value that is not a number is ignored rather than turning the step into an error."""
     monkeypatch.delenv("REEF_PROPOSER_TIMEOUT_S", raising=False)
     monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params == {"timeout_s": 600.0, "max_tokens": 65536}  # the entries call, after the plan
+    assert model.params_of == [
+        {"timeout_s": 60.0, "max_tokens": 4096},
+        {"timeout_s": 600.0, "max_tokens": 65536},
+        {"timeout_s": 120.0, "max_tokens": 16384},
+    ]
     model = canned("no json here")
     evolution.propose(NODES, SAMPLES, model)
-    assert model.params == {"timeout_s": 60.0, "max_tokens": 2048}
+    assert model.params_of == [{"timeout_s": 60.0, "max_tokens": 8192}]
     monkeypatch.setenv("REEF_PROPOSER_TIMEOUT_S", "900")
-    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16384")
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params == {"timeout_s": 900.0, "max_tokens": 16384}
+    assert model.params_of == [{"timeout_s": 900.0, "max_tokens": 32768}] * 3
     monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "16k")
     model = canned(request_reply({"id": "t", "name": "rules", "config": {"text": "Test first."}}))
     evolution.propose(NODES, (), model, requests=(REQUEST,))
-    assert model.params == {"timeout_s": 900.0, "max_tokens": 65536}
+    assert model.params_of == [
+        {"timeout_s": 900.0, "max_tokens": 4096},
+        {"timeout_s": 900.0, "max_tokens": 65536},
+        {"timeout_s": 900.0, "max_tokens": 16384},
+    ]
 
 
 def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply(evolution) -> None:
@@ -395,13 +430,14 @@ def test_propose_drops_a_reserved_id_and_a_malformed_object_from_a_request_reply
         {"id": "empty", "name": "rules", "config": {"text": "  "}},
         {"id": "ok", "name": "rules", "config": {"text": "ok"}},
     )
-    mutations = evolution.propose(NODES, (), canned(reply), requests=(REQUEST,))
+    mutations = evolution.propose(NODES, (), canned(reply), requests=(REQUEST,)).mutations
     assert [(m.op, m.id) for m in mutations] == [("create", "ok")]
     only_reserved = json.dumps(
         {"id": "reef-pi-extension-api", "name": "skill", "config": {"name": "reef-pi-extension-api", "text": "x"}}
     )
-    assert evolution.propose(NODES, (), canned(only_reserved), requests=(REQUEST,)) is None
-    assert evolution.propose(NODES, (), canned("no json here"), requests=(REQUEST,)) is None
+    # A reply with nothing to apply is a proposal without mutations, the reason in its notes.
+    assert failure_of(evolution.propose(NODES, (), canned(only_reserved), requests=(REQUEST,))) == DROPPED
+    assert failure_of(evolution.propose(NODES, (), canned("no json here"), requests=(REQUEST,))) == NO_ENTRY
 
 
 def test_propose_without_a_request_keeps_the_failure_path(evolution) -> None:
@@ -410,7 +446,14 @@ def test_propose_without_a_request_keeps_the_failure_path(evolution) -> None:
     # The failure path still writes skills only, whatever kinds a request may name.
     assert evolution.propose(NODES, SAMPLES, canned(proposal("answer-style", name="rules"))) is None
     down = Model(failure=ModelBindingError("model endpoint unreachable: connection refused"))
-    assert evolution.propose(NODES, (), down, requests=(REQUEST,)) is None
+    failure = failure_of(evolution.propose(NODES, (), down, requests=(REQUEST,)))
+    assert failure.endswith("(max_tokens=65536): model endpoint unreachable: connection refused")
+    # With the tree's entries in hand the failure path is what it was: one call, a bare Mutation, no design
+    # and no review.
+    model = canned(proposal("answer-style"))
+    mutation = evolution.propose(NODES, SAMPLES, model, entries=ENTRIES)
+    assert isinstance(mutation, Mutation) and (mutation.op, mutation.id) == ("update", "answer-style")
+    assert model.calls == 1 and "Design the change" not in model.prompt
 
 
 def test_propose_keeps_reefs_own_skill_out_of_the_failure_path(evolution) -> None:
@@ -429,6 +472,313 @@ def test_propose_keeps_reefs_own_skill_out_of_the_failure_path(evolution) -> Non
     assert (mutation.op, mutation.id) == ("create", "csv-median")
 
 
+# -- propose: the design, the review and the notes a request records ------
+
+#: The step's tree as the backend hands it to a proposer that names ``entries``: every entry with its id.
+ENTRIES = (
+    {"id": "answer-style", "name": "skill", "config": NODES[0][1]},
+    {"id": "brevity", "name": "rules", "config": {"text": "Be brief."}},
+)
+
+DESIGN = "The user wants the tests run before every answer. Trigger: every task; no state. Nothing to set up."
+
+REVIEW = {"result": "partial", "covered": ["the tests run first"], "uncovered": ["no second reviewer"]}
+
+
+def designed(*entries: dict, design: str = DESIGN, requires: list | None = None) -> str:
+    """A request reply as the prompt asks for it: the design object, the entries, the requires object last."""
+    objects = [{"design": design}, *entries]
+    if requires is not None:
+        objects.append({"requires": requires})
+    return json.dumps(objects)
+
+
+def skill(entry_id: str, text: str = "# improved\n\ntext") -> dict:
+    return {"id": entry_id, "name": "skill", "config": {"name": entry_id, "text": text}}
+
+
+def rules(entry_id: str, text: str) -> dict:
+    return {"id": entry_id, "name": "rules", "config": {"text": text}}
+
+
+def extension(entry_id: str, code: str) -> dict:
+    return {"id": entry_id, "name": "code_extension", "config": {"name": entry_id, "code": code}}
+
+
+def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(evolution) -> None:
+    model = Model(designed(skill("run-tests")), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert isinstance(proposal, StepProposal)
+    assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
+    assert proposal.notes == {"design": DESIGN, "review": REVIEW}
+    _plan_prompt, request_prompt, review_prompt = model.prompts
+    # The prompt asks for the design first: the restatement, the triggers and states with their sources and
+    # the explicit toggle rule, what the user must provide, then the entries, complete and nothing more.
+    assert "1. Restate the request in one sentence." in request_prompt
+    assert "turn it on and off" in request_prompt and "never a rule that assumes the state holds" in request_prompt
+    assert "4. Then write the entries: complete for what the request implies" in request_prompt
+    assert "nothing the request did not ask for" in request_prompt and "smallest change" not in request_prompt
+    # What only the user can provide is declared, with a prompt for setup: the extension never asks for it,
+    # stores it or hardcodes it, and reads an env item's value from the environment at run time.
+    assert "3. List what only the user can provide (a phone number, a credential, a permission, an account)" in (
+        request_prompt
+    )
+    assert "read at run time from process.env.NAME" in request_prompt
+    assert "never asks the user for it, never stores it in a file of its own and never hardcodes it" in request_prompt
+    assert "the extension itself never asks" in request_prompt and "once, at install time" in request_prompt
+    assert (
+        '{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}'
+        in request_prompt
+    )
+    assert (
+        '{"name": "messages-automation", "kind": "permission", "check": "osascript -e \'tell application '
+        '\\"Messages\\" to get name\'", "prompt": "Allow the agent to control Messages when macOS asks"}'
+        in request_prompt
+    )
+    assert (
+        '{"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "Sign in to the GitHub CLI"}'
+        in request_prompt
+    )
+    assert '{"design": "<the design>"}' in request_prompt and "null" not in request_prompt
+    # The review reads the request, fenced as data, the design and the entries as written.
+    assert REQUEST["text"] in review_prompt and "[BEGIN user request" in review_prompt
+    assert DESIGN in review_prompt and '"id": "run-tests"' in review_prompt and "# improved" in review_prompt
+    assert '"result": "complete" or "partial"' in review_prompt
+    assert "a value the user must provide that the extension asks for or stores itself instead of declaring" in (
+        review_prompt
+    )
+    assert model.params_of == [
+        {"timeout_s": 60.0, "max_tokens": 4096},
+        {"timeout_s": 600.0, "max_tokens": 65536},
+        {"timeout_s": 120.0, "max_tokens": 16384},
+    ]
+    # A design longer than the record keeps is cut, and a fenced review still reads.
+    fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
+    model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes["design"] == "x" * 1500 and proposal.notes["review"] == REVIEW
+    # Without a design object the notes carry the review alone, and the review prompt says none was written.
+    model = Model(request_reply(skill("run-tests")), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes == {"review": REVIEW} and "(none written)" in model.prompts[2]
+
+
+def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stand(evolution) -> None:
+    for review in (
+        "no json here",
+        json.dumps({"result": "done", "covered": []}),
+        json.dumps(["complete"]),
+        ModelBindingError("model endpoint unreachable: connection refused"),
+    ):
+        model = Model(designed(skill("run-tests")), review)
+        proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+        assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
+        assert proposal.notes == {"design": DESIGN} and model.calls == 3
+    # The verdict's case and the lists are read leniently: strings only, trimmed, anything else dropped.
+    lenient = {"result": "Complete", "covered": ["a", 1, " b ", ""], "uncovered": "none"}
+    model = Model(designed(skill("run-tests")), json.dumps(lenient))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes["review"] == {"result": "complete", "covered": ["a", "b"], "uncovered": []}
+
+
+def test_legacy_review_key_is_normalized_to_result(evolution) -> None:
+    review = {"verdict": "partial", "covered": ["tests"], "uncovered": ["review"]}
+    model = Model(designed(skill("run-tests")), json.dumps(review))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes["review"] == {"result": "partial", "covered": ["tests"], "uncovered": ["review"]}
+
+
+def test_a_failed_model_call_is_the_request_steps_failure_note_and_still_a_skip_on_the_failure_path(
+    evolution, monkeypatch, caplog
+) -> None:
+    """A request whose model call fails gets a StepProposal without mutations whose notes say why, in one line:
+    how long the call took, the reply budget and the endpoint's error, with the budget hint when the reply had no
+    text; the reason is logged too. The failure path keeps returning None, the reason in the log alone."""
+    monkeypatch.delenv("REEF_PROPOSER_MAX_TOKENS", raising=False)
+    no_text = ModelBindingError("model endpoint returned non-text content")
+    down = Model(failure=no_text)
+    with caplog.at_level(logging.WARNING):
+        proposal = evolution.propose(NODES, (), down, requests=(REQUEST,), entries=ENTRIES)
+    assert isinstance(proposal, StepProposal) and proposal.mutations == () and list(proposal.notes) == ["failure"]
+    assert re.fullmatch(
+        r"model call failed after \d+\.\d s \(max_tokens=65536\): model endpoint returned non-text content; "
+        r"a thinking model may have spent the reply budget on its reasoning, raise REEF_PROPOSER_MAX_TOKENS",
+        proposal.notes["failure"],
+    )
+    assert down.calls == 2  # the plan call and the entries call, both failed; nothing to review
+    assert "propose: served model call failed after" in caplog.text
+    # Any other error gets no budget hint, and the budget in the reason is the one the call was given.
+    monkeypatch.setenv("REEF_PROPOSER_MAX_TOKENS", "32768")
+    unreachable = Model(failure=ModelBindingError("model endpoint unreachable: connection refused"))
+    failure = failure_of(evolution.propose(NODES, (), unreachable, requests=(REQUEST,)))
+    assert failure.endswith("(max_tokens=32768): model endpoint unreachable: connection refused")
+    assert "REEF_PROPOSER_MAX_TOKENS" not in failure
+    # A reply with nothing to apply says so, with the design when the model wrote one; an empty reply too.
+    proposal = evolution.propose(NODES, (), canned(designed()), requests=(REQUEST,))
+    assert proposal.mutations == () and proposal.notes == {"design": DESIGN, "failure": NO_ENTRY}
+    assert failure_of(evolution.propose(NODES, (), canned(""), requests=(REQUEST,))) == "the reply is empty"
+    # The failure path: still None, nothing recorded.
+    assert evolution.propose(NODES, SAMPLES, Model(failure=no_text)) is None
+
+
+def test_propose_lists_every_entry_id_and_updates_a_rules_entry_by_it(evolution) -> None:
+    model = Model(designed(rules("brevity", "Be brief; one sentence.")), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [(m.op, m.id, m.options) for m in proposal.mutations] == [
+        ("update", "brevity", {"name": "rules", "config": {"text": "Be brief; one sentence."}})
+    ]
+    listing = model.prompt.split("Current harness entries", 1)[1].split("You may write", 1)[0]
+    assert json.loads(listing.split(":", 1)[1]) == [
+        {"id": "answer-style", "kind": "skill", "body": NODES[0][1]["text"]},
+        {"id": "brevity", "kind": "rules", "body": "Be brief."},
+    ]
+    # An id another kind holds would be refused at admission: a rules entry takes one from its text and a named
+    # kind is dropped, as before.
+    reused = designed(rules("answer-style", "One sentence."), skill("brevity"), skill("plan-first", "# plan\n"))
+    proposal = evolution.propose(NODES, (), Model(reused, json.dumps(REVIEW)), requests=(REQUEST,), entries=ENTRIES)
+    assert [(m.op, m.id) for m in proposal.mutations] == [
+        ("create", "rules-" + hashlib.sha256(b"One sentence.").hexdigest()[:8]),
+        ("create", "plan-first"),
+    ]
+    # A rules text the tree already holds under its text's id updates that entry rather than failing admission.
+    held_id = "rules-" + hashlib.sha256(b"Be brief.").hexdigest()[:8]
+    held = (*ENTRIES, {"id": held_id, "name": "rules", "config": {"text": "Be brief."}})
+    same = Model(designed(rules("answer-style", "Be brief.")), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), same, requests=(REQUEST,), entries=held)
+    assert [(m.op, m.id) for m in proposal.mutations] == [("update", held_id)]
+
+
+def test_propose_brings_an_env_check_to_its_variable_before_the_shape_check(evolution) -> None:
+    requires = [
+        # A shell test naming one variable: the check becomes that name.
+        {"name": "TWILIO_AUTH_TOKEN", "kind": "env", "check": 'test -n "$TWILIO_AUTH_TOKEN"'},
+        {"name": "twilio-sid", "kind": "env", "check": "[ -n ${TWILIO_SID} ]"},
+        # A check naming no variable is dropped when the name is one: the bare name says what to set.
+        {"name": "SMS_FROM", "kind": "env", "check": "echo checked"},
+        {"name": "SMS_FROM_NUMBER", "kind": "env", "check": "SMS_FROM_NUMBER"},
+        {"name": "github-cli", "kind": "service", "check": "gh auth status"},
+    ]
+    request = {**REQUEST, "requires": [{"name": "SMS_TO", "kind": "env"}]}
+    model = Model(designed(skill("sms"), requires=requires), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(request,), entries=ENTRIES)
+    assert request["requires"] == [
+        {"name": "SMS_TO", "kind": "env"},
+        {"name": "TWILIO_AUTH_TOKEN", "kind": "env", "check": "TWILIO_AUTH_TOKEN"},
+        {"name": "twilio-sid", "kind": "env", "check": "TWILIO_SID"},
+        {"name": "SMS_FROM", "kind": "env"},
+        {"name": "SMS_FROM_NUMBER", "kind": "env", "check": "SMS_FROM_NUMBER"},
+        {"name": "github-cli", "kind": "service", "check": "gh auth status"},
+    ]
+    assert "refused_requires" not in proposal.notes
+    # The review sees the requires items beside the entries.
+    assert '"check": "gh auth status"' in model.prompts[2] and '"name": "SMS_TO"' in model.prompts[2]
+
+
+def test_propose_keeps_the_prompt_of_a_requires_item_for_setup(evolution) -> None:
+    """A prompt is the sentence setup shows when it asks for the item: kept on the request mapping stripped and
+    cut at 200 characters, dropped when empty; the env normalization runs on the same item first."""
+    check = "osascript -e 'tell application \"Messages\" to get name'"
+    requires = [
+        {"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "  The phone number to text, with the country code "},
+        {"name": "messages-automation", "kind": "permission", "check": check, "prompt": "Allow " + "x" * 250},
+        {"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "   "},
+        {"name": "SMS_FROM", "kind": "env", "check": 'test -n "$SMS_FROM"', "prompt": "The number to text from"},
+    ]
+    request = dict(REQUEST)
+    model = Model(designed(skill("sms"), requires=requires), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(request,), entries=ENTRIES)
+    assert request["requires"] == [
+        {"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"},
+        {"name": "messages-automation", "kind": "permission", "check": check, "prompt": ("Allow " + "x" * 250)[:200]},
+        {"name": "github-cli", "kind": "service", "check": "gh auth status"},
+        {"name": "SMS_FROM", "kind": "env", "check": "SMS_FROM", "prompt": "The number to text from"},
+    ]
+    assert "refused_requires" not in proposal.notes and "undeclared_env" not in proposal.notes
+    # The review sees the prompts beside the items.
+    assert '"prompt": "The number to text from"' in model.prompts[2]
+    # A refused item is recorded as written, its prompt included.
+    refused = [{"name": "phone", "kind": "sms", "prompt": "The number to text"}]
+    model = Model(designed(skill("sms"), requires=refused), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(dict(REQUEST),), entries=ENTRIES)
+    assert proposal.notes["refused_requires"] == [
+        {"item": refused[0], "reason": "requires[0].kind must be one of ('permission', 'env', 'service')"}
+    ]
+
+
+def test_the_request_prompts_requires_examples_are_items_the_step_keeps_with_their_prompts(evolution) -> None:
+    """The worked example of each kind in the prompt is JSON the shape check admits, and a reply that copies it
+    lands on the request mapping as written, prompt included."""
+    model = Model(designed(skill("run-tests")), json.dumps(REVIEW))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    lines = [line for line in model.prompt.splitlines() if line.startswith(("- env,", "- permission,", "- service,"))]
+    examples = [json.loads(line[line.index("{") :]) for line in lines]
+    assert [item["kind"] for item in examples] == ["env", "permission", "service"]
+    assert all(item["prompt"] for item in examples) and "check" not in examples[0]
+    request = dict(REQUEST)
+    model = Model(designed(skill("run-tests"), requires=examples), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(request,), entries=ENTRIES)
+    assert request["requires"] == examples and "refused_requires" not in proposal.notes
+
+
+def test_propose_records_the_requires_items_it_could_not_honor_with_the_reason(evolution) -> None:
+    requires = [
+        {"name": "phone", "kind": "sms"},
+        "SLACK_WEBHOOK",
+        {"name": "two-vars", "kind": "env", "check": 'test -n "$A" && test -n "$B"'},
+        {"name": "bad name", "kind": "permission"},
+        {"name": "TWILIO_SID", "kind": "env"},
+    ]
+    request = dict(REQUEST)
+    model = Model(designed(skill("sms"), requires=requires), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(request,), entries=ENTRIES)
+    assert request["requires"] == [{"name": "TWILIO_SID", "kind": "env"}]
+    assert proposal.notes["refused_requires"] == [
+        {
+            "item": {"name": "phone", "kind": "sms"},
+            "reason": "requires[0].kind must be one of ('permission', 'env', 'service')",
+        },
+        {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
+        {
+            "item": {"name": "two-vars", "kind": "env", "check": 'test -n "$A" && test -n "$B"'},
+            "reason": "requires[0].check must be a variable name matching ^[A-Za-z_][A-Za-z0-9_]*$ for kind env",
+        },
+        {
+            "item": {"name": "bad name", "kind": "permission"},
+            "reason": "requires[0].name must be a non-empty string matching ^[A-Za-z0-9][A-Za-z0-9._-]*$",
+        },
+    ]
+    # A read only request mapping keeps the kept items out of it; the notes still record the refusals.
+    frozen = types.MappingProxyType(dict(REQUEST))
+    model = Model(designed(skill("sms"), requires=requires), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(frozen,), entries=ENTRIES)
+    assert "requires" not in frozen and len(proposal.notes["refused_requires"]) == 4
+
+
+def test_propose_lists_the_variables_an_extension_reads_that_no_requires_item_names(evolution) -> None:
+    code = (
+        "export default function (pi) {\n"
+        "  const token = process.env.TWILIO_AUTH_TOKEN;\n"
+        "  const sid = process.env[\"TWILIO_SID\"], from = process.env['SMS_FROM'];\n"
+        "  const known = [process.env.HOME, process.env.PATH, process.env.REEF_URL, process.env.PI_OFFLINE];\n"
+        "  return process.env.TWILIO_AUTH_TOKEN && process.env.SMS_TO;\n"
+        "}\n"
+    )
+    request = {**REQUEST, "requires": [{"name": "SMS_TO", "kind": "env"}]}
+    added = [{"name": "twilio-sid", "kind": "env", "check": "TWILIO_SID"}]
+    model = Model(designed(extension("sms", code), requires=added), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(request,), entries=ENTRIES)
+    # Named by an item's name or check, set by pi or the shell, or reef's own: not listed. Reading order, once.
+    assert proposal.notes["undeclared_env"] == ["TWILIO_AUTH_TOKEN", "SMS_FROM"]
+    # A skill reads nothing, and an extension whose every read is named leaves the key out.
+    model = Model(designed(skill("sms")), json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(dict(REQUEST),), entries=ENTRIES)
+    assert "undeclared_env" not in proposal.notes
+    covered = designed(extension("sms", "process.env.SMS_TO"), requires=[{"name": "SMS_TO", "kind": "env"}])
+    model = Model(covered, json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(dict(REQUEST),), entries=ENTRIES)
+    assert "undeclared_env" not in proposal.notes
+
+
 # -- evaluate: exact last-line grading ------------------------------------
 
 
@@ -441,17 +791,40 @@ def pi_message(text: str) -> dict:
 
 
 def test_evaluate_grades_exact_final_lines(evolution) -> None:
-    task = "[sieve] count the primes below 100000"
-    assert evolution.evaluate(task, episode((pi_message("Sieving...\n\n9592"),))) == 1.0
-    assert evolution.evaluate(task, episode(({"role": "assistant", "content": "9592"},))) == 1.0
+    prefix, answer = next(iter(evolution.ANSWERS.items()))
+    task = f"{prefix} the task"
+    assert evolution.evaluate(task, episode((pi_message(f"Working...\n\n{answer}"),))) == 1.0
+    assert evolution.evaluate(task, episode(({"role": "assistant", "content": answer},))) == 1.0
 
 
 def test_evaluate_grades_non_exact_as_zero(evolution) -> None:
-    task = "[sieve] count the primes below 100000"
-    assert evolution.evaluate(task, episode((pi_message("9,592"),))) == 0.0
-    assert evolution.evaluate(task, episode((pi_message("The count is 9592"),))) == 0.0
+    prefix, answer = next(iter(evolution.ANSWERS.items()))
+    task = f"{prefix} the task"
+    assert evolution.evaluate(task, episode((pi_message(f"{answer}!"),))) == 0.0
+    assert evolution.evaluate(task, episode((pi_message(f"The answer is {answer}"),))) == 0.0
     assert evolution.evaluate(task, episode(())) == 0.0
-    assert evolution.evaluate("no such prefix", episode((pi_message("9592"),))) == 0.0
+    assert evolution.evaluate("no such prefix", episode((pi_message(answer),))) == 0.0
+
+
+HEALTH_TASK = (
+    "[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output as a "
+    "plain word alone on the last line."
+)
+
+
+def test_the_builtin_grades_the_health_task_and_the_tutorial_keeps_its_own_answers(monkeypatch) -> None:
+    """The built-in scorer knows the profile's health task alone; the tutorial's shim keeps the three arithmetic
+    answers its deployments still run, reading the trajectory through the built-in reader."""
+    builtin = importlib.import_module("reef.recipe.reefine.evolution")
+    tutorial = _method(monkeypatch, "evolution")
+    assert builtin.ANSWERS == {"[health]": "reef-ok"}
+    assert set(tutorial.ANSWERS) == {"[sieve]", "[fib]", "[csv]"}
+    assert builtin.evaluate(HEALTH_TASK, episode((pi_message("$ echo reef-ok\nreef-ok"),))) == 1.0
+    assert builtin.evaluate(HEALTH_TASK, episode((pi_message("reef-ok is the output."),))) == 0.0
+    assert tutorial.evaluate(HEALTH_TASK, episode((pi_message("reef-ok"),))) == 0.0
+    assert tutorial.evaluate("[sieve] count the primes", episode((pi_message("Sieving...\n\n9592"),))) == 1.0
+    assert builtin.evaluate("[sieve] count the primes", episode((pi_message("9592"),))) == 0.0
+    assert builtin.final_assistant_text([pi_message("a"), {"role": "user", "content": "b"}]) == "a"
 
 
 # -- serve.yaml boots the recipe ------------------------------------------
@@ -501,10 +874,11 @@ def test_materializer_accepts_config_without_execution_sections(monkeypatch, tmp
     assert set(result) == {"schema-version", "recipe", "inference"}
 
 
-def test_example_yaml_boots_the_recipe_through_from_environment(evolution, tmp_path, monkeypatch) -> None:
+def test_example_yaml_boots_the_recipe_through_from_environment(tmp_path, monkeypatch) -> None:
     """The run.sh contract, hermetic: interpolate serve.yaml through reef's
     config loader, materialize the recipe sections as a named config, and
     boot the recipe (seed validation included) with a fake binary."""
+    evolution = _method(monkeypatch, "evolution")  # the tutorial's grader: its tasks are the three arithmetic ones
     monkeypatch.setenv("REEF_UPSTREAM_API_KEY", "dummy")
     config = load_config(EXAMPLE_DIR / "configs" / "serve.yaml")
     recipe_sections = {key: config[key] for key in ("implementation", "model", "evolution", "data", "execution")}
@@ -992,7 +1366,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     assert [e["id"] for e in seed_release["entries"]] == ["read_file", "main"]
     assert published["diff"] == {"added": [{"id": "answer-format", "kind": "rules"}], "updated": [], "removed": []}
     assert published["proposal"] == {"id": "p1", "session": "s1", "release_id": "r1"}
-    assert published["verdict"]["wins"] == 2 and published["verdict"]["reason"].startswith("candidate won")
+    assert published["result"]["wins"] == 2 and published["result"]["reason"].startswith("candidate won")
     assert [(s["session"], s["release_id"], len(s["events"])) for s in data["sessions"]] == [
         ("s1", "r1", 6),
         ("s2", "r2", 5),
@@ -1065,7 +1439,7 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
         ("published", 1, "r2"),
         ("rollback", 2, "r1"),
     ]
-    assert with_rollback["releases"][2]["verdict"] is None
+    assert with_rollback["releases"][2]["result"] is None
     assert with_rollback["releases"][2]["entries"] == with_rollback["releases"][1]["entries"]
 
     # An empty work directory still renders a page.

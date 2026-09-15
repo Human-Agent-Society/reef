@@ -12,6 +12,7 @@ import inspect
 import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBindings
@@ -20,6 +21,25 @@ from reef.harness.tree.mutations import Mutation
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.types import TrajectoryItem
+
+
+@dataclass(frozen=True)
+class StepProposal:
+    """A proposer's mutations with notes the step records and never reads.
+
+    ``notes`` is a JSON mapping (a plan, a review result, what the method
+    could not honor) that the commit metrics carry under ``proposal_notes``,
+    bounded like the rest of the step record. Empty ``mutations`` skip the
+    step as ``None`` does.
+    """
+
+    mutations: tuple[Mutation, ...]
+    notes: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "mutations", tuple(self.mutations))
+        if not isinstance(self.notes, Mapping):
+            raise TypeError("StepProposal notes must be a mapping")
 
 
 class Proposer(ABC):
@@ -33,7 +53,8 @@ class Proposer(ABC):
         :class:`~reef.harness.episodes.model_binding.ModelBindings` the method may
         call, return one :class:`~reef.train.cordis_backend.Mutation`, a
         sequence of them (one composite proposal, applied under one snapshot
-        and settled by one selection decision), or ``None`` to skip.
+        and settled by one selection decision), a :class:`StepProposal`
+        (the mutations plus notes the step records), or ``None`` to skip.
 
     ``models`` is the only way a method reaches a model: ``models.served``
     is the model under test and ``models["name"]`` one the recipe declared
@@ -50,7 +71,10 @@ class Proposer(ABC):
     id the sample came from), ``client`` (the ``x-reef-tag-client`` header's
     value, else the session tag, else ``untagged``) and ``untrusted``
     (always true: a sample is client text, never the operator's). Wrap sample text with
-    :func:`untrusted_text` before it enters a model prompt. Each keyword is
+    :func:`untrusted_text` before it enters a model prompt. ``entries`` is
+    the step's tree as entry options, ``{"id", "name", "config"}`` mappings
+    in tree order, so a method can name the entry an ``update`` or ``remove``
+    targets. Each keyword is
     only forwarded to callables whose signature names it, so earlier
     proposers run unchanged.
 
@@ -62,7 +86,7 @@ class Proposer(ABC):
     ``batch_size`` and possibly none (scored traces, or
     records under ``batch_policy: records``). The proposer must explicitly name ``requests`` to take
     instructions. It generates mutations against the current tree, then the
-    same gate and publication policy used by automatic evolution apply.
+    same evaluation and publication policy used by automatic evolution apply.
 
     ``requires`` is what the person said the change needs from their
     machine: a list of ``{name, kind, check}`` items, ``kind`` one of
@@ -93,7 +117,8 @@ class Proposer(ABC):
         rejected: Sequence[Mapping[str, Any]] = (),
         sources: Sequence[Mapping[str, Any]] = (),
         requests: Sequence[Mapping[str, Any]] = (),
-    ) -> Mutation | Sequence[Mutation] | None:
+        entries: Sequence[Mapping[str, Any]] = (),
+    ) -> Mutation | Sequence[Mutation] | StepProposal | None:
         """Propose mutations for the current composition and trace batch."""
 
 
@@ -163,13 +188,14 @@ class _CallableProposer(Proposer):
 
     def __init__(
         self,
-        fn: Callable[..., Mutation | Sequence[Mutation] | None],
+        fn: Callable[..., Mutation | Sequence[Mutation] | StepProposal | None],
     ) -> None:
         self._fn = fn
         self._forward_manifest = accepts_manifest(fn)
         self._forward_rejected = accepts_keyword(fn, "rejected")
         self._forward_sources = accepts_keyword(fn, "sources")
         self._forward_requests = names_keyword(fn, "requests")
+        self._forward_entries = accepts_keyword(fn, "entries")
 
     @property
     def reads_requests(self) -> bool:
@@ -185,7 +211,8 @@ class _CallableProposer(Proposer):
         rejected: Sequence[Mapping[str, Any]] = (),
         sources: Sequence[Mapping[str, Any]] = (),
         requests: Sequence[Mapping[str, Any]] = (),
-    ) -> Mutation | Sequence[Mutation] | None:
+        entries: Sequence[Mapping[str, Any]] = (),
+    ) -> Mutation | Sequence[Mutation] | StepProposal | None:
         extra: dict[str, Any] = {}
         if self._forward_manifest:
             extra["manifest"] = manifest
@@ -195,6 +222,8 @@ class _CallableProposer(Proposer):
             extra["sources"] = sources
         if self._forward_requests:
             extra["requests"] = requests
+        if self._forward_entries:
+            extra["entries"] = entries
         return self._fn(nodes, samples, models, **extra)
 
 
@@ -266,7 +295,7 @@ def resolve_episode_scorer(value: object) -> EpisodeScorer:
 
 
 class Promoter(ABC):
-    """Base class for choosing which trace prompts become permanent gate tasks.
+    """Base class for choosing which trace prompts become permanent evaluation tasks.
 
     Implement ``__call__``: given the step's trace samples, return the prompts
     to promote. Reef still dedupes, screens for credentials, and caps them.
@@ -280,7 +309,7 @@ class Promoter(ABC):
         *,
         manifest: FailureManifest | None = None,
     ) -> Sequence[str]:
-        """Return the prompts this step should promote into the gate."""
+        """Return the prompts this step should promote into the evaluation."""
 
 
 def resolve_promoter(value: object) -> Promoter:

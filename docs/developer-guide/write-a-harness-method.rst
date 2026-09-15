@@ -12,7 +12,7 @@ A method fills three slots:
 
 .. code:: python
 
-   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | None: ...
+   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
    def evaluate(task, result) -> float: ...
    class SelectionFactory(CandidatePluginFactory):  # optional
        def build(self, candidate_backend) -> CandidateEvaluationPlugin: ...
@@ -29,13 +29,20 @@ as ``binding.chat(messages, *, timeout_s=None, **params) -> str``. The
 binding returns the assistant text. ``propose`` returns one ``Mutation``
 (``create``, ``update``, or
 ``remove`` on one root-level entry), a sequence applied as one composite
-proposal under one verdict, or ``None`` to skip. An optional keyword-only
+proposal under one result, or ``None`` to skip. It may also return a
+``StepProposal(mutations, notes)``: the same mutations plus ``notes``, a JSON
+mapping (a plan, a review result, what the method could not honor) that the
+step records under the commit metrics key ``proposal_notes`` and never reads;
+empty mutations skip the step as ``None`` does. An optional keyword-only
 ``manifest`` argument receives the previous step's ``FailureManifest``, and an
 optional keyword-only ``rejected`` argument receives the recent rejected
 proposals, oldest first, each a mapping of ``step``, ``mutations`` (each with
 its ``op``, ``id`` and the ``options`` it carried, ``None`` for a remove), and
-the verdict's ``reason``; a method uses it to stop re-proposing what the gate
+the result's ``reason``; a method uses it to stop re-proposing what the evaluation
 already refused, and can read the refused content rather than only its id.
+An optional keyword-only ``entries`` argument receives the tree as entry
+options, ``{"id", "name", "config"}`` mappings in tree order, so an ``update``
+or ``remove`` can name the entry it targets instead of creating a second one.
 Reef passes each keyword only to a signature that names it.
 
 ``evaluate`` grades one finished episode. Reef calls it for both sides of every
@@ -44,13 +51,17 @@ that could not run never reach it.
 
 ``promote`` is an optional ``Promoter`` subclass or instance and only matters
 with ``evolution.promote_failures``. Its ``__call__(samples, *, manifest=None)``
-receives the step's trace samples and ``FailureManifest``, and returns the prompts to add to the gate as
+receives the step's trace samples and ``FailureManifest``, and returns the prompts to add to the evaluation as
 permanent tasks. Reef dedupes, screens for credentials, and caps what it
 returns. Without it every failing trace's user prompt is promoted.
 
 ``selection`` defaults to ``score_comparison``: select when the candidate wins
 more task comparisons than it loses, by more than ``evolution.min_win_margin``
-when that is set. ``always`` selects every applied mutation.
+when that is set. ``floor`` runs the candidate alone and selects it when every
+evaluation task scores at least ``evolution.floor_score`` (default ``1.0``; an
+episode that could not run missed the floor): a floor is absolute, not a
+comparison, so the current release is not run and ``current_scores`` is empty.
+``always`` selects every applied mutation.
 
 .. warning::
 
@@ -58,7 +69,7 @@ when that is set. ``always`` selects every applied mutation.
    credential (``apiKey``, ``token``, plural and list forms) fails admission at
    seed boot, at every proposal, and when recovered state loads. Tree state
    persists into the commit log, the snapshot metadata, and the published
-   artifact. If a workdir from before this gate already holds a key, resuming
+   artifact. If a workdir from before this admission check already holds a key, resuming
    fails and names the field: rotate the key, then edit the entry out of the
    stored state.
 
@@ -232,7 +243,7 @@ Untrusted input
 ~~~~~~~~~~~~~~~
 
 Every sample is client text. It enters the proposer's model prompt, and with
-``promote_failures`` it is re-run as a gate task, so a method treats it as
+``promote_failures`` it is re-run as an evaluation task, so a method treats it as
 data: fence it before it reaches a prompt, and read ``sources`` when a
 decision depends on who sent it.
 
@@ -265,5 +276,5 @@ the step's ``screened_tasks`` metric; one tagged client holds at most
 (``code_extension``, ``native_tool``, ``native_hook``) proposed from client
 text belongs behind ``evolution.review_kinds``, so a person reads it before
 it publishes. A ``native_graph`` carries no code, so a loop change can
-publish on the gate alone; list the kind in ``review_kinds`` when a person
+publish on the evaluation alone; list the kind in ``review_kinds`` when a person
 should read every loop change.

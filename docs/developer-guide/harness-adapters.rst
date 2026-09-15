@@ -188,12 +188,12 @@ workspace with the other tools importable by name (``import read_file;
 read_file.run({"path": "x"}, WORKDIR)``), so a tree can move from one call
 per tool to code that calls tools without a loop change. An adapter that declares no ``files.native_tool`` path
 refuses to render that kind, so the mutation fails under it instead of
-silently dropping the tool. The admission gate refuses ``code`` that does not
+silently dropping the tool. The admission check refuses ``code`` that does not
 compile; a tool module the loop cannot read (the file cannot be opened or
 does not parse, no top level statement binds ``run``, or the last top level
 assignment to a declaration constant is not a literal) ends the episode
 with reason ``error`` and code ``LOAD_ERROR`` before any model call, so the
-tree that carries it loses the gate instead of running without it; a file
+tree that carries it fails the checks instead of running without it; a file
 that parses but does not compile fails its first call like a top level that
 raises. The read takes the last binding at module scope in source order: it
 follows the bodies of ``if``, ``try``, ``with``, ``for``, ``while`` and
@@ -331,7 +331,7 @@ last assistant text stays the root's answer and which agent did what is read
 off its file; its header names the ``agent``, its ``turn`` and its ``parent``. A
 ``pre_execute`` hook that answers ``ask`` inside an agent's turn ends the
 turn with outcome ``ask`` instead of an ``APPROVAL_REQUIRED`` error, because
-the parent graph is the one that can answer. The gate's verdict carries
+the parent graph is the one that can answer. The evaluation's result carries
 ``candidate_agents`` and ``current_agents``, the turns, steps, tool calls,
 tool errors and, when the endpoint reported usage, the input and output
 tokens per agent summed over each side's episodes. It also carries
@@ -382,7 +382,7 @@ with the turn's reason. The transition guard is the graph's: past ``(max_steps
 + 1) * 16`` calls to ``model``, ``run_tools``, ``agent``, ``say`` and ``log``,
 or any exception out of ``run_turn`` (``SystemExit`` included;
 ``KeyboardInterrupt`` propagates), the turn ends with ``LOOP_ERROR`` and exit
-status 1, and the gate ranks the episode as one that could not run; that leaves
+status 1, and the evaluation ranks the episode as one that could not run; that leaves
 about 16 context calls per model step, ``log`` and ``say`` included. The first
 end is final: after ``max-steps``, ``ctx.end`` or an abort, every call into
 the context that acts raises the end again and writes nothing, so a turn has
@@ -536,30 +536,163 @@ proxies it as is.
 ``evolution.version_check: true`` in the recipe config writes an update
 prompt into the tree and ships for ``pi`` only. The
 prompt offers to run the update or skip in interactive mode and prints the
-instructions in headless mode. An ``opencode`` recipe that sets it refuses to
-boot. An evolved tree is adapter-specific: ``config`` node contents follow each
-adapter's schema.
+instructions in headless mode. Before the offer, every ``env`` item the
+installed release requires (over its chain, as ``reef-pi setup`` reads it)
+whose variable, the ``check`` else the ``name``, is unset in the session's
+shell gets one warning line, ``reef: <VAR> is not set; the installed harness
+needs it (reef-pi setup lists it)``; a check off records that the variable
+was set once, not that this shell has it. When the head requires an item
+not checked off, an interactive session with the ``reef-pi`` wrapper on
+disk (``REEF_HARNESS_WRAPPER``, which ``run_agent`` exports, else
+``reef-pi`` beside the release file) asks ``Set up release <id8> now?``
+with the list and runs the setup loop described under ``reef-requests``
+below before the offer; without a wrapper, or headless, it prints the list
+and ``Run reef-pi setup, then start reef-pi again.`` instead of the offer,
+and an item the loop leaves unmet is named by the loop, the offer waiting
+for the next session start. The update itself runs ``reef-pi update``
+through the wrapper when one is on disk (the option says so) and the
+install pipeline otherwise, and ends with ``Installed release <id8>. Type
+/reload to load it now.``: pi's ``/reload`` re-runs ``session_start`` on
+the installed tree, and only the person can type it. An ``opencode`` recipe
+that sets it refuses to boot. An evolved tree is adapter-specific:
+``config`` node contents follow each adapter's schema.
 
 ``evolution.requests: true`` seeds two more reef owned entries for ``pi``
 after the notice: the ``code_extension`` ``reef-requests``
-(`reef/harness/adapters/pi/requests.ts <../../reef/harness/adapters/pi/requests.ts>`__:
-the ``/reef-harness <request>`` command, which files the request with
-``POST /reef/train`` (the scenario runs in ``manual`` or ``hybrid``), leaves
-captured receipts available for feedback, and registers nothing under
-``PI_OFFLINE``) and the
-``skill`` ``reef-pi-extension-api`` (`reef/harness/adapters/pi/pi_extension_api.md
+(`reef/harness/adapters/pi/requests.ts <../../reef/harness/adapters/pi/requests.ts>`__)
+and the ``skill`` ``reef-pi-extension-api``
+(`reef/harness/adapters/pi/pi_extension_api.md
 <../../reef/harness/adapters/pi/pi_extension_api.md>`__, the pi extension
-API reference the service proposer reads before it writes an extension). The
-same extension's second command, ``/reef-versions [step]``, lists the release
-chain with each step's verdict and request, prints a step's page (``GET
-/reef/harness/releases/{step}/page``) and, for a pending release, the promote
-action and a trial install command, and ``/reef-versions <step> promote`` runs
-the promote after a confirmation. The
-agent only asks; the writing happens on the service, where the evolve step
-hands the request to the recipe's ``propose`` and the commit records it
-under ``training_request``, the merged ``requires`` list included.
-Asking needs no extension: ``reef-<adapter> harness "<request>"`` is a
-wrapper subcommand on every adapter. The ids ``reef-version-check``,
+API reference the service proposer reads before it writes an extension).
+The extension registers nothing under ``PI_OFFLINE``; otherwise it registers
+two commands, two tools and two event handlers:
+
+- ``/reef-harness <request>``: with a UI, sends the session model one user
+  message that asks it to think the request through (when it triggers, what
+  state the harness must know and how it learns it, what the person must
+  set up, what is ambiguous), to ask about an open point with
+  ``reef_ask_user`` and to file with ``reef_file_request``, and notifies
+  ``reef: clarifying, then filing``. With ``--direct`` as the first word, or
+  without a UI, it files the request as is with ``POST /reef/train`` (the
+  scenario runs in ``manual`` or ``hybrid``), leaving captured receipts
+  available for feedback. Either way the ``.reef-harness-release`` file
+  beside the tree names the release the request runs on; without it nothing
+  is sent.
+- ``reef_ask_user``, a tool: up to four questions, each with two to four
+  options offered through ``ctx.ui.select`` plus ``Other (type an answer)``,
+  which opens ``ctx.ui.input`` (so does no choice). It returns the question
+  and answer pairs as JSON; without a UI it returns ``no UI in this session:
+  proceed with your best assumptions and list them in the request``.
+- ``reef_file_request``, a tool: the request verbatim, then, when there are
+  clarifications, a ``Clarifications:`` block of ``- Q:`` / ``A:`` pairs,
+  capped at 4000 characters, filed the way the command files it. It returns
+  ``filed request <id>; reef is running the step, which usually takes one to
+  three minutes, and will report here when it settles. Watch it here:
+  <link>`` and throws the command's error messages; the command's own filing
+  notifies the same expected time and the same link. The link is the
+  request's page, ``GET /reef/harness/requests/<id>/page`` with ``scenario``
+  and, when ``REEF_TOKEN`` is set, ``token`` as query parameters, so a
+  browser opens it without the headers.
+- The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
+  <id> queued`` and, once the request's record (``GET
+  /reef/scenarios/<scenario>/records/<id>``, read each poll until then)
+  carries a ``compacted_at`` time, ``reef: step for request <id> running for
+  <Nm SSs>``, counted from the first poll that saw it; a failed record read
+  keeps the footer as it was. Meanwhile the extension polls ``GET
+  /reef/harness/releases`` every ``REEF_HARNESS_WATCH_MS`` milliseconds
+  (5000 by default) for the row whose ``metrics.training_request.id`` is the
+  filed record, for at most 30 minutes, checked on every tick; one watch
+  runs at a time, a second filing replaces the first, and
+  ``session_shutdown`` clears it. Every fetch the extension makes carries an
+  abort signal with a 10 s deadline (``REEF_HARNESS_FETCH_MS`` shortens it),
+  so a hung read costs one poll, not every later tick. When the row appears,
+  the report quotes the request's first 60 characters and names the next
+  action by result: a selected release names ``/reef-versions <step> install``;
+  a pending one says ``This release changes an
+  extension, so it is not installed until you promote it: /reef-versions
+  <step> promote. Page: <link>``; a rejected step quotes
+  ``selection.reason`` and says to rephrase or split the request; a skipped
+  step quotes ``metrics.skipped`` and, when the step recorded one,
+  ``proposal_notes.failure``, why the proposer produced nothing. The
+  selected, rejected and skipped lines end with ``Details: /reef-versions
+  <step>.``; ``Not covered: ...`` follows when the step's
+  ``proposal_notes.review.uncovered`` lists items. The report is delivered
+  twice on purpose: as a custom message (``pi.sendMessage`` with
+  ``customType: "reef-harness"`` and ``triggerTurn: false``), which the chat
+  renders and the session file keeps, and as a notice, which the next
+  status line may overwrite. Past the cap the watch says ``/reef-versions``
+  shows the result when it settles.
+- A background result opens no confirmation, selection or input dialog,
+  whether the agent is busy or idle. The report names the next command,
+  leaving the person free to keep chatting. ``/reef-versions <step> install``
+  explicitly starts the install of a published step after a confirmation
+  linking its page. Pending, rejected and skipped steps cannot be installed
+  through that action; use ``/reef-versions <step> promote`` to review and
+  promote a pending release first. The automatic update notice at session
+  start remains a separate entry point.
+- The install, through the ``reef-pi`` wrapper (``REEF_HARNESS_WRAPPER``,
+  which ``run_agent`` exports, else ``reef-pi`` beside the release file;
+  with neither on disk the notice is ``reef: no reef-pi wrapper found;
+  install it with reef-pi update, then reef-pi setup``): ``reef-pi update
+  --release <id>``, then the setup loop, then ``Installed release <id8>.
+  Type /reload to load it now.`` (pi's ``/reload`` re-runs
+  ``session_start`` on the installed tree; only the person can type it). An
+  update the wrapper refuses for unmet items (exit 3) runs the setup loop
+  first and then the update again; any other failure stops with ``reef:
+  reef-pi update failed (exit N): <stderr>``. If the same installation directory
+  was rebound to another service or scenario while the session was running,
+  setup and update automatically use the session's original service, scenario,
+  and token. The installation is restored to that configuration after a successful
+  update. Commands targeting a different install directory use its own configuration.
+  Setup values and checks are pinned to the release being installed. If that
+  release is absent, the error identifies the queried service and scenario;
+  refresh ``/reef-versions`` before choosing a release again.
+- The setup loop: ``reef-pi setup --json --release <id>`` lists the
+  release's items with ``met``; each unmet item is asked once, an ``env``
+  item through ``ctx.ui.input`` titled with its ``prompt`` (else ``Value
+  for <NAME>``) and handed over as one argument, ``reef-pi setup --set
+  NAME=<value> --release <id>``, a ``permission`` or ``service`` item through
+  ``ctx.ui.confirm`` titled with its ``prompt`` (else ``Run this check?``)
+  and the check as the message, then ``reef-pi setup --run NAME --release <id>``. One
+  line per item: ``reef: NAME set``, ``reef: NAME met``, ``reef: NAME not
+  met (exit N)``, or ``reef: NAME skipped`` for a declined check or an
+  empty value; at the end, when items stay unmet, ``reef: still to set up:
+  A, B (reef-pi setup)``. A listing that fails notifies its stderr and
+  stops the loop. The value goes to the wrapper's env file, never into the
+  tree or to reef, and an evolved extension reads it from ``process.env``
+  at run time.
+- The filed requests not yet reported are kept in
+  ``.reef-harness-requests.json`` beside the release file, as ``{id, text,
+  filed_at}`` entries (the newest ten, none older than a day), and dropped
+  once reported. At ``session_start`` each stored id whose row the catalog
+  holds gets its report as the custom message and the notice; one the
+  catalog does not hold yet gets the watch again. So a restarted pi, or a
+  report the person missed, still gets the result in the chat.
+- ``session_start``: with a UI, one info line says the two commands exist,
+  and a second line counts the pending releases no promote has named yet
+  and says how to see and promote them: ``N release(s) await your review:
+  /reef-versions <step>[, <step>] (promote with /reef-versions <step>
+  promote)``.
+- ``/reef-versions [step] [promote|install]``: lists the release chain with each
+  step's result and request. With a step it prints ``design:`` (the
+  proposer's plan, first 200 characters) and ``not covered:`` when the row
+  carries ``proposal_notes``, then the step's page link (``GET
+  /reef/harness/releases/{step}/page`` with the scenario and the token as
+  query parameters) and a curl that fetches the page with the headers into
+  a file, and, for a pending release, the promote action and a trial
+  install command; ``/reef-versions <step> promote`` runs the promote after
+  a confirmation, then offers the install of the head the promote made.
+
+The writing happens on the service, where the evolve step hands the request
+to the recipe's ``propose`` and the commit records it under
+``training_request``, the merged ``requires`` list included. The harness
+requests RFC (#310) kept the agent side free of tools so that it only asks;
+the two tools above change that rule on purpose (issue #435): a request is
+clarified in the session where the person asked it, while they are still
+there to answer, and the tools still write no mutation and start no step of
+their own beyond the filing. Asking needs no extension:
+``reef-<adapter> harness "<request>"`` is a wrapper subcommand on every
+adapter. The ids ``reef-version-check``,
 ``reef-requests`` and ``reef-pi-extension-api`` are ``RESERVED_ENTRY_IDS`` in
 `reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__: the seed
 and a recovered state carry them, and admission refuses a mutation that

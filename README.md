@@ -199,47 +199,51 @@ current version without restarting Reef.
 
 ### Harness-evolving deployment
 
-Improve harness skills using a model API instead of GPUs.
+Refine a coding harness from plain-language asks, using a model API instead of GPUs.
 
-The harness evolve recipe includes a deployment configuration; specify the provider URL
-and model. From your Reef checkout and activated Python environment:
+Reefine is the built-in harness-refinement recipe and includes a deployment
+configuration; specify the provider URL and model. From your Reef checkout and
+activated Python environment:
 
 ```bash
-reef serve --recipe harness-evolve \
+reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b
 ```
 
 The example connects to a local Ollama server. For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
-`REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef listens on
-`127.0.0.1:8900` with no token and keeps its state under `.reef/harness-evolve/`. To change anything
-else, copy [the deployment configuration](reef/service/profiles/harness-evolve.yaml) and pass
+`REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
+listens on `127.0.0.1:8901` with token `reef-local` and keeps its state under
+`.reef/reefine/` (`--recipe harness-evolve`, the former name, starts the same
+configuration). To change anything else, copy
+[the deployment configuration](reef/service/profiles/reefine.yaml) and pass
 your copy with `-c`.
 
 In another terminal with the same Python environment activated (the install
-bakes that terminal's `python3` into `reef-pi`), install the harness and run a task:
+bakes that terminal's `python3` into `reef-pi`), create a scenario, install the
+harness, and ask for a change:
 
 ```bash
-curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
-reef-pi -p "fix the failing test in auth.py"
+export REEF_TOKEN=reef-local
+curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+  -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
+curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: my-harness" \
+  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
-# After running your tests, report the actual result:
-reef-pi report --score 0 --feedback "missed the empty-token case"
+reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-To change the model, restart `reef serve` with another `--inference.upstream-model`
-and rerun the install command before `reef-pi`: installation writes the model ID into the
-local harness configuration.
-
-Failed reports trigger a candidate skill update. Reef evaluates it against the
-current harness on the tutorial's three coding tasks and publishes it only if
-it wins. See the [tutorial](tutorials/evolve-your-harness/README.md) to customize the
-tasks and evaluation.
-
-To ask for a harness change in plain words and see the whole path from the ask to the install, run the [Reefine tutorial](tutorials/reefine/README.md).
-
-Reefine ships with `reef-infra`: start it with `reef serve --recipe reefine --model ollama/gemma4:26b`.
+Inside a `reef-pi` session, `/reef-harness <text>` files the same ask. The served
+model writes the change as a skill, a rules entry, an agent command, or a pi
+extension, and the next session's update notice offers the install; review the
+versions with `/reef-versions`, and promote an extension with
+`/reef-versions <step> promote` before it is offered. To change the model, restart
+`reef serve` with another `--inference.upstream-model` and rerun the install
+command: installation writes the model ID into the local harness configuration.
+See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and
+research demos and the [Reefine guide](docs/user-guide/recipes/reefine.rst) for
+configuration.
 
 ## 📚 Recipes and examples
 

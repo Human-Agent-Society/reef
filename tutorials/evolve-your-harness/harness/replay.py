@@ -75,7 +75,7 @@ def collect(work: Path) -> dict:
                     "kind": operation,
                     "recorded_at": row.get("recorded_at"),
                     "mutations": [],
-                    "verdict": None,
+                    "result": None,
                     "entries": entries or previous or [],
                     "diff": None,
                 }
@@ -94,7 +94,7 @@ def collect(work: Path) -> dict:
                     "kind": "seed",
                     "entries": first_entries,
                     "diff": None,
-                    "verdict": None,
+                    "result": None,
                     "recorded_at": None,
                 }
             )
@@ -111,7 +111,7 @@ def collect(work: Path) -> dict:
                 "recorded_at": row.get("recorded_at"),
                 "proposal": metrics.get("proposal"),
                 "mutations": metrics.get("mutations") or ([metrics["mutation"]] if metrics.get("mutation") else []),
-                "verdict": {
+                "result": {
                     "wins": metrics.get("wins"),
                     "losses": metrics.get("losses"),
                     "ties": metrics.get("ties"),
@@ -130,7 +130,7 @@ def collect(work: Path) -> dict:
             previous = entries
     if not releases and seed_entries:
         releases.append(
-            {"release_id": "seed", "step": 0, "kind": "seed", "entries": seed_entries, "diff": None, "verdict": None}
+            {"release_id": "seed", "step": 0, "kind": "seed", "entries": seed_entries, "diff": None, "result": None}
         )
 
     sessions = []
@@ -256,7 +256,7 @@ function renderChain() {
   const el = document.getElementById('chain'); el.innerHTML = '';
   D.releases.forEach((r, i) => {
     const d = document.createElement('div'); d.className = 'rel' + (i === state.release ? ' sel' : ''); d.tabIndex = 0;
-    const v = r.verdict || {};
+    const v = r.result || r.verdict || {};
     const source = r.proposal ? `agent proposal, session ${short(r.proposal.session)}` : (r.step ? 'method proposal' : 'the served tree before any step');
     const muts = (r.mutations || []).map(m => `<li><span class="tag">${esc(m.op)}</span>${esc(m.id)} <span class="tag">${esc((m.options||{}).name||'')}</span></li>`).join('');
     const diff = r.diff ? ['added','updated','removed'].filter(k => r.diff[k].length).map(k => `<li>${k}: ${r.diff[k].map(e => esc(e.id)).join(', ')}</li>`).join('') : '';

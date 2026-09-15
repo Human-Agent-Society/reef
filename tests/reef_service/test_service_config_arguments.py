@@ -58,8 +58,8 @@ def test_parser_defaults_come_from_settings():
 
 
 def test_recipe_setting_and_launcher_profile_are_independent_arguments():
-    args = build_serve_parser().parse_args(["--recipe", "harness-evolve", "--reef.recipe", "custom-preset"])
-    assert args.recipe == "harness-evolve"
+    args = build_serve_parser().parse_args(["--recipe", "reefine", "--reef.recipe", "custom-preset"])
+    assert args.recipe == "reefine"
     assert args.config_recipe == "custom-preset"
     assert parse_service_arguments({"reef": {"recipe": "custom-preset"}})["recipe"] == "custom-preset"
 

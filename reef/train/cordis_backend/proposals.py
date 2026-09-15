@@ -6,8 +6,8 @@ directly under the scenario's inbox directory. ``prepare_step`` claims the
 oldest by renaming it into ``claimed/`` before it applies anything, so a
 crash between the claim and the settlement never applies it twice; admission
 then runs again against the step's entries, a refusal moves the file to
-``refused/`` with the reason, and the gate's verdict moves it to
-``settled/`` with the verdict appended. Plain files, so a reader can inspect
+``refused/`` with the reason, and the evaluation's result moves it to
+``settled/`` with the result appended. Plain files, so a reader can inspect
 every state with ``ls`` and ``cat``.
 """
 
@@ -104,9 +104,9 @@ class ProposalInbox:
         """A claimed proposal the step's admission refused: into ``refused/`` with the reason."""
         self._move(proposal_id, REFUSED_DIR, {"refused": reason})
 
-    def settle(self, proposal_id: str, verdict: Mapping[str, Any]) -> None:
-        """A claimed proposal the gate settled: into ``settled/`` with the verdict."""
-        self._move(proposal_id, SETTLED_DIR, {"verdict": dict(verdict)})
+    def settle(self, proposal_id: str, selection_result: Mapping[str, Any]) -> None:
+        """A claimed proposal the evaluation settled: into ``settled/`` with the result."""
+        self._move(proposal_id, SETTLED_DIR, {"result": dict(selection_result)})
 
     def _move(self, proposal_id: str, subdir: str, extra: Mapping[str, Any]) -> None:
         source = self.directory / CLAIMED_DIR / f"{proposal_id}.json"
@@ -115,7 +115,7 @@ class ProposalInbox:
         try:
             data = json.loads(source.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            # An operator moved or removed the claimed file by hand; the verdict still gets filed, not lost.
+            # An operator moved or removed the claimed file by hand; the result still gets filed, not lost.
             data = {"proposal_id": proposal_id}
         _write(target, {**data, **extra})
         source.unlink(missing_ok=True)

@@ -42,7 +42,6 @@ from reef.service.deploy.cli import (
     object_override_path,
 )
 from reef.service.deploy.config_utils import (
-    PROJECT_ROOT,
     DeployConfigError,
     config_value,
     interpolate_config,
@@ -68,7 +67,7 @@ from reef.service.deploy.service_config import (
     service_override,
 )
 from reef.service.deploy.training import assemble_training_services, local_model_required
-from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_path
+from reef.service.profiles import PROFILES_DIR, UnknownProfileError, profile_alias_notice, profile_path
 
 _DEFAULT_GRACE_TIMEOUT = 30
 _WATCHDOG_INTERVAL = 5
@@ -541,9 +540,6 @@ _PROVIDERS: dict[str, tuple[str, str | None]] = {
     "openai": ("https://api.openai.com", None),
 }
 
-#: The tutorial method the harness-evolve profile points at; the profile runs from the checkout that holds it.
-_PROFILE_METHODS = {"harness-evolve": Path("tutorials/evolve-your-harness/harness/evolution.py")}
-
 
 def _model_overrides(
     spec: str, environ: Mapping[str, str], overrides: Mapping[str, str] | None = None
@@ -580,9 +576,13 @@ def _resolve_config(config: str | None, recipe: str | None) -> str | None:
         return config
     if recipe is not None:
         try:
-            return str(profile_path(recipe))
+            path = profile_path(recipe)
         except UnknownProfileError as exc:
             raise DeployConfigError(str(exc)) from exc
+        notice = profile_alias_notice(recipe)
+        if notice is not None:
+            print(notice, file=sys.stderr)
+        return str(path)
     return None
 
 
@@ -592,7 +592,7 @@ def _prepare_profile(
     environ: MutableMapping[str, str],
     overrides: Mapping[str, str] | None = None,
 ) -> None:
-    """What a profile needs from the environment before it loads: its own directory, the checkout, a model."""
+    """What a profile needs from the environment before it loads: its own directory and a model."""
     selected_model = model or environ.get("REEF_UPSTREAM_MODEL", "")
     for key, value in (overrides or {}).items():
         declared = service_override(key, value)
@@ -600,18 +600,7 @@ def _prepare_profile(
             selected_model = value
     if not selected_model.strip():
         raise DeployConfigError(f"--recipe {recipe} needs the model: pass --inference.upstream-model MODEL")
-    method = _PROFILE_METHODS.get(recipe)
-    if method is not None and not (PROJECT_ROOT / method).is_file():
-        raise DeployConfigError(
-            f"the {recipe} profile runs from a reef checkout: its proposer is {method}, not found under {PROJECT_ROOT}"
-        )
     environ["REEF_RECIPE_CONFIG_DIR"] = str(PROFILES_DIR)
-    environ["REEF_CHECKOUT"] = str(PROJECT_ROOT)
-    if method is not None:
-        python_paths = [str((PROJECT_ROOT / method).parents[1]), str(PROJECT_ROOT)]
-        if environ.get("PYTHONPATH"):
-            python_paths.append(environ["PYTHONPATH"])
-        environ["PYTHONPATH"] = os.pathsep.join(python_paths)
 
 
 def main(argv: Sequence[str] | None = None) -> None:

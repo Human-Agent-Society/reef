@@ -16,12 +16,11 @@ from reef.recipe.reefine import ReefineRecipe
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend.backend import ScoreComparisonPluginFactory
-from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
+from reef.train.cordis_backend.backend import FloorPluginFactory, ScoreComparisonPluginFactory
 
 
 def test_dotted_recipe_defaults_and_config_are_independent() -> None:
-    config = {"evolution": {"tasks": ["[sieve] Count primes below 100000."]}}
+    config = {"evolution": {"tasks": ["[health] Run `echo reef-ok` and reply with its output."]}}
     original = copy.deepcopy(config)
     built = build_recipe("reef.recipe.reefine:ReefineRecipe", {}, config)
     assert recipe_class_for("reef.recipe.reefine:ReefineRecipe") is ReefineRecipe
@@ -30,7 +29,9 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.training_mode == "manual"
     assert built.propose.reads_requests
     assert built.review_kinds == ("code_extension",)
-    assert isinstance(built.candidate_plugin, AlwaysSelectPluginFactory)
+    # The floor: the candidate alone must pass every evaluation task; the current release is not run.
+    assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
+    assert built.candidate_plugin.floor_score == 1.0
     assert [entry["id"] for entry in built.seed] == [
         "reef-version-check",
         "reef-requests",
@@ -67,8 +68,7 @@ def test_invalid_evolution_config_is_rejected(evolution: object) -> None:
         ReefineRecipe.from_environment({}, config={"evolution": evolution})
 
 
-def test_profile_preparation_needs_no_checkout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("reef.service.deploy.orchestrator.PROJECT_ROOT", tmp_path)
+def test_profile_preparation_needs_no_checkout() -> None:
     environ: dict[str, str] = {}
     _prepare_profile("reefine", "ollama/gemma4:26b", environ)
     assert Path(environ["REEF_RECIPE_CONFIG_DIR"]) == profile_path("reefine").parent
@@ -104,7 +104,8 @@ recipe = build_named_recipe('reefine', os.environ, config_directory=path.parent,
                             default_runtime=_upstream_runtime(service))
 assert isinstance(recipe, ReefineRecipe)
 assert recipe.training_mode == 'manual' and recipe.propose.reads_requests
-assert len(recipe.tasks) == 3
+assert len(recipe.tasks) == 1 and recipe.tasks[0].startswith('[health] ')
+assert type(recipe.candidate_plugin).__name__ == 'FloorPluginFactory'
 assert recipe.base_artifact_files()
 assert recipe.model_binding().model == 'test-model'
 """

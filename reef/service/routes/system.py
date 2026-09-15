@@ -6,7 +6,7 @@ from aiohttp import web
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.service.request_service import RequestService
+from reef.service.request_service import RequestService, page_headers
 from reef.service.routes.payload import read_object
 
 
@@ -38,8 +38,19 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
 
     async def harness_release_page(request: web.Request) -> web.Response:
         step = int(request.match_info["step"])
-        page = await asyncio.to_thread(request_service.harness_release_page, request.headers, step)
+        headers = page_headers(request.headers, request.query)
+        page = await asyncio.to_thread(request_service.harness_release_page, headers, step)
         return web.Response(text=page, content_type="text/html")
+
+    async def harness_request_page(request: web.Request) -> web.Response:
+        headers = page_headers(request.headers, request.query)
+        # The version page link opens the way this page was opened: the query parameters travel with it.
+        link_query = {key: request.query[key] for key in ("scenario", "token") if key in request.query}
+        page = await asyncio.to_thread(
+            request_service.harness_request_page, headers, request.match_info["record_id"], link_query
+        )
+        # The page changes every few seconds while the step runs; nothing should serve a stale copy.
+        return web.Response(text=page, content_type="text/html", headers={"Cache-Control": "no-store"})
 
     async def harness_step_records(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(
@@ -89,6 +100,7 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
     # One to nine digits: a step that is no number, or longer than any catalog, is no row; the router's own 404 answers it.
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/page", harness_release_page)
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/records", harness_step_records)
+    app.router.add_get("/reef/harness/requests/{record_id}/page", harness_request_page)
     app.router.add_post("/reef/harness/proposals", harness_proposals)
     app.router.add_get("/reef/harness/adapters", adapters)
     app.router.add_get("/reef/status", status)

@@ -1,9 +1,10 @@
 """What a release needs from the person: the ``requires`` items a training request carries.
 
 A request posted to ``POST /reef/train`` may name what its change needs
-from the person's machine, as ``{name, kind, check}`` items; the proposer
-may add items its extension needs, and the commit that answered the request
-carries the merged list under ``training_request.requires``. A release's
+from the person's machine, as ``{name, kind, check, prompt}`` items (the
+``prompt`` is one sentence telling the person what to enter or grant); the
+proposer may add items its extension needs, and the commit that answered the
+request carries the merged list under ``training_request.requires``. A release's
 items are per step, so the manifest, the install script, ``reef-<adapter>
 setup`` and the update notice read the union over the release's chain with
 :func:`required_by`, the one rule for all four. Nothing here runs a check:
@@ -20,6 +21,8 @@ from typing import Any
 REQUIRE_KINDS = ("permission", "env", "service")
 #: A release names a handful of things to set up; a longer list is a request that should be split.
 MAX_REQUIRES = 8
+#: A prompt is one sentence saying what to enter or grant; the listings show it beside the item, so it stays short.
+MAX_REQUIRE_PROMPT = 200
 #: An item's name is shown, checked off and matched by name, so it keeps to the entry name pattern.
 _REQUIRE_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 #: An env item names a variable the wrapper and the extension read from the environment, so it is an identifier.
@@ -27,26 +30,28 @@ _ENV_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 
 def parse_requires(value: object, *, limit: int | None = MAX_REQUIRES) -> list[dict[str, Any]]:
-    """The ``requires`` list of a request as ``{name, kind, check?}`` records; a ValueError names the first bad item.
+    """The ``requires`` list of a request as ``{name, kind, check?, prompt?}`` records; a ValueError names the first bad item.
 
     ``value`` is the list as the route or a proposer gave it: at most
     ``limit`` objects (``MAX_REQUIRES`` for one request; ``None`` for a
     chain union, which the cap never bounds), each with a ``name`` matching
-    the entry name pattern, a ``kind`` from ``REQUIRE_KINDS`` and an
-    optional non empty ``check``; for kind ``env`` the variable named (the
-    check, else the name) is a shell identifier. Unknown keys are dropped;
-    ``None`` means no items."""
+    the entry name pattern, a ``kind`` from ``REQUIRE_KINDS``, an optional
+    non empty ``check`` and an optional ``prompt``, one sentence telling the
+    person what to enter or grant, stripped, at most ``MAX_REQUIRE_PROMPT``
+    characters and dropped when blank; for kind ``env`` the variable named
+    (the check, else the name) is a shell identifier. Unknown keys are
+    dropped; ``None`` means no items."""
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
-        raise ValueError("requires must be a list of {name, kind, check} objects")
+        raise ValueError("requires must be a list of {name, kind, check, prompt} objects")
     if limit is not None and len(value) > limit:
         raise ValueError(f"requires must have at most {limit} items")
     items: list[dict[str, Any]] = []
     for index, item in enumerate(value):
         if not isinstance(item, Mapping):
             raise ValueError(f"requires[{index}] must be an object with a name and a kind")
-        name, kind, check = item.get("name"), item.get("kind"), item.get("check")
+        name, kind, check, prompt = item.get("name"), item.get("kind"), item.get("check"), item.get("prompt")
         if not isinstance(name, str) or not _REQUIRE_NAME.fullmatch(name):
             raise ValueError(f"requires[{index}].name must be a non-empty string matching {_REQUIRE_NAME.pattern}")
         if kind not in REQUIRE_KINDS:
@@ -58,9 +63,16 @@ def parse_requires(value: object, *, limit: int | None = MAX_REQUIRES) -> list[d
             raise ValueError(
                 f"requires[{index}].{field} must be a variable name matching {_ENV_NAME.pattern} for kind env"
             )
+        if prompt is not None and not isinstance(prompt, str):
+            raise ValueError(f"requires[{index}].prompt must be a string when present")
+        prompt = prompt.strip() if isinstance(prompt, str) else ""
+        if len(prompt) > MAX_REQUIRE_PROMPT:
+            raise ValueError(f"requires[{index}].prompt must be at most {MAX_REQUIRE_PROMPT} characters")
         parsed: dict[str, Any] = {"name": name, "kind": kind}
         if check is not None:
             parsed["check"] = check
+        if prompt:
+            parsed["prompt"] = prompt
         items.append(parsed)
     return items
 
@@ -140,6 +152,7 @@ def ancestor_requiring_nothing(rows: Sequence[Mapping[str, Any]], release_id: st
 
 __all__ = [
     "MAX_REQUIRES",
+    "MAX_REQUIRE_PROMPT",
     "REQUIRE_KINDS",
     "ancestor_requiring_nothing",
     "merge_requires",

@@ -1360,7 +1360,12 @@ def test_hybrid_promotes_the_failures_an_instruction_step_carries(tmp_path):
     def gate_rows():
         rows = dispatcher.get_or_create_scenario("s").releases()
         return [
-            (metrics["traces"], metrics["promoted_tasks"], metrics["gate_tasks"], "training_request" in metrics)
+            (
+                metrics["traces"],
+                metrics["promoted_tasks"],
+                metrics["evaluation_task_count"],
+                "training_request" in metrics,
+            )
             for row in rows
             if (metrics := row.get("metrics"))
         ]

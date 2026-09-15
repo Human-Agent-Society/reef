@@ -1,7 +1,7 @@
 # Run from the repository root:
 # reef serve -c tutorials/reefine/configs/deployment.yaml
 # The built-in Reefine recipe with its state under tutorials/reefine/work/,
-# training_mode manual and the gate's selection set to always. ./run.sh starts it,
+# training_mode manual and the evaluation's selection set to floor. ./run.sh starts it,
 # installs the served tree and runs run.py <demo>.
 schema-version: 2
 reef:
@@ -26,10 +26,11 @@ recipe:
       version_check: true
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]
-      # A workflow change does not move the three arithmetic tasks, so every pairing ties and the score
-      # comparison would reject; the demo publishes on any verdict and records it (RFC #308's tasks are the fix).
-      selection: always
-      # Every step's proposer calls, parsed proposal and gate episodes, so a row can be read back.
+      # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
+      # that the tree still works (the model binding, the tools, the extensions load), not that the requested
+      # change does; the step page's design and review notes and the person judge the change itself.
+      selection: floor
+      # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
       step_record_dir: tutorials/reefine/work/deployment/steps
       # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
       proposals_dir: tutorials/reefine/work/deployment/proposals
@@ -37,33 +38,8 @@ recipe:
       # ~/.local/share/reef-harness/pi, shared with the client install script.
       # Set evolution.binary to a path to use an install of your own instead.
       tasks:
-        - '[sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
-          integer alone on the last line.'
-        - '[fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the value
-          as a plain integer alone on the last line.'
-        - '[csv] Compute the median of the value column in this csv:
-
-          id,value
-
-          1,12
-
-          2,47
-
-          3,3
-
-          4,88
-
-          5,21
-
-          6,56
-
-          7,9
-
-          8,74
-
-          9,30
-
-          Reply with the median as a plain integer alone on the last line.'
+        - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+          as a plain word alone on the last line.'
       seed:
         - id: answer-style
           name: skill

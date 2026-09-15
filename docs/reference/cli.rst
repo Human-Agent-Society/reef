@@ -19,7 +19,7 @@ unexpectedly.
 .. config::
 
    -c, --config | optional config file. No file is loaded unless explicitly selected.
-   --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``harness-evolve``.
+   --recipe NAME | start a built in recipe's profile instead of a config file. Today: ``reefine``; ``harness-evolve``, its former name, starts the same profile.
    --model [PROVIDER/]MODEL | the upstream model. An ``ollama/`` or ``openai/`` prefix fills the endpoint and the key; any other spelling is the model ID as is.
    --print-config | print every resolved setting with its source (file, command line, environment, automatic, default) and exit without downloading models or starting services. Credentials are masked.
    --help | the command list
@@ -34,7 +34,7 @@ without a file of your own:
 
 .. code:: bash
 
-   reef serve --recipe harness-evolve \
+   reef serve --recipe reefine \
      --inference.upstream-url http://127.0.0.1:11434 \
      --inference.upstream-model gemma4:26b
 
@@ -48,11 +48,13 @@ The optional ``--model`` shorthand remains supported: ``ollama/`` fills
 ``https://api.openai.com`` and reads ``REEF_UPSTREAM_API_KEY``. Other prefixes
 and bare values are model IDs and need an upstream URL.
 An explicit ``--inference.upstream-url`` or ``--inference.upstream-api-key`` override wins over
-the prefix. The ``harness-evolve`` profile points at the tutorial's proposer
-and evaluator, so it runs from a reef checkout; it listens on
-``127.0.0.1:8900`` with no token and keeps its state under
-``.reef/harness-evolve/``. To change anything else, copy
-``reef/service/profiles/harness-evolve.yaml`` and pass the copy with ``-c``.
+the prefix. The ``reefine`` profile ships its proposer and evaluator in the
+wheel, so it runs from an installed package; it listens on
+``127.0.0.1:8901`` with token ``reef-local`` and keeps its state under
+``.reef/reefine/``. To change anything else, copy
+``reef/service/profiles/reefine.yaml`` and pass the copy with ``-c``.
+``--recipe harness-evolve``, the former name of the profile folded into it,
+starts the same profile and says so on stderr.
 
 Overriding config values
 ------------------------

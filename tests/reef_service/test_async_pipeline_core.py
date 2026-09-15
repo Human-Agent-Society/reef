@@ -189,15 +189,15 @@ class OperationalExperimentTracker(RecordingExperimentTracker):
 
 
 def wait_for_operational_sample(
-    tracker: RecordingExperimentTracker, key: str, expected: int
+    tracker: RecordingExperimentTracker, expected: Mapping[str, int]
 ) -> dict[str, float | int]:
     deadline = time.monotonic() + _ASYNC_WAIT_TIMEOUT_S
     while time.monotonic() < deadline:
         for namespace, metrics in tracker.loggers["math"].logged:
-            if namespace == "operations" and metrics.get(key) == expected:
+            if namespace == "operations" and all(metrics.get(key) == value for key, value in expected.items()):
                 return metrics
         time.sleep(_ASYNC_WAIT_POLL_S)
-    pytest.fail(f"no operational sample with {key}={expected}")
+    pytest.fail(f"no operational sample matching {expected}")
 
 
 @pytest.fixture
@@ -476,6 +476,17 @@ def test_storage_block_preserves_pending_batch_and_retries(start_dispatcher, mon
     assert dispatcher.build_training_status()["scenarios"]["math"]["checkpoint_storage"] is None
 
 
+def test_operational_sample_wait_ignores_a_matching_backlog_before_training() -> None:
+    tracker = OperationalExperimentTracker()
+    logger = RecordingExperimentLogger()
+    tracker.loggers["math"] = logger
+    logger.log({"records/unread_count": 2, "training/execution/active": 0}, namespace="operations")
+    running = {"records/unread_count": 2, "training/execution/active": 1}
+    logger.log(running, namespace="operations")
+
+    assert wait_for_operational_sample(tracker, running) == running
+
+
 def test_periodic_metrics_report_backlog_during_training_without_status_reads(start_dispatcher, monkeypatch) -> None:
     monkeypatch.setattr(Dispatcher, "operational_metrics_interval_seconds", 0.01)
     tracker = OperationalExperimentTracker()
@@ -483,7 +494,8 @@ def test_periodic_metrics_report_backlog_during_training_without_status_reads(st
     _submit_pair(dispatcher)
     assert runtime.started.wait(1)
     _submit_pair(dispatcher, "2", "job:job-0")
-    sample = wait_for_operational_sample(tracker, "records/unread_count", 2)
+    # The first pair can also produce a backlog of two before training starts.
+    sample = wait_for_operational_sample(tracker, {"records/unread_count": 2, "training/execution/active": 1})
     assert sample["training/execution/active"] == 1
     assert sample["training/execution/elapsed_seconds"] >= 0
     assert sample["records/oldest_unread_age_seconds"] >= 0
@@ -516,7 +528,7 @@ def test_periodic_metrics_keep_failures_after_training_recovery(start_dispatcher
 
     monkeypatch.setattr(runtime, "train_candidate", fail)
     _submit_pair(dispatcher)
-    sample = wait_for_operational_sample(tracker, "training/error", 1)
+    sample = wait_for_operational_sample(tracker, {"training/error": 1})
     assert sample["training/error"] == 1
     assert not tracker.events
     monkeypatch.setattr(runtime, "train_candidate", train_candidate)
@@ -552,7 +564,7 @@ def test_periodic_metrics_observe_incomplete_weight_sync(start_dispatcher, monke
     try:
         _submit_pair(dispatcher)
         assert transferring.wait(1)
-        sample = wait_for_operational_sample(tracker, "runtime/weight_sync/active", 1)
+        sample = wait_for_operational_sample(tracker, {"runtime/weight_sync/active": 1})
         assert sample["runtime/weight_sync/elapsed_seconds"] >= 0
         assert sample["runtime/weight_sync/completed_total"] == 0
         assert not tracker.events
@@ -602,19 +614,21 @@ def test_serving_only_scenarios_upload_requests_during_generation(
         request = asyncio.create_task(service.infer({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler))
         try:
             await asyncio.wait_for(handler.started.wait(), 2)
-            sample = await asyncio.to_thread(wait_for_operational_sample, tracker, "serve/request/active", 1)
+            sample = await asyncio.to_thread(wait_for_operational_sample, tracker, {"serve/request/active": 1})
             assert sample["serve/request/completed_total"] == 0
             assert sample["serve/request/elapsed_seconds"] >= 0
             assert not tracker.events
             request.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await request
-            sample = await asyncio.to_thread(wait_for_operational_sample, tracker, "serve/request/failed_total", 1)
+            sample = await asyncio.to_thread(wait_for_operational_sample, tracker, {"serve/request/failed_total": 1})
             assert sample["serve/request/active"] == 0
             assert sample["ingest/accepted_total"] == 0
             handler.release.set()
             await service.infer({"x-reef-scenario": "math"}, {}, "/v1/chat/completions", handler)
-            sample = await asyncio.to_thread(wait_for_operational_sample, tracker, "serve/request/completed_total", 1)
+            sample = await asyncio.to_thread(
+                wait_for_operational_sample, tracker, {"serve/request/completed_total": 1}
+            )
             assert sample["ingest/accepted_total"] == 1
         finally:
             request.cancel()

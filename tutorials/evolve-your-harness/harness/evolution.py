@@ -1,7 +1,9 @@
 """Compatibility entrypoints for the evolve-your-harness tutorial.
 
-Proposal and episode evaluation live in the built-in Reefine recipe. The small
-client grader stays dependency-free so run.py still needs only reef-client.
+Proposals and the reading of an episode's final answer live in the built-in
+Reefine recipe; the grader and its three arithmetic answers are this
+tutorial's own, since its deployments keep those tasks. The small client
+grader stays dependency-free so run.py still needs only reef-client.
 """
 
 import json
@@ -47,15 +49,16 @@ def grade_text(task: str, text: str | None) -> float:
     return 1.0 if lines and lines[-1] == expected else 0.0
 
 
-def propose(nodes, samples, models, *, requests=()):
-    """Delegate service-side proposals to the built-in recipe."""
+def propose(nodes, samples, models, *, requests=(), entries=()):
+    """Delegate service-side proposals to the built-in recipe, the tree's entries included."""
     from reef.recipe.reefine.evolution import propose as reefine_propose
 
-    return reefine_propose(nodes, samples, models, requests=requests)
+    return reefine_propose(nodes, samples, models, requests=requests, entries=entries)
 
 
 def evaluate(task: str, result) -> float:
-    """Delegate service-side episode scoring to the built-in recipe."""
-    from reef.recipe.reefine.evolution import evaluate as reefine_evaluate
+    """Grade the episode's final assistant text, read as the built-in recipe reads it, against this tutorial's
+    own answers."""
+    from reef.recipe.reefine.evolution import final_assistant_text
 
-    return reefine_evaluate(task, result)
+    return grade_text(task, final_assistant_text(result.trajectory))

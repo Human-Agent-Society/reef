@@ -335,14 +335,13 @@ def test_provider_cli_serves_and_records_feedback_without_yaml_or_gpu_imports(tm
 
 @pytest.mark.usefixtures("provider_environment")
 @pytest.mark.parametrize("model_flag", ["--inference.upstream-model", "--upstream_model"])
-def test_profile_accepts_explicit_provider_fields_without_model_shorthand(monkeypatch, captured_stack, model_flag):
-    monkeypatch.setattr(orchestrator, "PROJECT_ROOT", Path(__file__).resolve().parents[2])
+def test_profile_accepts_explicit_provider_fields_without_model_shorthand(captured_stack, model_flag):
     with pytest.raises(SystemExit) as result:
         main(
             [
                 "serve",
                 "--recipe",
-                "harness-evolve",
+                "reefine",
                 "--inference.upstream-url",
                 "http://127.0.0.1:11434",
                 model_flag,
@@ -353,6 +352,18 @@ def test_profile_accepts_explicit_provider_fields_without_model_shorthand(monkey
     config = captured_stack["config"]["reef"]
     assert config["upstream_url"] == "http://127.0.0.1:11434"
     assert config["upstream_model"] == "gemma4:26b"
-    assert config["recipe"] == "reef.recipe.cordis:CordisRecipe"
-    assert config["data"]["training_mode"] == "hybrid"
+    assert config["recipe"] == "reef.recipe.reefine:ReefineRecipe"
+    assert config["data"]["training_mode"] == "manual"
     assert captured_stack["started"] and captured_stack["stopped"]
+
+
+@pytest.mark.usefixtures("provider_environment")
+def test_the_former_profile_name_starts_reefine_and_says_so(captured_stack, capsys):
+    with pytest.raises(SystemExit) as result:
+        main(["serve", "--recipe", "harness-evolve", "--model", "ollama/gemma4:26b"])
+    assert result.value.code == 0
+    config = captured_stack["config"]["reef"]
+    assert config["recipe"] == "reef.recipe.reefine:ReefineRecipe" and config["port"] == 8901
+    assert config["data"]["training_mode"] == "manual"
+    notice = "reef: --recipe harness-evolve is now reefine; starting the reefine profile"
+    assert capsys.readouterr().err.count(notice) == 1

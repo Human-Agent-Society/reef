@@ -559,8 +559,8 @@ def test_replay_driver_dry_run(driver, skillclaw, example, tmp_path, monkeypatch
         service.wait_for_training_step(step_before)
         assert service.training_versions() == 1
         manifest = driver.pull_pool(client, service, tmp_path / "pulled")
-        assert manifest["gate"]["published"] is True
-        mutation = manifest["gate"]["mutation"]
+        assert manifest["evaluation"]["published"] is True
+        mutation = manifest["evaluation"]["mutation"]
         assert (mutation["op"], mutation["id"], mutation["options"]["name"]) == ("create", "csv-median", "skill")
         assert "Sort, take the middle." in mutation["options"]["config"]["text"]
         assert "Sort, take the middle." in manifest["files"]["pi-agent/skills/csv-median/SKILL.md"]

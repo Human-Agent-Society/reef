@@ -26,7 +26,7 @@ from reef.train.evaluation import (
     CandidateEvaluator,
     CandidateSelector,
     EvaluationResult,
-    RegressionGateMixin,
+    RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
     build_candidate_evaluation,
@@ -41,6 +41,9 @@ from reef.recipe import (
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import DataProcessor, Trainer
 from reef.runtime.interfaces import ActivatedModel, InferenceRuntime, ModelCandidate, TrainingRuntime
+
+# Compatibility aliases for existing imports.
+RegressionGateMixin = RegressionCheckMixin
 
 __all__ = [
     "SCENARIO_METADATA_KEY",
@@ -67,6 +70,7 @@ __all__ = [
     "RecipeConfigError",
     "RecordStore",
     "ReefError",
+    "RegressionCheckMixin",
     "RegressionGateMixin",
     "ReportBase",
     "ReportPayload",

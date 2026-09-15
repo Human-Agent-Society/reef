@@ -100,7 +100,9 @@ class _FakeReef(ThreadingHTTPServer):
     def base_url(self) -> str:
         return f"http://127.0.0.1:{self.server_address[1]}"
 
-    def release(self, release_id: str, entries: list[dict], parent: str | None = None, **gate: Any) -> None:
+    def release(
+        self, release_id: str, entries: list[dict], parent: str | None = None, **evaluation_metrics: Any
+    ) -> None:
         self.releases[release_id] = {
             "release_id": release_id,
             "parent_release_id": parent,
@@ -108,7 +110,7 @@ class _FakeReef(ThreadingHTTPServer):
             "operation": "training",
             "pending": False,
             "files": {"native/tree.json": json.dumps(entries, indent=2, sort_keys=True) + "\n"},
-            "metrics": {"wins": 1, **gate},
+            "metrics": {"wins": 1, **evaluation_metrics},
         }
         self.order.append(release_id)
         self.head = release_id
@@ -151,7 +153,7 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": {"message": f"unknown release {release_id}"}})
                 return
             manifest = {k: v for k, v in row.items() if k not in ("metrics", "operation", "pending")}
-            manifest["gate"] = row["metrics"]
+            manifest["evaluation"] = row["metrics"]
             self._json(200, manifest, x_reef_release_id=release_id)
         else:
             self._json(404, {"error": {"message": "no route"}})
@@ -715,8 +717,9 @@ def test_a_trial_that_fails_admission_or_load_is_refused_and_rolled_back(tmp_pat
     assert [r["headers"].get("x-reef-tag-trial") for r in reef.requests] == [None] * 5
 
 
-def test_harness_inspect_reads_the_tree_the_graphs_the_verdicts_and_the_status(
-    tmp_path: Path, reef: _FakeReef
+@pytest.mark.parametrize("results_view", ["results", "verdicts"])
+def test_harness_inspect_reads_the_tree_the_graphs_the_results_and_the_status(
+    tmp_path: Path, reef: _FakeReef, results_view: str
 ) -> None:
     reef.release("r0", [_tool("shout")])
     rejected = [
@@ -725,14 +728,14 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_verdicts_and_the_status(
     reef.release("r1", [_tool("shout"), _graph(SEED_STAGES, SEED_EDGES)], parent="r0", rejected=rejected)
     reef.replies = [
         _reply(tool_calls=[_call("harness_inspect", {"what": what}, f"c-{what}")])
-        for what in ("tree", "graph", "verdicts", "status", "nope")
+        for what in ("tree", "graph", results_view, "status", "nope")
     ]
     reef.replies.append(_reply("looked"))
     with _running(_tree(tmp_path, reef, "r1"), self_tools=True) as server:
         result, streamed = _turn(server, "look around")
         socket_path = server.socket_path
     assert result["text"] == "looked"
-    tree, graph, verdicts, status, nope = _typed(streamed, "tool/result")
+    tree, graph, results, status, nope = _typed(streamed, "tool/result")
     assert json.loads(tree["content"]) == {
         "release_id": "r1",
         "entries": [
@@ -742,9 +745,10 @@ def test_harness_inspect_reads_the_tree_the_graphs_the_verdicts_and_the_status(
     }
     graphs = json.loads(graph["content"])
     assert graphs["main"]["start"] == "think" and list(graphs["graphs"]) == ["main"]
-    seen = json.loads(verdicts["content"])
+    seen = json.loads(results["content"])
     assert [row["release_id"] for row in seen["releases"]] == ["r1", "r0"]
-    assert seen["releases"][0]["gate"] == {"wins": 1, "rejected": rejected} and seen["head"] == "r1"
+    assert seen["releases"][0]["evaluation"] == {"wins": 1, "rejected": rejected} and seen["head"] == "r1"
+    assert seen["releases"][0]["gate"] == seen["releases"][0]["evaluation"]
     assert seen["rejected"] == rejected
     assert json.loads(status["content"]) == {
         "release_id": "r1",

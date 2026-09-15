@@ -2,11 +2,11 @@
 
 Three built-in tools, built in code and registered only by ``reef-native
 serve --self-tools``; the episode form never sees them, so a candidate cannot
-win the gate by calling them, and a tree entry cannot take their names. They
+pass the checks by calling them, and a tree entry cannot take their names. They
 run in process whatever ``REEF_NATIVE_ENFORCE`` says, since they are reef's
 code and not the tree's. The order a model should use is inspect, then try,
 then propose: a trial that helped is one ``harness_propose`` away from the
-gate, and nothing a trial does is served to another session or published.
+evaluation, and nothing a trial does is served to another session or published.
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ from reef.harness.tree.nodes import ALWAYS_REVIEWED_KINDS, NATIVE_RESERVED_TOOL_
 
 #: The names reserved for built-in tools; a tree entry that takes one fails to mount.
 RESERVED_NAMES = NATIVE_RESERVED_TOOL_NAMES
-#: How many catalog rows ``harness_inspect("verdicts")`` returns, newest first.
-VERDICT_ROWS = 20
+#: How many catalog rows ``harness_inspect("results")`` returns, newest first.
+RESULT_ROWS = 20
 
 _MUTATIONS_SCHEMA: dict[str, Any] = {
     "type": "array",
@@ -54,13 +54,13 @@ _MUTATIONS_SCHEMA: dict[str, Any] = {
 
 INSPECT_DESCRIPTION = (
     "Read the harness you are running in. what=tree lists the live entries (id, kind, config) and the mounted "
-    "release id; what=graph shows the main loop graph and every named graph as JSON; what=verdicts lists the "
-    "newest releases with the gate metrics that admitted each one and, when Reef exposes it, the proposals the "
-    "gate rejected; what=status shows the mounted release, the follow mode and any pending mount. Read only. "
+    "release id; what=graph shows the main loop graph and every named graph as JSON; what=results lists the "
+    "newest releases with the evaluation metrics that admitted each one and, when Reef exposes it, the proposals the "
+    "evaluation rejected; what=status shows the mounted release, the follow mode and any pending mount. Read only. "
     "Call it before you change anything."
 )
 PROPOSE_DESCRIPTION = (
-    "Send a change to your harness to Reef for the gate. Reef admits or refuses the mutations at once and "
+    "Send a change to your harness to Reef for the evaluation. Reef admits or refuses the mutations at once and "
     "answers with a proposal id; an admitted proposal is measured on real tasks against the current harness "
     "before it is served, and nothing changes in this session. Give the reason in one or two sentences. Try the "
     "change with harness_try first."
@@ -158,14 +158,14 @@ class SelfTools(ToolRunner):
                 if e.get("name") == "native_graph" and isinstance(e.get("config"), Mapping)
             }
             return {"main": graphs.get("main", SEED_GRAPH), "graphs": graphs}
-        if what == "verdicts":
-            return self._verdicts()
+        if what in ("results", "verdicts"):
+            return self.results()
         if what == "status":
             return self._state.status()
-        raise ToolFailed(f"what must be one of tree, graph, verdicts, status; got {what!r}")
+        raise ToolFailed(f"what must be one of tree, graph, results, status; got {what!r}")
 
-    def _verdicts(self) -> dict[str, Any]:
-        rows = list(reversed(self._state.client.releases()))[:VERDICT_ROWS]
+    def results(self) -> dict[str, Any]:
+        rows = list(reversed(self._state.client.releases()))[:RESULT_ROWS]
         releases = [
             {
                 "release_id": row.get("release_id"),
@@ -173,15 +173,19 @@ class SelfTools(ToolRunner):
                 "operation": row.get("operation"),
                 "pending": row.get("pending", False),
                 "recorded_at": row.get("recorded_at"),
-                "gate": row.get("metrics", row.get("gate")),
+                "evaluation": row.get("metrics", row.get("evaluation", row.get("gate"))),
             }
             for row in rows
         ]
+        # Older self-tool consumers read evaluation metrics from this key.
+        for release in releases:
+            release["gate"] = release["evaluation"]
         head = self._state.release_id or (str(rows[0]["release_id"]) if rows and rows[0].get("release_id") else None)
         rejected = None
         if head is not None:
-            gate = self._state.client.fetch(head).get("gate")
-            rejected = gate.get("rejected") if isinstance(gate, Mapping) else None
+            manifest = self._state.client.fetch(head)
+            evaluation_metrics = manifest.get("evaluation", manifest.get("gate"))
+            rejected = evaluation_metrics.get("rejected") if isinstance(evaluation_metrics, Mapping) else None
         return {"head": head, "releases": releases, "rejected": rejected}
 
     def propose(self, args: dict[str, Any], workdir: str) -> Any:
@@ -226,8 +230,8 @@ def self_tools(state: ServeState) -> list[HostTool]:
                 "properties": {
                     "what": {
                         "type": "string",
-                        "enum": ["tree", "graph", "verdicts", "status"],
-                        "description": "Which view: tree, graph, verdicts or status.",
+                        "enum": ["tree", "graph", "results", "verdicts", "status"],
+                        "description": "Which view: tree, graph, results or status.",
                     }
                 },
                 "required": ["what"],
@@ -259,4 +263,7 @@ def self_tools(state: ServeState) -> list[HostTool]:
     ]
 
 
-__all__ = ["RESERVED_NAMES", "VERDICT_ROWS", "HostTool", "SelfTools", "ServeState", "self_tools"]
+# Compatibility aliases for existing imports.
+VERDICT_ROWS = RESULT_ROWS
+
+__all__ = ["RESERVED_NAMES", "RESULT_ROWS", "VERDICT_ROWS", "HostTool", "SelfTools", "ServeState", "self_tools"]

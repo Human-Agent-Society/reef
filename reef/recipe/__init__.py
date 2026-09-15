@@ -9,7 +9,8 @@ weights or the harness*. This package holds everything a method binds to:
   ``WeightTrainingSpec`` (step preparer, loss family, data processor).
 - ``checkpoint_strategy`` — policy for which committed steps need durable artifacts.
 - ``cordis`` — ``CordisRecipe`` assembles the harness evolution backend.
-- ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement.
+- ``reefine`` — ``ReefineRecipe`` supplies built-in request-driven harness refinement,
+  gated by a health floor.
 - ``registry`` — dotted class resolution (``recipe_class_for``) and
   ``build_named_recipe`` for a deployment preset.
 - ``config_fields`` — one dataclass field as the whole configuration surface
