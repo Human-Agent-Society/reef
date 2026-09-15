@@ -13,8 +13,13 @@
 beta/spade/
   environment_loader.py   load and play a generated environment as the reference does; ships into every task
   tasks.py                a generated environment as a Harbor task directory, a replay verifier, a split per generation
+  designer.py             the Designer's adversarial prompt, its reply parsed, the smoke test of what it wrote
 ```
 
 ## The task form
 
 `environment_task` turns one generated environment (its code, skill, generation, index, hint, the Designer's generation record id) into a `HarborTask` from `reef.core.tasks`. The agent never holds the game's code: `instruction.md` says the game is served one turn at a time, `tests/env.py` holds the class unchanged beside `tests/env_loader.py` and `tests/replay.py`, which replay the agent's action log through it and write the episode return (the last step's reward, clipped to [-1, 1], when the episode terminated, else 0), `solution/hint.txt` holds the privileged hint, and `task.toml` carries skill, generation, step, index, difficulty, document, class name, turn limit and seed. `split_generation` puts every environment of one Designer call on one side of a train/eval split.
+
+## The Designer
+
+`designer_messages` builds one Designer call: the skill and difficulty, the rules of the environment contract, and what the agent did on the last generation's environments as `PlayRecord` rows, sorted into the frontier (lost without the hint, won with it), the ones it wins anyway and the ones out of reach, so the next environment lands where the agent fails today. `parse_designer_reply` reads the `python` and `hint` blocks of the reply, and `smoke_test` runs the code in a child interpreter before anything else trusts it.
