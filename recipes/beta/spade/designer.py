@@ -77,6 +77,14 @@ FORBIDDEN_MODULES = frozenset(
         "datetime",
         "secrets",
         "uuid",
+        "posix",
+        "nt",
+        "fcntl",
+        "_posixsubprocess",
+        "_io",
+        "_socket",
+        "_thread",
+        "_signal",
     }
 )
 FORBIDDEN_CALLS = frozenset(
@@ -85,7 +93,7 @@ FORBIDDEN_CALLS = frozenset(
 PYTHON_BLOCK = re.compile(r"^[ \t]*```(?:python3?|py)\b[^\n]*\r?\n(.*?)\r?\n[ \t]*```", re.S | re.M | re.I)
 HINT_BLOCK = re.compile(r"^[ \t]*```hint\b[^\n]*\r?\n(.*?)\r?\n[ \t]*```", re.S | re.M | re.I)
 HINT_LINE = re.compile(r"^HINT:[ \t]*(.+)$", re.M)
-JSON_BLOCK = re.compile(r"^[ \t]*```[^\n]*\r?\n[ \t]*(\{.*?\})[ \t]*\r?\n[ \t]*```", re.S | re.M)
+JSON_BLOCK = re.compile(r"^[ \t]*```[^\n{]*(?:\r?\n)?[ \t]*(\{.*?\})[ \t]*(?:\r?\n)?[ \t]*```", re.S | re.M)
 HARBOR_FILE_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,99}(/[A-Za-z0-9][A-Za-z0-9._-]{0,99}){0,3}$")
 
 SYSTEM_PROMPT = (
@@ -360,7 +368,7 @@ def checked_code(code: str) -> str:
 
 
 OPENENV_RULES_TEXT = """RULES:
-- Two Python modules of the OpenEnv framework (huggingface/OpenEnv). models.py defines exactly one class inheriting Action and exactly one inheriting Observation, imported with `from openenv.core.env_server.types import Action, Observation`, with pydantic fields; the observation carries reward: float and done: bool. environment.py defines exactly one class inheriting Environment, imported with `from openenv.core.env_server import Environment`, and imports the models with `from openenv_task.models import ...`; it has reset(self, seed=None, **kwargs) -> the observation, step(self, action) -> the observation, and a state property returning State(episode_id, step_count) from openenv.core.env_server.types.
+- Two Python modules of the OpenEnv framework (huggingface/OpenEnv). models.py defines exactly one class inheriting Action and exactly one inheriting Observation, imported with `from openenv.core.env_server.types import Action, Observation`, with pydantic fields; the observation carries reward: float and done: bool. environment.py defines exactly one class inheriting Environment, imported with `from openenv.core.env_server import Environment`, and imports the models with `from openenv_task.models import ...`; it has reset(self, seed=None, **kwargs) -> the observation, step(self, action) -> the observation, both plain methods (no async), and a state property returning State(episode_id=..., step_count=...) from openenv.core.env_server.types. No other class may subclass it.
 - Standard library, openenv and pydantic only; no files, no processes, no network, no printing. All randomness comes from the seed: the same seed gives the same episode. reset() generates ONE task for the episode; step() never generates a new one.
 - HIDDEN STATE: the goal cannot be reached in one action; the agent must probe, remember and plan. The observation never states the answer or the rule behind it, and every observation shows the state, the result of the last action and what actions are possible.
 - REWARD: success sets reward 1.0 and done True; failure sets reward 0.0 and done True; every other step sets reward 0.0 and done False. The server ends the episode after {turn_limit} steps on its own.
@@ -382,25 +390,47 @@ def parse_openenv_reply(text: str) -> OpenEnvReply:
     """The ``json`` block of an openenv reply: the goal, both modules, the example action and the hint, all checked."""
     if not isinstance(text, str) or not text.strip():
         raise DesignerReplyError("the reply is empty")
-    match = JSON_BLOCK.search(text)
-    if match is None:
+    blocks = list(JSON_BLOCK.finditer(text))
+    if not blocks:
         raise DesignerReplyError("the reply holds no ```json block with an object")
-    try:
-        document = json.loads(textwrap.dedent(match.group(1)))
-    except json.JSONDecodeError as exc:
-        raise DesignerReplyError(f"the ```json block is not valid JSON: {exc}") from exc
-    if not isinstance(document, dict):
-        raise DesignerReplyError("the ```json block must hold an object")
+    chosen = None
+    first_error = ""
+    for block in blocks:
+        try:
+            # strict=False: a model writes real line breaks inside the code strings as often as escaped ones.
+            document = json.loads(textwrap.dedent(block.group(1)), strict=False)
+        except json.JSONDecodeError as exc:
+            first_error = first_error or f"the ```json block is not valid JSON: {exc}"
+            continue
+        if not isinstance(document, dict):
+            first_error = first_error or "the ```json block must hold an object"
+            continue
+        if chosen is None or "models" in document:
+            chosen = (block, document)
+        if "models" in document:
+            break
+    if chosen is None:
+        raise DesignerReplyError(first_error)
+    block, document = chosen
     unknown = sorted(
         key for key in document if key not in ("instruction", "models", "environment", "action_example", "hint")
     )
     if unknown:
         raise DesignerReplyError(f"the reply carries keys the task has no place for: {', '.join(unknown)}")
+    if "hint" not in document:
+        hint_match = HINT_BLOCK.search(text, block.end()) or HINT_LINE.search(text, block.end())
+        if hint_match is not None:
+            document["hint"] = hint_match.group(1)
     instruction = checked_text(document.get("instruction"), "instruction")
     models = checked_text(document.get("models"), "models")
     environment = checked_text(document.get("environment"), "environment")
     hint = checked_text(document.get("hint"), "hint")
     action_example = document.get("action_example")
+    if isinstance(action_example, str):
+        try:
+            action_example = json.loads(action_example, strict=False)
+        except json.JSONDecodeError:
+            action_example = None
     if not isinstance(action_example, dict) or not action_example:
         raise DesignerReplyError("the reply's action_example must be a non-empty object")
     return OpenEnvReply(

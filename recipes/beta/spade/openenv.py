@@ -116,8 +116,8 @@ class OpenEnvCheck:
     first_observation: str = ""
 
 
-def class_names(code: str, base: str) -> list[str]:
-    """Top level classes of ``code`` whose bases name ``base``."""
+def class_names(code: str, *parents: str) -> list[str]:
+    """Top level classes of ``code`` whose bases name one of ``parents``."""
     tree = ast.parse(code)
     names = []
     for node in tree.body:
@@ -125,9 +125,27 @@ def class_names(code: str, base: str) -> list[str]:
             bases = {
                 b.id if isinstance(b, ast.Name) else b.attr if isinstance(b, ast.Attribute) else "" for b in node.bases
             }
-            if base in bases:
+            if bases.intersection(parents):
                 names.append(node.name)
     return names
+
+
+def method_errors(code: str, class_name: str) -> list[str]:
+    """Why ``class_name`` in ``code`` cannot be served: a required method missing or written as a coroutine."""
+    errors: list[str] = []
+    for node in ast.parse(code).body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            methods = {item.name for item in node.body if isinstance(item, ast.FunctionDef)}
+            coroutines = {item.name for item in node.body if isinstance(item, ast.AsyncFunctionDef)}
+            errors.extend(
+                f"{name} must be a plain method, not a coroutine"
+                for name in ("reset", "step", "state")
+                if name in coroutines
+            )
+            missing = sorted({"reset", "step", "state"} - methods - coroutines)
+            if missing:
+                errors.append(f"the environment class lacks {', '.join(missing)}")
+    return errors
 
 
 def code_errors(code: str, label: str) -> list[str]:
@@ -176,14 +194,13 @@ def reply_errors(reply: OpenEnvReply) -> list[str]:
         errors.append(f"models must define exactly one Observation subclass, found {len(observations)}")
     if len(environments) != 1:
         errors.append(f"environment must define exactly one Environment subclass, found {len(environments)}")
-    if environments:
-        tree = ast.parse(reply.environment)
-        for node in tree.body:
-            if isinstance(node, ast.ClassDef) and node.name == environments[0]:
-                methods = {item.name for item in node.body if isinstance(item, ast.FunctionDef)}
-                missing = sorted({"reset", "step", "state"} - methods)
-                if missing:
-                    errors.append(f"the environment class lacks {', '.join(missing)}")
+    if len(environments) == 1:
+        errors.extend(method_errors(reply.environment, environments[0]))
+        # The task wraps the one Environment subclass; a class derived from it would be the real environment.
+        errors.extend(
+            f"{derived} subclasses {environments[0]}; the environment class must have no subclass"
+            for derived in class_names(reply.environment, environments[0])
+        )
     if not isinstance(reply.action_example, dict) or not reply.action_example:
         errors.append("action_example must be a non-empty object")
     return errors
@@ -258,9 +275,9 @@ def instruction_text(goal: str, action_example: dict[str, object], max_turns: in
         f"`curl -s -X POST localhost:{PORT}/reset` starts the episode and returns the first observation; "
         f"`curl -s -X POST localhost:{PORT}/step -H 'content-type: application/json' -d '{example}'` "
         "takes one action and returns the observation, the reward and whether the episode is done. "
-        f"The episode ends when it is done or after {max_turns} steps; a reset after that changes nothing the "
-        "verifier reads. You never see the environment's code; the verifier scores the last step of the first "
-        "episode that ended.\n"
+        f"The episode ends when it is done or after {max_turns} steps. The verifier scores the last step of the "
+        "first episode only: a reset after a step of that episode abandons it with no reward, and a reset after "
+        "it ended changes nothing. You never see the environment's code.\n"
     )
 
 
@@ -430,34 +447,54 @@ app = create_app(environment, {models.action}, {models.observation}, env_name="{
 
 
 #: The verifier: the first episode of the root held log, its last reward when it ended, else 0.
-REPLAY_SCRIPT = '''"""Read the environment server's log and write the episode return of the first episode."""
+REPLAY_SCRIPT = '''"""Read the environment server's log and write the episode return of the first episode.
+
+The first episode runs from the first reset to the first step that ended it; a reset after a step of that
+episode abandons it (no reward), a reset before any step only starts it again, and a line that does not
+parse ends the log.
+"""
 
 import json
 import math
 import sys
 
 
+def reward_of(event):
+    try:
+        return float(event.get("reward", 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def main(log_path, reward_path):
-    value = 0.0
     try:
         with open(log_path, encoding="utf-8", errors="replace") as handle:
-            events = [json.loads(line) for line in handle if line.strip()]
-        started = False
-        rewards = []
-        done = False
-        for event in events:
-            kind = event.get("event")
-            if kind == "reset" and not started:
-                started = True
-            elif kind == "step" and started:
-                rewards.append(float(event.get("reward", 0.0)))
-                if event.get("done") or event.get("truncated"):
-                    done = bool(event.get("done"))
-                    break
-        if rewards and done and math.isfinite(rewards[-1]):
-            value = max(-1.0, min(1.0, rewards[-1]))
-    except (OSError, ValueError):
-        value = 0.0
+            lines = handle.readlines()
+    except OSError:
+        lines = []
+    started = False
+    rewards = []
+    done = False
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except ValueError:
+            break
+        kind = event.get("event") if isinstance(event, dict) else None
+        if kind == "reset":
+            if started and rewards:
+                break
+            started = True
+        elif kind == "step" and started:
+            rewards.append(reward_of(event))
+            if event.get("done") or event.get("truncated"):
+                done = bool(event.get("done"))
+                break
+    value = 0.0
+    if rewards and done and math.isfinite(rewards[-1]):
+        value = max(-1.0, min(1.0, rewards[-1]))
     with open(reward_path, "w", encoding="utf-8") as handle:
         handle.write(f"{value}\\n")
 
@@ -471,8 +508,35 @@ def docker_run(arguments: Sequence[str], *, timeout_s: float) -> subprocess.Comp
     return subprocess.run(["docker", *arguments], capture_output=True, text=True, timeout=timeout_s, check=False)
 
 
+def server_log(container: str) -> str:
+    """The tail of the server's log inside the container, for a reason the Designer can act on."""
+    return docker_run(["exec", container, "tail", "-n", "20", "/var/env/server.log"], timeout_s=30.0).stdout.strip()
+
+
+def answered(container: str, label: str, method: str, path: str, body: str | None = None) -> tuple[dict, str]:
+    """One request as the agent user; the JSON object it answered, or an empty object and the reason."""
+    arguments = ["exec", "-u", AGENT_USER, container, "curl", "-s", "-o", "-", "-w", "\\n%{http_code}"]
+    arguments += ["-X", method, f"localhost:{PORT}{path}"]
+    if body is not None:
+        arguments += ["-H", "content-type: application/json", "-d", body]
+    result = docker_run(arguments, timeout_s=60.0)
+    payload, _, status = result.stdout.rstrip("\n").rpartition("\n")
+    if result.returncode != 0:
+        detail = result.stderr.strip()[-200:] or "no reply"
+        return {}, f"{label} failed: {detail}; server log: {server_log(container)[-500:]}"
+    if status != "200":
+        return {}, f"{label} answered {status}: {payload[:200]}; server log: {server_log(container)[-500:]}"
+    try:
+        document = json.loads(payload)
+    except json.JSONDecodeError:
+        return {}, f"{label} did not answer JSON: {payload[:200]!r}"
+    if not isinstance(document, dict):
+        return {}, f"{label} did not answer an object: {payload[:200]!r}"
+    return document, ""
+
+
 def openenv_check(task_path, *, action_example: dict[str, object], timeout_s: float = CHECK_TIMEOUT_S) -> OpenEnvCheck:
-    """Build the task's image, start the server in a container without network, reset and take one step."""
+    """Build the task's image, start the server in a container without network, reset, take one step, read the state."""
     if shutil.which("docker") is None:
         return OpenEnvCheck(is_serving=False, reason="docker is not installed")
     tag = "spade-openenv-" + CONTAINER_NAME_PATTERN.sub("-", str(task_path).lower()).strip("-")[-60:]
@@ -486,50 +550,22 @@ def openenv_check(task_path, *, action_example: dict[str, object], timeout_s: fl
     try:
         serve = docker_run(["exec", container, "/usr/local/bin/serve"], timeout_s=SERVER_WAIT_S + 30.0)
         if serve.returncode != 0:
-            log = docker_run(["exec", container, "cat", "/var/env/server.log"], timeout_s=30.0)
-            return OpenEnvCheck(is_serving=False, reason=f"serve failed: {(serve.stderr + log.stdout).strip()[-500:]}")
-        reset = docker_run(
-            ["exec", "-u", AGENT_USER, container, "curl", "-s", "-f", "-X", "POST", f"localhost:{PORT}/reset"],
-            timeout_s=60.0,
-        )
-        if reset.returncode != 0 or not reset.stdout.strip():
-            return OpenEnvCheck(is_serving=False, reason=f"reset failed: {reset.stderr.strip()[-300:] or 'no reply'}")
-        try:
-            first = json.loads(reset.stdout)
-        except json.JSONDecodeError:
-            return OpenEnvCheck(is_serving=False, reason=f"reset did not answer JSON: {reset.stdout[:200]!r}")
+            detail = (serve.stderr + "\n" + server_log(container)).strip()[-500:]
+            return OpenEnvCheck(is_serving=False, reason=f"serve failed: {detail}")
+        first, reason = answered(container, "reset", "POST", "/reset")
+        if reason:
+            return OpenEnvCheck(is_serving=False, reason=reason)
         body = json.dumps({"action": action_example})
-        step = docker_run(
-            [
-                "exec",
-                "-u",
-                AGENT_USER,
-                container,
-                "curl",
-                "-s",
-                "-f",
-                "-X",
-                "POST",
-                f"localhost:{PORT}/step",
-                "-H",
-                "content-type: application/json",
-                "-d",
-                body,
-            ],
-            timeout_s=60.0,
-        )
-        if step.returncode != 0 or not step.stdout.strip():
+        answer, reason = answered(container, "the example action", "POST", "/step", body)
+        if reason:
+            return OpenEnvCheck(is_serving=False, reason=reason)
+        if "observation" not in answer:
             return OpenEnvCheck(
-                is_serving=False, reason=f"the example action failed: {step.stderr.strip()[-300:] or 'no reply'}"
+                is_serving=False, reason=f"step answered without an observation: {json.dumps(answer)[:200]}"
             )
-        try:
-            answer = json.loads(step.stdout)
-        except json.JSONDecodeError:
-            return OpenEnvCheck(is_serving=False, reason=f"step did not answer JSON: {step.stdout[:200]!r}")
-        if not isinstance(answer, dict) or "observation" not in answer:
-            return OpenEnvCheck(
-                is_serving=False, reason=f"step answered without an observation: {step.stdout[:200]!r}"
-            )
+        reason = answered(container, "state", "GET", "/state")[1]
+        if reason:
+            return OpenEnvCheck(is_serving=False, reason=reason)
         return OpenEnvCheck(
             is_serving=True, reason="", first_observation=json.dumps(first.get("observation", first))[:2000]
         )

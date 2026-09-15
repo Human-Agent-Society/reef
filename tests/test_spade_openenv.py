@@ -123,6 +123,28 @@ def test_an_unusable_openenv_reply_is_refused(change, message: str) -> None:
         parse_openenv_reply("```json\n" + json.dumps(document) + "\n```")
 
 
+def test_a_reply_in_a_looser_shape_is_still_read() -> None:
+    expected = parse_openenv_reply(REPLY_TEXT)
+    # real line breaks and tabs inside the code strings, as a model writes them
+    tabbed = dict(DOCUMENT, instruction=DOCUMENT["instruction"].replace("was drawn", "was\tdrawn"))
+    raw = json.dumps(tabbed, indent=2).replace("\\n", "\n").replace("\\t", "\t")
+    loose = parse_openenv_reply("```json\n" + raw + "\n```")
+    assert loose.models == expected.models and loose.environment == expected.environment
+    assert "\t" in loose.instruction
+    # the object on the fence line and the closing fence glued to the brace
+    assert parse_openenv_reply("```json " + json.dumps(DOCUMENT) + "```") == expected
+    # an example block before the document
+    first = "```json\n" + json.dumps({"guess": 2}) + "\n```\n\n```json\n" + json.dumps(DOCUMENT) + "\n```"
+    assert parse_openenv_reply(first) == expected
+    # the hint after the block instead of inside it
+    without_hint = {key: value for key, value in DOCUMENT.items() if key != "hint"}
+    after = "```json\n" + json.dumps(without_hint) + "\n```\nHINT: " + DOCUMENT["hint"] + "\n"
+    assert parse_openenv_reply(after) == expected
+    # the example action as a JSON string
+    quoted = dict(DOCUMENT, action_example=json.dumps(DOCUMENT["action_example"]))
+    assert parse_openenv_reply("```json\n" + json.dumps(quoted) + "\n```") == expected
+
+
 # ----------------------------------------------------------------------------------------------- the package
 
 
@@ -159,6 +181,19 @@ def test_a_usable_package_has_no_errors_and_names_its_classes() -> None:
             "exactly one Environment subclass, found 0",
         ),
         ({"environment": "import os\n" + ENVIRONMENT}, "imports 'os', which the rules forbid"),
+        ({"environment": "import posix\n" + ENVIRONMENT}, "imports 'posix', which the rules forbid"),
+        (
+            {
+                "environment": ENVIRONMENT.replace(
+                    "    def step(self, action: GuessAction):", "    async def step(self, action: GuessAction):"
+                )
+            },
+            "step must be a plain method, not a coroutine",
+        ),
+        (
+            {"environment": ENVIRONMENT + "\n\nclass HarderGuess(GuessEnvironment):\n    pass\n"},
+            "HarderGuess subclasses GuessEnvironment; the environment class must have no subclass",
+        ),
         (
             {"environment": "import numpy\n" + ENVIRONMENT},
             "imports 'numpy'; only the standard library, openenv and pydantic",
@@ -388,6 +423,20 @@ def test_the_verifier_scores_the_first_episode_that_ended(tmp_path: Path) -> Non
     assert scored(tmp_path, []) == 0.0
     clipped = [{"event": "reset"}, {"event": "step", "reward": 7.0, "done": True}]
     assert scored(tmp_path, clipped) == 1.0
+    odd_reward = [{"event": "reset"}, {"event": "step", "reward": None, "done": True}]
+    assert scored(tmp_path, odd_reward) == 0.0
+
+
+def test_a_reset_after_a_step_abandons_the_first_episode(tmp_path: Path) -> None:
+    abandoned = [
+        {"event": "reset"},
+        {"event": "step", "reward": 0.0, "done": False},
+        {"event": "reset"},
+        {"event": "step", "reward": 1.0, "done": True},
+    ]
+    assert scored(tmp_path, abandoned) == 0.0, "a reset mid episode must not hand out a fresh turn budget"
+    restarted = [{"event": "reset"}, {"event": "reset"}, {"event": "step", "reward": 1.0, "done": True}]
+    assert scored(tmp_path, restarted) == 1.0, "a reset before any step only starts the episode again"
 
 
 def test_the_verifier_survives_a_missing_or_torn_log(tmp_path: Path) -> None:
@@ -403,6 +452,14 @@ def test_the_verifier_survives_a_missing_or_torn_log(tmp_path: Path) -> None:
         [sys.executable, "-S", str(script), str(tmp_path / "torn.jsonl"), str(reward_path)], check=True, timeout=30
     )
     assert reward_path.read_text() == "0.0\n"
+    won = '{"event": "reset"}\n{"event": "step", "reward": 1.0, "done": true}\n{"event": "st'
+    (tmp_path / "won-then-torn.jsonl").write_text(won)
+    subprocess.run(
+        [sys.executable, "-S", str(script), str(tmp_path / "won-then-torn.jsonl"), str(reward_path)],
+        check=True,
+        timeout=30,
+    )
+    assert reward_path.read_text() == "1.0\n", "a torn line after the win must not take the win away"
 
 
 # ----------------------------------------------------------------------------------------------- the check
@@ -431,14 +488,20 @@ elif verb == "exec":
         if script.get("serve_fails"):
             sys.stderr.write("the environment server exited; see /var/env/server.log\\n"); sys.exit(1)
         print("the environment server is up")
-    elif "cat" in arguments:
-        print("ModuleNotFoundError: No module named 'openenv_task.models'")
+    elif "tail" in arguments:
+        print("ValueError: reset exploded")
     elif "/reset" in " ".join(arguments):
-        print(json.dumps(script.get("reset", {{"observation": {{"message": "Guess a number from 1 to 3."}}, "reward": 0.0, "done": False}})))
+        if script.get("reset_fails"):
+            print("Internal Server Error"); print("500")
+        else:
+            print(json.dumps(script.get("reset", {{"observation": {{"message": "Guess a number from 1 to 3."}}, "reward": 0.0, "done": False}}))); print("200")
     elif "/step" in " ".join(arguments):
         if script.get("step_fails"):
-            sys.stderr.write("curl: (22) The requested URL returned error: 422\\n"); sys.exit(22)
-        print(json.dumps(script.get("step", {{"observation": {{"message": "Wrong."}}, "reward": 0.0, "done": False}})))
+            print(json.dumps({{"detail": [{{"msg": "Field required"}}]}})); print("422")
+        else:
+            print(json.dumps(script.get("step", {{"observation": {{"message": "Wrong."}}, "reward": 0.0, "done": False}}))); print("200")
+    elif "/state" in " ".join(arguments):
+        print(json.dumps({{"episode_id": "e1", "step_count": 1}})); print("200")
 elif verb == "rm":
     pass
 '''
@@ -467,6 +530,7 @@ def test_the_check_builds_starts_resets_steps_and_removes_the_container(tmp_path
     assert calls[2] == ["exec", "cid123", "/usr/local/bin/serve"]
     assert calls[3][:4] == ["exec", "-u", "agent", "cid123"] and "localhost:8000/reset" in calls[3]
     assert "localhost:8000/step" in calls[4] and '{"action": {"guess": 2}}' in calls[4]
+    assert calls[5][:4] == ["exec", "-u", "agent", "cid123"] and "localhost:8000/state" in calls[5]
     assert calls[-1] == ["rm", "-f", "cid123"]
 
 
@@ -475,7 +539,8 @@ def test_the_check_builds_starts_resets_steps_and_removes_the_container(tmp_path
     [
         ({"build_fails": True}, "the image did not build: Dockerfile parse error"),
         ({"serve_fails": True}, "serve failed: the environment server exited"),
-        ({"step_fails": True}, "the example action failed: curl: (22)"),
+        ({"reset_fails": True}, "reset answered 500: Internal Server Error; server log: ValueError: reset exploded"),
+        ({"step_fails": True}, "the example action answered 422: "),
         ({"step": {"reward": 0.0}}, "step answered without an observation"),
     ],
 )
