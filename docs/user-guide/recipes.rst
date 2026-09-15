@@ -151,3 +151,11 @@ Beta recipes
 **beta** until complete, reproducible learning results are published. Both
 live under ``recipes/beta/coral/``. Integration and smoke tests validate the
 wiring but do not establish learning performance.
+
+`SPADE <../../recipes/beta/spade/README.md>`__ (self play in adaptive
+synthetic executable environments, `arXiv:2608.19197
+<https://arxiv.org/abs/2608.19197>`__) is **beta** under
+``recipes/beta/spade/``: one policy plays an Environment Designer that writes
+executable environments and a Reasoning Agent that learns in them. The first
+piece is the task form of a generated environment, a Harbor task directory
+with a replay verifier; the training side follows.
