@@ -151,6 +151,13 @@ class EpisodeEvaluationWorker:
             return _ScoredEpisode(
                 None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
             )
+        trial_error = _failed_trial_error(result.trajectory)
+        if trial_error:
+            # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
+            # start): no answer was given, so it ranks below every real score instead of tying a zero.
+            return _ScoredEpisode(
+                None, FailureObservation(task=task, stage="trial", cause=trial_error), residue, agents, path
+            )
         if path.get("error") is not None:
             # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
             # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
@@ -174,6 +181,14 @@ class EpisodeEvaluationWorker:
                 score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path
             )
         return _ScoredEpisode(score, None, residue, agents, path)
+
+
+def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
+    """The error of a terminus trial that never ran (a failed ``verifier`` row with an error), else empty."""
+    for event in trajectory:
+        if event.get("type") == "verifier" and event.get("failed") and event.get("error"):
+            return str(event["error"])
+    return ""
 
 
 @dataclass(frozen=True, kw_only=True)

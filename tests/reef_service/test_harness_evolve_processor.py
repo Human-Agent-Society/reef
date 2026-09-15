@@ -67,6 +67,22 @@ def test_trace_processor_batches_successful_reports() -> None:
     assert processor.build_batch().items[0].metadata.get("reward") == 1.0
 
 
+def test_trace_processor_carries_the_task_a_report_names() -> None:
+    processor = _processor()
+    processor.ingest(_inference("inf-1", {"messages": []}))
+    report = _report("rep-1", 1.0, ["inf-1"])
+    task = {"name": "hello-file", "path": "/tasks/hello-file", "digest": "ab" * 32}
+    named = AgentRecord.create(
+        scenario="s",
+        request_type=RequestType.REPORT,
+        payload={**report.payload, "metadata": {"task": task}},
+        agent_record_id="rep-1",
+    )
+    processor.ingest(named)
+    sample = processor.build_batch().items[0]
+    assert sample.metadata["task"] == task and sample.metadata["reward"] == 1.0
+
+
 def test_trace_processor_batches_a_multi_reference_report_as_one_trajectory() -> None:
     """A report over a whole run becomes one sample: the trajectory holds
     every referenced payload in reference order, the payload is the last

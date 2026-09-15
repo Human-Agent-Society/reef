@@ -685,6 +685,33 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not
     assert crashed.path == {"stages": [], "reason": "completed"}
 
 
+def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run() -> None:
+    """The runner records a trial whose image did not build or whose agent could not start as a failed
+    verifier row with the error; it ranks below every real score and the error reaches the manifest."""
+    from reef.train.cordis_backend.strategies import verifier_reward
+
+    episode_worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("terminus"),
+        scorer=resolve_episode_scorer(verifier_reward),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+
+    def row(error: str) -> dict:
+        return {"type": "verifier", "task": "task one", "rewards": {}, "reward": None, "failed": True, "error": error}
+
+    never_ran = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row("docker build failed"),), residue=())
+    scored = episode_worker._score_result(never_ran, "task one")
+    assert scored.score is None and scored.failure is not None
+    assert scored.failure.stage == "trial" and scored.failure.cause == "docker build failed"
+    # A verifier that ran and wrote nothing is the agent's loss: it scores through the scorer.
+    wrote_nothing = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row(""),), residue=())
+    scored = episode_worker._score_result(wrote_nothing, "task one")
+    assert scored.score == 0.0 and scored.failure is not None and scored.failure.stage == "exit"
+
+
 def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run(episode_worker) -> None:
     """A subagent's model error aborts the whole run with no root turn/end; the episode could not run either."""
     error = {"code": "MODEL_ERROR", "message": "the endpoint answered 500"}

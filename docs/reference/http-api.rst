@@ -398,7 +398,11 @@ data inside ``metadata`` or ``feedback``.
    * - ``metadata``
      - object
      - no
-     - Recipe metadata; ``training.eligible`` is not supported.
+     - Recipe metadata; ``training.eligible`` is not supported. ``metadata.task``
+       (``name``, with ``path`` and ``digest`` when known) or
+       ``metadata.harbor.task_name`` names the Harbor task the episode played;
+       the assembled training sample carries it as ``task``, so a recipe can
+       group samples by task.
 
 It answers ``{agent_record_id, scenario, request_type}``.
 

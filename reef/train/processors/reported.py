@@ -417,6 +417,23 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 # --------------------------------------------------------- shared helpers
 
 
+def reported_task(metadata: object) -> dict[str, Any] | None:
+    """The task a report names, so a recipe can group samples by task; None when the report names none.
+
+    ``metadata.task`` is a mapping with at least a ``name`` (the task player also sends ``path`` and
+    ``digest``); a Harbor report from the shipped harness names the task as ``metadata.harbor.task_name``.
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    task = metadata.get("task")
+    if isinstance(task, Mapping) and isinstance(task.get("name"), str) and task["name"]:
+        return dict(task)
+    harbor = metadata.get("harbor")
+    if isinstance(harbor, Mapping) and isinstance(harbor.get("task_name"), str) and harbor["task_name"]:
+        return {"name": harbor["task_name"]}
+    return None
+
+
 @dataclass(frozen=True)
 class SampleAssembly:
     """Shape a resolved report into a policy sample, without recipe policy.
@@ -465,8 +482,12 @@ class SampleAssembly:
             raise ValueError("training data cannot assemble the recorded multi-turn trajectory")
         if (sample.training.get("turn_count", 1) > 1) and not self.accept_multi_turn:
             raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
-        return sample.with_metadata(
-            feedback=context.report.payload.get("feedback"),
-            report_agent_record_id=context.report.agent_record_id,
-            references=list(context.references),
-        )
+        fields: dict[str, Any] = {
+            "feedback": context.report.payload.get("feedback"),
+            "report_agent_record_id": context.report.agent_record_id,
+            "references": list(context.references),
+        }
+        task = reported_task(context.report.payload.get("metadata"))
+        if task is not None:
+            fields["task"] = task
+        return sample.with_metadata(**fields)

@@ -28,7 +28,7 @@ from __future__ import annotations
 import importlib
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -241,6 +241,15 @@ class HermesSessionReader(TrajectoryReader):
                     raise TrajectoryError(f"hermes session {file} holds a message that is not an object")
                 events.append({"type": "message", **message})
         return tuple(events)
+
+
+def primary_reward(rewards: Mapping[str, Any]) -> Any:
+    """Harbor's primary reward among a verifier's rewards: the ``reward`` entry, else the sole entry, else None."""
+    if "reward" in rewards:
+        return rewards["reward"]
+    if len(rewards) == 1:
+        return next(iter(rewards.values()))
+    return None
 
 
 @register_trajectory_reader

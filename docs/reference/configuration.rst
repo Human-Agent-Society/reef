@@ -815,7 +815,7 @@ Every valid scored report contributes a trace, including successful outcomes.
 .. config::
 
    evolution.propose | a ``Proposer``, a plain callable, or a dotted ``module:attribute``
-   evolution.evaluate | an ``EpisodeScorer``, likewise
+   evolution.evaluate | an ``EpisodeScorer``, likewise; ``reef.train.cordis_backend.strategies:verifier_reward`` scores a task directory episode by its Harbor verifier's reward, for a gate fed by ``evolution.task_manifest``
    evolution.selection | score_comparison | ``always``, or a dotted reference to an object with ``decide``
    evolution.tasks | non-empty list of episode prompts, scored once per tree per step
    evolution.task_manifest | a split manifest written by ``reef.core.tasks``; the eval split names the gate's tasks as directories under ``evolution.tasks_root``, each passed to the adapter as its path; set instead of ``evolution.tasks`` and only with an adapter whose prompt is a task directory (``terminus``); ``promote_failures`` cannot be combined with it

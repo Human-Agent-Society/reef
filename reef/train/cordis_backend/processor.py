@@ -6,7 +6,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import make_trajectory, source_record_id
 from reef.train.processors.base import DataProcessor, RetentionDecision
-from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor
+from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor, reported_task
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 
@@ -35,7 +35,9 @@ class CordisProcessor(ReportedFeedbackProcessor):
         return self._make_pending(batch_number)
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
-        return make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
+        sample = make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
+        task = reported_task(context.report.payload.get("metadata"))
+        return sample if task is None else sample.with_metadata(task=task)
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
         return TrainingBatch(f"{self.scenario}:harness_evolve:{batch_number}", items)
