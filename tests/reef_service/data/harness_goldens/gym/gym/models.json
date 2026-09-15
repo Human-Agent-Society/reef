@@ -1,0 +1,14 @@
+{
+  "providers": {
+    "qwen": {
+      "api": "openai-completions",
+      "apiKey": "dummy",
+      "baseUrl": "http://localhost:8000/v1",
+      "models": [
+        {
+          "id": "qwen3-8b"
+        }
+      ]
+    }
+  }
+}

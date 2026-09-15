@@ -385,8 +385,19 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
         render_composition([("config", {"data": {"env": {"DISABLE_AUTOUPDATER": "0"}}})], get_adapter("claude"))
 
 
+def test_gym_render_matches_the_golden_tree() -> None:
+    # The runner reads rules, skills and the two config targets; a command or an extension has nowhere to go.
+    nodes = [node for node in NODES if node[0] not in ("agent_command", "code_extension")]
+    descriptor = get_adapter("gym")
+    assert render_composition(nodes, descriptor) == golden_tree("gym")
+    assert descriptor.tree_path is None and descriptor.is_prompt_task_directory
+    for kind, node in (("agent_command", "summarize"), ("code_extension", "tracer")):
+        with pytest.raises(RenderError, match=f"does not render {kind} nodes"):
+            render_composition([node_ for node_ in NODES if node_[1].get("name") == node], descriptor)
+
+
 def test_bundled_adapters_are_discoverable() -> None:
-    assert set(available_adapters()) >= {"claude", "codex", "dsh", "opencode", "pi"}
+    assert set(available_adapters()) >= {"claude", "codex", "dsh", "gym", "opencode", "pi"}
 
 
 def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:

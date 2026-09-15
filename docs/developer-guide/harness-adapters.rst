@@ -65,6 +65,22 @@ the sandbox (for example under ``/opt``). Ordinary declarative trees can still
 use the local executor and Docker. Docker inside bubblewrap and extensions in
 an unisolated runner are rejected before process launch.
 
+The ``gym`` adapter plays a Gym style environment rather than driving a CLI.
+The prompt is a gym task directory (``reef.core.tasks.gym``): the game's
+class lives under ``tests/``, where only the verifier and the ``reef-gym``
+runner read it, so the agent sees observations and nothing else. The runner
+reads the tree from ``REEF_GYM_DIR`` (``rules`` and every ``skill`` become
+the system prompt, ``models.json`` the endpoint, and ``config`` may set
+``temperature``, ``max_tokens`` and ``timeout_s``), serves the game one
+observation at a time from a child interpreter for at most the task's turn
+limit, writes the action log into the workspace, and writes every turn plus
+the episode return under ``REEF_GYM_SESSION_DIR`` for the ``gym-jsonl``
+reader. ``reef.harness.runners.gym:evaluate`` is the matching
+``evolution.evaluate``: the return the runner recorded, in [-1, 1]; an episode
+that failed before the game ended scores 0. The class runs on the service
+host, so a hosted service runs ``evolution.executor: sandbox`` and keeps the
+task directories under a bound base path.
+
 An adapter quirk can expose an ``ExecutionValidator`` instance as
 ``validate_execution``. Its ``__call__(files, executor)`` checks the rendered
 tree against the configured executor before any episode files are written.

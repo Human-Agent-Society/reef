@@ -1,0 +1,42 @@
+# A Gym style environment played turn by turn by the served model, through a runner Reef owns.
+#
+# The prompt is a gym task directory (reef.core.tasks.gym): the game's class lives under tests/, where
+# only the verifier and this runner read it. The ``reef-gym`` console script reads the rendered tree
+# from REEF_GYM_DIR (rules and skills become the system prompt, models.json the endpoint), plays the
+# game in a child interpreter for at most the task's turn limit, and writes every turn and the episode
+# return under REEF_GYM_SESSION_DIR for the ``gym-jsonl`` reader.
+name: gym
+binary: reef-gym
+argv:
+  - --task
+  - "{prompt}"
+env:
+  REEF_GYM_DIR: "{root}/gym"
+  REEF_GYM_SESSION_DIR: "{root}/gym/sessions"
+files:
+  config:
+    primary:
+      path: "gym/config.json"
+      defaults: {}
+    models:
+      path: "gym/models.json"
+      defaults: {}
+  rules: "gym/RULES.md"
+  skill: "gym/skills/{name}/SKILL.md"
+trajectory:
+  format: gym-jsonl
+  path: "gym/sessions"
+writable_paths:
+  - "gym/sessions"
+cleanup_whitelist:
+  - "gym/sessions/**"
+is_prompt_task_directory: true
+# The served model reaches the runner through this file only; the served tree never carries a provider.
+model_binding:
+  openai:
+    - target: models
+      data:
+        api: openai
+        base_url: "{base_url}"
+        api_key: "{api_key}"
+        model: "{model}"

@@ -312,3 +312,13 @@ class NativeSessionReader(TrajectoryReader):
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return PiSessionReader()(path)
+
+
+@register_trajectory_reader
+class GymSessionReader(TrajectoryReader):
+    """Read the gym runner's session: every ``*.jsonl`` under ``path``, in order, like a pi session."""
+
+    format = "gym-jsonl"
+
+    def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        return PiSessionReader()(path)

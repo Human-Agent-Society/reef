@@ -100,6 +100,7 @@ Homepage = "https://github.com/Human-Agent-Society/reef"
 reef = "reef.cli:main"
 reef-native = "reef.harness.runners.native.__main__:main"
 reef-terminus = "reef.harness.runners.terminus:main"
+reef-gym = "reef.harness.runners.gym:main"
 
 [project.entry-points."sglang.srt.plugins"]
 reef = "reef.inference.sglang.plugin:install_sglang_plugin"
