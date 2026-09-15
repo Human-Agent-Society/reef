@@ -156,7 +156,7 @@ REPLAY_SCRIPT = '''"""Replay an action log through a generated environment and w
 
 import sys
 
-from env_loader import episode_return, load_environment_class, make_environment, play
+from env_loader import episode_return, load_environment_class, make_environment, replay
 
 
 def main(env_path, actions_path, reward_path, max_turns, seed):
@@ -169,7 +169,7 @@ def main(env_path, actions_path, reward_path, max_turns, seed):
             actions = []
         environment = make_environment(load_environment_class(env_path), max_turns)
         environment.reset(seed=seed)
-        rewards, terminated = play(environment, actions, max_turns)
+        rewards, terminated = replay(environment, actions, max_turns)
         value = episode_return(rewards, terminated)
     finally:
         with open(reward_path, "w", encoding="utf-8") as handle:

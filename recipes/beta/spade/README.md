@@ -14,6 +14,7 @@ beta/spade/
   environment_loader.py   load and play a generated environment as the reference does; ships into every task
   tasks.py                a generated environment as a Harbor task directory, a replay verifier, a split per generation
   designer.py             the Designer's adversarial prompt, its reply parsed, the smoke test of what it wrote
+  play.py                 the agent plays one environment turn by turn, the game in a child process
 ```
 
 ## The task form
@@ -23,3 +24,7 @@ beta/spade/
 ## The Designer
 
 `designer_messages` builds one Designer call: the skill and difficulty, the rules of the environment contract, and what the agent did on the last generation's environments as `PlayRecord` rows, sorted into the frontier (lost without the hint, won with it), the ones it wins anyway and the ones out of reach, so the next environment lands where the agent fails today. `parse_designer_reply` reads the `python` and `hint` blocks of the reply, and `smoke_test` runs the code in a child interpreter before anything else trusts it.
+
+## The play
+
+`play_episode` plays one environment with the agent behind a chat callable, the reference's actor loop: the first observation wrapped in the gameplay prompt (the hint appended for the with hint arm), every later observation a plain user turn, the reply re-boxed before it reaches `step`. The game runs in a child interpreter through `GameProcess` with a timeout per `reset` and `step`, so a game that hangs, exits or floods stdout costs one episode. `Episode.actions` is the action log the task's verifier replays, so the driver's return and the verifier's agree.

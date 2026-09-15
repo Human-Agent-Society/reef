@@ -14,7 +14,7 @@ from recipes.beta.spade import (
     load_environment_class,
     make_environment,
     normalized_action,
-    play,
+    replay,
 )
 
 GUESS = """import re
@@ -162,19 +162,19 @@ def test_a_template_conforming_game_wins_loses_and_walks_over(tmp_path: Path) ->
     environment = make_environment(environment_class, 12)
     environment.reset(seed=7)  # type: ignore[attr-defined]
     target = environment.target  # type: ignore[attr-defined]
-    rewards, terminated = play(environment, [r"\boxed{9}", f"so \\boxed{{{target}}}"], 12)
+    rewards, terminated = replay(environment, [r"\boxed{9}", f"so \\boxed{{{target}}}"], 12)
     assert (rewards, terminated) == ([0.0, 1.0], True)
     environment = make_environment(environment_class, 3)
     environment.reset(seed=7)  # type: ignore[attr-defined]
-    rewards, terminated = play(environment, [r"\boxed{9}"] * 5, 3)
+    rewards, terminated = replay(environment, [r"\boxed{9}"] * 5, 3)
     assert (rewards, terminated) == ([0.0, 0.0, -1.0], True)
-    assert play(make_environment(environment_class, 3), [], 3) == ([], False)
+    assert replay(make_environment(environment_class, 3), [], 3) == ([], False)
 
 
 def test_a_missing_box_is_a_format_reminder_not_a_loss(tmp_path: Path) -> None:
     environment = make_environment(load_environment_class(written(tmp_path, GUESS)), 12)
     environment.reset(seed=7)  # type: ignore[attr-defined]
-    assert play(environment, ["2"], 12) == ([0.0], False)
+    assert replay(environment, ["2"], 12) == ([0.0], False)
 
 
 @pytest.mark.parametrize(
@@ -194,7 +194,7 @@ def test_a_broken_step_ends_the_episode_the_way_the_reference_does(
     code = f"class AEnv:\n    def reset(self, seed=None):\n        return 'o', {{}}\n    def step(self, action):\n        {body}\n"
     environment = make_environment(load_environment_class(written(tmp_path, code)), 12)
     environment.reset(seed=0)  # type: ignore[attr-defined]
-    assert play(environment, [r"\boxed{go}", r"\boxed{again}"], 12) == (rewards, terminated)
+    assert replay(environment, [r"\boxed{go}", r"\boxed{again}"], 12) == (rewards, terminated)
 
 
 @pytest.mark.parametrize(

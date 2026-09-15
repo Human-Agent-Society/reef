@@ -127,32 +127,37 @@ def make_environment(environment_class: type, max_turns: int) -> object:
     return environment
 
 
-def step_once(environment: object, action: str) -> tuple[float, bool, bool]:
-    """One ``step``: (reward, terminated, truncated); a broken step is an error reward that terminates."""
+def step_once(environment: object, action: str) -> tuple[str, float, bool, bool]:
+    """One ``step``: (observation, reward, terminated, truncated); a broken step is an error reward that terminates."""
     try:
         result = environment.step(action)  # type: ignore[attr-defined]
-    except Exception:
-        return ERROR_REWARD, True, False
+    except Exception as exc:
+        return f"Error: {type(exc).__name__}: {exc}", ERROR_REWARD, True, False
     if not isinstance(result, tuple) or len(result) != 5:
-        return ERROR_REWARD, True, False
-    _, reward, terminated, truncated, _ = result
+        return (
+            "Error: step did not return (observation, reward, terminated, truncated, info)",
+            ERROR_REWARD,
+            True,
+            False,
+        )
+    observation, reward, terminated, truncated, _ = result
     if reward is None:
         reward = 0.0
     try:
         reward = float(reward)
     except (TypeError, ValueError):
-        return ERROR_REWARD, True, False
+        return "Error: the reward is not a number", ERROR_REWARD, True, False
     if not math.isfinite(reward):
         reward = 0.0
-    return reward, bool(terminated), bool(truncated)
+    return str(observation), reward, bool(terminated), bool(truncated)
 
 
-def play(environment: object, actions: Sequence[str], max_turns: int) -> tuple[list[float], bool]:
+def replay(environment: object, actions: Sequence[str], max_turns: int) -> tuple[list[float], bool]:
     """Replay ``actions`` (at most ``max_turns``) and return the rewards and whether the episode terminated."""
     rewards: list[float] = []
     terminated = False
     for action in list(actions)[:max_turns]:
-        reward, terminated, truncated = step_once(environment, normalized_action(action))
+        _, reward, terminated, truncated = step_once(environment, normalized_action(action))
         rewards.append(reward)
         if terminated or truncated:
             break
