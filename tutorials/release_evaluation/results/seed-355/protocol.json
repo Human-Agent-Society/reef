@@ -1,0 +1,25 @@
+{
+  "algorithm": "one reflective update per family; accept ties or gains on every current-family validation case",
+  "baseline_rules": "Solve the user's reasoning problem carefully. Finish with FINAL: (X), using the correct option letter.",
+  "claims_new_algorithm": false,
+  "families": [
+    "tracking_shuffled_objects_seven_objects",
+    "logical_deduction_seven_objects"
+  ],
+  "heldout_used_for_selection": false,
+  "immutable_model_revision": false,
+  "max_calls": 320,
+  "max_model_steps_per_episode": 3,
+  "max_output_tokens_per_call": 1536,
+  "model": "deepseek-flash",
+  "repeats": 2,
+  "seed": 355,
+  "temperature": 0,
+  "test_per_family": 12,
+  "thinking": "disabled",
+  "tools": [
+    "apply_swaps"
+  ],
+  "train_per_family": 8,
+  "validation_per_family": 4
+}
