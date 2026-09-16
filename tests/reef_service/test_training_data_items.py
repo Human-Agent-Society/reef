@@ -2,6 +2,7 @@
 
 import json
 import pickle
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from pathlib import Path
 
@@ -17,6 +18,8 @@ from reef.core.trajectories import (
     source_record_id,
     trajectory_reward,
 )
+from reef.runtime.interfaces import InferenceStream
+from reef.service.streaming import stream_record
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TaskItem, TrainingBatch, TrajectoryItem, trajectories, trajectory_groups
 
@@ -88,6 +91,64 @@ def test_original_provider_payloads_and_feedback_survive_json_roundtrip():
     assert recorded_payloads(loaded) == (first, last)
     assert recorded_payload(loaded) == last
     assert loaded.metadata["feedback"] == {"detail": "feedback"}
+
+
+@pytest.mark.parametrize("provider", ["openai", "anthropic"])
+def test_completed_stream_messages_survive_multiturn_atif_conversion(provider: str) -> None:
+    records = []
+    messages = []
+    for question, answer in (("First question", "First answer"), ("Next question", "Next answer")):
+        if provider == "openai":
+            event = {"choices": [{"index": 0, "delta": {"content": answer}}]}
+            terminal = "[DONE]"
+        else:
+            event = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": answer}}
+            terminal = json.dumps({"type": "message_stop"})
+        body = f"data: {json.dumps(event)}\n\ndata: {terminal}\n\n".encode()
+
+        async def _chunks(body: bytes = body) -> AsyncIterator[bytes]:
+            yield body
+
+        stream = InferenceStream(status=200, headers={"content-type": "text/event-stream"}, chunks=_chunks())
+        response = stream_record(stream, body, complete=True)
+        messages.append({"role": "user", "content": question})
+        records.append(
+            AgentRecord.create(
+                scenario="stream",
+                request_type=RequestType.INFERENCE,
+                payload={"messages": list(messages), "response": response},
+            )
+        )
+        messages.append({"role": "assistant", "content": answer})
+
+    item = make_trajectory(records, reward=1.0)
+    loaded = TrajectoryItem(json.loads(json.dumps(item.trajectory)))
+
+    assert [(step["source"], step["message"]) for step in loaded.trajectory["steps"]] == [
+        ("user", "First question"),
+        ("agent", "First answer"),
+        ("user", "Next question"),
+        ("agent", "Next answer"),
+    ]
+    assert recorded_payloads(loaded) == tuple(record.payload for record in records)
+    assert item.source_agent_record_ids == tuple(record.agent_record_id for record in records)
+    assert trajectory_reward(loaded) == 1.0
+    assert loaded.training == {}
+
+
+def test_training_response_message_takes_precedence_over_stream_summary() -> None:
+    item = recorded_trajectory(
+        "stream",
+        {
+            "response": {
+                "message": {"role": "assistant", "content": "Stream summary"},
+                "training": {"response_message": {"role": "assistant", "content": "Captured answer"}},
+            }
+        },
+        1.0,
+    )
+
+    assert item.trajectory["steps"][0]["message"] == "Captured answer"
 
 
 @pytest.mark.parametrize("algorithm", ["sao", "openclawrl", "tttd"])

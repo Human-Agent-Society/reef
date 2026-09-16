@@ -782,6 +782,12 @@ tensors fail at the training boundary; these helpers do not invent tokens or
 log probabilities from text. Both batch readers reject unsupported item kinds
 instead of silently filtering mixed batches.
 
+Completed text-only streaming responses contribute their aggregated
+``response.message`` to the ATIF agent step. The original SSE body remains
+in the captured record. Matching assistant messages in later request history
+are reused as context without duplicating those steps. An explicit
+``training.response_message`` takes precedence over the stream summary.
+
 Migration: the former policy/trace sample types and their batch subclasses are
 removed. Construct ATIF items directly and return ``TrainingBatch(id, items)``.
 Use ``group_id`` on each member for grouped batches. Read captured tensors from

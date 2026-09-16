@@ -142,6 +142,9 @@ def _exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, An
     output = response.get("output")
     if isinstance(output, list):
         return request, [entry for entry in output if isinstance(entry, Mapping)]
+    message = response.get("message")
+    if isinstance(message, Mapping):
+        return request, [message]
     return request, [
         {
             "role": "assistant",
