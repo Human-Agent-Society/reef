@@ -120,4 +120,22 @@ forwarded from the host by the harness.
 
 ## Results
 
-RESULTS_PLACEHOLDER
+One run of the stream (seed 42, `results/figure3/`: `accuracy.csv` holds
+every judge score, `figure3.png` the curves). The Science Q&A stage was
+stopped at step 108 of 167 to free its GPUs, so its curve ends at the
+judge's score after step 100; the Tool Use stage ran to its end.
+
+| after | Tool Use | Science Q&A |
+|---|---|---|
+| the base model (step 0) | 41.2% (40/97) | 29.2% (148/507) |
+| Tool Use, 252 steps | 68.0% (66/97) | 26.6% (135/507) |
+| Science Q&A, 100 of 167 steps | 48.5% (47/97) | 69.6% (353/507) |
+
+![Both skills' test accuracy against gradient steps under SFT](results/figure3/figure3.png)
+
+Tool Use climbs from 41% to 68% over its stage and Science Q&A stays near
+the base model's 29%. Twenty steps into the Science Q&A stage Science is at
+55% and reaches 70% by step 100, while Tool Use falls from 68% to about
+48% by step 60 and stays there: the forgetting the paper's Figure 3 shows
+for SFT, on the same protocol. The SDFT arm of the same stream is recorded
+in the `sdft` recipe's example.
