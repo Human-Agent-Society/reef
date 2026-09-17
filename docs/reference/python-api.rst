@@ -248,8 +248,12 @@ Report
 
 .. code:: python
 
-   from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
+   from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 
+``ScoredRolloutReport`` is the shared score-only contract and
+``TeacherContextReport`` the shared contract of the distilling recipes: a
+rollout's receipt and the ``context`` its teacher sees (a demonstration,
+environment feedback, or nothing for a separate teacher).
 Method-specific report contracts live in their method package; Reef does not
 import or re-export them.
 
@@ -603,7 +607,7 @@ Processor
 
 .. code:: python
 
-   from reef.train.processors import ComputedFeedbackProcessor, ReportedFeedbackProcessor
+   from reef.train.processors import ComputedFeedbackProcessor, ReportedFeedbackProcessor, TeacherSequenceProcessor
 
 A processor turns durable records into typed batches. Reef owns replay,
 retention, deduplication, pending batches, and exactly-once consumption; the

@@ -145,3 +145,44 @@ Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher).
+
+The distillation base
+---------------------
+
+The recipes that distil a teacher on the student's own samples (SDFT, SDPO,
+on-policy distillation) compute the same per-token divergence and differ in
+who the teacher is and which divergence is minimized. Both are settings of
+one implementation in the backend, ``reef/train/slime_backend/distill/``,
+and each such recipe's family is a thin subclass of it:
+
+- ``DistillAlgorithm`` is the driver-side base: the six-column wire row
+  (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
+  by the student's response ids verbatim), the ``--<name>-*`` flags under
+  the family's own prefix (``teacher``, ``divergence``, ``top-k``,
+  ``teacher-update-rate``, ``teacher-checkpoint``,
+  ``importance-sampling-cap``, ``skip-response-tokens``, ``jsd-beta``) and
+  the settings they stamp on ``args`` under ``distill_*`` names, which the
+  worker hooks read whatever the prefix was. A family names itself, sets
+  its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
+  forwards ``<name>_loss`` and ``<name>_actor_pre_train`` to
+  ``distill.objective``.
+- The teacher is ``self`` (the student's own weights reading the privileged
+  prefix: the current weights at update rate 1, a slow-moving copy below it,
+  a frozen snapshot at 0) or ``separate`` (another checkpoint that fits the
+  actor's model, loaded beside the actor's weights). The pre-train hook
+  switches the teacher's weights in through the actor's backups, runs one
+  forward-only pass over the batch's teacher sequences, and switches the
+  actor back.
+- The divergence is the forward KL, the reverse KL or the generalized JSD,
+  over the teacher's whole distribution (``top-k`` 0: one row of this rank's
+  vocab shard per response position, kept in float16 on the host) or over
+  the teacher's top-K ids renormalized, the reverse KL then estimated at the
+  sampled token. The kernels reduce across the vocab shards of tensor
+  parallel themselves and write the gradients out where autograd over one
+  shard would drop the coupling through the global log-sum-exp;
+  ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python
+  reference and to the dense gradients across four ranks.
+
+The base registers no family and imports nothing from ``reef_adapters``;
+``recipes/openclawrl/slime/`` imports its packing schedule and its sharded
+gathers from it.
