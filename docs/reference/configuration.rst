@@ -555,6 +555,33 @@ actor and one rollout engine; ``recipes/tttd/examples/tttd/serve.yaml`` adds
 LoRA training, and ``recipes/openclawrl/examples/openclawrl/serve.yaml`` adds
 a PRM engine and a student model.
 
+The ``inference`` section
+-------------------------
+
+``inference.timeout-s`` limits one inference request. Buffered inference
+attempts share the retry deadline. When ``inference.retry-timeout-s`` is
+omitted, it follows ``inference.timeout-s`` instead of remaining at 300
+seconds.
+
+.. config::
+
+   inference.timeout-s | 300.0 | maximum time for one inference request
+   inference.retry-timeout-s | ``inference.timeout-s`` (300.0 by default) | total deadline shared by inference attempts and retry delays
+   inference.retry-initial-s | 0.05 | delay before the first retry
+   inference.retry-max-s | 1.0 | maximum delay between retries
+
+YAML also accepts the underscore spellings ``inference.timeout_s``,
+``inference.retry_timeout_s``, ``inference.retry_initial_s`` and
+``inference.retry_max_s``.
+
+For a slow local model, increase the request timeout. The retry deadline
+follows it unless set separately:
+
+.. code:: bash
+
+   reef serve --recipe harness-evolve --model ollama/qwen3.5:9b \
+     --inference.timeout-s 1800
+
 Legacy ``reef`` section
 ----------------------
 
