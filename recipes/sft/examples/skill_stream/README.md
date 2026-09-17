@@ -60,31 +60,6 @@ arm trains on the demonstrations with the settings the authors gave for these
 runs (issue 9 of the reference): learning rate 1e-5 with a cosine schedule
 and 10 warmup steps, 32 prompts per optimizer step for two epochs.
 
-`run.py` keeps that protocol with Reef in the trainer's place. Each stage
-starts the stack from the previous stage's HF export (the base model for the
-first) with the learning-rate schedule spanning exactly the stage's steps
-(252 for Tool Use, 167 for Science Q&A: two shuffled epochs cut into steps
-of 32, the tail dropped), then runs the stage as a Harbor task. The stack is
-four GPUs, the actor (tensor parallel 4) colocated with four rollout
-engines. In the task container, `stage.py` sends each step's 32 prompts
-through Reef at temperature 1.0, reports each demonstration as the report's
-`context` against the sample's receipt, and waits for the step's training
-release before sampling the next step. The `sft` recipe renders each
-demonstration as the assistant turn of the recorded request with the served
-model's chat template and trains those tokens with Slime's stock `sft_loss`;
-the student's samples are recorded and ignored, so the same stage runner and
-judge drive the self-distillation arms unchanged: the same prompts in the
-same order, the same 32-prompt steps, the same optimizer. Before the first
-step, every ten steps, and after the last, the runner submits the step number
-to the task's judge, which scores the served model on both test splits and
-records both accuracies; the verifier's reward is this stage's skill after
-the last step, and the judge's log becomes the trace rows `plot.py` draws.
-
-What differs from the reference: the trainer is Megatron instead of TRL on
-one GPU, and the steps run across the epoch boundary with the tail dropped
-where TRL's dataloader ends each epoch on a partial batch. Sampling goes
-through SGLang instead of vLLM, which matters only for the on-policy arms.
-
 ## Setup (once)
 
 The training stack needs the GPU environment described in
