@@ -102,9 +102,9 @@ judge's score after step 100; the Tool Use stage ran to its end.
 
 | after | Tool Use | Science Q&A |
 |---|---|---|
-| the base model (step 0) | 41.2% (40/97) | 29.2% (148/507) |
-| Tool Use, 252 steps | 68.0% (66/97) | 26.6% (135/507) |
-| Science Q&A, 100 of 167 steps | 48.5% (47/97) | 69.6% (353/507) |
+| the base model (step 0) | 41.2%  | 29.2% |
+| Tool Use | 68.0% | 26.6% |
+| Science Q&A | 48.5%  | 69.6%  |
 
 ![Both skills' test accuracy against gradient steps under SFT](results/skill_stream/accuracy.png)
 
