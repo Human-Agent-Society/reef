@@ -77,7 +77,7 @@ hf download Qwen/Qwen2.5-7B-Instruct --local-dir ~/models/Qwen2.5-7B-Instruct
 cd recipes/sft/examples/skill_stream
 ./run.sh                                     # Tool Use (252 steps), then Science Q&A (167)
 SKILLS_STEPS=2 ./run.sh --stream smoke       # a smoke run: two steps per stage
-uv run --no-project --python 3.12 --with reef-eval --with matplotlib plot.py --lab work/lab --out results/figure3
+uv run --no-project --python 3.12 --with reef-eval --with matplotlib plot.py --lab work/lab --out results/skill_stream
 ```
 
 `run.sh` reads `REEF_IMAGE` (default `reef`), `MODEL_DIR` (default
@@ -95,8 +95,8 @@ forwarded from the host by the harness.
 
 ## Results
 
-One run of the stream (seed 42, `results/figure3/`: `accuracy.csv` holds
-every judge score, `figure3.png` the curves). The Science Q&A stage was
+One run of the stream (seed 42, `results/skill_stream/`: `accuracy.csv` holds
+every judge score, `accuracy.png` the curves). The Science Q&A stage was
 stopped at step 108 of 167 to free its GPUs, so its curve ends at the
 judge's score after step 100; the Tool Use stage ran to its end.
 
@@ -106,7 +106,7 @@ judge's score after step 100; the Tool Use stage ran to its end.
 | Tool Use, 252 steps | 68.0% (66/97) | 26.6% (135/507) |
 | Science Q&A, 100 of 167 steps | 48.5% (47/97) | 69.6% (353/507) |
 
-![Both skills' test accuracy against gradient steps under SFT](results/figure3/figure3.png)
+![Both skills' test accuracy against gradient steps under SFT](results/skill_stream/accuracy.png)
 
 Tool Use climbs from 41% to 68% over its stage and Science Q&A stays near
 the base model's 29%. Twenty steps into the Science Q&A stage Science is at

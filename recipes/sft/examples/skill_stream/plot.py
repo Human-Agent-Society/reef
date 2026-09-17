@@ -2,12 +2,12 @@
 
 Reads the trace rows reef-eval stored for the stream (every judge score:
 the step and both skills' accuracies, tagged ``arm`` and ``position``),
-writes ``figure3.png`` and ``accuracy.csv`` under ``--out``, in the figure
+writes ``accuracy.png`` and ``accuracy.csv`` under ``--out``, in the figure
 style the repository's results share with the docs site. Only this
 example's arm (``sft``) is drawn; the SDFT example's plot draws it beside
 the SDFT arm when both streams share a Lab store.
 
-    uv run --no-project --python 3.12 --with reef-eval --with matplotlib plot.py --lab work/lab --out results/figure3
+    uv run --no-project --python 3.12 --with reef-eval --with matplotlib plot.py --lab work/lab --out results/skill_stream
 """
 
 from __future__ import annotations
@@ -88,23 +88,37 @@ def stream_scores(lab_root: Path, stream: str) -> pd.DataFrame:
 def draw(scores: pd.DataFrame, out: Path) -> None:
     with plt.rc_context(STYLE):
         figure, axes = plt.subplots(1, len(STAGES), figsize=(11, 4), sharex=True)
+        # Where training switched tasks: the last step of each earlier stage, the
+        # later stage's span shaded so the switch reads at a glance.
+        switches = scores.groupby("position")["cumulative_step"].agg(["min", "max"])
         for axis, skill in zip(axes, STAGES, strict=True):
             for arm, group in scores.groupby("arm"):
                 axis.plot(group["cumulative_step"], group[skill] * 100, color=ARM_COLORS[arm], label=ARM_NAMES[arm])
-                # Where the arm switched tasks: the last step of each earlier stage.
-                for boundary in group.groupby("position")["cumulative_step"].max().iloc[:-1]:
-                    axis.axvline(boundary, color=HAIRLINE, linestyle="--", linewidth=1.0)
+            for position, (start, end) in switches.iloc[1:].iterrows():
+                axis.axvspan(start, end, color=HAIRLINE, alpha=0.45, linewidth=0)
+                axis.axvline(start, color=INK, linestyle=(0, (5, 3)), linewidth=1.4)
+                axis.annotate(
+                    f"{SKILL_NAMES[STAGES[position]]}\ntraining starts",
+                    xy=(start, 1.0),
+                    xycoords=("data", "axes fraction"),
+                    xytext=(5, -4),
+                    textcoords="offset points",
+                    ha="left",
+                    va="top",
+                    fontsize=9,
+                    color=INK,
+                )
             axis.set_title(f"{SKILL_NAMES[skill]} accuracy (%)")
             axis.set_xlabel("gradient steps (Tool Use, then Science Q&A)")
         axes[0].legend(loc="lower right")
         figure.tight_layout()
-        figure.savefig(out / "figure3.png", dpi=160)
+        figure.savefig(out / "accuracy.png", dpi=160)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--lab", type=Path, default=Path("work") / "lab", help="the Lab directory run.py wrote")
-    parser.add_argument("--stream", default="figure3", help="the stream's name in the Lab store")
+    parser.add_argument("--stream", default="skill-stream", help="the stream's name in the Lab store")
     parser.add_argument("--out", type=Path, required=True, help="results directory for the figure and accuracy.csv")
     arguments = parser.parse_args()
     scores = stream_scores(arguments.lab, arguments.stream)

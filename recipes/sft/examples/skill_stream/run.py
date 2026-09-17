@@ -155,7 +155,9 @@ async def run_stream(stream: str, seed: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--stream", default="figure3", help="the stream's name in the Lab store (a new name reruns)")
+    parser.add_argument(
+        "--stream", default="skill-stream", help="the stream's name in the Lab store (a new name reruns)"
+    )
     parser.add_argument("--seed", type=int, default=42, help="the training order's seed")
     arguments = parser.parse_args()
     for variable in ("REEF_TOKEN", "REEF_IMAGE", "MODEL_DIR", "REEF_ROOT"):
