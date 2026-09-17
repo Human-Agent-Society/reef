@@ -260,7 +260,8 @@ class ReefUpdateWeightFromTensor(SynchronizedWeightUpdateMixin, UpdateWeightFrom
             ipc_engine=self._ipc_engine,
             ipc_gather_src=self._ipc_gather_src,
             ipc_gather_group=self._ipc_gather_group,
-            runtime_load_id=str(self.runtime_load_id),
+            # Slime's weight version is the runtime load id Reef stamps on the publication.
+            weight_version=str(self.runtime_load_id),
         )
         all_refs.extend(refs_colocated)
         if self.use_distribute and self._is_distributed_src_rank:

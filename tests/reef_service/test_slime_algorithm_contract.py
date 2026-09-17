@@ -55,7 +55,7 @@ class _TestAlgorithm(SlimeAlgorithm):
         pass
 
 
-#: The cookbook families plus the two plain ones tests/conftest.py registers.
+#: The cookbook families plus the plain one tests/conftest.py registers.
 _ALL_FAMILIES = ("openclawrl", "pg", "sao", "sft", "tttd")
 
 
@@ -148,7 +148,7 @@ def test_sft_spec_refuses_advantages_instead_of_silently_dropping_them() -> None
     # where the weighted objective lives, not train silently unweighted.
     with pytest.raises(ValueError, match="sft ignores advantages"):
         to_slime_rollout_data(payload)
-    with pytest.raises(ValueError, match="pg loss family"):
+    with pytest.raises(ValueError, match="register_loss_family"):
         to_slime_rollout_data(payload)
 
     del payload["advantages"]
@@ -365,7 +365,7 @@ def test_sao_config_freezes_critic_attention_only_for_moe() -> None:
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ADAPTERS_ROOT = _REPO_ROOT / "reef" / "train" / "slime_backend" / "reef_adapters"
-_BUNDLED_FAMILIES = ("openclawrl", "sao", "tttd")
+_BUNDLED_FAMILIES = ("openclawrl", "sao", "sft", "tttd")
 #: Deprecated flag spellings allowed alongside the canonical --<pkg>-* form.
 _DEPRECATED_FLAG_PREFIXES = ("--openclaw-topk-",)
 #: @objective channel -> required entry-point name for package <pkg>.
@@ -386,6 +386,7 @@ _EXPECTED_OBJECTIVE_CHANNELS = {
         }
     ),
     "sao": frozenset({"custom_advantage_function_path", "custom_pg_loss_function_path"}),
+    "sft": frozenset(),
     "tttd": frozenset({"custom_advantage_function_path", "custom_loss_function_path"}),
 }
 
@@ -554,7 +555,7 @@ def test_objective_entry_points_are_named_by_channel(family: str) -> None:
 
 @pytest.mark.unit
 def test_objective_resolution_only_ignores_the_missing_objective_module(monkeypatch) -> None:
-    # The plain sft family from tests/conftest.py declares no hooks.
+    # The sft family declares no hooks and ships no objective module.
     module_path = f"{type(resolve_loss_family('sft')).__module__}.objective"
 
     def missing_objective(name: str) -> None:

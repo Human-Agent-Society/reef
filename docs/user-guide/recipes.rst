@@ -57,6 +57,11 @@ learns from each score before the next task arrives.
      - ``recipes/sao/``
      - `SAO <recipes/sao.rst>`__
      - `SAO on IMOAnswerBench <../../recipes/sao/examples/imo_answerbench/README.md>`__
+   * - SFT
+     - model weights
+     - ``recipes/sft/``
+     - `SFT <recipes/sft.rst>`__
+     - `SFT on a skill stream <../../recipes/sft/examples/skill_stream/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``

@@ -1,0 +1,48 @@
+# The Reef training stack of one stage (Reef, Ray, Slime/Megatron, SGLang) in
+# the reef image. run.py starts one per stage with the stage's starting
+# weights and step count, the stream's GPUs and host port; run.sh supplies
+# image, paths and the token. The stack keeps its own network namespace
+# (Ray, the engines and their ports stay inside), publishing only Reef's
+# port, so another stream's stack coexists with it on one host.
+services:
+  reef:
+    image: ${REEF_IMAGE}
+    container_name: reef-sft-skills
+    command: reef serve -c /workspace/Reef/recipes/sft/examples/skill_stream/serve.yaml
+    ipc: host
+    shm_size: 32gb
+    ports:
+      # The task containers reach Reef through host.docker.internal on this port.
+      - "${REEF_HOST_PORT}:28902"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              # Four GPUs: the actor ranks with the rollout engines colocated.
+              device_ids:
+                - "${REEF_GPU_0}"
+                - "${REEF_GPU_1}"
+                - "${REEF_GPU_2}"
+                - "${REEF_GPU_3}"
+              capabilities: [gpu]
+    volumes:
+      - ${MODEL_DIR}:/root/models
+      - ${RUN_DIR}:/var/lib/reef
+      # The whole experiment: a stage starts from the previous stage's export.
+      - ${EXPERIMENT_DIR}:/var/lib/experiment
+      - ${REEF_ROOT}:/workspace/Reef
+    environment:
+      REEF_TOKEN: ${REEF_TOKEN}
+      SKILLS_MODEL_PATH: ${SKILLS_MODEL_PATH}
+      SKILLS_LR_DECAY_ITERS: ${SKILLS_LR_DECAY_ITERS}
+      PYTHONPATH: /workspace/Reef:/root/Megatron-LM
+      PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
+      WANDB_API_KEY: ${WANDB_API_KEY:-}
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://127.0.0.1:28902/healthz"]
+      interval: 10s
+      timeout: 5s
+      # The stack boots in a few minutes on H100s; 120 x 10s is the ceiling.
+      retries: 120
+      start_period: 30s

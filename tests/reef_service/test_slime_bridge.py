@@ -1783,7 +1783,8 @@ def test_training_preparation_keeps_a_resolvable_loss_family_reference(tmp_path,
         assert prepared.loss_family == "external_family_pkg:ALGORITHM"
     finally:
         unregister_loss_family("external_family")
-    assert bridge.prepare_bridge(args, loss_family="sft").loss_family == "sft"
+    # The cookbook's sft family is registered by reference, so the workers get the reference.
+    assert bridge.prepare_bridge(args, loss_family="sft").loss_family == "recipes.sft.slime:SftAlgorithm"
     assert args.save_hf == str(tmp_path / "checkpoints/hf/{rollout_id}")
 
 

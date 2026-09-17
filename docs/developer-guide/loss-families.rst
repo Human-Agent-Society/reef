@@ -55,6 +55,8 @@ objective; the driver checks it at start and refuses a mismatch.
 +----------------+-----------------------------+----------------------------+
 | ``openclawrl`` | ``custom_loss``             | not required               |
 +----------------+-----------------------------+----------------------------+
+| ``sft``        | ``sft_loss``                | not required               |
++----------------+-----------------------------+----------------------------+
 
 The spec
 --------
@@ -144,4 +146,5 @@ A family that ships more than the five policy columns declares them on the spec.
 Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
-frozen Megatron teacher).
+frozen Megatron teacher), ``recipes/sft/slime/`` (the smallest family: a
+stock Slime loss, no hooks).

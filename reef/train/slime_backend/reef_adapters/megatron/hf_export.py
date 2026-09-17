@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import dataclasses
+from collections.abc import Mapping
 from contextlib import contextmanager
+from typing import Any
 
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     is_lora_weight_name,
@@ -105,7 +107,9 @@ class MegatronToHfWeightIterator:
         from slime.backends.megatron_utils.misc_utils import strip_param_name_prefix
         from slime.utils.misc import chunk_named_params_by_size
 
-        renamed = {strip_param_name_prefix(name): value for name, value in megatron_local_weights.items()}
+        renamed = stage_named_backup(
+            {strip_param_name_prefix(name): value for name, value in megatron_local_weights.items()}, self.args
+        )
         with _patched_megatron_model(self.model):
             model_bridge = self._bridge._model_bridge
             original_materialize = model_bridge.materialize_adapter_weights
@@ -157,6 +161,28 @@ class MegatronToHfWeightIterator:
                 yield from chunk_named_params_by_size(converted(), chunk_size=self.args.update_weight_buffer_size)
             finally:
                 delattr(model_bridge, "materialize_adapter_weights")
+
+
+def stage_named_backup(weights: Mapping[str, Any], args: Any) -> Mapping[str, Any]:
+    """The actor backup keyed per virtual pipeline stage, as the conversion tasks look tensors up.
+
+    Slime's backuper names a tensor by its global name (``decoder.layers.<global
+    index>...`` once the ``module.`` prefixes are stripped), while the Bridge's
+    conversion tasks name a parameter within its virtual pipeline stage
+    (``vp_stages.<stage>.<local name>``). With one pipeline stage the two
+    spellings agree, so a global-named backup is filed under stage 0; a backup
+    that already carries stage names is returned as is. More pipeline stages
+    would need the layer offsets, which no deployment here uses.
+    """
+    if any(name.startswith("vp_stages.") for name in weights):
+        return weights
+    pipeline_stages = int(args.pipeline_model_parallel_size) * int(args.virtual_pipeline_model_parallel_size or 1)
+    if pipeline_stages != 1:
+        raise RuntimeError(
+            "the colocated HF export reads a global-named actor backup, which maps onto conversion tasks "
+            f"only with one pipeline stage; this deployment has {pipeline_stages}"
+        )
+    return {f"vp_stages.0.{name}": value for name, value in weights.items()}
 
 
 class _MegatronNameResolver:
@@ -215,4 +241,4 @@ class _MapWithLength:
         return (self.function(value) for value in self.values)
 
 
-__all__ = ["MegatronToHfWeightIterator", "patch_hf_config", "patch_megatron_expert_cache_to_cpu"]
+__all__ = ["MegatronToHfWeightIterator", "patch_hf_config", "patch_megatron_expert_cache_to_cpu", "stage_named_backup"]

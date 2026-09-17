@@ -133,7 +133,9 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--expert-tensor-parallel-size",
         "--group-query-attention",
         "--hidden-dropout",
+        "--lr-decay-iters",
         "--lr-decay-style",
+        "--lr-warmup-iters",
         "--normalization",
         "--no-save-optim",
         "--optimizer",
@@ -167,6 +169,8 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
     "REEF_TOKEN": "config-test-token",
+    "SKILLS_LR_DECAY_ITERS": "252",
+    "SKILLS_MODEL_PATH": "/root/models/Qwen2.5-7B-Instruct",
     "REEF_UPSTREAM_URL": "http://127.0.0.1:8000/v1",
     "REEF_UPSTREAM_MODEL": "config-test-model",
     "TTTD_CHECKPOINT_INTERVAL": "2",
@@ -371,6 +375,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
+        "recipes/sft/examples/skill_stream/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -393,6 +398,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "tutorials/evolve-your-harness/configs/serve.yaml",
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
+        "recipes/sft/examples/skill_stream/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

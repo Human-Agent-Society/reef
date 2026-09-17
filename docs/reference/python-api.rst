@@ -138,6 +138,7 @@ for every scenario in a deployment.
    ├── WeightTrainingRecipe     training objective, loss family, separate runtimes
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
+   │   ├── SFTRecipe                                        recipes.sft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
    └── CordisRecipe             harness tree + episodes  reef.recipe.cordis
        └── SkillClawRecipe                                recipes.skillclaw.recipe
@@ -248,10 +249,14 @@ Report
 
 .. code:: python
 
-   from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
+   from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 
-Method-specific report contracts live in their method package; Reef does not
-import or re-export them.
+``ScoredRolloutReport`` is the shared score-only contract and
+``TeacherContextReport`` the shared contract of the self-distillation recipes
+and their SFT control (a rollout's receipt and the ``context`` its teacher
+sees: a demonstration, or environment feedback). Method-specific
+report contracts live in their method package; Reef does not import or
+re-export them.
 
 A report type declares the feedback a method accepts, so malformed input fails
 at ingress with HTTP 400.

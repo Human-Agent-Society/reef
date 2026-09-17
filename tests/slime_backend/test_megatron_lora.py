@@ -354,7 +354,11 @@ def _load_colocated_module(monkeypatch):
     stub(
         "slime.backends.megatron_utils.update_weight.update_weight_from_tensor",
         UpdateWeightFromTensor=type("UpdateWeightFromTensor", (), {}),
-        _send_to_colocated_engine=lambda *_args, **_kwargs: ([], None),
+        # Slime's signature, so a stale keyword in the updater fails here rather than in a stack.
+        _send_to_colocated_engine=lambda hf_named_tensors, *, ipc_engine, ipc_gather_src, ipc_gather_group, weight_version: (
+            [],
+            None,
+        ),
     )
     stub("slime.utils.distributed_utils", get_gloo_group=lambda: None)
     return importlib.import_module(f"{package_name}.colocated")
