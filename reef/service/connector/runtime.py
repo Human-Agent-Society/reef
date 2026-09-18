@@ -78,6 +78,7 @@ class ReefRuntime:
         self.client = client
 
     async def snapshot(self) -> dict[str, Any]:
+        url = self.client.base_url
         try:
             listing, status = await asyncio.gather(
                 self.client.request("/reef/scenarios", timeout=5), self.client.request("/reef/status", timeout=5)
@@ -95,13 +96,24 @@ class ReefRuntime:
                 if mode in ("auto", "manual", "hybrid"):
                     row["training_mode"] = mode
                 scenarios.append(row)
-            return {"reachable": True, "scenarios": scenarios}
-        except (aiohttp.ClientError, TimeoutError, ValueError, HTTPFailure, TypeError, AttributeError):
-            return {
-                "reachable": False,
-                "scenarios": [],
-                "error": "Cannot read Reef. Check the local URL, service token and runtime status.",
-            }
+            return {"reachable": True, "scenarios": scenarios, "reef_url": url}
+        # The code tells the console which setting to check; the message never includes a response body.
+        except TimeoutError:
+            error_code, error = "timeout", f"Reef at {url} did not answer within 5 seconds."
+        except aiohttp.ClientConnectorError:
+            error_code = "connection_failed"
+            error = f"Nothing answered at {url}. Start Reef there, or connect with the address Reef serves on."
+        except HTTPFailure as exc:
+            if exc.status in (401, 403):
+                error_code = "unauthorized"
+                error = f"Reef at {url} rejected the connector's service token (HTTP {exc.status})."
+            elif exc.status == 404:
+                error_code, error = "not_reef", f"The service at {url} is not a Reef runtime (HTTP 404)."
+            else:
+                error_code, error = "invalid_response", f"Reef at {url} returned an unexpected response ({exc})."
+        except (aiohttp.ClientError, ValueError, TypeError, AttributeError):
+            error_code, error = "invalid_response", f"Reef at {url} returned an unexpected response."
+        return {"reachable": False, "scenarios": [], "reef_url": url, "error_code": error_code, "error": error}
 
     async def execute(self, command: dict[str, Any]) -> dict[str, Any]:
         action = command.get("action")
