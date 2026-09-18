@@ -153,3 +153,20 @@ def test_autofill_skips_dense_ffn_size_for_pure_moe_models() -> None:
 
     assert "--ffn-hidden-size" not in flags
     assert flags["--moe-ffn-hidden-size"] == "1408"
+
+
+@pytest.mark.unit
+def test_autofill_zeroes_dropout_unless_the_config_or_cli_says_otherwise() -> None:
+    """Megatron's 0.1 defaults would make the trainer disagree with the served model on every token."""
+    flags = _flags(hf_architecture_arguments([], _dense_hf_config()))
+    assert flags["--attention-dropout"] == "0.0"
+    assert flags["--hidden-dropout"] == "0.0"
+
+    flags = _flags(hf_architecture_arguments([], _dense_hf_config(attention_dropout=0.05)))
+    assert flags["--attention-dropout"] == "0.05"
+
+    flags = _flags(
+        hf_architecture_arguments(["--attention-dropout=0.2", "--hidden-dropout", "0.3"], _dense_hf_config())
+    )
+    assert flags["--attention-dropout"] == "0.2"
+    assert "--hidden-dropout=0.0" not in hf_architecture_arguments(["--hidden-dropout", "0.3"], _dense_hf_config())
