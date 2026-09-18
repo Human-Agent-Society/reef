@@ -60,14 +60,14 @@ def test_scored_rollout_round_trip() -> None:
 
 
 def test_teacher_context_round_trip() -> None:
-    # The distilling recipes' contract: the context rides metadata, the score is optional.
-    schema = TeacherContextReport(context="100 degrees Celsius.")
+    # The distilling recipes' contract: the teacher context rides metadata, the score is optional.
+    schema = TeacherContextReport(teacher_context="100 degrees Celsius.")
     body = schema.to_dict(references=["receipt-1"])
-    assert body == {"metadata": {"context": "100 degrees Celsius."}, "references": ["receipt-1"]}
+    assert body == {"metadata": {"teacher_context": "100 degrees Celsius."}, "references": ["receipt-1"]}
     assert TeacherContextReport.from_dict(body) == schema
-    scored = TeacherContextReport.from_dict({"score": 0.5, "metadata": {"context": "demo"}})
-    assert scored == TeacherContextReport(context="demo", score=0.5)
-    # A teacher that reads no privileged text (on-policy distillation) leaves the context empty,
+    scored = TeacherContextReport.from_dict({"score": 0.5, "metadata": {"teacher_context": "demo"}})
+    assert scored == TeacherContextReport(teacher_context="demo", score=0.5)
+    # A teacher that reads no privileged text (on-policy distillation) leaves the teacher context empty,
     # and a field at its default is not serialized.
     assert TeacherContextReport.from_dict({"metadata": {}}) == TeacherContextReport()
     assert TeacherContextReport().to_dict(references=["receipt-1"]) == {"references": ["receipt-1"]}
@@ -127,7 +127,7 @@ def test_minimal_score_only_report_is_a_valid_task_outcome() -> None:
             "metadata.algorithm",
         ),
         (TaskOutcome, {"score": 1.0, "metadata": {"resolved": "yes"}}, "resolved must be a boolean"),
-        (TeacherContextReport, {"metadata": {"context": 3}}, "metadata.context must be a string"),
+        (TeacherContextReport, {"metadata": {"teacher_context": 3}}, "metadata.teacher_context must be a string"),
     ],
 )
 def test_violations_name_the_broken_field(report_type: type[ReportBase], payload: dict, fragment: str) -> None:

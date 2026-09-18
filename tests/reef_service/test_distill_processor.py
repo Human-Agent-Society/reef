@@ -40,14 +40,14 @@ class CountingTokenizer(TeacherPromptTokenizer):
 
 
 class FeedbackProcessor(DistillProcessor):
-    """A recipe's composition: the student's own answer and the context as a system message, no tools."""
+    """A recipe's composition: the student's own answer and the teacher context as a system message, no tools."""
 
     batch_label = "feedback"
 
     def teacher_request(
-        self, messages: list[Any], tools: list[Any] | None, response: str, context: str
+        self, messages: list[Any], tools: list[Any] | None, response: str, teacher_context: str
     ) -> tuple[list[Any], list[Any] | None]:
-        system = {"role": "system", "content": f"You answered: {response}\nVerifier: {context}"}
+        system = {"role": "system", "content": f"You answered: {response}\nVerifier: {teacher_context}"}
         return [system, *messages], None
 
 
@@ -71,8 +71,10 @@ def _inference(agent_record_id: str, *, messages: list[dict[str, Any]] | None = 
     )
 
 
-def _report(agent_record_id: str, references: tuple[str, ...], context: str = "100 degrees Celsius.") -> AgentRecord:
-    body = TeacherContextReport(context=context).to_dict(references=references)
+def _report(
+    agent_record_id: str, references: tuple[str, ...], teacher_context: str = "100 degrees Celsius."
+) -> AgentRecord:
+    body = TeacherContextReport(teacher_context=teacher_context).to_dict(references=references)
     return AgentRecord.create(
         scenario="science",
         request_type=RequestType.REPORT,
@@ -91,7 +93,7 @@ def test_by_default_the_teacher_reads_the_request_as_recorded() -> None:
     tokenizer = CountingTokenizer()
     processor = _processor(tokenizer)
     processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",), context=""))
+    processor.ingest(_report("r1", ("i1",), teacher_context=""))
 
     batch = processor.build_batch()
 
@@ -114,7 +116,7 @@ def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context
     tokenizer = CountingTokenizer()
     processor = FeedbackProcessor(ProcessorContext("science", {"batch_size": 1}, TeacherContextReport), tokenizer)
     processor.ingest(_inference("i1"))
-    processor.ingest(_report("r1", ("i1",), context="Too low."))
+    processor.ingest(_report("r1", ("i1",), teacher_context="Too low."))
 
     batch = processor.build_batch()
 
@@ -144,7 +146,7 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window() -> 
 
     # A later report that fits still trains.
     processor.ingest(short_request)
-    processor.ingest(_report("r2", ("i2",), context="ok"))
+    processor.ingest(_report("r2", ("i2",), teacher_context="ok"))
     assert len(processor.build_batch().items) == 1
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
 

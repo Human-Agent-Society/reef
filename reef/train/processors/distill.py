@@ -51,7 +51,7 @@ class DistillProcessor(ReportedFeedbackProcessor):
     """One report, one distillation sample: the student's policy tensors plus its teacher sequence.
 
     A report references one recorded request and carries the teacher's
-    ``context``. ``teacher_tokens`` is the teacher's request
+    ``teacher_context``. ``teacher_tokens`` is the teacher's request
     (:meth:`teacher_request`) rendered with the served model's chat template
     (``tokenizer_path``), followed by the student's response ids verbatim,
     so a teacher pass scores the student's own tokens. A sequence longer
@@ -83,9 +83,9 @@ class DistillProcessor(ReportedFeedbackProcessor):
         super().__init__(context)
 
     def teacher_request(
-        self, messages: list[Any], tools: list[Any] | None, response: str, context: str
+        self, messages: list[Any], tools: list[Any] | None, response: str, teacher_context: str
     ) -> tuple[list[Any], list[Any] | None]:
-        """The request the teacher reads, from the student's recorded request, its response and the report's context.
+        """The request the teacher reads, from the student's recorded request, its response and the report's teacher context.
 
         The default is the request as recorded: the teacher reads no
         privileged text (on-policy distillation from a separate teacher).
@@ -113,7 +113,7 @@ class DistillProcessor(ReportedFeedbackProcessor):
         payload = context.inferences[0].payload
         messages, tools = recorded_request(payload)
         teacher_messages, teacher_tools = self.teacher_request(
-            messages, tools, recorded_response(payload), parsed.context
+            messages, tools, recorded_response(payload), parsed.teacher_context
         )
         prompt_ids = self._tokenizer.prompt_token_ids(teacher_messages, teacher_tools)
         teacher_tokens = [*prompt_ids, *tokens[-response_length:]]

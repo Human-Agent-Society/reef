@@ -252,7 +252,7 @@ Report
 
 ``ScoredRolloutReport`` is the shared score-only contract and
 ``TeacherContextReport`` the shared contract of the distilling recipes: a
-rollout's receipt and the ``context`` its teacher sees (a demonstration,
+rollout's receipt and the ``teacher_context`` its teacher sees (a demonstration,
 environment feedback, or nothing for a separate teacher).
 Method-specific report contracts live in their method package; Reef does not
 import or re-export them.

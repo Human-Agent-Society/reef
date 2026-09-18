@@ -241,7 +241,7 @@ Where a processor lives
 Shared engines live under ``reef/train/processors/``, including
 ``DistillProcessor``, the reported engine of the distilling recipes: it
 emits the student's rollout plus the teacher sequence, the request the recipe
-composes from the recorded request and the report's context (its
+composes from the recorded request and the report's ``teacher_context`` (its
 ``teacher_request`` override) rendered with the served model's chat template. Concrete method processors
 live in ``recipes/<name>/processor.py``; the harness evolution implementation
 lives in ``reef/train/cordis_backend/processor.py``. Recipe-specific correlation
