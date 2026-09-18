@@ -15,8 +15,8 @@ from abc import ABC, abstractmethod
 from collections.abc import Hashable, Mapping, Sequence
 from typing import Any
 
-from reef.core.chat_request import recorded_request, recorded_response
 from reef.core.reports import TeacherContextReport
+from reef.train.processors.common import recorded_request, recorded_response
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
 

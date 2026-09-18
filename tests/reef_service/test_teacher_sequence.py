@@ -13,11 +13,11 @@ import pytest
 
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
-from reef.core.chat_request import recorded_response
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.train import ProcessorContext
 from reef.train.processors import TeacherSequenceProcessor
+from reef.train.processors.common import recorded_response
 from reef.train.processors.teacher_sequence import TeacherPromptTokenizer
 from reef.train.types import TrainingBatch
 
