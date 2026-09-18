@@ -239,7 +239,7 @@ Where a processor lives
 -----------------------
 
 Shared engines live under ``reef/train/processors/``, including
-``TeacherSequenceProcessor``, the reported engine of the distilling recipes: it
+``DistillProcessor``, the reported engine of the distilling recipes: it
 emits the student's rollout plus the teacher sequence, the request the recipe
 composes from the recorded request and the report's context (its
 ``teacher_request`` override) rendered with the served model's chat template. Concrete method processors

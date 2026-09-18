@@ -1,4 +1,4 @@
-"""The shared teacher-sequence processor: the student's rollout plus the teacher's prompt, one sample per report.
+"""The shared distillation processor: the student's rollout plus the teacher's prompt, one sample per report.
 
 Torch/ray free. The tokenizer is a fake that counts tokens deterministically,
 so no model files are needed; a test subclass stands in for a recipe's.
@@ -16,9 +16,9 @@ from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.core.trajectories import source_record_id
 from reef.train import ProcessorContext
-from reef.train.processors import TeacherSequenceProcessor
+from reef.train.processors import DistillProcessor
 from reef.train.processors.common import recorded_response
-from reef.train.processors.teacher_sequence import TeacherPromptTokenizer
+from reef.train.processors.distill import TeacherPromptTokenizer
 from reef.train.types import TrainingBatch
 
 STUDENT_TOKENS = (5, 6, 7, 1, 2, 3)  # three prompt ids, three response ids
@@ -39,7 +39,7 @@ class CountingTokenizer(TeacherPromptTokenizer):
         return [100 + index for index in range(len(messages) + len(text) // 10)]
 
 
-class FeedbackProcessor(TeacherSequenceProcessor):
+class FeedbackProcessor(DistillProcessor):
     """A recipe's composition: the student's own answer and the context as a system message, no tools."""
 
     batch_label = "feedback"
@@ -82,10 +82,8 @@ def _report(agent_record_id: str, references: tuple[str, ...], context: str = "1
     )
 
 
-def _processor(tokenizer: CountingTokenizer | None = None, **config: Any) -> TeacherSequenceProcessor:
-    return TeacherSequenceProcessor(
-        ProcessorContext("science", {"batch_size": 1, **config}, TeacherContextReport), tokenizer
-    )
+def _processor(tokenizer: CountingTokenizer | None = None, **config: Any) -> DistillProcessor:
+    return DistillProcessor(ProcessorContext("science", {"batch_size": 1, **config}, TeacherContextReport), tokenizer)
 
 
 @pytest.mark.unit

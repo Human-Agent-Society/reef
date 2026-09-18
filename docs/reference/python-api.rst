@@ -607,7 +607,7 @@ Processor
 
 .. code:: python
 
-   from reef.train.processors import ComputedFeedbackProcessor, ReportedFeedbackProcessor, TeacherSequenceProcessor
+   from reef.train.processors import ComputedFeedbackProcessor, DistillProcessor, ReportedFeedbackProcessor
 
 A processor turns durable records into typed batches. Reef owns replay,
 retention, deduplication, pending batches, and exactly-once consumption; the

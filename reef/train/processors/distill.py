@@ -1,8 +1,8 @@
-"""Teacher sequences: the student's request with the teacher's context, rendered as the teacher reads it.
+"""The distillation processor: the student's request with the teacher's context, rendered as the teacher reads it.
 
 The distilling recipes make a teacher score the student's own sample. What
 the teacher reads beyond the student's request is the recipe's policy
-(:meth:`TeacherSequenceProcessor.teacher_request`: a demonstration,
+(:meth:`DistillProcessor.teacher_request`: a demonstration,
 environment feedback, nothing); rendering it with the served model's chat
 template and shipping it as ``teacher_tokens`` beside the student's policy
 tensors is the mechanism they share.
@@ -47,7 +47,7 @@ class ChatTemplateTokenizer(TeacherPromptTokenizer):
         return [int(token) for token in self._tokenizer(rendered, add_special_tokens=False)["input_ids"]]
 
 
-class TeacherSequenceProcessor(ReportedFeedbackProcessor):
+class DistillProcessor(ReportedFeedbackProcessor):
     """One report, one distillation sample: the student's policy tensors plus its teacher sequence.
 
     A report references one recorded request and carries the teacher's
@@ -143,4 +143,4 @@ class TeacherSequenceProcessor(ReportedFeedbackProcessor):
         return TrainingBatch(f"{self.scenario}:{self.batch_label}:{batch_number}", items)
 
 
-__all__ = ["ChatTemplateTokenizer", "TeacherPromptTokenizer", "TeacherSequenceProcessor"]
+__all__ = ["ChatTemplateTokenizer", "DistillProcessor", "TeacherPromptTokenizer"]
