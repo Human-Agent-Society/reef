@@ -1,12 +1,15 @@
 """The shared distillation processor: the student's rollout plus the teacher's prompt, one sample per report.
 
-Torch/ray free. The tokenizer is a fake that counts tokens deterministically,
-so no model files are needed; a test subclass stands in for a recipe's.
+Torch/ray free. The tokenizer is a fake installed as ``transformers.AutoTokenizer``
+that counts tokens deterministically, so neither transformers nor model files
+are needed; a test subclass stands in for a recipe's.
 """
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Mapping, Sequence
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -18,7 +21,6 @@ from reef.core.trajectories import source_record_id
 from reef.train import ProcessorContext
 from reef.train.processors import DistillProcessor
 from reef.train.processors.common import recorded_response
-from reef.train.processors.distill import TeacherPromptTokenizer
 from reef.train.types import TrainingBatch
 
 STUDENT_TOKENS = (5, 6, 7, 1, 2, 3)  # three prompt ids, three response ids
@@ -27,16 +29,45 @@ STUDENT_LOG_PROBS = (-0.1, -0.2, -0.3)
 QUESTION = "What is the boiling point of water?"
 
 
-class CountingTokenizer(TeacherPromptTokenizer):
-    """One token per message plus one per ten characters of text; records what it rendered."""
+class CountingTokenizer:
+    """The served model's tokenizer: one token per message plus one per ten characters of text.
+
+    It records where it was loaded from and what it rendered, and like
+    transformers 5 returns a mapping unless ``return_dict=False``.
+    """
 
     def __init__(self) -> None:
+        self.loaded: list[tuple[str, dict[str, Any]]] = []
         self.calls: list[tuple[list[Mapping[str, Any]], Sequence[Any] | None]] = []
 
-    def prompt_token_ids(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Any] | None) -> list[int]:
-        self.calls.append((list(messages), tools))
+    def from_pretrained(self, path: str, **options: Any) -> CountingTokenizer:
+        self.loaded.append((path, options))
+        return self
+
+    def apply_chat_template(
+        self,
+        conversation: Sequence[Mapping[str, Any]],
+        tools: Sequence[Any] | None = None,
+        *,
+        tokenize: bool = True,
+        add_generation_prompt: bool = False,
+        return_dict: bool = True,
+    ) -> list[int] | dict[str, list[int]]:
+        self.calls.append((list(conversation), tools))
+        ids = self.count_ids(conversation)
+        return ids if not return_dict else {"input_ids": ids}
+
+    @staticmethod
+    def count_ids(messages: Sequence[Mapping[str, Any]]) -> list[int]:
         text = "".join(str(message.get("content") or "") for message in messages)
         return [100 + index for index in range(len(messages) + len(text) // 10)]
+
+
+@pytest.fixture
+def tokenizer(monkeypatch: pytest.MonkeyPatch) -> CountingTokenizer:
+    fake = CountingTokenizer()
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoTokenizer=fake))
+    return fake
 
 
 class FeedbackProcessor(DistillProcessor):
@@ -84,14 +115,17 @@ def _report(
     )
 
 
-def _processor(tokenizer: CountingTokenizer | None = None, **config: Any) -> DistillProcessor:
-    return DistillProcessor(ProcessorContext("science", {"batch_size": 1, **config}, TeacherContextReport), tokenizer)
+def _processor(**config: Any) -> DistillProcessor:
+    return DistillProcessor(
+        ProcessorContext(
+            "science", {"batch_size": 1, "tokenizer_path": "/models/science", **config}, TeacherContextReport
+        )
+    )
 
 
 @pytest.mark.unit
-def test_by_default_the_teacher_reads_the_request_as_recorded() -> None:
-    tokenizer = CountingTokenizer()
-    processor = _processor(tokenizer)
+def test_by_default_the_teacher_reads_the_request_as_recorded(tokenizer: CountingTokenizer) -> None:
+    processor = _processor()
     processor.ingest(_inference("i1"))
     processor.ingest(_report("r1", ("i1",), teacher_context=""))
 
@@ -100,11 +134,12 @@ def test_by_default_the_teacher_reads_the_request_as_recorded() -> None:
     assert isinstance(batch, TrainingBatch)
     (sample,) = batch.items
     assert source_record_id(sample) == "i1"
+    assert tokenizer.loaded == [("/models/science", {"trust_remote_code": True})]
     rendered, tools = tokenizer.calls[0]
     assert rendered == [{"role": "user", "content": QUESTION}]
     assert tools == [{"type": "function", "function": {"name": "lookup"}}]
     # The teacher sequence is the rendered prompt plus the response ids verbatim.
-    prompt_ids = tokenizer.prompt_token_ids(rendered, tools)
+    prompt_ids = tokenizer.count_ids(rendered)
     assert list(sample.training["teacher_tokens"]) == [*prompt_ids, 1, 2, 3]
     assert list(sample.training["tokens"]) == list(STUDENT_TOKENS)
     assert batch.batch_id == "science:teacher:1"
@@ -112,9 +147,10 @@ def test_by_default_the_teacher_reads_the_request_as_recorded() -> None:
 
 
 @pytest.mark.unit
-def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context() -> None:
-    tokenizer = CountingTokenizer()
-    processor = FeedbackProcessor(ProcessorContext("science", {"batch_size": 1}, TeacherContextReport), tokenizer)
+def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context(tokenizer: CountingTokenizer) -> None:
+    processor = FeedbackProcessor(
+        ProcessorContext("science", {"batch_size": 1, "tokenizer_path": "/models/science"}, TeacherContextReport)
+    )
     processor.ingest(_inference("i1"))
     processor.ingest(_report("r1", ("i1",), teacher_context="Too low."))
 
@@ -124,18 +160,17 @@ def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context
     assert rendered[0] == {"role": "system", "content": "You answered: About 90 degrees.\nVerifier: Too low."}
     assert rendered[1:] == [{"role": "user", "content": QUESTION}]
     assert tools is None
-    assert list(batch.items[0].training["teacher_tokens"]) == [*tokenizer.prompt_token_ids(rendered, tools), 1, 2, 3]
+    assert list(batch.items[0].training["teacher_tokens"]) == [*tokenizer.count_ids(rendered), 1, 2, 3]
     assert batch.batch_id == "science:feedback:1"
 
 
 @pytest.mark.unit
-def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window() -> None:
-    tokenizer = CountingTokenizer()
+def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(tokenizer: CountingTokenizer) -> None:
     long_request = _inference("i1")
     short_request = _inference("i2", messages=[{"role": "user", "content": "q"}])
     # The window admits the short request's teacher sequence and not the long one's.
-    window = len(tokenizer.prompt_token_ids(short_request.payload["messages"], None)) + 3
-    processor = _processor(tokenizer, max_teacher_tokens=window)
+    window = len(tokenizer.count_ids(short_request.payload["messages"])) + 3
+    processor = _processor(max_teacher_tokens=window)
     processor.ingest(long_request)
     processor.ingest(_report("r1", ("i1",)))
 
@@ -152,8 +187,8 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window() -> 
 
 
 @pytest.mark.unit
-def test_the_processor_requires_one_recorded_request_per_report() -> None:
-    processor = _processor(CountingTokenizer(), accept_multi_turn_policy_samples=True)
+def test_the_processor_requires_one_recorded_request_per_report(tokenizer: CountingTokenizer) -> None:
+    processor = _processor(accept_multi_turn_policy_samples=True)
     processor.ingest(_inference("i1"))
     processor.ingest(_inference("i2"))
 
@@ -164,9 +199,9 @@ def test_the_processor_requires_one_recorded_request_per_report() -> None:
 @pytest.mark.unit
 def test_the_processor_requires_the_tokenizer_path_and_a_valid_window() -> None:
     with pytest.raises(ValueError, match="tokenizer_path"):
-        _processor()
+        _processor(tokenizer_path="")
     with pytest.raises(ValueError, match="max_teacher_tokens"):
-        _processor(CountingTokenizer(), max_teacher_tokens=-1)
+        _processor(max_teacher_tokens=-1)
 
 
 @pytest.mark.unit

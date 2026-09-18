@@ -11,8 +11,7 @@ tensors is the mechanism they share.
 from __future__ import annotations
 
 import logging
-from abc import ABC, abstractmethod
-from collections.abc import Hashable, Mapping, Sequence
+from collections.abc import Hashable, Mapping
 from typing import Any
 
 from reef.core.reports import TeacherContextReport
@@ -21,30 +20,6 @@ from reef.train.processors.reported import GroupDecision, ReportContext, Reporte
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
-
-
-class TeacherPromptTokenizer(ABC):
-    """Render a chat request into the prompt token ids the served model sees."""
-
-    @abstractmethod
-    def prompt_token_ids(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Any] | None) -> list[int]:
-        """The prompt ids of ``messages`` with the generation prompt appended."""
-
-
-class ChatTemplateTokenizer(TeacherPromptTokenizer):
-    """The served model's Hugging Face tokenizer applying its own chat template."""
-
-    def __init__(self, tokenizer_path: str) -> None:
-        # transformers belongs to the training environment; the service never renders a prompt.
-        from transformers import AutoTokenizer
-
-        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path)
-
-    def prompt_token_ids(self, messages: Sequence[Mapping[str, Any]], tools: Sequence[Any] | None) -> list[int]:
-        rendered = self._tokenizer.apply_chat_template(
-            list(messages), tools=list(tools) if tools else None, tokenize=False, add_generation_prompt=True
-        )
-        return [int(token) for token in self._tokenizer(rendered, add_special_tokens=False)["input_ids"]]
 
 
 class DistillProcessor(ReportedFeedbackProcessor):
@@ -66,18 +41,19 @@ class DistillProcessor(ReportedFeedbackProcessor):
     exclusive_sources = True
     batch_label = "teacher"
 
-    def __init__(self, context: ProcessorContext, tokenizer: TeacherPromptTokenizer | None = None) -> None:
+    def __init__(self, context: ProcessorContext) -> None:
         config = context.config
         self._assembly = SampleAssembly.from_config(context)
         self._max_teacher_tokens = int(config.get("max_teacher_tokens", 0))
         if self._max_teacher_tokens < 0:
             raise ValueError("max_teacher_tokens must be non-negative (0 disables the limit)")
-        if tokenizer is None:
-            tokenizer_path = str(config.get("tokenizer_path", "")).strip()
-            if not tokenizer_path:
-                raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
-            tokenizer = ChatTemplateTokenizer(tokenizer_path)
-        self._tokenizer = tokenizer
+        tokenizer_path = str(config.get("tokenizer_path", "")).strip()
+        if not tokenizer_path:
+            raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
+        # transformers belongs to the training environment; the service never renders a prompt.
+        from transformers import AutoTokenizer
+
+        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
         self._overflow_reports: set[str] = set()
         self._overflow_count = 0
         super().__init__(context)
@@ -115,7 +91,9 @@ class DistillProcessor(ReportedFeedbackProcessor):
         teacher_messages, teacher_tools = self.teacher_request(
             messages, tools, recorded_response(payload), parsed.teacher_context
         )
-        prompt_ids = self._tokenizer.prompt_token_ids(teacher_messages, teacher_tools)
+        prompt_ids = self._tokenizer.apply_chat_template(
+            teacher_messages, tools=teacher_tools or None, tokenize=True, add_generation_prompt=True, return_dict=False
+        )
         teacher_tokens = [*prompt_ids, *tokens[-response_length:]]
         if self._max_teacher_tokens and len(teacher_tokens) > self._max_teacher_tokens:
             self._overflow_reports.add(context.report.agent_record_id)
@@ -143,4 +121,4 @@ class DistillProcessor(ReportedFeedbackProcessor):
         return TrainingBatch(f"{self.scenario}:{self.batch_label}:{batch_number}", items)
 
 
-__all__ = ["ChatTemplateTokenizer", "DistillProcessor", "TeacherPromptTokenizer"]
+__all__ = ["DistillProcessor"]
