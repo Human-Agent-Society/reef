@@ -1,4 +1,4 @@
-"""Opt-in outbound connection from an existing Reef service to its owner's console."""
+"""Opt-in outbound connection from a Reef service to its owner's console, optionally starting that service."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 import aiohttp
 
 from reef.service.connector.runtime import HTTPFailure, JSONClient, ReefRuntime, endpoint_url
+from reef.service.connector.service import ReefService, address_in_use, serve_address
 from reef.service.connector.state import ConnectorState
 
 logger = logging.getLogger(__name__)
@@ -33,20 +34,30 @@ BODY_LIMIT = 192 * 1024
 class Connector:
     """Maintain heartbeats independently of one in-flight local operation."""
 
-    def __init__(self, platform: JSONClient, runtime: ReefRuntime, state: ConnectorState):
+    def __init__(
+        self, platform: JSONClient, runtime: ReefRuntime, state: ConnectorState, service: ReefService | None = None
+    ):
         self.platform = platform
         self.runtime = runtime
         self.state = state
+        self.service = service
+
+    async def snapshot(self) -> dict[str, Any]:
+        snapshot = await self.runtime.snapshot()
+        if self.service is not None:
+            snapshot["service"] = self.service.status(snapshot["reachable"])
+        return snapshot
 
     async def execute(self, command: dict[str, Any]) -> None:
         command_id = str(uuid.UUID(command["id"]))
         if not self.state.start(command_id):
             return
         try:
-            value = await self.runtime.execute(command)
+            refresh = command.get("action") == "refresh"
+            value = await self.snapshot() if refresh else await self.runtime.execute(command)
             result: dict[str, Any] = {"state": "succeeded", "value": value}
             if command.get("action") != "releases":
-                result["snapshot"] = value if command.get("action") == "refresh" else await self.runtime.snapshot()
+                result["snapshot"] = value if refresh else await self.snapshot()
             if len(json.dumps(result).encode()) > BODY_LIMIT:
                 result = {"state": "failed", "error": "The result exceeds the connector size limit"}
         except asyncio.CancelledError:
@@ -81,6 +92,8 @@ class Connector:
 
     async def run(self, stop: asyncio.Event) -> None:
         self.state.recover()
+        if self.service is not None:
+            self.service.start()
         operation: asyncio.Task[None] | None = None
         next_snapshot = 0.0
         snapshot: dict[str, Any] | None = None
@@ -94,8 +107,9 @@ class Connector:
                         next_snapshot = 0
                     await self.flush_results()
                     if time.monotonic() >= next_snapshot:
-                        snapshot = await self.runtime.snapshot()
-                        next_snapshot = time.monotonic() + 15
+                        snapshot = await self.snapshot()
+                        # Check sooner while Reef is not answering, so the console sees it come up quickly.
+                        next_snapshot = time.monotonic() + (15 if snapshot["reachable"] else 5)
                     body: dict[str, Any] = {"protocol": 1, "ready": operation is None}
                     if snapshot is not None:
                         body["snapshot"] = snapshot
@@ -122,6 +136,8 @@ class Connector:
                 operation.cancel()
                 with suppress(asyncio.CancelledError):
                     await operation
+            if self.service is not None:
+                await self.service.stop()
 
 
 async def authorize(config: dict[str, Any], state: ConnectorState, *, no_browser: bool) -> dict[str, Any]:
@@ -180,19 +196,38 @@ async def run_connector(config: dict[str, Any], state: ConnectorState) -> None:
         aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar(), trust_env=True) as platform_session,
         aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as local_session,
     ):
+        serve = config.get("serve")
+        service = (
+            ReefService(
+                serve["arguments"],
+                config["reef_url"],
+                config.get("reef_token", ""),
+                Path(serve["directory"]),
+                state.directory / "serve.log",
+            )
+            if serve
+            else None
+        )
         connector = Connector(
             JSONClient(platform_session, config["platform_url"], config["connector_token"]),
             ReefRuntime(JSONClient(local_session, config["reef_url"], config.get("reef_token", ""))),
             state,
+            service,
         )
         await connector.run(stop)
 
 
+async def check_reef(config: dict[str, Any]) -> dict[str, Any]:
+    async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as session:
+        return await ReefRuntime(JSONClient(session, config["reef_url"], config.get("reef_token", ""))).snapshot()
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="reef connect", description="Connect an existing Reef runtime to your API platform account."
+        prog="reef connect",
+        description="Connect a Reef runtime to your API platform account, optionally starting it with --serve.",
     )
-    parser.add_argument("--url", default="http://127.0.0.1:8900", help="Existing Reef service URL")
+    parser.add_argument("--url", default="http://127.0.0.1:8900", help="Reef service URL")
     parser.add_argument("--platform", default="https://api.reefinfra.ai", help="API platform URL")
     parser.add_argument("--name", help="Name shown in the console")
     parser.add_argument(
@@ -206,6 +241,13 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--status", action="store_true", help="Show this connector's local process and state directory"
+    )
+    parser.add_argument(
+        "--serve",
+        nargs=argparse.REMAINDER,
+        metavar="SERVE_OPTION",
+        help="Start `reef serve` with the options that follow on the --url address, and stop it with the connector."
+        " Put it last.",
     )
     parser.add_argument("--run", action="store_true", help=argparse.SUPPRESS)
     return parser
@@ -230,19 +272,26 @@ def main(argv: list[str] | None = None) -> None:
         state = ConnectorState(directory)
         try:
             running = _running(state)
+            config = state.load()
+            serving = bool(config.get("serve"))
             if args.status:
                 print(f"Connector {'running' if running else 'stopped'}\nState: {directory}")
+                if serving:
+                    print(f"Reef logs: {directory / 'serve.log'}")
                 return
             if args.stop:
                 if running:
                     os.kill(int((directory / "connector.pid").read_text()), signal.SIGTERM)
-                print(
-                    "Connector stopping. Reef continues serving; revoke access in the console to remove authorization."
-                )
+                if serving:
+                    print("Connector stopping, together with the Reef service it started.")
+                else:
+                    print(
+                        "Connector stopping. Reef continues serving; revoke access in the console to remove"
+                        " authorization."
+                    )
                 return
             if running:
                 raise RuntimeError("This connector is already running; use --status or --stop")
-            config = state.load()
             if args.run:
                 if not config.get("connector_token"):
                     raise RuntimeError("Run reef connect to authorize this instance first")
@@ -254,6 +303,8 @@ def main(argv: list[str] | None = None) -> None:
                 raise ValueError(
                     "This state directory belongs to another endpoint; use its original --platform and --url"
                 )
+            if args.serve is not None and address_in_use(*serve_address(reef_url, args.serve)):
+                raise RuntimeError(f"A service already answers at {reef_url}. Stop it, or connect without --serve.")
             config.update(
                 {
                     "platform_url": platform_url,
@@ -261,11 +312,25 @@ def main(argv: list[str] | None = None) -> None:
                     "instance_id": config.get("instance_id") or str(uuid.uuid4()),
                     "name": args.name or config.get("name") or socket.gethostname(),
                     "reef_token": os.environ.get(args.reef_token_env, config.get("reef_token", "")),
+                    # Each invocation decides whether the connector starts Reef; serve runs where connect ran.
+                    "serve": (
+                        {"arguments": args.serve, "directory": str(Path.cwd())} if args.serve is not None else None
+                    ),
                 }
             )
             # Save identity before authorization so interrupted logins cannot create new identities.
             state.save(config)
+            if args.serve is None:
+                reef = asyncio.run(check_reef(config))
+                if not reef["reachable"]:
+                    print(
+                        f"Warning: {reef['error']}\nThe connection still completes; the console shows the runtime"
+                        " once Reef answers. To start Reef with the connector, add --serve and its options.",
+                        file=sys.stderr,
+                    )
             config = asyncio.run(authorize(config, state, no_browser=args.no_browser))
+            if args.serve is not None:
+                print(f"Starting Reef at {reef_url}. Logs: {directory / 'serve.log'}", flush=True)
             if args.foreground:
                 with state.lock():
                     (directory / "connector.pid").write_text(str(os.getpid()))
