@@ -34,7 +34,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from reef.core.requirements import parse_requires
-from reef.harness.adapters.descriptor import AdapterDescriptor, DescriptorError, InstallSpec
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, DescriptorError, InstallSpec
 from reef.harness.episodes.vendor_install import DEFAULT_PREFIX_ROOT, PREFIX_ENV
 
 #: The script's install-prefix root in shell spelling, the same root reef's
@@ -306,7 +306,7 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
                 "import os, sys",
                 "path = sys.argv[1]",
                 'text = open(path, encoding="utf-8").read()',
-                f'open(path, "w", encoding="utf-8").write(text.replace({TOKEN_PLACEHOLDER!r}, os.environ.get("REEF_TOKEN", "")))',
+                f'open(path, "w", encoding="utf-8").write(text.replace({TOKEN_PLACEHOLDER!r}, os.environ.get("REEF_TOKEN") or {NO_TOKEN_API_KEY!r}))',
                 "REEF_BIND_EOF",
             ]
         )

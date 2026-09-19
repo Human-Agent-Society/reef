@@ -176,7 +176,7 @@ from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_han
 
 from reef.core.requirements import required_by
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 
 
 def _captures_dir() -> Path:
@@ -381,8 +381,8 @@ def _extract_reef_token(adapter: str, compose_dir: Path) -> str | None:
     """The token the install wrote into the tree, at the key path where the adapter's binding renders ``{api_key}``.
 
     The file is parsed, not searched: a second provider's key in the same
-    file is never taken for Reef's, and a Reef entry the install left empty
-    (no ``REEF_TOKEN`` in the installing shell) yields nothing."""
+    file is never taken for Reef's, and a Reef entry the install left without a token (no ``REEF_TOKEN`` in the
+    installing shell: ``NO_TOKEN_API_KEY``, or empty from an older install) yields nothing."""
     descriptor = get_adapter(adapter)
     for binding in _bindings(descriptor, "{api_key}"):
         file = _binding_file(descriptor, compose_dir, binding)
@@ -394,7 +394,7 @@ def _extract_reef_token(adapter: str, compose_dir: Path) -> str | None:
             raise WrapperError(f"binding file {file.name!r} does not parse: {exc}") from None
         for key in binding.path:
             value = value.get(key) if isinstance(value, Mapping) else None
-        if isinstance(value, str) and value:
+        if isinstance(value, str) and value and value != NO_TOKEN_API_KEY:
             return value
     return None
 
