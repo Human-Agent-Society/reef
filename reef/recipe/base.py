@@ -21,7 +21,7 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
 from reef.surface.weights import create_weight_surface
@@ -155,6 +155,11 @@ class Recipe:
         """
         runtime = self.runtime
         return runtime.inference_handler if runtime is not None else None
+
+    @property
+    def multimodal_relay(self) -> MultimodalRelay | None:
+        """Where this recipe's scenarios send multimodal calls, or ``None`` when it offers none (the default)."""
+        return None
 
     def build_surface(self, scenario: str) -> Surface:
         """Build the serving surface for the named scenario.

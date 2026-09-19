@@ -34,6 +34,9 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages/count_tokens``                     | count request tokens; recorded like any inference |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/images``, ``/v1/embeddings``,               | multimodal call, relayed by the recipe to its     |
+| ``/v1/audio/speech``, ``/v1/decisions``                | gateway; not recorded, 501 when it offers none    |
++--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                  | submit feedback about one or more receipts        |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                   | enqueue one training instruction                  |
@@ -226,6 +229,15 @@ variables a written extension reads through ``process.env`` that no
 A request step that produced nothing records ``failure``, why: the model
 call failed (how long it took, the reply budget and the endpoint's error)
 or the reply held no usable entry. Other methods may write other keys.
+
+An optional ``client`` reports the requesting machine, so a proposer builds
+for it rather than for the sandbox it tries changes in: ``platform``,
+``arch`` and ``release`` (short words) and ``commands``, a map of command
+names to whether each is on the machine's PATH (at most 64). ``reef-pi`` and
+pi's ``/reef-harness`` send one, reading the PATH without running anything.
+It only informs the proposer: what does not fit that shape is dropped, never
+a reason to refuse the request, and ``training_request.client`` carries what
+was kept.
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after record compaction; reusing the id with
@@ -777,7 +789,14 @@ the request, ``proposing`` while the served model writes the change,
 step record directory when the backend reports them, and the time into the
 step), ``running`` while the trainer holds the request and the backend
 reports no phase, and ``settling`` while the row that consumed the record
-lands. The catalog row whose ``metrics.training_request.id`` is the record
+lands. While a step holds the request, Activity lists what the proposer has
+done so far, newest first, each line at its time into the step and the
+newest with how long ago it happened: every model call as it starts and
+as it answers (its seconds and tokens, or its error), and for the agent
+proposer each tool the agent calls, each admission check, each trial with
+its exit and multimodal calls, and each multimodal call with its status;
+failed lines are marked. The page lists the latest 80; the step record
+keeps every call. The catalog row whose ``metrics.training_request.id`` is the record
 id settles the page: the reload stops and Progress gives way to Result
 (the result as the version page words it, what it means and the next
 action, a failed instruction's ``error``, ``proposal_notes.failure`` as
@@ -796,9 +815,13 @@ row landed as once it settles, else null), ``state`` (the page's own
 ``queued``, ``proposing``, ``evaluating``, ``running`` or ``settling``, and
 the settled row's result once a row answers the request), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
-step holds this request, ``started_at``, ``episodes_total`` and
-``step_record`` from the backend's progress. The phase is what the pi
-extension's spinner names while the step runs. Unlike the two pages this is
+step holds this request, ``started_at``, ``episodes_total``,
+``step_record`` and ``activity`` (the Activity lines oldest first, each
+``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
+``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
+empty otherwise) from the backend's progress. The phase is what the pi
+extension's spinner names while the step runs, and opening the spinner lists
+the latest four activity lines. Unlike the two pages this is
 an ordinary route: it reads the headers alone, and a ``?token=`` is HTTP
 401. An unknown id, or one that is not a training instruction, is HTTP 404
 naming it.

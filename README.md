@@ -212,8 +212,7 @@ reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b
 ```
-
-The example connects to a local Ollama server. For another provider, change
+For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
 `REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
 listens on `127.0.0.1:8901` without authentication (set `REEF_TOKEN` before
@@ -238,7 +237,10 @@ reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test f
 
 Inside a `reef-pi` session, `/reef-harness <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
-extension, and the next session's update notice offers the install; a step that
+extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
+non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it
+works as a coding agent that runs the changed harness before handing the change
+back. The next session's update notice offers the install; a step that
 settles while you are between turns offers its install right away. Review the
 versions with `/reef-versions`, which opens a step's page, and install one with
 `/reef-versions <step> install`. To change the model, restart

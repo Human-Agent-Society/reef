@@ -175,8 +175,9 @@ import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
 from reef.core.requirements import required_by
+from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 
 
 def _captures_dir() -> Path:
@@ -381,8 +382,8 @@ def _extract_reef_token(adapter: str, compose_dir: Path) -> str | None:
     """The token the install wrote into the tree, at the key path where the adapter's binding renders ``{api_key}``.
 
     The file is parsed, not searched: a second provider's key in the same
-    file is never taken for Reef's, and a Reef entry the install left empty
-    (no ``REEF_TOKEN`` in the installing shell) yields nothing."""
+    file is never taken for Reef's, and a Reef entry the install left without a token (no ``REEF_TOKEN`` in the
+    installing shell: ``NO_TOKEN_API_KEY``, or empty from an older install) yields nothing."""
     descriptor = get_adapter(adapter)
     for binding in _bindings(descriptor, "{api_key}"):
         file = _binding_file(descriptor, compose_dir, binding)
@@ -394,9 +395,22 @@ def _extract_reef_token(adapter: str, compose_dir: Path) -> str | None:
             raise WrapperError(f"binding file {file.name!r} does not parse: {exc}") from None
         for key in binding.path:
             value = value.get(key) if isinstance(value, Mapping) else None
-        if isinstance(value, str) and value:
+        if isinstance(value, str) and value and value != NO_TOKEN_API_KEY:
             return value
     return None
+
+
+def client_report() -> dict[str, Any]:
+    """This machine as a request reports it, so the proposer builds for it rather than for its own sandbox: the
+    platform, and which of ``CLIENT_COMMANDS`` are on the PATH. Read from the PATH; nothing is run."""
+    import platform
+
+    return {
+        "platform": sys.platform,
+        "arch": platform.machine(),
+        "release": platform.release(),
+        "commands": {name: shutil.which(name) is not None for name in CLIENT_COMMANDS},
+    }
 
 
 def _reef_token(adapter: str, compose_dir: str) -> str | None:
@@ -1226,7 +1240,7 @@ def harness(
     # Session and release identify where the request came from; they do not select an inference batch.
     session = _spooled_session(scenario) or str(uuid.uuid4())
 
-    body = {"text": text, "session": session, "release_id": release}
+    body = {"text": text, "session": session, "release_id": release, "client": client_report()}
     token = _reef_token(adapter, compose_dir)
     req = urllib.request.Request(
         f"{upstream}/reef/train",

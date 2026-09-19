@@ -120,6 +120,15 @@ Pass values as arguments, never as shell source. The directory of this harness's
 
 fetch is global. Pass signal. Reef's own routes take the headers { "x-reef-scenario": process.env.REEF_SCENARIO } and, when set, { authorization: `Bearer ${process.env.REEF_TOKEN}` }; the service is at process.env.REEF_SERVICE_URL.
 
+Models beyond the session's chat model are Reef routes too, when the Reef recipe configures a multimodal provider: POST a JSON body in that provider's own format (OpenRouter's by default) to process.env.REEF_SERVICE_URL + one of the routes below, with Reef's headers above and { "content-type": "application/json" }. Reef adds the provider's key; the extension holds none.
+
+- /v1/images: generate an image from a prompt.
+- /v1/embeddings: embed text.
+- /v1/audio/speech: text to speech; the response body is the audio bytes.
+- /v1/decisions: a fast structured choice (routing, classification) from a decision model such as ~typesafe/jev-latest, where the provider serves one.
+
+Name the model in the body. These routes do not stream, and answer 501 when the Reef recipe configures no multimodal provider or its provider serves no such route.
+
 ## Rules for a reef tree entry
 
 - Return before registering anything when process.env.PI_OFFLINE is set: evaluation episodes are hermetic and must see no network calls, prompts or timers.

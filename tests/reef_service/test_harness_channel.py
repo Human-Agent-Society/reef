@@ -30,7 +30,7 @@ from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import DescriptorError, load_descriptor
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, DescriptorError, load_descriptor
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.version_check import version_check_entry
@@ -732,7 +732,7 @@ def _run_install(
 def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path) -> None:
     """The served composition carries no endpoint; the script writes the adapter's binding at the Reef it
     came from, fills the token from REEF_TOKEN at install time, and the wrapper reads the URL back."""
-    from reef.harness.client.wrapper import _extract_reef_url
+    from reef.harness.client.wrapper import _extract_reef_token, _extract_reef_url
 
     binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
     bound = render_composition(
@@ -760,7 +760,10 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
     again = _run_install(script, dest, prefix, {k: v for k, v in env.items() if k != "REEF_TOKEN"})
     assert again.returncode == 0, again.stderr
     assert "REEF_TOKEN is not set" in again.stderr
-    assert json.loads((dest / "pi-agent/models.json").read_text(encoding="utf-8"))["providers"]["reef"]["apiKey"] == ""
+    # pi refuses an empty key, so the binding carries a stand-in the wrapper reads back as no token.
+    models = json.loads((dest / "pi-agent/models.json").read_text(encoding="utf-8"))
+    assert models["providers"]["reef"]["apiKey"] == NO_TOKEN_API_KEY
+    assert _extract_reef_token("pi", dest / "pi-agent") is None
 
 
 @pytest.mark.unit
@@ -1616,7 +1619,7 @@ def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) 
             host = f"{client.host}:{client.port}"
             assert f'"baseUrl": "http://{host}/v1"' in script
             assert f'"apiKey": "{TOKEN_PLACEHOLDER}"' in script
-            assert 'os.environ.get("REEF_TOKEN", "")' in script
+            assert f'os.environ.get("REEF_TOKEN") or {NO_TOKEN_API_KEY!r}' in script
             response = await client.get(
                 "/reef/harness/install",
                 params={"adapter": "pi", "release_id": first["release_id"]},

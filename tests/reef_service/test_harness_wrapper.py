@@ -9,6 +9,7 @@ import json
 import os
 import re
 import shutil
+import sys
 import tempfile
 import textwrap
 import urllib.error
@@ -19,6 +20,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.client.wrapper import (
     harness,
     main,
@@ -1169,7 +1171,9 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     reef.close()
 
     (request,) = reef.posts("/reef/train")
-    assert set(request["body"]) == {"text", "session", "release_id"}
+    assert set(request["body"]) == {"text", "session", "release_id", "client"}
+    client = request["body"]["client"]
+    assert client["platform"] == sys.platform and set(client["commands"]) == set(CLIENT_COMMANDS)
     assert request["body"]["text"] == "text me when you are blocked"
     assert request["body"]["release_id"] == "rel-3"
     # The proxy stamps a session tag on every call, so the request names the session that ran; the spool carries it.

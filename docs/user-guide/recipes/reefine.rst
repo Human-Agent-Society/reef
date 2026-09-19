@@ -13,10 +13,15 @@ Start the bundled profile with an OpenAI-compatible endpoint:
    reef serve --recipe reefine \
      --inference.upstream-url http://127.0.0.1:11434 \
      --inference.upstream-model gemma4:26b \
-     --inference.upstream-api-key dummy
+     --inference.upstream-api-key dummy \
+     --recipe.config.evolution.multimodal.api_key sk-or-...
 
 For an OpenAI Responses or Anthropic endpoint, add
 ``--inference.upstream-api responses`` or ``--inference.upstream-api anthropic``.
+The last line, an OpenRouter key (or ``REEF_MULTIMODAL_API_KEY``), gives the
+harness image, speech, embedding and decision models (see
+`Images, speech, embeddings and decisions`_); leave it out to go without them,
+or when the upstream is OpenRouter.
 
 The profile listens on ``127.0.0.1:8901``, requires no token unless ``REEF_TOKEN`` is set, and keeps
 state under ``.reef/reefine/``. For custom deployments, copy
@@ -42,7 +47,11 @@ How it works
    reloads every five seconds, naming the step's state, until the result
    is on it.
 2. Step. In ``training-mode: manual`` the service runs one evolve step for
-   each accepted instruction. The served model writes a design first (the
+   each accepted instruction. Where the host can isolate it, a coding agent
+   answers the instruction (see `The agent proposer`_): it edits the tree,
+   runs the changed harness for real and hands the entries back, and a
+   review call reads them against the request. Otherwise the served model
+   answers it in a few calls: it writes a design first (the
    request in one sentence, what triggers the behavior, what state the
    harness must know and where it comes from, what only you can provide as
    ``requires`` items with a ``prompt`` each), then the entries, and a
@@ -81,7 +90,8 @@ Behavior and configuration
 
 * ``training-mode: manual`` runs one step for each accepted instruction on
   ``POST /reef/train``. Use ``hybrid`` to also learn from failing reports.
-* The served model proposes skills, rules, agent commands, or pi extensions.
+* The agent proposer, or the served model where the host cannot isolate the
+  agent, proposes skills, rules, agent commands, or pi extensions.
   Requests and update notices are enabled in the seed by default.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
   human promotion. Client requirements must pass setup before installation.
@@ -98,6 +108,115 @@ Behavior and configuration
   you for it in the session, never stores it in a file of its own and never
   hardcodes it, and its review lists a value the extension asks for or
   stores itself as uncovered.
+
+The agent proposer
+------------------
+
+The text proposer writes an extension it never runs, so a model name it
+guessed or a parameter a provider refuses only shows once you use the
+change. The agent proposer runs the served model as a pi coding agent
+instead. Its working directory holds the tree as one file per entry
+(``harness/skills``, ``rules``, ``commands`` and ``extensions``, plus
+``requires.json`` and ``design.md``), with Reef's own entries, the
+extension API reference among them, read-only beside it. It may read
+documentation on the network, and two tools of its own:
+
+* ``harness_check`` runs the working directory through Reef's admission, as
+  the step will.
+* ``harness_trial`` runs the changed harness for real, online, on a task the
+  agent writes, and returns the session's final text, the tools it called,
+  every image, speech, embedding or decision call it made with the
+  provider's error when one failed, and the end of its stderr.
+
+While it runs, the request page's Activity lists each tool the agent calls,
+each check and trial with its result, and each image or speech call with the
+provider's status, so a long run shows what it is doing; opening the
+``/reef-harness`` spinner in pi lists the latest few.
+
+When the agent stops, its files are read back into the step's mutations,
+``requires`` items and design, and the review runs as for the text
+proposer. The agent's session log lands in the step record as
+``agent-session.jsonl``.
+
+The agent holds no credential. It and its trials reach models through a
+loopback gateway whose address carries a random token: the served model
+with the served key (always the served model, whatever a request names),
+and ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and
+``/v1/decisions`` on the recipe's multimodal gateway (``evolution.multimodal``,
+see below), and the provider's
+model list (``GET /models?modality=``, fetched with its key), so the agent picks
+a model that exists without holding a key. Every call spends from
+``evolution.max_model_calls_per_step`` and is recorded in the step's
+``proposer.json``. Nothing else is reachable through it, Reef's own routes
+included.
+
+Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
+
+* ``bwrap`` (the default where the host can): the agent and its trials run in
+  a bubblewrap jail with an empty environment, a read-only system and only
+  the working directory writable, in a network namespace pasta connects to
+  the internet with no host address reachable but the gateway's port. It
+  needs ``bwrap`` and ``pasta`` (the ``passt`` package) and a service that
+  runs as a non-root user with user namespaces allowed.
+* ``e2b``: the agent and its trials run in an `E2B <https://e2b.dev>`__
+  cloud sandbox, a microVM with the internet and no route to the Reef host.
+  The gateway's port answers at the same loopback address inside it through
+  a tunnel Reef opens from its side (a relay in the sandbox that Reef polls
+  over the sandbox's public address, with a per-run secret), so it works
+  from a laptop as from a server, and no other host port is reachable. The
+  agent's files are copied in, refreshed for each check and trial, and copied
+  back when it stops. It needs ``pip install 'reef-infra[e2b]'`` and an E2B
+  key (``e2b_api_key``, else ``E2B_API_KEY``); ``e2b_template`` names the
+  sandbox image, else Reef builds ``reef-pi-<version>`` (the pinned pi on
+  Node 22) on first use, in about a minute. The sandbox's own user can reach
+  root in it; nothing there holds a key.
+
+  .. code:: bash
+
+     E2B_API_KEY=e2b_... reef serve --recipe reefine \
+       --inference.upstream-url https://openrouter.ai/api \
+       --inference.upstream-model z-ai/glm-5.3 \
+       --recipe.config.evolution.proposer_agent.sandbox e2b
+
+* ``none``: no isolation. The agent runs with the service's user and full
+  network access, fed your clients' text. Choose it only where you trust
+  every client, such as your own machine.
+* Left unset on a host that cannot isolate, the agent is off and the text
+  proposer answers; the service logs why.
+
+``timeout_s`` (1800) bounds the whole agent run and ``trial_timeout_s`` (300)
+each trial. A run past its limit hands back no change. Set
+``evolution.max_model_calls_per_step`` to bound what one request may spend:
+an agent run makes a model call per turn and may probe several provider
+models before it settles on one.
+
+Images, speech, embeddings and decisions
+----------------------------------------
+
+``evolution.multimodal`` names one gateway that serves these modalities behind
+a single key. Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``,
+``/v1/audio/speech`` and ``/v1/decisions`` to it with the key, the way the
+upstream serves chat: an extension calls them at ``REEF_SERVICE_URL`` with the
+scenario and token headers, in the provider's own format, and holds no provider
+key. Nothing is recorded, so these calls are not learning signal. The agent
+proposer's trials reach the same gateway, so an extension it proves in a trial
+calls what the harness will call.
+
+.. code:: yaml
+
+   evolution:
+     multimodal:
+       preset: openrouter          # or openai-compatible (OrcaRouter, LiteLLM, ...)
+       url: https://openrouter.ai/api   # the preset's address unless set; required for openai-compatible
+       api_key: ${REEF_MULTIMODAL_API_KEY}   # or api_key_env: NAME
+
+``api_key`` takes the key the way ``inference.upstream_api_key`` takes the chat
+key; the profile sets it to ``${REEF_MULTIMODAL_API_KEY}``, and
+``--recipe.config.evolution.multimodal.api_key`` sets it on the command line.
+Empty, the upstream key serves when the upstream is the same address, so a
+deployment that chats through OpenRouter needs nothing more. Without a key,
+or for a route the preset does not serve (``openai-compatible`` has no
+decisions), those routes answer 501. Recipes other than reefine offer none.
 
 The health floor
 ----------------
