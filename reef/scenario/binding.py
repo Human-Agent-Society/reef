@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from reef.core.reports import ReportBase
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.surface.base import ArtifactValidator, Surface
 
 
@@ -22,5 +22,3 @@ class ScenarioBinding:
     #: ingress. ``None`` keeps open ingress.
     report_type: type[ReportBase] | None = None
     training_runtime: TrainingRuntime | None = None
-    #: The recipe's relay for ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions``.
-    multimodal_relay: MultimodalRelay | None = None

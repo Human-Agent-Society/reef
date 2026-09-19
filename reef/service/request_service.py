@@ -333,7 +333,9 @@ class RequestService:
     async def relay_multimodal(
         self, headers: Mapping[str, str], payload: dict[str, Any], path: str
     ) -> InferenceStream:
-        """A multimodal call, relayed by the scenario's recipe to the provider it configured; nothing is recorded."""
+        """A multimodal call for a scenario, relayed by the deployment's recipe to the provider it configured;
+        nothing is recorded. The relay is the deployment's: its key and gateway, whatever model a scenario chats
+        with."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         scenario = await asyncio.to_thread(
             self._dispatcher.get_or_create_scenario,
@@ -342,7 +344,7 @@ class RequestService:
         )
         if scenario is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        relay = scenario.multimodal_relay
+        relay = self._dispatcher.recipe.multimodal_relay
         if relay is None:
             raise NotImplementedError(f"the served recipe relays no multimodal calls, so it serves no {path}")
         return await relay.relay(path, payload)

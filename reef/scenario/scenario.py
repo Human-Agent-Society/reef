@@ -12,7 +12,7 @@ from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
@@ -95,11 +95,6 @@ class Scenario:
     def inference_handler(self) -> InferenceHandler | None:
         runtime = self.model_config.runtime
         return runtime.inference_handler if runtime is not None else self._binding.inference_handler
-
-    @property
-    def multimodal_relay(self) -> MultimodalRelay | None:
-        """The recipe's relay for multimodal calls, or ``None`` when the recipe offers none."""
-        return self._binding.multimodal_relay
 
     @property
     def repository(self) -> Repository:
