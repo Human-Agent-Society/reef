@@ -175,6 +175,7 @@ import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
 from reef.core.requirements import required_by
+from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 
@@ -397,6 +398,19 @@ def _extract_reef_token(adapter: str, compose_dir: Path) -> str | None:
         if isinstance(value, str) and value and value != NO_TOKEN_API_KEY:
             return value
     return None
+
+
+def client_report() -> dict[str, Any]:
+    """This machine as a request reports it, so the proposer builds for it rather than for its own sandbox: the
+    platform, and which of ``CLIENT_COMMANDS`` are on the PATH. Read from the PATH; nothing is run."""
+    import platform
+
+    return {
+        "platform": sys.platform,
+        "arch": platform.machine(),
+        "release": platform.release(),
+        "commands": {name: shutil.which(name) is not None for name in CLIENT_COMMANDS},
+    }
 
 
 def _reef_token(adapter: str, compose_dir: str) -> str | None:
@@ -1226,7 +1240,7 @@ def harness(
     # Session and release identify where the request came from; they do not select an inference batch.
     session = _spooled_session(scenario) or str(uuid.uuid4())
 
-    body = {"text": text, "session": session, "release_id": release}
+    body = {"text": text, "session": session, "release_id": release, "client": client_report()}
     token = _reef_token(adapter, compose_dir)
     req = urllib.request.Request(
         f"{upstream}/reef/train",

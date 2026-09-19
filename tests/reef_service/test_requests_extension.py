@@ -25,11 +25,14 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
 
 import pytest
+
+from reef.core.training_request import CLIENT_COMMANDS, TrainingRequest
 
 ASSET = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "requests.ts"
 SKILL = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "pi_extension_api.md"
@@ -362,7 +365,13 @@ def test_the_command_submits_native_training_without_touching_receipts(tmp_path:
         "authorization": "Bearer tok",
         "content-type": "application/json",
     }
+    # The request reports this machine, so the proposer builds for it and not for the sandbox it tries changes in.
+    client = request["body"].pop("client")
     assert request["body"] == {"text": "text me when you are blocked", "session": "sess-1234", "release_id": "v1"}
+    assert client["platform"] == sys.platform and client["arch"] and client["release"]
+    assert list(client["commands"]) == list(CLIENT_COMMANDS)
+    assert client["commands"]["node"] is True  # the test runs the extension under node, which is on the PATH
+    assert TrainingRequest.from_dict({**request["body"], "client": client}).client == client
     assert _notices(out) == [{"kind": "notify", "message": f"{ACCEPTED_NOTICE}&token=tok", "type": "info"}]
     # The watch starts once the request is filed: the footer names the record until the step settles.
     assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}]
@@ -1054,6 +1063,7 @@ def test_file_request_composes_the_text_posts_it_and_starts_the_watch(tmp_path: 
         "authorization": "Bearer tok",
         "content-type": "application/json",
     }
+    assert request["body"].pop("client")["platform"] == sys.platform  # the machine rides with every request
     assert request["body"] == {
         "text": "text me when you are blocked\n\nClarifications:\n- Q: Which channel?\n  A: SMS\n- Q: When?\n  A: Nights",
         "session": "sess-1234",

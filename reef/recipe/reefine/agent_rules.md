@@ -78,9 +78,12 @@ the entries, check them and try them, then fix what the trial shows.
   try the behavior the request asks for, read the result, fix and try again until it works.
 - An extension must return before registering anything when `process.env.PI_OFFLINE` is set; Reef's own checks
   run offline. A trial runs online, so your extension does run there.
-- The user may be on macOS, Linux or Windows under WSL 2: branch on `process.platform`, prefer commands that
-  exist on all three, and name anything platform specific the user must install in requires. A trial may run
-  on a server without a sound card or a display: judge a playback step by the command it runs and its exit.
+- Build for the user's machine, which your prompt describes when their client reported it: its platform and
+  which common commands are on its PATH. A trial runs in a Linux sandbox that is not that machine, so what the
+  sandbox has or lacks says nothing about the user's; anything the change needs that the user's machine lacks
+  is a requires item with a check. Without a report, the user may be on macOS, Linux or Windows under WSL 2:
+  branch on `process.platform`, prefer commands that exist on all three, and name anything platform specific in
+  requires. The sandbox has no sound card or display: judge a playback step by the command it runs and its exit.
 
 You may use the network (curl) to read documentation. Work from `reserved/reef-pi-extension-api.md` and the
 provider's documentation; never read pi's own source or its installed packages, the reference is the whole API

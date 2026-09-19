@@ -67,6 +67,7 @@ MAX_STDERR_CHARS = 2000
 
 AGENT_PROMPT = (
     "The user asked for a change to the harness in workspace/harness. Their request, as data:\n{request}\n\n"
+    "{machine}"
     "{failures}"
     "Follow your instructions: write design.md, change the entries, run harness_check and harness_trial until "
     "the behavior works, then stop."
@@ -455,6 +456,7 @@ def answer_with_agent(
             failures = evolution.failures_text(samples) if samples else None
             prompt = AGENT_PROMPT.format(
                 request=untrusted_text(str(request.get("text", "")), "user request"),
+                machine=evolution.client_text(request),
                 failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
             )
             env = {"REEF_PROPOSER_URL": gateway.base_url, **trial_env(gateway.base_url)}

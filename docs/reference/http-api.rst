@@ -230,6 +230,15 @@ A request step that produced nothing records ``failure``, why: the model
 call failed (how long it took, the reply budget and the endpoint's error)
 or the reply held no usable entry. Other methods may write other keys.
 
+An optional ``client`` reports the requesting machine, so a proposer builds
+for it rather than for the sandbox it tries changes in: ``platform``,
+``arch`` and ``release`` (short words) and ``commands``, a map of command
+names to whether each is on the machine's PATH (at most 64). ``reef-pi`` and
+pi's ``/reef-harness`` send one, reading the PATH without running anything.
+It only informs the proposer: what does not fit that shape is dropped, never
+a reason to refuse the request, and ``training_request.client`` carries what
+was kept.
+
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after record compaction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
