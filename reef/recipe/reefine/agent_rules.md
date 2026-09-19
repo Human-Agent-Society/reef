@@ -61,11 +61,15 @@ format.
 <!-- provider -->
 
 Never guess a model name or a parameter: list the real models first, and read the provider's documentation
-for a model's parameters and formats (a failed trial call shows the provider's error, which usually names
-what is wrong). Let the user override the model with an environment variable the extension reads, with a
-working default.
+for the one you pick (a failed call shows the provider's error, which usually names what is wrong). Take the
+first model and parameters that answer for what the request needs and build on them: do not compare models,
+measure limits such as input length, or tune a choice that works; that is for later, if the user asks. Let the
+user override the model with an environment variable the extension reads, with a working default.
 
 ## Prove it works
+
+A run has a time limit, and a change that never reached a trial is not done: once the design is clear, write
+the entries, check them and try them, then fix what the trial shows.
 
 - `harness_check` runs your workspace through Reef's admission, as the evolve step will. Run it after every
   change and fix what it refuses.
@@ -78,5 +82,7 @@ working default.
   exist on all three, and name anything platform specific the user must install in requires. A trial may run
   on a server without a sound card or a display: judge a playback step by the command it runs and its exit.
 
-You may use the network (curl) to read documentation. Finish by making sure `design.md`, the entries and
+You may use the network (curl) to read documentation. Work from `reserved/reef-pi-extension-api.md` and the
+provider's documentation; never read pi's own source or its installed packages, the reference is the whole API
+an extension may use. Finish by making sure `design.md`, the entries and
 `requires.json` are what you want applied, then stop.
