@@ -21,6 +21,7 @@ import copy
 import functools
 import json
 import logging
+import os
 import re
 import threading
 from collections.abc import Mapping
@@ -265,14 +266,19 @@ def load_tokenizer(path: str):
     return AutoTokenizer.from_pretrained(path, trust_remote_code=True)
 
 
-async def _post_json(url: str, payload: dict[str, Any], timeout_s: float) -> Any | None:
-    """POST and parse one sglang request; any failure is ``None``."""
+async def _post_json(
+    url: str,
+    payload: dict[str, Any],
+    timeout_s: float,
+    headers: Mapping[str, str] | None = None,
+) -> Any | None:
+    """POST and parse one judge request; any failure is ``None``."""
     from aiohttp import ClientError, ClientSession, ClientTimeout
 
     try:
         async with (
             ClientSession(timeout=ClientTimeout(total=timeout_s)) as session,
-            session.post(url, json=payload) as response,
+            session.post(url, json=payload, headers=dict(headers or {})) as response,
         ):
             if response.status >= 400:
                 return None
@@ -285,10 +291,18 @@ async def _post_json(url: str, payload: dict[str, Any], timeout_s: float) -> Any
 class PRMJudge:
     """Run m independent PRM judgments per turn.
 
-    ``generate_url`` is the PRM sglang server's native ``/generate``
-    endpoint; requests are byte-identical to the upstream API server's. A
-    failed or timed-out generation is a failed vote flowing into the same
-    tie rules, so a flaky PRM degrades to neutral instead of blocking.
+    Two dialects reach the same judgment. ``sglang`` posts upstream's verbatim
+        payload to the PRM server's native ``/generate``, applying the chat
+        template locally first. ``openai`` posts chat messages to any
+        OpenAI-compatible ``/chat/completions`` — a hosted provider, or another
+        Reef — and lets the provider own its own template, which is what makes a
+        judge runnable without serving a second model.
+
+        Everything downstream of the generated text is dialect-independent: the
+        prompts, the parser, the vote rule and the hint candidates are upstream's
+        either way. A failed or timed-out generation is a failed vote flowing into
+        the same tie rules, so a flaky judge degrades to neutral instead of
+        blocking.
     """
 
     generate_url: str
@@ -297,12 +311,23 @@ class PRMJudge:
     temperature: float = 0.6
     max_tokens: int = 8192
     timeout_s: float = 120.0
+    #: ``sglang`` (default, upstream's own transport) or ``openai``.
+    api: str = "sglang"
+    #: The provider's model name. Required by, and only used by, ``openai``.
+    model: str = ""
+    #: Bearer credential for ``openai``. Resolved from the environment by
+    #: :func:`build_clients`; never read from a config file.
+    api_key: str = ""
 
     def __post_init__(self) -> None:
         if self.m <= 0:
             raise ValueError("m must be positive")
         if self.timeout_s <= 0:
             raise ValueError("timeout_s must be positive")
+        if self.api not in ("sglang", "openai"):
+            raise ValueError(f"prm api must be 'sglang' or 'openai', got {self.api!r}")
+        if self.api == "openai" and not self.model:
+            raise ValueError("an openai-dialect judge requires prm_model")
 
     async def evaluate(
         self,
@@ -332,6 +357,35 @@ class PRMJudge:
         return votes
 
     async def _generate(self, messages: list[dict[str, str]]) -> str:
+        """One judge generation; "" on failure, which becomes a failed vote."""
+        if self.api == "openai":
+            return await self._generate_openai(messages)
+        return await self._generate_sglang(messages)
+
+    async def _generate_openai(self, messages: list[dict[str, str]]) -> str:
+        """One completion from an OpenAI-compatible provider.
+
+        No local templating: the provider applies its own model's template,
+        so a judge served elsewhere needs no tokenizer here.
+        """
+        payload: dict[str, Any] = {
+            "model": self.model,
+            "messages": [dict(message) for message in messages],
+            "temperature": self.temperature,
+            "max_tokens": self.max_tokens,
+        }
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        data = await _post_json(self.generate_url, payload, self.timeout_s, headers)
+        if not isinstance(data, dict):
+            return ""
+        choices = data.get("choices")
+        if not isinstance(choices, list) or not choices:
+            return ""
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        content = message.get("content") if isinstance(message, dict) else None
+        return content if isinstance(content, str) else ""
+
+    async def _generate_sglang(self, messages: list[dict[str, str]]) -> str:
         """One judge generation (upstream's payload, verbatim); "" on failure."""
         try:
             tokenizer = await asyncio.to_thread(load_tokenizer, self.tokenizer_path)
@@ -448,8 +502,22 @@ def build_clients(config: Mapping[str, Any]) -> tuple[Any, Any, Any]:
         return None, None, None
     tokenizer_path = str(config.get("prm_tokenizer_path", "") or "").strip()
     if not tokenizer_path:
+        # The teacher and the turn renderer need the policy's tokenizer
+        # whichever dialect the judge speaks.
         raise ValueError("OpenClaw-RL judging requires prm_tokenizer_path next to prm_url")
-    generate_url = url.rstrip("/") + "/generate"
+    api = str(config.get("prm_api", "sglang") or "sglang").strip()
+    # An OpenAI-compatible base URL already names its own endpoint; only
+    # sglang's native transport appends a path.
+    generate_url = url.rstrip("/") if api == "openai" else url.rstrip("/") + "/generate"
+    api_key = ""
+    if api == "openai":
+        key_variable = str(config.get("prm_api_key_env", "") or "").strip()
+        if key_variable:
+            # The credential is named, never written: a config file records
+            # which variable holds it, not the secret itself.
+            api_key = os.environ.get(key_variable, "")
+            if not api_key:
+                raise ValueError(f"prm_api_key_env names {key_variable!r}, which is unset")
     prm = PRMJudge(
         generate_url=generate_url,
         tokenizer_path=tokenizer_path,
@@ -457,5 +525,8 @@ def build_clients(config: Mapping[str, Any]) -> tuple[Any, Any, Any]:
         temperature=float(config.get("prm_temperature", 0.6)),
         max_tokens=int(config.get("prm_max_tokens", 8192)),
         timeout_s=float(config.get("prm_timeout_s", 120.0)),
+        api=api,
+        model=str(config.get("prm_model", "") or "").strip(),
+        api_key=api_key,
     )
     return prm, DirectiveTeacher(tokenizer_path=tokenizer_path), ResponseRenderer(tokenizer_path)

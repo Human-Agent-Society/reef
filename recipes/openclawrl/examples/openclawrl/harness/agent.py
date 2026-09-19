@@ -60,7 +60,14 @@ TOKEN = os.environ.get("REEF_TOKEN", "")  # run.sh mints one per run: the stack 
 MODEL = "reef"  # model name hermes sends through the shim
 SCENARIO_PREFIX = "openclawrl-stream"
 MAX_TURNS = 8
-TURN_TIMEOUT_S = 600
+#: Wall-clock ceiling for one ``hermes chat`` turn. A turn that outruns it is
+#: killed, and the benchmark scores the dead turn as a ``no-reply`` failure --
+#: so on a runtime slower than the reference's GPUs this constant silently
+#: converts serving latency into policy failures. Measured on the MLX path
+#: (Qwen3.5-9B, single-sequence serving, M4 Pro) a turn takes 397s at the
+#: median, leaving little headroom under the 600s default; raise it there with
+#: ``OPENCLAWRL_TURN_TIMEOUT_S``. The default keeps the reference unchanged.
+TURN_TIMEOUT_S = int(os.environ.get("OPENCLAWRL_TURN_TIMEOUT_S", "600"))
 SHIM_PORT = 29101
 #: How often to ask the judge whether its reaction has landed.
 REACTION_POLL_S = 2.0
