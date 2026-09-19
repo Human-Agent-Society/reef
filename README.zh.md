@@ -198,13 +198,9 @@ Reefine 是内置的 harness 改进 recipe，自带部署配置；只需指定 p
 ```bash
 reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
-  --inference.upstream-model gemma4:26b \
-  --recipe.config.evolution.multimodal.api_key sk-or-...
+  --inference.upstream-model gemma4:26b
 ```
-
-该示例连接本地 Ollama 服务；最后一行把一个 OpenRouter key 交给 Reef（也可用 `REEF_MULTIMODAL_API_KEY`），让 harness 的
-extension 能生成图片和语音、做文本 embedding、调用决策模型，key 由 Reef 持有，extension 看不到它。不需要这些时省略它；上游是
-OpenRouter 时也可省略，Reef 会沿用上游的 key。使用其他网关时，在配置副本（见下文）里设置 `evolution.multimodal`。使用其他 provider 时，修改
+使用其他 provider 时，修改
 `--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
 `REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，不启用认证（启动前设置 `REEF_TOKEN` 即要求该 token），状态保存在
 `.reef/reefine/`（`--recipe harness-evolve` 是旧名称，启动的是同一个配置）。

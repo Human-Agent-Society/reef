@@ -208,16 +208,9 @@ activated Python environment:
 ```bash
 reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
-  --inference.upstream-model gemma4:26b \
-  --recipe.config.evolution.multimodal.api_key sk-or-...
+  --inference.upstream-model gemma4:26b
 ```
-
-The example connects to a local Ollama server, and the last line gives Reef an
-OpenRouter key (`REEF_MULTIMODAL_API_KEY` works too) so the harness's extensions
-can generate images and speech, embed text, and call decision models; Reef holds
-the key and the extensions never see it. Leave it out to go without them, or
-when the upstream is OpenRouter, whose key Reef then uses. For another gateway, set `evolution.multimodal` in a copy of
-the configuration (below). For another provider, change
+For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
 `REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
 listens on `127.0.0.1:8901` without authentication (set `REEF_TOKEN` before
