@@ -158,6 +158,26 @@ Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
   the internet with no host address reachable but the gateway's port. It
   needs ``bwrap`` and ``pasta`` (the ``passt`` package) and a service that
   runs as a non-root user with user namespaces allowed.
+* ``e2b``: the agent and its trials run in an `E2B <https://e2b.dev>`__
+  cloud sandbox, a microVM with the internet and no route to the Reef host.
+  The gateway's port answers at the same loopback address inside it through
+  a tunnel Reef opens from its side (a relay in the sandbox that Reef polls
+  over the sandbox's public address, with a per-run secret), so it works
+  from a laptop as from a server, and no other host port is reachable. The
+  agent's files are copied in, refreshed for each check and trial, and copied
+  back when it stops. It needs ``pip install 'reef-infra[e2b]'`` and an E2B
+  key (``e2b_api_key``, else ``E2B_API_KEY``); ``e2b_template`` names the
+  sandbox image, else Reef builds ``reef-pi-<version>`` (the pinned pi on
+  Node 22) on first use, in about a minute. The sandbox's own user can reach
+  root in it; nothing there holds a key.
+
+  .. code:: bash
+
+     E2B_API_KEY=e2b_... reef serve --recipe reefine \
+       --inference.upstream-url https://openrouter.ai/api \
+       --inference.upstream-model z-ai/glm-5.3 \
+       --recipe.config.evolution.proposer_agent.sandbox e2b
+
 * ``none``: no isolation. The agent runs with the service's user and full
   network access, fed your clients' text. Choose it only where you trust
   every client, such as your own machine.

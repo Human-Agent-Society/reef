@@ -16,7 +16,8 @@ recipe:
       adapter: pi
       # A coding agent (pi) answers a request: it edits the tree, runs the changed harness to prove it, and
       # hands the entries back. Jailed with bubblewrap and pasta where the host has them; without them the text
-      # proposer answers, unless REEF_PROPOSER_SANDBOX=none runs the agent unisolated (trusted clients only).
+      # proposer answers, unless proposer_agent.sandbox (or REEF_PROPOSER_SANDBOX) is e2b, an E2B cloud sandbox
+      # (E2B_API_KEY), or none, which runs the agent unisolated (trusted clients only).
       propose: reef.recipe.reefine.agent:propose
       proposer_agent:
         timeout_s: 1800

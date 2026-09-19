@@ -25,6 +25,7 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
+from reef.harness.episodes.e2b import E2BExecutor, deployment_owner, reap_leftovers
 from reef.harness.episodes.executor import (
     EpisodeExecutor,
     LocalExecutor,
@@ -77,7 +78,10 @@ def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[E
 
     ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
     but the gateway's, and refuses to start where bwrap or pasta is missing;
-    ``sandbox: none`` runs it unisolated with the service's privileges, and must
+    ``sandbox: e2b`` runs it in an E2B cloud sandbox (``e2b_api_key``, else
+    ``E2B_API_KEY``; ``e2b_template``, else the harness's pinned binary, built on
+    first use) that reaches the gateway through a tunnel and nothing else of the
+    host; ``sandbox: none`` runs it unisolated with the service's privileges, and must
     be chosen. Left empty (and ``REEF_PROPOSER_SANDBOX`` unset), the agent is
     jailed where the host can, and off (the text proposer answers requests)
     where it cannot.
@@ -99,8 +103,19 @@ def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[E
             "full network access, fed text from clients; use it only where you trust every client"
         )
         return LocalExecutor(), timeouts[0], timeouts[1]
+    if sandbox == "e2b":
+        remote = E2BExecutor(
+            api_key=str(section.get("e2b_api_key") or environ.get("E2B_API_KEY") or "").strip(),
+            template=str(section.get("e2b_template") or "").strip(),
+            timeout_s=timeouts[0],
+        )
+        try:
+            remote.preflight()
+        except SandboxUnavailable as exc:
+            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is e2b, but {exc}") from exc
+        return remote, timeouts[0], timeouts[1]
     if sandbox not in ("", "bwrap"):
-        raise RecipeConfigError("evolution.proposer_agent.sandbox must be 'bwrap' or 'none'")
+        raise RecipeConfigError("evolution.proposer_agent.sandbox must be 'bwrap', 'e2b' or 'none'")
     executor = SandboxExecutor(network="isolated")
     try:
         executor.preflight()
@@ -570,6 +585,11 @@ class CordisRecipe(Recipe):
         agent_executor, agent_timeout_s, agent_trial_timeout_s = proposer_agent_settings(
             evolution.get("proposer_agent"), values
         )
+        if isinstance(agent_executor, E2BExecutor):
+            # The deployment's own state directory names its sandboxes; a starting service stops the ones a
+            # previous run left, which a stop mid run never closed.
+            agent_executor = replace(agent_executor, owner=deployment_owner(Path(proposals_dir.strip())))
+            reap_leftovers(agent_executor)
         return {
             "agent_executor": agent_executor,
             "agent_timeout_s": agent_timeout_s,

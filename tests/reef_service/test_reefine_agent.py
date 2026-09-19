@@ -366,6 +366,7 @@ def test_an_isolated_sandbox_runs_the_jail_under_pasta_with_every_forward_named(
 
 @pytest.mark.unit
 def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
+    from reef.harness.episodes.e2b import E2BExecutor
     from reef.harness.episodes.executor import SandboxExecutor, SandboxUnavailable
     from reef.recipe.cordis import proposer_agent_settings
     from reef.recipe.errors import RecipeConfigError
@@ -374,8 +375,20 @@ def test_proposer_agent_settings_choose_the_isolation(monkeypatch) -> None:
     executor, timeout_s, trial_s = proposer_agent_settings({"sandbox": "none", "timeout_s": 60}, {})
     assert isinstance(executor, LocalExecutor) and (timeout_s, trial_s) == (60.0, 300.0)
     assert isinstance(proposer_agent_settings({}, {"REEF_PROPOSER_SANDBOX": "none"})[0], LocalExecutor)
-    with pytest.raises(RecipeConfigError, match="'bwrap' or 'none'"):
+    with pytest.raises(RecipeConfigError, match="'bwrap', 'e2b' or 'none'"):
         proposer_agent_settings({"sandbox": "docker"}, {})
+    # E2B: the key from the section, else the environment; none at all is refused at startup.
+    with pytest.raises(RecipeConfigError, match=r"sandbox is e2b, but .*E2B_API_KEY"):
+        proposer_agent_settings({"sandbox": "e2b"}, {})
+    monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)  # the e2b package is an extra
+    remote, timeout_s, _ = proposer_agent_settings({"sandbox": "e2b", "timeout_s": 900}, {"E2B_API_KEY": "e2b-env"})
+    assert isinstance(remote, E2BExecutor) and remote.api_key == "e2b-env" and remote.timeout_s == 900.0
+    assert remote.template == "" and "e2b-env" not in repr(remote)
+    configured = proposer_agent_settings(
+        {"sandbox": "e2b", "e2b_api_key": "e2b-cfg", "e2b_template": "mine"}, {"E2B_API_KEY": "e2b-env"}
+    )[0]
+    assert isinstance(configured, E2BExecutor) and (configured.api_key, configured.template) == ("e2b-cfg", "mine")
+    monkeypatch.undo()
     with pytest.raises(RecipeConfigError, match="positive number"):
         proposer_agent_settings({"timeout_s": 0}, {})
 
