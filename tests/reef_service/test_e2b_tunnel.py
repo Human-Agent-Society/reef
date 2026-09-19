@@ -234,10 +234,11 @@ def test_an_e2b_executor_needs_its_key(monkeypatch) -> None:
 
 
 @pytest.mark.unit
-def test_a_starting_reef_stops_only_the_sandboxes_its_own_deployment_left(tmp_path: Path, monkeypatch) -> None:
+def test_the_first_sandbox_stops_only_the_ones_its_own_deployment_left(tmp_path: Path, monkeypatch) -> None:
     e2b = pytest.importorskip("e2b")  # the e2b extra; the reap is the SDK's list and kill
 
-    from reef.harness.episodes.e2b import deployment_owner, reap_leftovers
+    import reef.harness.episodes.e2b as e2b_executor
+    from reef.harness.episodes.e2b import deployment_owner
 
     mine, theirs = deployment_owner(tmp_path / "a"), deployment_owner(tmp_path / "b")
     assert mine != theirs and mine == deployment_owner(tmp_path / "a")
@@ -267,8 +268,13 @@ def test_a_starting_reef_stops_only_the_sandboxes_its_own_deployment_left(tmp_pa
 
     executor = E2BExecutor(api_key="k", owner=mine)
     assert executor.labels() == {"reef": "episode", "reef_owner": mine}
-    reap_leftovers(executor).join(5)
+    monkeypatch.setattr(e2b_executor, "REAPED_OWNERS", set())
+    executor.reap_once()
     assert killed == ["left-1", "left-2"]
+    # Once per process: the sandboxes it starts itself are never taken for leftovers.
+    executor.reap_once()
+    assert len(queries) == 1
     assert queries == [({"reef": "episode", "reef_owner": mine}, "k")]
     # No owner, no deployment to speak for: nothing is listed or stopped.
+    E2BExecutor(api_key="k").reap_once()
     assert E2BExecutor(api_key="k").reap() == 0 and len(queries) == 1

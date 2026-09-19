@@ -21,8 +21,11 @@ The template is the harness's pinned binary on Node 22; one Reef builds on
 first use (about a minute) when the alias does not exist yet.
 
 A sandbox carries its deployment as ``owner``; a Reef that stopped mid run
-never closed its sandbox, so a starting Reef stops the ones its deployment
-left (:meth:`E2BExecutor.reap`), and never another deployment's.
+never closed its sandbox, so before a process starts its first sandbox it
+stops the ones its deployment left (:meth:`E2BExecutor.reap_once`), and never
+another deployment's. It waits for that first sandbox rather than reaping at
+start: a second start that cannot bind the port serves no request, so it
+never reaches a peer's sandbox that is still in use.
 """
 
 from __future__ import annotations
@@ -66,6 +69,9 @@ POLLERS = 8
 SANDBOX_MARGIN_S = 600
 #: How long a new relay has to answer before the session gives up on it.
 RELAY_READY_S = 60.0
+#: The deployments this process has reaped: each once, before its first sandbox.
+REAPED_OWNERS: set[str] = set()
+REAP_LOCK = threading.Lock()
 #: Headers that describe one connection and never cross the tunnel.
 HOP_BY_HOP = frozenset(
     {"connection", "content-length", "host", "keep-alive", "te", "trailer", "transfer-encoding", "upgrade"}
@@ -80,24 +86,6 @@ def template_alias(adapter: str, version: str) -> str:
 def deployment_owner(anchor: Path) -> str:
     """Which Reef deployment a sandbox belongs to: this host and one of the deployment's own state directories."""
     return hashlib.sha256(f"{socket.gethostname()}:{anchor.resolve()}".encode()).hexdigest()[:16]
-
-
-def reap_leftovers(executor: E2BExecutor) -> threading.Thread:
-    """Stop the sandboxes a previous run of this deployment left, on a thread so a slow E2B API never holds the
-    service's start up."""
-
-    def run() -> None:
-        try:
-            stopped = executor.reap()
-        except Exception as exc:
-            logger.warning("could not look for E2B sandboxes a previous run left: %s", exc)
-            return
-        if stopped:
-            logger.warning("stopped %d E2B sandbox(es) a previous run of this deployment left running", stopped)
-
-    thread = threading.Thread(target=run, name="reef-e2b-reap", daemon=True)
-    thread.start()
-    return thread
 
 
 def remote_root(root: Path) -> str:
@@ -182,6 +170,23 @@ class E2BExecutor(EpisodeExecutor):
         """The metadata every sandbox this executor starts carries."""
         return {"reef": "episode", **({"reef_owner": self.owner} if self.owner else {})}
 
+    def reap_once(self) -> None:
+        """Stop this deployment's leftovers the first time this process opens a sandbox; a failed look is
+        logged and tried again next time. Held under a lock, so no sandbox of this process starts meanwhile."""
+        if not self.owner:
+            return
+        with REAP_LOCK:
+            if self.owner in REAPED_OWNERS:
+                return
+            try:
+                stopped = self.reap()
+            except Exception as exc:
+                logger.warning("could not look for E2B sandboxes a previous run left: %s", exc)
+                return
+            REAPED_OWNERS.add(self.owner)
+        if stopped:
+            logger.warning("stopped %d E2B sandbox(es) a previous run of this deployment left running", stopped)
+
     def reap(self) -> int:
         """Stop this deployment's running sandboxes and answer how many; without an ``owner`` none is touched."""
         if not self.owner:
@@ -231,6 +236,7 @@ class E2BExecutor(EpisodeExecutor):
             raise EpisodeLaunchError("an E2B sandbox needs a template")
         from e2b import Sandbox
 
+        self.reap_once()
         try:
             if self.npm_package:
                 ensure_template(self.template, self.npm_package, self.api_key)
@@ -468,7 +474,6 @@ __all__ = [
     "deployment_owner",
     "ensure_template",
     "pack",
-    "reap_leftovers",
     "remote_command",
     "remote_root",
     "template_alias",

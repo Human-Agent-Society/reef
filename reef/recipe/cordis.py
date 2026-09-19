@@ -25,7 +25,7 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.e2b import E2BExecutor, deployment_owner, reap_leftovers
+from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
 from reef.harness.episodes.executor import (
     EpisodeExecutor,
     LocalExecutor,
@@ -586,10 +586,9 @@ class CordisRecipe(Recipe):
             evolution.get("proposer_agent"), values
         )
         if isinstance(agent_executor, E2BExecutor):
-            # The deployment's own state directory names its sandboxes; a starting service stops the ones a
+            # The deployment's own state directory names its sandboxes, so its first sandbox can stop the ones a
             # previous run left, which a stop mid run never closed.
             agent_executor = replace(agent_executor, owner=deployment_owner(Path(proposals_dir.strip())))
-            reap_leftovers(agent_executor)
         return {
             "agent_executor": agent_executor,
             "agent_timeout_s": agent_timeout_s,
