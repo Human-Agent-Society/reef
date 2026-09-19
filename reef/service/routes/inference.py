@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import logging
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from typing import Any
 
 from aiohttp import web
 
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.interfaces import MULTIMODAL_ROUTES, InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 from reef.service.streaming import (
@@ -16,8 +17,15 @@ from reef.service.streaming import (
     receipt_sse_events,
     stream_record,
 )
+from reef.service.wire import RELEASE_ID_HEADER
 
 logger = logging.getLogger(__name__)
+
+
+async def _release_header(request_service: RequestService, headers: Mapping[str, str]) -> dict[str, str]:
+    """``x-reef-release-id`` on a file serving scenario's inference responses, so a resident harness learns of a new head on its next call."""
+    head = await asyncio.to_thread(request_service.harness_head, headers)
+    return {} if head is None else {RELEASE_ID_HEADER: head}
 
 
 class _SSERelay:
@@ -68,18 +76,21 @@ async def _relay_inference_stream(
     payload: dict[str, Any],
     *,
     request_service: RequestService,
-    inference_backend: InferenceBackend | None,
+    inference_handler: InferenceHandler | None,
 ) -> web.StreamResponse:
     """Stream one upstream inference to the client and record what it sent."""
     upstream, pending = await request_service.start_stream(
         request.headers,
         payload,
         request.path,
-        inference_backend,
+        inference_handler,
     )
     response_headers = {
-        name: value for name, value in upstream.headers.items() if name.lower() != "x-reef-agent-record-id"
+        name: value
+        for name, value in upstream.headers.items()
+        if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
     }
+    response_headers.update(await _release_header(request_service, request.headers))
     content_type = next(
         (value for name, value in response_headers.items() if name.lower() == "content-type"),
         "",
@@ -151,7 +162,7 @@ def register_inference_routes(
     app: web.Application,
     *,
     request_service: RequestService,
-    inference_backend: InferenceBackend | None,
+    inference_handler: InferenceHandler | None,
 ) -> None:
     async def inference(request: web.Request) -> web.StreamResponse:
         payload = await read_object(request)
@@ -160,19 +171,39 @@ def register_inference_routes(
                 request,
                 payload,
                 request_service=request_service,
-                inference_backend=inference_backend,
+                inference_handler=inference_handler,
             )
         response_payload, item = await request_service.infer_with_data(
             request.headers,
             payload,
             request.path,
-            inference_backend,
+            inference_handler,
         )
-        return web.json_response(response_payload, headers={"x-reef-agent-record-id": item.agent_record_id})
+        headers = {"x-reef-agent-record-id": item.agent_record_id}
+        headers.update(await _release_header(request_service, request.headers))
+        return web.json_response(response_payload, headers=headers)
+
+    async def multimodal(request: web.Request) -> web.StreamResponse:
+        """Relay a multimodal call through the scenario's recipe; the answer streams back unchanged, unrecorded."""
+        payload = await read_object(request)
+        if payload.get("stream") is True:
+            raise web.HTTPBadRequest(text=f"{request.path} does not stream; send the request without stream")
+        upstream = await request_service.relay_multimodal(request.headers, payload, request.path)
+        response = web.StreamResponse(status=upstream.status, headers=upstream.headers)
+        try:
+            await response.prepare(request)
+            async for chunk in upstream.chunks:
+                await response.write(chunk)
+        finally:
+            await upstream.close()
+        return response
 
     app.router.add_post("/v1/chat/completions", inference)
+    app.router.add_post("/v1/responses", inference)
     app.router.add_post("/v1/messages", inference)
     app.router.add_post("/v1/messages/count_tokens", inference)
+    for path in MULTIMODAL_ROUTES:
+        app.router.add_post(path, multimodal)
 
 
 __all__ = ["register_inference_routes"]

@@ -9,7 +9,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import ReefError
-from reef.surface.base import Surface
+from reef.surface.base import ArtifactValidator, InferenceHooks, Surface
 from reef.surface.files import TextFileTree
 from reef.surface.skills.modules import RequestSkillLayer, SkillLayer
 
@@ -32,7 +32,7 @@ def validate_tree(files: Mapping[str, str], layers: Sequence[SkillLayer]) -> Non
 
 
 @dataclass(frozen=True)
-class SkillValidator:
+class SkillValidator(ArtifactValidator):
     """Validate the shape and contents of a layered skill artifact."""
 
     layers: tuple[SkillLayer, ...]
@@ -46,7 +46,7 @@ class SkillValidator:
 
 
 @dataclass(frozen=True)
-class SkillInferenceHooks:
+class SkillInferenceHooks(InferenceHooks):
     """Inject request-aware skill layers in declaration order."""
 
     layers: tuple[RequestSkillLayer, ...]

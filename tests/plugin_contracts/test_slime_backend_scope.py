@@ -15,10 +15,8 @@ def test_reef_never_wires_the_internal_rollout_stack() -> None:
     assert not offenders, offenders
 
 
-def test_rollout_manager_only_accepts_external_training_batches() -> None:
-    source = (ROOT / "reef" / "train" / "slime_backend" / "reef_adapters" / "rollout" / "manager.py").read_text(
-        encoding="utf-8"
-    )
+def test_batch_processor_only_accepts_external_training_batches() -> None:
+    source = (ROOT / "reef" / "train" / "slime_backend" / "reef_adapters" / "batches.py").read_text(encoding="utf-8")
 
     assert "def prepare_external_train_data(self, data):" in source
     for removed_contract in (

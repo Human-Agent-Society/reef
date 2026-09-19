@@ -66,7 +66,7 @@ caps the table those unmatched requests fill, evicting the least recently active
 sessions above it.
 
 When a session's next state arrives, the finished turn is judged
-by a PRM on a private worker. The PRM votes on
+through an independently deployed PRM. The PRM votes on
 whether the message shows acceptance, and on acceptance it also proposes a
 hindsight hint, a short instruction that would have produced this reply if
 the user had given it up front. Judged turns are batched for training
@@ -79,7 +79,7 @@ candidates the engine recorded at generation time. The teacher is the frozen
 base model conditioned on one of the accepted hindsight hints, and the
 objective selects which hint by how well the teacher's top-K overlaps the
 policy's. The weights of the two terms are ``--openclawrl-w-rl`` and
-``--openclawrl-w-opd`` in ``training.slime_flags``, both 1.0 by default.
+``--openclawrl-w-opd`` in ``training.options``, both 1.0 by default.
 
 Configuration
 -------------
@@ -101,11 +101,18 @@ Configuration
    max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
 
 The values above are the recipe's defaults. The example's ``serve.yaml``
-overrides three of them. It points ``prm_url`` and ``prm_tokenizer_path`` at
-the stack's own PRM engine, raises ``prm_timeout_s`` to 3600 because a
+overrides several of them. It points ``prm_url`` and ``prm_tokenizer_path`` at
+the example's independently deployed PRM engine, raises ``prm_timeout_s`` to 3600 because a
 thinking model can spend minutes on a single vote, and sets
 ``prm_record_file`` so every batch leaves one line with the reward split and
 the judge counters.
+
+Reef coordinates inference and training only. OpenClawRL's example Compose
+file owns PRM and student-model startup, health checks and GPU allocation.
+The recipe consumes ``recipe.config.prm-url`` and requires the matching
+``recipe.config.prm-tokenizer-path``; it owns judge request handling. Reef does
+not register, schedule or stop the PRM process. The student-model endpoint is
+used by the simulation harness, outside Reef.
 
 Run the example
 ---------------

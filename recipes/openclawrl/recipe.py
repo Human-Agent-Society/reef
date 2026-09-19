@@ -9,6 +9,7 @@ from recipes.openclawrl.processor import OpenClawRLProcessor
 from recipes.openclawrl.sessions import DEFAULT_MAX_SESSIONS
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
+from reef.train.algos import StepScheduling
 
 _logger = logging.getLogger(__name__)
 
@@ -26,7 +27,7 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
     records into sessions by preferring a harness-supplied session tag and
     falling back to trace matching, judges each turn by its next state against
     the PRM's sglang server, and batches judgments directly — no external
-    grader. The step preparer then applies the verbatim upstream top-K select
+    grader. The training objective then applies the verbatim upstream top-K select
     objective.
 
     Empty ``prm_url`` is correlate-only mode: sessions resolve, nothing
@@ -63,9 +64,10 @@ class OpenClawRLRecipe(WeightTrainingRecipe):
         # The paper objective is the verbatim upstream top-K select loss
         # (recipes/openclawrl/slime), not the plain pg surrogate.
         return WeightTrainingSpec(
-            step_preparer="openclawrl",
-            loss_family="openclawrl",
+            objective="openclawrl",
             processor=OpenClawRLProcessor,
+            # Each turn-sample is its own rollout; the backend's configured step size applies.
+            scheduling=StepScheduling(unit="sample"),
         )
 
     def __post_init__(self) -> None:

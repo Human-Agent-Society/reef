@@ -16,20 +16,19 @@ import json
 from pathlib import Path
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 gepa = pytest.importorskip("gepa")
 
 from gepa.core.adapter import EvaluationBatch
 from gepa.core.state import GEPAState
-
 from recipes.gepa.archive import Archive
-from recipes.gepa.method import GEPAProposer, GEPASelector
+from recipes.gepa.method import EpisodeRunner, Feedback, GEPAProposer, GEPASelectorMixin
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeResult
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.run import EpisodeResult
 from reef.train.cordis_backend.strategies import resolve_episode_scorer
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
-from reef.train.types import TraceSample
 
 TRAIN = [{"input": f"train problem {i}", "answer": "### 1"} for i in range(45)]
 VAL = [{"input": f"validation problem {i}", "answer": "### 1"} for i in range(45)]
@@ -53,6 +52,11 @@ def score_of(output: str) -> float:
 
 def feedback(task: str, output: str, score: float) -> str:
     return "correct" if score >= 1.0 else f"wrong for {task}"
+
+
+class ReefFeedback(Feedback):
+    def feedback(self, task: str, output: str, score: float) -> str:
+        return feedback(task, output, score)
 
 
 def reflect(prompt: str) -> str:
@@ -104,8 +108,8 @@ def run_upstream(run_dir: Path, budget: int):
     return result, log, GEPAState.load(str(run_dir)).i + 1
 
 
-class ReefEpisodes:
-    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
+class ReefEpisodes(EpisodeRunner):
+    def run(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         text = files["pi-agent/AGENTS.md"].rstrip("\n")
         return EpisodeResult(0, "", "", ({"role": "assistant", "content": output_for(text, prompt)},), ())
 
@@ -126,7 +130,7 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
         descriptor=get_adapter("pi"),
         binary=None,
         score_episode=resolve_episode_scorer(evaluate),
-        feedback=feedback,
+        feedback=ReefFeedback(),
         minibatch_size=3,
         rng_seed=0,
         skip_perfect_score=True,
@@ -136,14 +140,14 @@ def run_reef(tmp_path: Path, iterations: int) -> Archive:
         valset_size=len(VAL),
         episode_runner=ReefEpisodes(),
     )
-    selector = GEPASelector(archive)
+    selector = GEPASelectorMixin(archive)
     served = ModelBinding("http://model.test", "m", api_key="k")
     models = ModelBindings(served=served, named={"reflection": Reflector()})
     text = SEED_TEXT
     for iteration in range(iterations):
         plan = archive.plan(len(TRAIN), len(VAL), 3)
         samples = tuple(
-            TraceSample(
+            recorded_trajectory(
                 f"r{iteration}-{index}",
                 {
                     "messages": [{"role": "user", "content": TRAIN[index]["input"]}],

@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import re
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Real
@@ -180,6 +181,10 @@ class WandbExperimentTracker(ExperimentTracker):
         self._failed_run_ids: set[str] = set()
         self._lock = RLock()
 
+    @property
+    def operational_metrics_enabled(self) -> bool:
+        return self.config.active
+
     def bind_scenario(
         self,
         *,
@@ -316,7 +321,7 @@ class WandbExperimentTracker(ExperimentTracker):
         for run in runs:
             try:
                 run.finish()
-            except Exception as exc:  # noqa: PERF203
+            except Exception as exc:
                 logger.warning("W&B shutdown failed (%s)", type(exc).__name__)
 
     def _record_optimizer_steps(self, run: Any, event: TrainingExperimentEvent) -> None:
@@ -425,20 +430,21 @@ class WandbExperimentTracker(ExperimentTracker):
                 run = self._initialize_run(run_id, context)
             if run is None:
                 return
-            event_step = scenario_logger._next_event(namespace, getattr(run, "summary", None))
-            values = {
-                f"{namespace}/event": event_step,
-                **{f"{namespace}/{key}": value for key, value in numeric_metrics.items()},
-            }
             try:
+                event_step = scenario_logger._next_event(namespace, run.summary)
+                values = {
+                    f"{namespace}/event": event_step,
+                    **{f"{namespace}/{key}": value for key, value in numeric_metrics.items()},
+                }
+                if namespace == "operations":
+                    values["operations/time_seconds"] = time.time()
                 if namespace not in scenario_logger._defined_namespaces:
-                    run.define_metric(f"{namespace}/event")
-                    run.define_metric(f"{namespace}/*", step_metric=f"{namespace}/event")
+                    axis = "operations/time_seconds" if namespace == "operations" else f"{namespace}/event"
+                    run.define_metric(axis)
+                    run.define_metric(f"{namespace}/*", step_metric=axis)
                     scenario_logger._defined_namespaces.add(namespace)
                 run.log(values)
-                summary = getattr(run, "summary", None)
-                if summary is not None:
-                    summary[f"reef/{namespace}_events"] = event_step + 1
+                run.summary[f"reef/{namespace}_events"] = event_step + 1
             except Exception as exc:
                 logger.warning("W&B %s logging failed (%s); execution will continue", namespace, type(exc).__name__)
 

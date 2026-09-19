@@ -20,11 +20,12 @@ class PreparedCommit:
     durable first. Persisted as a CommitRecord (reef/scenario/commit_log.py);
     the only construction site is Scenario._append_commit_record.
 
-    ``metrics`` is the preparer's step result, carried opaquely: its schema is
+    ``metrics`` is the objective's step result, carried opaquely: its schema is
     owned by the processor or backend that produced it; the trainer and commit log
     never interpret it, and the harness manifest republishes it verbatim as
     ``gate``. It rides the commit record because that is the only durable
-    version-keyed store, which is what lets provenance survive to serving.
+    version-keyed store, so training metrics remain available when the
+    resulting version is served.
     """
 
     algorithm_state: Mapping[str, Any]

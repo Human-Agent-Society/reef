@@ -40,8 +40,8 @@ body:
   - type: textarea
     id: motivation
     attributes:
-      label: Motivation and evidence
-      description: Describe the problem, affected users, current limitations, and supporting evidence.
+      label: Motivation and supporting results
+      description: Describe the problem, affected users, current limitations, and supporting examples or measurements.
     validations:
       required: true
 

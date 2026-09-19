@@ -1,0 +1,78 @@
+# Built-in Reefine: reef serve --recipe reefine --model ollama/gemma4:26b
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8901
+  # Unset REEF_TOKEN leaves the loopback service without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
+  run-dir: .reef/reefine/stack
+
+recipe:
+  implementation: reef.recipe.reefine:ReefineRecipe
+  # The recipe uses the upstream runtime's model for evaluation as well as serving.
+
+  config:
+    evolution:
+      adapter: pi
+      # A coding agent (pi) answers a request: it edits the tree, runs the changed harness to prove it, and
+      # hands the entries back. Jailed with bubblewrap and pasta where the host has them; without them the text
+      # proposer answers, unless proposer_agent.sandbox (or REEF_PROPOSER_SANDBOX) is e2b, an E2B cloud sandbox
+      # (E2B_API_KEY), or none, which runs the agent unisolated (trusted clients only).
+      propose: reef.recipe.reefine.agent:propose
+      proposer_agent:
+        timeout_s: 1800
+        trial_timeout_s: 300
+      # Images, embeddings, speech and decisions: Reef relays the harness's calls to this gateway with its key,
+      # unrecorded. The key is REEF_MULTIMODAL_API_KEY or --recipe.config.evolution.multimodal.api_key, else the
+      # upstream's when the upstream is this gateway; without one those routes answer 501. For another gateway:
+      # preset: openai-compatible and its url.
+      multimodal:
+        preset: openrouter
+        api_key: ${REEF_MULTIMODAL_API_KEY}
+      evaluate: reef.recipe.reefine.evolution:evaluate
+      # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
+      requests: true
+      # The notice at session start offers the update once the head moved.
+      version_check: true
+      # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
+      review_kinds: [code_extension]
+      # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
+      # that the tree still works (the model binding, the tools, the extensions load), not that the requested
+      # change does; the step page's design and review notes and the person judge the change itself.
+      selection: floor
+      # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
+      step_record_dir: .reef/reefine/steps
+      # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
+      proposals_dir: .reef/reefine/proposals
+      # No binary: at startup reef installs the descriptor's pinned pi under
+      # ~/.local/share/reef-harness/pi, shared with the client install script.
+      # Set evolution.binary to a path to use an install of your own instead.
+      tasks:
+        - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+          as a plain word alone on the last line.'
+      seed:
+        - id: answer-style
+          name: skill
+          config:
+            name: answer-style
+            text: '# answer-style
+
+
+              Starter skill. The evolution loop replaces this placeholder with
+
+              concrete guidance learned from failing tasks.
+
+              '
+    batch-size: 1
+    # One step per instruction and no failure driven step between them: the measurement counts a step per request.
+    training-mode: manual
+
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+storage:
+  agent-record-dir: .reef/reefine/agent-record
+  artifact-repository: .reef/reefine/artifacts.git
+  artifact-work-dir: .reef/reefine/artifact-work
+  artifact-cache-dir: .reef/reefine/artifact-cache

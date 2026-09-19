@@ -1,4 +1,4 @@
-"""Optional helpers for implementing backend-neutral step preparers."""
+"""Optional helpers for implementing backend-neutral training objectives."""
 
 from __future__ import annotations
 

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from reef.harness.nodes import NODE_KINDS
+from reef.harness.tree.nodes import NODE_KINDS
 
 
 def _validate(kind: str, config: dict) -> None:

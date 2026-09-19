@@ -12,12 +12,12 @@ import torch
 import torch.distributed as dist
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
 from slime.utils.distributed_utils import get_gloo_group
-from slime.utils.memory_utils import print_memory
+from slime.utils.memory_utils import clear_memory, print_memory
+from slime.utils.misc import Box
 from slime.utils.reloadable_process_group import destroy_process_groups, reload_process_groups
 from slime.utils.timer import Timer, timer
 from torch_memory_saver import torch_memory_saver
 
-from reef.runtime.names import ADAPTER_SLOTS_DIRNAME
 from reef.train.slime_backend.reef_adapters.megatron.adapter_slots import AdapterSlotSwitcher
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
@@ -25,6 +25,7 @@ from reef.train.slime_backend.reef_adapters.megatron.lora import (
     zero_megatron_lora_adapters,
 )
 from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_lora_adapter_to_path
+from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
     _loss_family_spec,
     drain_worker_metrics,
@@ -83,6 +84,11 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 init_hook(self)
         return result
 
+    def set_rollout_manager(self, inference: Any) -> dict[str, Any]:
+        """Attach directly to inference and return topology to Reef's trainer."""
+        self.rollout_manager = inference
+        return dict(self.train_parallel_config)
+
     # -- Per-scenario adapter slot --------------------------------------
 
     def activate_scenario(self, scenario: str) -> bool:
@@ -117,19 +123,9 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         slots = self.adapter_slots
         return () if slots is None else slots.scenarios
 
-    def sync_serving_runtime_load_id(self) -> str:
-        """Stamp the updater's current version token on every engine, publishing nothing.
-
-        A LoRA bridge that has not trained yet serves the frozen base; the
-        engines still need Reef's canonical ``<incarnation>:<sequence>``
-        token so rollouts carry an admissible producing version.
-        """
-        version = str(self.weight_updater.runtime_load_id)
-        if dist.get_rank() == 0:
-            engines, *_ = ray.get(self.rollout_manager.get_updatable_engines_and_lock.remote())
-            ray.get([engine.set_runtime_load_id.remote(version) for engine in engines])
-        dist.barrier(group=get_gloo_group())
-        return version
+    def initialize_runtime_load_id(self, runtime_load_id: str) -> None:
+        """Initialize only the sender's metadata; Reef initializes receivers."""
+        self.weight_updater.initialize_exact_runtime_load_id(runtime_load_id)
 
     def publish_adapter(self, scenario: str, lora_name: str) -> None:
         """Make ``scenario``'s current adapter resident under ``lora_name``.
@@ -139,6 +135,21 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         """
         self.activate_scenario(scenario)
         self._with_lora_engines(lambda: self.weight_updater.publish_lora_adapter(lora_name))
+
+    def train(
+        self,
+        rollout_id: int,
+        rollout_data_ref: Box,
+        external_data: dict[str, list[torch.Tensor]] | None = None,
+    ) -> dict[str, list[torch.Tensor]] | None:
+        result = super().train(rollout_id, rollout_data_ref, external_data=external_data)
+        if not self.args.offload_train:
+            # A resident model shares its GPUs with the colocated other one.
+            # Slime empties the caching allocator only on the offload path, so
+            # without this a step's freed activations would stay reserved by
+            # this process and be unavailable to the other model's step.
+            clear_memory()
+        return result
 
     def train_actor(self, rollout_id, rollout_data, external_data=None):
         pre_train_hook = _loss_family_hook(self.args, "reef_actor_pre_train_hook_path")
@@ -188,8 +199,8 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
     def get_runtime_load_id(self) -> str:
         return str(self.weight_updater.exact_runtime_load_id)
 
-    def restore_runtime_load_id_for_republication(self, runtime_load_id: str) -> None:
-        self.weight_updater.restore_exact_runtime_load_id(runtime_load_id)
+    def set_runtime_load_id_for_update(self, runtime_load_id: str) -> None:
+        self.weight_updater.prepare_exact_runtime_load_id(runtime_load_id)
 
     def pop_metrics(self) -> dict[str, float]:
         metrics = drain_worker_metrics()
@@ -199,7 +210,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         return metrics
 
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False) -> Any:
-        """Pass bridge-owned generation policy through Slime's actor hook."""
+        """Pass Reef-owned lifecycle policy through the native actor hook."""
         updater = self.weight_updater
         original_update = updater.update_weights
         supported = inspect.signature(original_update).parameters
@@ -219,11 +230,19 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         previous = instance_attributes.get("update_weights")
         had_previous = "update_weights" in instance_attributes
         updater.update_weights = update_with_generation_policy
+        fault_tolerance = getattr(self.args, "use_fault_tolerance", False)
+        if not manage_generation and fault_tolerance:
+            # Pinned Slime's actor hook otherwise recovers inference itself.
+            # Keep its training memory/transport setup while Reef exclusively
+            # decides when a failed receiver is replaced and republished.
+            self.args.use_fault_tolerance = False
         try:
             if not megatron_lora_enabled(self.args):
                 return super().update_weights()
             return self._update_lora_weights()
         finally:
+            if not manage_generation and fault_tolerance:
+                self.args.use_fault_tolerance = fault_tolerance
             if had_previous:
                 updater.update_weights = previous
             else:
@@ -260,6 +279,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             if force_sync and self.args.async_save:
                 maybe_finalize_async_save(blocking=True)
 
+            slots = self.adapter_slots
             if self.args.save_hf is not None and self.role == "actor":
                 output_dir = Path(self.args.save_hf.format(rollout_id=rollout_id))
                 context = torch_memory_saver.disable() if self.args.offload_train else nullcontext()
@@ -268,8 +288,9 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                         self.args,
                         output_dir,
                         self.weight_updater.export_lora_adapter_tensors(),
+                        scenario=None if slots is None else slots.active,
+                        scenario_step=rollout_id,
                     )
-            slots = self.adapter_slots
             if slots is not None and slots.active is not None:
                 # The Megatron checkpoint above holds only the active slot;
                 # every scenario's state must survive a restart on its own.
@@ -299,11 +320,6 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         """Run ``publish`` with rollout engines connected and the actor readable."""
         if self.args.debug_train_only or self.args.debug_rollout_only:
             return
-
-        if self.args.use_fault_tolerance:
-            if dist.get_rank() == 0:
-                ray.get(self.rollout_manager.recover_updatable_engines.remote())
-            dist.barrier(group=get_gloo_group())
 
         (
             rollout_engines,

@@ -27,7 +27,7 @@ from typing import Any
 
 import yaml
 
-from reef.harness.render import RenderError
+from reef.harness.tree.render import RenderError
 
 _PATCH = "dsh/profiles/headless/cordis.patch.yml"
 _ENV = "dsh/.env"

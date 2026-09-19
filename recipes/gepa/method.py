@@ -4,7 +4,7 @@ One GEPA iteration is split across the mechanism's step. ``GEPAProposer``
 owns the half GEPA calls the reflective mutation: sample a parent from the
 archive's Pareto front, evaluate it on a minibatch, reflect on one component
 with the feedback that minibatch produced, evaluate the child on the same
-minibatch, and accept only a strict improvement. ``GEPASelector`` owns the
+minibatch, and accept only a strict improvement. ``GEPASelectorMixin`` owns the
 other half, the full validation pass: the mechanism has already run every
 ``evolution.tasks`` prompt on both compositions by the time ``decide`` is
 called, so the per-task scores in its evaluation are exactly GEPA's valset
@@ -25,20 +25,24 @@ count leaves out.
 from __future__ import annotations
 
 import math
+from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from statistics import fmean
-from typing import Any, Protocol
+from typing import Any
 
-from reef.harness.descriptor import AdapterDescriptor
-from reef.harness.episode import EpisodeError, EpisodeResult, run_episode
-from reef.harness.executor import EpisodeExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindings
-from reef.harness.render import render_composition
-from reef.harness.trajectory import TrajectoryError
-from reef.train.cordis_backend.strategies import EpisodeScorer, Mutation
-from reef.train.evaluation.contracts import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.train.types import TraceSample
+from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.trajectories import recorded_payload
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.episodes.executor import EpisodeExecutor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
+from reef.harness.episodes.trajectory import TrajectoryError
+from reef.harness.tree.mutations import Mutation
+from reef.harness.tree.render import render_composition
+from reef.train.cordis_backend.strategies import EpisodeScorer
+from reef.train.evaluation.evaluators import BackendEvaluateMixin
+from reef.train.types import TrajectoryItem
 
 from . import components, reflection
 from .archive import Archive
@@ -54,16 +58,18 @@ OUTPUTS_KEY = "Generated Outputs"
 FEEDBACK_KEY = "Feedback"
 
 
-class Feedback(Protocol):
+class Feedback(ABC):
     """The ``evolution.feedback`` hook: what the reflection model is told."""
 
-    def __call__(self, task: str, output: str, score: float) -> str: ...
+    @abstractmethod
+    def feedback(self, task: str, output: str, score: float) -> str: ...
 
 
-class EpisodeRunner(Protocol):
-    """``reef.harness.episode.run_episode``, as an injectable interface."""
+class EpisodeRunner(ABC):
+    """``reef.harness.episodes.run.run_episode``, as an injectable interface."""
 
-    def __call__(
+    @abstractmethod
+    def run(
         self,
         descriptor: AdapterDescriptor,
         files: Mapping[str, str],
@@ -73,6 +79,29 @@ class EpisodeRunner(Protocol):
         timeout: float = EPISODE_TIMEOUT_S,
         executor: EpisodeExecutor | None = None,
     ) -> EpisodeResult: ...
+
+
+class HarnessEpisodeRunner(EpisodeRunner):
+    """Execute episodes through Reef's harness runner."""
+
+    def run(
+        self,
+        descriptor: AdapterDescriptor,
+        files: Mapping[str, str],
+        prompt: str,
+        *,
+        binary: str | None = None,
+        timeout: float = EPISODE_TIMEOUT_S,
+        executor: EpisodeExecutor | None = None,
+    ) -> EpisodeResult:
+        return run_episode(descriptor, files, prompt, binary=binary, timeout=timeout, executor=executor)
+
+
+class ScoreFeedback(Feedback):
+    """Explain a result using its numeric score."""
+
+    def feedback(self, task: str, output: str, score: float) -> str:
+        return default_feedback(task, output, score)
 
 
 def default_feedback(task: str, output: str, score: float) -> str:
@@ -119,7 +148,7 @@ class GEPAProposer:
         kinds: Sequence[str],
         valset_size: int,
         reflection_model: str = "reflection",
-        episode_runner: EpisodeRunner = run_episode,
+        episode_runner: EpisodeRunner | None = None,
     ) -> None:
         self._archive = archive
         self._descriptor = descriptor
@@ -136,6 +165,8 @@ class GEPAProposer:
         self._episode_timeout_s = float(episode_timeout_s)
         self._forbid_residue = forbid_residue
         self._score_episode = score_episode
+        if not isinstance(feedback, Feedback):
+            raise TypeError("GEPA feedback must inherit Feedback")
         self._feedback = feedback
         self._minibatch_size = minibatch_size
         archive.rng_seed = rng_seed
@@ -145,12 +176,14 @@ class GEPAProposer:
         self._max_metric_calls = max_metric_calls
         self._kinds = tuple(kinds)
         self._reflection_model = reflection_model
-        self._run_episode = episode_runner
+        self._episode_runner = HarnessEpisodeRunner() if episode_runner is None else episode_runner
+        if not isinstance(self._episode_runner, EpisodeRunner):
+            raise TypeError("GEPA episode_runner must inherit EpisodeRunner")
 
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],
-        samples: tuple[TraceSample, ...],
+        samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
     ) -> tuple[Mutation, ...] | None:
         archive = self._archive
@@ -243,7 +276,7 @@ class GEPAProposer:
         nodes: tuple[tuple[str, object], ...],
         parent: int,
         parent_texts: Mapping[str, str],
-        samples: Sequence[TraceSample],
+        samples: Sequence[TrajectoryItem],
         models: ModelBindings,
     ) -> list[_Example]:
         """The parent's minibatch: free from traffic, or re-run on the parent."""
@@ -253,7 +286,7 @@ class GEPAProposer:
             # parent on the minibatch and counts it, so the traffic that
             # stands in for that evaluation counts the same.
             self._archive.charge(len(batch))
-            return [_Example(task, output, float(sample.score)) for sample, (task, output) in batch]
+            return [_Example(task, output, float(sample.metadata.get("reward"))) for sample, (task, output) in batch]
         examples = []
         for _, (task, _) in batch:
             score, output, error = self._score(nodes, parent_texts, task, models)
@@ -274,7 +307,7 @@ class GEPAProposer:
         )
         self._archive.charge(1)
         try:
-            result = self._run_episode(
+            result = self._episode_runner.run(
                 self._descriptor,
                 files,
                 task,
@@ -298,7 +331,7 @@ class GEPAProposer:
             {
                 INPUTS_KEY: example.task,
                 OUTPUTS_KEY: example.output,
-                FEEDBACK_KEY: example.error or self._feedback(example.task, example.output, example.score),
+                FEEDBACK_KEY: example.error or self._feedback.feedback(example.task, example.output, example.score),
             }
             for example in minibatch
         ]
@@ -317,8 +350,8 @@ class GEPAProposer:
             return models.served
 
 
-class GEPASelector:
-    """GEPA's valset pass and Pareto update, as the selection policy.
+class GEPASelectorMixin(CandidateEvaluationPlugin):
+    """GEPA's valset pass and Pareto update, as a plugin's ``decide()``.
 
     Selection is strict mean improvement over the served composition, which
     keeps the served tree equal to the archive's best candidate - GEPA's
@@ -327,6 +360,7 @@ class GEPASelector:
     """
 
     def __init__(self, archive: Archive) -> None:
+        super().__init__()
         self._archive = archive
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
@@ -379,18 +413,28 @@ class GEPASelector:
         )
 
 
+class GEPAPlugin(GEPASelectorMixin, BackendEvaluateMixin):
+    """GEPA's candidate evaluation: measure through the backend, decide by valset mean."""
+
+    def __init__(self, candidate_backend: Any, archive: Archive) -> None:
+        super().__init__(archive)
+        self._candidate_backend = candidate_backend
+
+
 def _scores(values: Any) -> list[float]:
     """Per-task scores with failed episodes read as zero, never as missing."""
     return [0.0 if value is None else float(value) for value in values]
 
 
-def _traffic(samples: Sequence[TraceSample]) -> list[tuple[TraceSample, tuple[str, str]]]:
+def _traffic(samples: Sequence[TrajectoryItem]) -> list[tuple[TrajectoryItem, tuple[str, str]]]:
     """Each sample as its prompt and the answer the served composition gave.
 
     A recorded request with no user message carries no task to re-run, so it
     is not a minibatch example at all and is dropped here.
     """
-    pairs = [(sample, (_prompt_of(sample.payload), _response_of(sample.payload))) for sample in samples]
+    pairs = [
+        (sample, (_prompt_of(recorded_payload(sample)), _response_of(recorded_payload(sample)))) for sample in samples
+    ]
     return [(sample, texts) for sample, texts in pairs if texts[0]]
 
 

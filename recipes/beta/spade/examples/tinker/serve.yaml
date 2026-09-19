@@ -1,0 +1,60 @@
+# SPADE on Tinker: the served model writes tasks as the Designer and trains on them as the Reasoning Agent.
+# Supply TINKER_API_KEY through the shell, never here; REEF_SPADE_STATE_DIR is where this deployment keeps its state.
+# The generator service runs under the same interpreter as Reef.
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: ${REEF_TOKEN}
+  run-dir: ${REEF_SPADE_STATE_DIR}/stack
+  # The Tinker runtime downloads tokenizer files and saves the initial checkpoint before /healthz answers.
+  ready-timeout: 600
+inference:
+  model-path: Qwen/Qwen3-8B
+  # An agent's episode is many turns; a Designer call is one long reply.
+  timeout-s: 1800
+# The generator service: writes, checks and plays the Designer's tasks, on the host that has Docker and harbor.
+generator:
+  tasks-root: ${REEF_SPADE_STATE_DIR}/tasks
+  # The Reasoning Agent's Harbor agent, thinking off: a thinking model's episode never assembles into one sample.
+  agent:
+    name: terminus-2
+    model_name: openai/{model}
+    kwargs:
+      api_base: "{base_url}/v1"
+      llm_kwargs:
+        api_key: "{api_key}"
+        extra_body:
+          chat_template_kwargs:
+            enable_thinking: false
+recipe:
+  implementation: recipes.beta.spade.recipe:SpadeRecipe
+  config:
+    # A batch is tasks-per-step complete groups of rollouts-per-task episodes of one task.
+    tasks-per-step: 2
+    rollouts-per-task: 4
+    # Qwen3 with thinking off ends each generation prompt with an empty think block the history drops.
+    scaffold-tolerance: 8
+    # The Designer's generations: count tasks each, the next one after batches-per-generation batches trained.
+    generator-url: ${endpoints.generator}
+    generations: 20
+    batches-per-generation: 2
+    count: 8
+    hint-plays: 2
+    description: shell tasks with hidden state under /var and /etc
+    skills: [inspection, repair]
+    state-dir: ${REEF_SPADE_STATE_DIR}/generations
+    checkpoint-every-n-versions: 1
+training:
+  backend: tinker
+  ready-timeout: 1800
+  timeout-s: 1800
+  options:
+    state-dir: ${REEF_SPADE_STATE_DIR}/tinker
+    lora-rank: 32
+    learning-rate: 0.00004
+storage:
+  artifact-repository: ${REEF_SPADE_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${REEF_SPADE_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${REEF_SPADE_STATE_DIR}/artifact-cache
+  agent-record-dir: ${REEF_SPADE_STATE_DIR}/agent-record

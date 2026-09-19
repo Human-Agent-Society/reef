@@ -10,7 +10,6 @@ from collections.abc import Mapping
 from pathlib import Path
 from threading import Lock
 from time import monotonic
-from typing import Protocol, runtime_checkable
 
 from reef.artifact.artifact import (
     LOCAL_RELEASE_PREFIX,
@@ -18,10 +17,11 @@ from reef.artifact.artifact import (
     ArtifactConflict,
     ArtifactPublicationError,
     ArtifactRef,
+    ArtifactRepository,
 )
 
 
-class RepositoryBackend(ABC):
+class RepositoryBackend(ArtifactRepository):
     """Durable storage bound to one scenario repository."""
 
     @abstractmethod
@@ -54,7 +54,41 @@ class RepositoryBackend(ABC):
     ) -> ArtifactRef: ...
 
 
-class CachedRepositoryBackendFactory(ABC):
+class StagedReleaseRepositoryBackend(RepositoryBackend):
+    """Optional storage contract for publication followed by head promotion.
+
+    ``publish(advance_head=False)`` must store resolvable release bytes and
+    metadata without moving the head. ``commit_release`` then promotes that
+    release without publishing its bytes again.
+    """
+
+    @abstractmethod
+    def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
+        """Advance a staged durable release after the scenario commits it.
+
+        Implementations must accept an already-current release so recovery can
+        repeat an interrupted post-commit mirror update without publishing new
+        bytes. They must reject an unrelated current head.
+        """
+        ...
+
+
+class RepositoryBackendFactory(ABC):
+    @abstractmethod
+    def __call__(self, scenario: str) -> RepositoryBackend: ...
+
+
+class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory):
+    @abstractmethod
+    def has_registration(self, scenario: str) -> bool: ...
+
+
+class EnumerableRepositoryBackendFactory(RepositoryBackendFactory):
+    @abstractmethod
+    def list_registrations(self) -> tuple[str, ...]: ...
+
+
+class CachedRepositoryBackendFactory(RegistrationAwareRepositoryBackendFactory, EnumerableRepositoryBackendFactory):
     """Own per-scenario backend caching instead of hiding it in a closure."""
 
     _REGISTRATION_MISS_TTL_SECONDS = 5.0
@@ -105,6 +139,19 @@ class CachedRepositoryBackendFactory(ABC):
             loaded = {name for name, backend in self._backends.items() if backend.metadata() is not None}
         return tuple(sorted(loaded | set(self._list_persisted_registrations())))
 
+    def archive_registration(self, scenario: str) -> tuple[str, ...]:
+        """Forget the scenario's backend and move its durable registration aside; what was archived, by name.
+
+        After this the factory answers ``has_registration`` false and
+        ``list_registrations`` without the name, so a later create under the
+        same name starts from the base artifact. Content-addressed storage
+        the scenario shared with others stays.
+        """
+        with self._lock:
+            self._backends.pop(scenario, None)
+            self._registration_misses.pop(scenario, None)
+        return self._archive_persisted_registration(scenario)
+
     @abstractmethod
     def _build_backend(self, scenario: str) -> RepositoryBackend: ...
 
@@ -114,22 +161,12 @@ class CachedRepositoryBackendFactory(ABC):
     def _list_persisted_registrations(self) -> tuple[str, ...]:
         return ()
 
-
-class RepositoryBackendFactory(Protocol):
-    def __call__(self, scenario: str) -> RepositoryBackend: ...
-
-
-@runtime_checkable
-class RegistrationAwareRepositoryBackendFactory(RepositoryBackendFactory, Protocol):
-    def has_registration(self, scenario: str) -> bool: ...
+    def _archive_persisted_registration(self, scenario: str) -> tuple[str, ...]:
+        """Move the durable registration aside; nothing to do for a backend that registers in memory only."""
+        return ()
 
 
-@runtime_checkable
-class EnumerableRepositoryBackendFactory(RepositoryBackendFactory, Protocol):
-    def list_registrations(self) -> tuple[str, ...]: ...
-
-
-class Repository:
+class Repository(ArtifactRepository):
     """Scenario-scoped release chain and persistence facade."""
 
     def __init__(
@@ -210,6 +247,29 @@ class Repository:
                     f"refusing to advance to {ref.release_id}"
                 )
             self._current_artifact = ref
+
+    def install_checkpoint(self, ref: ArtifactRef, *, expected: ArtifactRef, expected_checkpoint: ArtifactRef) -> None:
+        """Install already-committed serving and checkpoint refs without storage I/O."""
+        with self._head_lock:
+            if self._current_artifact != expected or self._checkpoint_artifact != expected_checkpoint:
+                raise ArtifactConflict("repository heads changed before the committed release was installed")
+            self._current_artifact = ref
+            self._checkpoint_artifact = ref
+
+    def synchronize_checkpoint(self) -> None:
+        """Repair a stale backend head from the committed checkpoint, never vice versa."""
+        checkpoint = self.require_checkpoint_artifact()
+        if self.backend.current() == checkpoint:
+            return
+        if checkpoint.parent_release_id is None:
+            raise ArtifactConflict("a committed checkpoint without a parent cannot repair a different head")
+        parent = self.backend.resolve_release(checkpoint.parent_release_id)
+        self.require_staged_commit_support().commit_release(checkpoint, expected_parent=parent)
+
+    def require_staged_commit_support(self) -> StagedReleaseRepositoryBackend:
+        if not isinstance(self.backend, StagedReleaseRepositoryBackend):
+            raise ArtifactPublicationError("repository backend must implement StagedReleaseRepositoryBackend")
+        return self.backend
 
     def fork(self, *, metadata: Mapping[str, object] | None = None) -> ArtifactRef:
         ref = self.backend.fork(self.base_artifact.release_id, metadata=metadata)

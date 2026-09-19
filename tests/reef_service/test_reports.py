@@ -13,9 +13,10 @@ import pytest
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
+from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ProcessorContext
 
 
@@ -56,6 +57,20 @@ def test_scored_rollout_round_trip() -> None:
     body = schema.to_dict(references=["receipt-1"])
     assert body == {"score": 0.83, "references": ["receipt-1"]}
     assert ScoredRolloutReport.from_dict(body) == schema
+
+
+def test_teacher_context_round_trip() -> None:
+    # The distilling recipes' contract: the teacher context rides metadata, the score is optional.
+    schema = TeacherContextReport(teacher_context="100 degrees Celsius.")
+    body = schema.to_dict(references=["receipt-1"])
+    assert body == {"metadata": {"teacher_context": "100 degrees Celsius."}, "references": ["receipt-1"]}
+    assert TeacherContextReport.from_dict(body) == schema
+    scored = TeacherContextReport.from_dict({"score": 0.5, "metadata": {"teacher_context": "demo"}})
+    assert scored == TeacherContextReport(teacher_context="demo", score=0.5)
+    # A teacher that reads no privileged text (on-policy distillation) leaves the teacher context empty,
+    # and a field at its default is not serialized.
+    assert TeacherContextReport.from_dict({"metadata": {}}) == TeacherContextReport()
+    assert TeacherContextReport().to_dict(references=["receipt-1"]) == {"references": ["receipt-1"]}
 
 
 def test_grouped_rollout_round_trip() -> None:
@@ -112,6 +127,7 @@ def test_minimal_score_only_report_is_a_valid_task_outcome() -> None:
             "metadata.algorithm",
         ),
         (TaskOutcome, {"score": 1.0, "metadata": {"resolved": "yes"}}, "resolved must be a boolean"),
+        (TeacherContextReport, {"metadata": {"teacher_context": 3}}, "metadata.teacher_context must be a string"),
     ],
 )
 def test_violations_name_the_broken_field(report_type: type[ReportBase], payload: dict, fragment: str) -> None:
@@ -185,6 +201,7 @@ def _dispatcher(recipe: Recipe, name: str) -> Dispatcher:
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
 
@@ -228,7 +245,7 @@ def test_undeclared_recipe_keeps_open_ingress_via_anyreport() -> None:
 # there is no report parse for it to name a violation against.
 
 
-def test_tttd_names_grid_mismatch_and_schema_violations() -> None:
+def test_tttd_raises_for_grid_mismatch_and_schema_violations() -> None:
     processor = TTTDProcessor(
         ProcessorContext(
             "discovery",
@@ -236,31 +253,139 @@ def test_tttd_names_grid_mismatch_and_schema_violations() -> None:
             report_type=TTTDGroupedRolloutReport,
         )
     )
-    # Announces an 8x64 grid at a 2x3 scenario: a config-relative rejection
-    # from the judge, named.
+    processor.ingest(
+        AgentRecord.create(
+            scenario="discovery",
+            request_type=RequestType.INFERENCE,
+            agent_record_id="inference-a",
+            payload={},
+        )
+    )
     mismatched = TTTDGroupedRolloutReport(
-        score=1.0, step=0, group=0, rollout=0, groups_per_step=8, rollouts_per_group=64
+        score=1.0,
+        step=0,
+        group=0,
+        rollout=0,
+        groups_per_step=8,
+        rollouts_per_group=64,
     ).to_dict(references=["inference-a"])
-    processor.ingest(
-        AgentRecord.create(
-            scenario="discovery",
-            request_type=RequestType.REPORT,
-            agent_record_id="mismatch",
-            references=("inference-a",),
-            payload=mismatched,
+    with pytest.raises(ValueError, match="8x64"):
+        processor.ingest(
+            AgentRecord.create(
+                scenario="discovery",
+                request_type=RequestType.REPORT,
+                agent_record_id="mismatch",
+                payload=mismatched,
+            )
         )
-    )
-    # Structurally malformed: no coordinates at all — the judge's schema
-    # parse rejects it, named.
-    processor.ingest(
-        AgentRecord.create(
-            scenario="discovery",
-            request_type=RequestType.REPORT,
-            agent_record_id="uncoordinated",
-            references=("inference-b",),
-            payload={"score": 1.0, "references": ["inference-b"]},
+    with pytest.raises(ReportValidationError, match="metadata"):
+        processor.ingest(
+            AgentRecord.create(
+                scenario="discovery",
+                request_type=RequestType.REPORT,
+                agent_record_id="uncoordinated",
+                payload={"score": 1.0, "references": ["inference-a"]},
+            )
         )
-    )
-    reasons = processor.never_reasons
-    assert any("8x64" in reason for reason in reasons)
-    assert any("metadata" in reason for reason in reasons)
+
+
+def test_report_references_are_checked_against_storage_not_processor_cache() -> None:
+    dispatcher = _dispatcher(Recipe(), "recipe")
+    try:
+        scenario = dispatcher.get_or_create_scenario("workload")
+        source = AgentRecord.create(
+            scenario="workload",
+            request_type=RequestType.INFERENCE,
+            agent_record_id="source",
+            payload={},
+        )
+        scenario.records.append(source)  # Stored, but deliberately not ingested by the processor.
+        stored = dispatcher.accept_record(_report_record("feedback", {"references": ["source"], "score": 0.0}))
+        assert stored.references == ("source",)
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize("references", [["missing"], ["foreign"], ["report-source"], ["source", "source"]])
+def test_invalid_report_references_are_not_persisted(references: list[str]) -> None:
+    dispatcher = _dispatcher(Recipe(), "recipe")
+    try:
+        for scenario_name, record_id, request_type in (
+            ("workload", "source", RequestType.INFERENCE),
+            ("other", "foreign", RequestType.INFERENCE),
+            ("workload", "report-source", RequestType.REPORT),
+        ):
+            dispatcher.accept_record(
+                AgentRecord.create(
+                    scenario=scenario_name,
+                    request_type=request_type,
+                    agent_record_id=record_id,
+                    payload={},
+                )
+            )
+        scenario = dispatcher.get_or_create_scenario("workload")
+        with pytest.raises(ReportValidationError, match="reference"):
+            dispatcher.accept_record(_report_record("invalid", {"references": references, "score": 1.0}))
+        assert scenario.records.get_for_audit("workload", "invalid") is None
+    finally:
+        dispatcher.close()
+
+
+def test_missing_reference_rejection_does_not_queue_or_reserve_the_report_id() -> None:
+    dispatcher = _dispatcher(Recipe(), "recipe")
+    try:
+        record = _report_record("feedback", {"references": ["source"], "score": 1.0})
+        with pytest.raises(ReportValidationError):
+            dispatcher.accept_record(record)
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="workload",
+                request_type=RequestType.INFERENCE,
+                agent_record_id="source",
+                payload={},
+            )
+        )
+        scenario = dispatcher.get_or_create_scenario("workload")
+        assert scenario.records.get("workload", "feedback") is None
+        assert dispatcher.accept_record(record).agent_record_id == "feedback"
+    finally:
+        dispatcher.close()
+
+
+def test_report_retry_after_source_purge_remains_idempotent_and_conflicts_fail() -> None:
+    from dataclasses import replace
+    from reef.storage.records import RecordConflict
+
+    dispatcher = _dispatcher(Recipe(), "recipe")
+    try:
+        dispatcher.accept_record(
+            AgentRecord.create(
+                scenario="workload",
+                request_type=RequestType.INFERENCE,
+                agent_record_id="source",
+                payload={},
+            )
+        )
+        record = _report_record("feedback", {"references": ["source"], "score": 1.0})
+        dispatcher.accept_record(record)
+        scenario = dispatcher.get_or_create_scenario("workload")
+        scenario.records.compact("workload", frozenset({"source", "feedback"}))
+        scenario.records.purge_compacted("workload", before=1e20)
+        assert dispatcher.accept_record(record).agent_record_id == "feedback"
+        with pytest.raises(RecordConflict):
+            dispatcher.accept_record(replace(record, payload={**record.payload, "score": 0.0}))
+        assert scenario.records.count("workload") == 0
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize("eligible", [True, False])
+def test_report_eligibility_flag_is_rejected_at_ingress(eligible: bool) -> None:
+    dispatcher = _dispatcher(Recipe(), "recipe")
+    try:
+        with pytest.raises(ReportValidationError, match="eligible"):
+            dispatcher.accept_record(_report_record("invalid", {"metadata": {"training": {"eligible": eligible}}}))
+        scenario = dispatcher.get_or_create_scenario("workload")
+        assert scenario.records.get_for_audit("workload", "invalid") is None
+    finally:
+        dispatcher.close()

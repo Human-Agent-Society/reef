@@ -7,8 +7,9 @@ owner, then use the matching playbook below.
 Core and external extensions
 ----------------------------
 
-Recipes and learning methods are external packages selected by dotted
-reference; Reef does not bundle or register them. Changes to shared runtime or
+Reefine is the built-in harness refinement recipe in ``reef/recipe/reefine/``.
+Other recipes and learning methods are external packages selected by dotted
+reference; Reef does not import those packages at boot. Changes to shared runtime or
 training machinery start with an `RFC issue
 <https://github.com/Human-Agent-Society/reef/issues/new?template=rfc.yml>`__.
 A new top-level package, persisted format, wire contract, or incompatible
@@ -34,13 +35,13 @@ Implementation
   ``<method-package>/processor.py``, subclassing a processor contract
   from ``reef/train/processors/``; extend those contracts only when they do
   not already express it.
-- Put the method's backend-neutral step preparer in
-  ``<method-package>/preparer.py`` (``reef/train/algos/`` holds the
+- Put the method's backend-neutral training objective in
+  ``<method-package>/objective.py`` (``reef/train/algos/`` holds the
   contract). Backend-specific payload
   construction belongs to the concrete integration.
 - A method with its own tensor objective adds a loss family in
   ``<method-package>/slime/`` (spec in ``__init__.py``, hooks in
-  ``objective.py``) and names it in the recipe's ``training_spec()``;
+  ``objective.py``) and names it in the objective's ``loss_family``;
   the `Loss families
   <../developer-guide/loss-families.rst>`__ lists what a family declares.
 - Override ``build_surface`` only when the produced artifact needs delivery
@@ -58,7 +59,7 @@ Surrounding changes
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
 - Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe
-  table when the cookbook carries the method. Update the relevant processor, preparer, or surface
+  table when the cookbook carries the method. Update the relevant processor, objective, or surface
   reference if its public contract changes.
 
 Add a training integration
@@ -74,9 +75,24 @@ Implementation
 - Start an accepted integration in ``reef/train/<integration>/``. Keep its
   implementation, framework adapters, bridge code, and plugins inside that
   subtree.
-- Change ``reef/train/backend.py`` or ``reef/runtime/base.py`` only when the
+- Implement ``TrainingBackend`` from ``reef/runtime/interfaces.py`` for native
+  training operations. ``TrainingRuntime`` in ``reef/runtime/interfaces.py`` is Reef's
+  scheduling interface. The recipe candidate lifecycle is ``CandidateBackend``
+  in ``reef/train/backend.py``.
+- Put the integration's scheduling connection in ``runtime.py`` within its
+  package. Reuse ``reef.train.runtime.ExecutorTrainingRuntime`` when the backend
+  uses Reef's coordinator RPC; keep native optimizer and weight-transfer operations
+  in its ``TrainingBackend`` implementation.
+- Change these shared interfaces only when the
   existing backend-neutral contract is insufficient for more than one
   integration. Contract changes need focused compatibility tests.
+- Implement ``TrainingDeployment`` in the integration to describe process preparation
+  and its runtime connection. Implement ``create_training_plan`` when using Reef's
+  shared model driver; return an unstarted trainer and launch data. Reef selects
+  the inference factory independently and owns both lifecycles. In-process integrations can extend
+  ``InProcessTrainingDeployment``. Expose it through a dotted reference or the
+  ``reef.training_backends`` entry-point group; see `Training backend deployment
+  <../developer-guide/write-a-recipe.rst#training-backend-deployment>`__.
 - Keep step signals in ``reef/train/algos/`` backend-neutral. Translate them
   into framework payloads inside the integration.
 - Declare Python dependencies and source pins in ``pyproject.toml``. Add
@@ -104,15 +120,39 @@ Add a runtime kind
 
 Use this playbook for a new inference provider or a runtime implementation that
 satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
-``reef/runtime/base.py`` before adding configuration.
+``reef/runtime/interfaces.py`` before adding configuration.
 
 - For an external runtime, expose a factory as
   ``package.module:factory_name`` and use that dotted value as the runtime
   ``type``.
-- For an accepted bundled runtime, add an adapter under
-  ``reef/runtime/adapters/``. Subclass ``RuntimeFactory``, set its ``kind``,
+- For a concrete inference backend, add its native implementation under
+  ``reef/inference/<integration>/``. Keep native engine launch, request
+  adaptation, weight reception, and framework imports inside that package.
+  ``reef/runtime/`` holds Reef's backend-neutral interfaces and scheduling;
+  it must not import a concrete inference or training implementation.
+  Implement the applicable contracts in
+  ``reef/runtime/interfaces.py`` when integrating with managed
+  training and publication. Import those contracts instead of the coordinator.
+  Put the integration's ``InferenceRuntime`` implementation in its ``runtime.py``;
+  it may reuse ``reef.inference.runtime.ExecutorInferenceRuntime`` with an explicit
+  request handler. Shared monitoring and engine recovery belong in
+  ``runtime/recovery.py``; publication, residency and transfer locking belong in
+  ``runtime/publication.py``. Shared contracts and version values belong in
+  ``runtime/interfaces.py``.
+- For a registered runtime, subclass ``RuntimeFactory``, set its ``kind``,
   implement ``__call__``, decorate the class with ``@register_runtime_kind``,
-  and import its module from ``reef/runtime/adapters/__init__.py``.
+  and load the selected integration from service assembly. ``RuntimeFactory`` and
+  factory resolution live in ``reef.runtime.deployment``. Runtime is a namespace
+  package: importing ``reef.runtime`` does not register integrations or re-export
+  classes. Keep its top level limited to ``interfaces.py``, ``scheduler.py``,
+  ``deployment.py``, ``publication.py``, ``recovery.py`` and ``executor/``.
+- A ``RuntimeFactory`` can expose ``config_type()`` returning a configuration
+  dataclass whose fields use ``reef.core.config.config_option``. The registry
+  parses that selected schema with the shared CLI/YAML rules and runs the
+  dataclass's validation before calling the factory. Keep schema imports
+  lightweight. Factories without a schema retain their mapping contract.
+  Opaque backend payloads must be declared as object fields and validated by
+  the adapter; do not enumerate backend-native flags in the service layer.
 - Keep provider authentication and provider-native request handling in the
   adapter. Do not import a concrete training backend from ``reef/runtime/``.
 - Test registered and dotted resolution in
@@ -121,13 +161,23 @@ satisfies Reef's backend-neutral lifecycle. Read the runtime contract in
 - Add or update the stack that exercises the runtime under ``recipes/`` and
   document every public setting. Never commit credentials or real provider tokens.
 
+Add a worker executor
+---------------------
+
+Use an ``Executor`` subclass when worker launch or control transport changes
+while the training lifecycle stays the same. Implement the common interface
+under ``reef/runtime/executor/`` for a general-purpose backend, or inside the
+owning training integration for a backend-specific launcher. See
+`Worker executors <../developer-guide/executors.rst>`__ for configuration,
+ownership, rank ordering and the Slime extension contract.
+
 Add a surface or artifact type
 ------------------------------
 
 Artifacts own immutable bytes and release heads; surfaces own validation and
 delivery. A change that needs both still keeps those responsibilities in
 separate packages. Read the `Python API <../reference/python-api.rst#surface>`__ and the
-release-chain section of `Architecture <../getting-started/architecture.rst>`__.
+release-chain section of `Architecture <../getting-started/core-loop.rst>`__.
 
 - Put storage, materialization, or version identity behavior in
   ``reef/artifact/``. A new storage backend implements ``RepositoryBackend``

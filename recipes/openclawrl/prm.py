@@ -277,7 +277,7 @@ async def _post_json(url: str, payload: dict[str, Any], timeout_s: float) -> Any
             if response.status >= 400:
                 return None
             return await response.json()
-    except (asyncio.TimeoutError, ClientError, OSError, ValueError):
+    except (TimeoutError, ClientError, OSError, ValueError):
         return None
 
 

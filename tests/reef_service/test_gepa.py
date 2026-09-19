@@ -12,27 +12,30 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from reef_service._trajectories import recorded_trajectory
 
 from recipes.gepa import components, reflection
 from recipes.gepa.archive import Archive, Candidate
 from recipes.gepa.backend import ARCHIVE_STATE_KEY
-from recipes.gepa.method import GEPAProposer, GEPASelector, default_feedback
+from recipes.gepa.method import EpisodeRunner, Feedback, GEPAPlugin, GEPAProposer, ScoreFeedback
 from recipes.gepa.recipe import GEPARecipe, scenario_archive_path
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.evaluation import EvaluationResult, UpdateCandidate
+from reef.core.trajectories import recorded_payload
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeError, EpisodeResult
-from reef.harness.executor import LocalExecutor
-from reef.harness.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.executor import LocalExecutor
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.run import EpisodeError, EpisodeResult
+from reef.harness.tree.mutations import Mutation
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
-from reef.records import RecordStore
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.train.cordis_backend.strategies import Mutation, resolve_episode_scorer
-from reef.train.evaluation.contracts import EvaluationResult, UpdateCandidate
+from reef.storage.commit_log import CommitLogScenarioStore
+from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
+from reef.train.cordis_backend.strategies import resolve_episode_scorer
 from reef.train.trainer import Trainer
-from reef.train.types import TraceSample
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the scorer can prefer any composition whose instructions carry the marker.
@@ -65,7 +68,7 @@ NODES = (
 SEED = ({"id": "rules", "name": "rules", "config": {"text": SEED_TEXT}},)
 
 TASK = "what is 2+2?"
-SAMPLE = TraceSample(
+SAMPLE = recorded_trajectory(
     "a1",
     {
         "messages": [{"role": "user", "content": TASK}],
@@ -75,7 +78,7 @@ SAMPLE = TraceSample(
 )
 #: The same exchange as the proxy records a streamed reply: the message it
 #: assembled from the chunks sits beside the raw stream body, no ``choices``.
-STREAMED_SAMPLE = TraceSample(
+STREAMED_SAMPLE = recorded_trajectory(
     "a2",
     {
         "messages": [{"role": "user", "content": TASK}],
@@ -97,7 +100,7 @@ def score_rules(task: str, result: EpisodeResult) -> float:
     return 1.0 if MARKER in str(last.get("content", last.get("rules", ""))) else 0.0
 
 
-class FakeEpisodes:
+class FakeEpisodes(EpisodeRunner):
     """An episode runner that answers with the rules text it was rendered."""
 
     def __init__(self, failure: Exception | None = None, *, residue: tuple[str, ...] = ()) -> None:
@@ -108,7 +111,7 @@ class FakeEpisodes:
         self.failure = failure
         self.residue = residue
 
-    def __call__(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
+    def run(self, descriptor, files, prompt, *, binary=None, timeout=600.0, executor=None):
         self.prompts.append(prompt)
         self.executors.append(executor)
         self.timeouts.append(timeout)
@@ -126,7 +129,15 @@ class FakeEpisodes:
 
 
 class FakeChat:
-    """A model binding stand-in that answers one canned reflection reply."""
+    """A model binding stand-in that answers one canned reflection reply; it
+    carries a binding's endpoint fields so the step record's recording seam
+    can wrap it like any declared model."""
+
+    base_url = "http://127.0.0.1:9"
+    model = "reflection"
+    api_key = None
+    api = "openai"
+    timeout_s = 600.0
 
     def __init__(self, reply: str) -> None:
         self.reply = reply
@@ -195,7 +206,7 @@ def proposer(
         descriptor=get_adapter("pi"),
         binary=None,
         score_episode=resolve_episode_scorer(score_rules),
-        feedback=default_feedback,
+        feedback=ScoreFeedback(),
         episode_runner=episodes,
         **settings,
     )
@@ -473,7 +484,7 @@ def test_proposer_enforces_residue_and_finite_score_policy(tmp_path: Path) -> No
         descriptor=get_adapter("pi"),
         binary=None,
         score_episode=resolve_episode_scorer(lambda task, result: float("nan")),
-        feedback=default_feedback,
+        feedback=ScoreFeedback(),
         minibatch_size=1,
         rng_seed=0,
         skip_perfect_score=False,
@@ -501,7 +512,7 @@ def test_a_perfect_minibatch_short_circuits_before_any_model_call(tmp_path: Path
     archive = Archive(tmp_path / "archive.json")
     episodes = FakeEpisodes()
     models, reflector = bindings()
-    solved = TraceSample("a1", dict(SAMPLE.payload), 1.0)
+    solved = recorded_trajectory("a1", dict(recorded_payload(SAMPLE)), 1.0)
 
     assert proposer(archive, episodes)(NODES, (solved,), models) is None
     assert (episodes.prompts, reflector.prompts) == ([], [])
@@ -544,6 +555,13 @@ def evaluation(candidate: tuple, current: tuple) -> EvaluationResult:
     )
 
 
+class DecideOnlyBackend:
+    """Stands in for the training backend: these cases exercise ``decide`` only."""
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        raise AssertionError("this case exercises decide(), not evaluate()")
+
+
 def pending_archive(tmp_path: Path) -> Archive:
     archive = Archive(tmp_path / "archive.json")
     archive.seed({"rules": SEED_TEXT})
@@ -553,7 +571,9 @@ def pending_archive(tmp_path: Path) -> Archive:
 
 def test_the_first_decision_records_both_sides_and_charges_the_candidate(tmp_path: Path) -> None:
     archive = pending_archive(tmp_path)
-    decision = GEPASelector(archive).decide(UpdateCandidate("c1"), evaluation((1.0, None), (0.0, 0.0)))
+    decision = GEPAPlugin(DecideOnlyBackend(), archive).decide(
+        UpdateCandidate("c1"), evaluation((1.0, None), (0.0, 0.0))
+    )
 
     assert decision.selected
     assert (decision.policy, decision.policy_version) == ("gepa", "1")
@@ -573,7 +593,9 @@ def test_the_first_decision_records_both_sides_and_charges_the_candidate(tmp_pat
 
 def test_a_candidate_that_does_not_beat_the_served_mean_is_rejected(tmp_path: Path) -> None:
     archive = pending_archive(tmp_path)
-    decision = GEPASelector(archive).decide(UpdateCandidate("c1"), evaluation((1.0, 0.0), (0.0, 1.0)))
+    decision = GEPAPlugin(DecideOnlyBackend(), archive).decide(
+        UpdateCandidate("c1"), evaluation((1.0, 0.0), (0.0, 1.0))
+    )
 
     assert not decision.selected  # equal means are not an improvement
     assert (archive.served, archive.pending) == (0, None)
@@ -583,7 +605,7 @@ def test_a_candidate_that_does_not_beat_the_served_mean_is_rejected(tmp_path: Pa
 
 def test_the_seed_is_validated_once(tmp_path: Path) -> None:
     archive = pending_archive(tmp_path)
-    selector = GEPASelector(archive)
+    selector = GEPAPlugin(DecideOnlyBackend(), archive)
     selector.decide(UpdateCandidate("c1"), evaluation((0.0, 0.0), (1.0, 1.0)))
     archive.add({"rules": "third"}, 0, [1.0])
     selector.decide(UpdateCandidate("c2"), evaluation((0.0, 0.0), (1.0, 1.0)))
@@ -595,8 +617,12 @@ def test_the_seed_is_validated_once(tmp_path: Path) -> None:
 # -- recipe: config boot and the per-scenario binding -----------------------
 
 
-def feedback_hook(task: str, output: str, score: float) -> str:
-    return f"{task} answered {output} at {score}"
+class FeedbackHook(Feedback):
+    def feedback(self, task: str, output: str, score: float) -> str:
+        return f"{task} answered {output} at {score}"
+
+
+feedback_hook = FeedbackHook()
 
 
 def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
@@ -638,7 +664,7 @@ def test_the_config_boots_the_recipe_and_binds_both_seams(tmp_path: Path) -> Non
     assert built.feedback is feedback_hook
     # Unbound until build: the archive is per scenario, so the seams cannot
     # be filled at config time.
-    assert isinstance(built.build("demo", RecordStore()), Trainer)
+    assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)
 
 
 def test_scenario_archive_path_cannot_escape_its_directory(tmp_path: Path) -> None:
@@ -679,12 +705,12 @@ def test_a_missing_gepa_block_is_refused(tmp_path: Path) -> None:
 
 def test_a_configured_selection_object_is_left_alone(tmp_path: Path) -> None:
     """Only the empty seams are filled: an operator who names a policy keeps it."""
-    from reef.train.evaluation import AlwaysSelect
+    from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
 
     config = sections(tmp_path)
-    config["evolution"]["selection"] = AlwaysSelect()
+    config["evolution"]["selection"] = AlwaysSelectPluginFactory()
     built = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
-    assert isinstance(built.candidate_selector, AlwaysSelect)
+    assert isinstance(built.candidate_plugin, AlwaysSelectPluginFactory)
 
 
 # -- one full step through the real backend and commit path -----------------
@@ -727,6 +753,7 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         built,
         factory,
         agent_record_dir=tmp_path / "agent-record",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
     )
     scenario_name = "../gepa-demo"
     try:
@@ -745,7 +772,8 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         dispatcher.close()
 
     assert result.metrics["published"] is True
-    assert result.metrics["mutation"] == {"op": "update", "id": "rules"}
+    mutation = result.metrics["mutation"]
+    assert (mutation["op"], mutation["id"], mutation["options"]["name"]) == ("update", "rules", "rules")
     gate = result.metrics
     assert (gate["candidate_val_mean"], gate["served_val_mean"], gate["parent"]) == (1.0, 0.0, 0)
     assert (gate["archive_size"], gate["front_size"]) == (2, 1)
@@ -772,7 +800,9 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     initial.mkdir()
     factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     data_dir = tmp_path / "agent-record"
-    dispatcher = Dispatcher(built, factory, agent_record_dir=data_dir)
+    dispatcher = Dispatcher(
+        built, factory, agent_record_dir=data_dir, scenario_storage=SQLiteScenarioStorage(data_dir)
+    )
     try:
         scenario = dispatcher.get_or_create_scenario("gepa-demo")
         assert scenario is not None
@@ -791,7 +821,8 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
         assert second.state[ARCHIVE_STATE_KEY] != committed
         assert json.loads(archive_path.read_text()) == committed
 
-        commit_log = scenario.commit_log
+        assert isinstance(scenario.store, CommitLogScenarioStore)
+        commit_log = scenario.store.commit_log
         assert commit_log is not None
 
         def fail_append(record):
@@ -804,7 +835,9 @@ def test_archive_mirror_does_not_advance_when_a_no_artifact_commit_fails(tmp_pat
     finally:
         dispatcher.close()
 
-    recovered_dispatcher = Dispatcher(built, factory, agent_record_dir=data_dir)
+    recovered_dispatcher = Dispatcher(
+        built, factory, agent_record_dir=data_dir, scenario_storage=SQLiteScenarioStorage(data_dir)
+    )
     try:
         recovered = recovered_dispatcher.get_or_create_scenario("gepa-demo")
         assert recovered is not None

@@ -1,0 +1,78 @@
+# The same stack as serve.yaml on reef's native harness: `./run.sh native`.
+# The loop's tools and loop hooks are nodes, so the proposer may change
+# what the agent can do, not only what it is told.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  # The OpenAI-compatible provider (no /v1 suffix) and the model under test.
+  run-dir: work/stack
+
+recipe:
+  implementation: reef.recipe.cordis:CordisRecipe
+
+  config:
+    evolution:
+      adapter: native
+      # The native variant of the method beside this file (harness/): the same
+      # grader, a proposer whose vocabulary is skills, tools and hooks.
+      propose: tutorials.evolve-your-harness.harness.native_evolution:propose
+      evaluate: tutorials.evolve-your-harness.harness.native_evolution:evaluate
+      # No binary: the native loop is reef's own. run.sh puts a reef-native
+      # launcher for this checkout on PATH; an installed reef ships the script.
+      tasks:
+        - >-
+          [sieve] Write and mentally run a prime sieve: how many primes are below 100000? Reply with the count as a plain
+          integer alone on the last line.
+        - >-
+          [fib] With fib(1) = 1 and fib(2) = 1, compute fib(90) exactly (memoize, do not approximate). Reply with the value
+          as a plain integer alone on the last line.
+        - |-
+          [csv] Compute the median of the value column in this csv:
+          id,value
+          1,12
+          2,47
+          3,3
+          4,88
+          5,21
+          6,56
+          7,9
+          8,74
+          9,30
+          Reply with the median as a plain integer alone on the last line.
+      # The first-boot composition: the loop's shipped tools (read_file,
+      # write_file, run_bash) and its loop guard hook, seeded by reference so
+      # the proposer may retune or replace them, plus the starter skill. It
+      # carries no provider: Reef renders its own model binding into each
+      # evaluation episode.
+      seed:
+        - reef.harness.runners.native.seed:SEED_NODES
+        - id: answer-style
+          name: skill
+          config:
+            name: answer-style
+            text: |
+              # answer-style
+
+              Starter skill. The evolution loop replaces this placeholder with
+              concrete guidance learned from failing tasks.
+
+    batch-size: 1
+    # The default: nobody asks in this demo, and auto refuses POST /reef/train.
+    training-mode: auto
+
+inference:
+  upstream-url: http://127.0.0.1:8000
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+  upstream-model: qwen3-8b
+storage:
+  agent-record-dir: work/agent-record
+  artifact-repository: work/artifacts.git
+  artifact-work-dir: work/artifact-work
+  artifact-cache-dir: work/artifact-cache
+
+execution:
+  evolution:
+    workers: 1  # Auto selects uni for one CPU worker, mp for multiple workers.

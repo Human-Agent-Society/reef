@@ -1,0 +1,124 @@
+# SAO functional-smoke config for recipes/sao/examples/imo_answerbench/run.sh.
+#
+# SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) trains one
+# rollout at a time with no comparison group: batch_size 1 means the dispatcher
+# runs a full train step the moment a rollout's score arrives. The value model
+# computes advantages in-backend via skip-observation GAE, so reef ships no
+# advantages and the family turns Slime's advantage pass on itself. The critic
+# actor colocates on the actor GPUs (fractional placement), so the GPU budget
+# is the same as a critic-free run: actor + rollout.
+#
+# Reduced-model smoke: 2 GPUs, Qwen2.5-1.5B-Instruct. Scale seq-length,
+# model, and GPU counts up for a real run; the objective settings below are the
+# paper's reasoning-domain values and do not change with model size. Changing
+# the model family means updating the model-specific flags in training.options
+# (--padded-vocab-size, --add-qkv-bias, --normalization, ...) to match: Reef
+# derives only size and topology flags from the HF config, and e.g. Qwen3
+# models have no QKV bias, so pointing model_path at one while these flags
+# stay fails the HF-to-Megatron load.
+#
+# Started by run.sh; state under ./work.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: work/stack
+  ready-timeout: 3600
+
+inference:
+  num-gpus: "1"
+  tensor-parallel-size: "1"
+  options:
+    router-port: "30000"
+  model-path: ~/models/Qwen2.5-1.5B-Instruct
+recipe:
+  implementation: recipes.sao.recipe:SAORecipe
+  config:
+    batch-size: 1                      # MUST equal training.config.global_batch_size
+    max-staleness: 18
+    checkpoint-every-n-versions: 1
+training:
+  backend: slime
+  ready-timeout: 900
+  # One SAO training RPC covers critic_steps_per_actor value steps *plus* the
+  # actor step, a checkpoint save, and a weight publish, so it outlasts an
+  # inference request by a wide margin. Match the bridge ceiling instead of
+  # the client default to avoid a stale RUNNING marker.
+  timeout-s: 14400
+  config:
+    # Relative paths resolve against the directory reef serve runs from. The
+    # checkpoint preflight requires roughly 16x the HF model size free on this
+    # filesystem before the stack boots (the critic doubles the training state).
+    checkpoint_dir: work/checkpoints
+    global_batch_size: 1
+  # SAO objective as slime flags: --use-critic creates the value-model group;
+  # the algorithm spec sets --custom-advantage-function-path (skip-observation
+  # GAE) and --custom-pg-loss-function-path (hard-masked DIS calibration)
+  # automatically. --eps-clip / --eps-clip-high are the mask's bounds.
+  # Reef derives architecture flags from the HF config.
+  #
+  # Value-model settings are the paper's (Section 4.1): the critic trains at
+  # 5e-6 against the 1e-6 policy lr, and the first 10 rollout steps train the
+  # critic only. The value head starts from zero, so without the warmup the
+  # first actor steps train on advantages built from an unfitted critic —
+  # the cold-start problem the paper's value-training designs exist to avoid.
+  # Warmup steps still commit one training release per rollout; the actor's
+  # weights first move on step 11.
+  options:
+    megatron-to-hf-mode: "bridge"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "100"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    add-qkv-bias: true
+    normalization: "RMSNorm"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "1"
+    num-gpus-per-node: "2"
+    tensor-model-parallel-size: "1"
+    pipeline-model-parallel-size: "1"
+    seq-length: "4096"
+    rollout-max-response-len: "2048"
+    optimizer: "adam"
+    lr: "1e-6"
+    lr-decay-style: "constant"
+    loss-type: "policy_loss"
+    use-rollout-logprobs: true
+    use-critic: true
+    eps-clip: "0.3"
+    eps-clip-high: "5.0"
+    critic-steps-per-actor: "2"
+    critic-lr: "5e-6"
+    num-critic-only-steps: "10"
+    sao-length-adaptive-lambda: true
+    sao-lambda-alpha: "1.5"
+    gamma: "1.0"
+    lambd: "1.0"
+    entropy-coef: "0.0"
+    n-samples-per-prompt: "1"
+storage:
+  artifact-repository: work/artifacts.git
+  artifact-work-dir: work/artifact-work
+  artifact-cache-dir: work/artifact-cache
+  agent-record-dir: work/agent-record
+observability:
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: sao               # produces group sao/<scenario>
+    # name_prefix: sao
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: work/wandb
+    upload_checkpoints: false

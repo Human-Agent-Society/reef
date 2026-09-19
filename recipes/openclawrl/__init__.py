@@ -7,17 +7,17 @@
 - ``sessions`` / ``turns`` / ``prm`` — the derivation machinery the
   processor calls: how a session is recognized, what one turn's judgment
   gets and answers, what one PRM call does.
-- ``preparer`` — the backend-agnostic step preparer.
+- ``objective`` — the backend-agnostic training objective.
 - ``slime`` — the Slime loss family, its torch objective, and the frozen
   Megatron teacher. Imported by the training driver and workers only; this
   package's public surface never loads it.
 """
 
-from recipes.openclawrl.preparer import OpenClawRLPreparer
+from recipes.openclawrl.objective import OpenClawRLObjective
 from recipes.openclawrl.processor import OpenClawRLProcessor
 from recipes.openclawrl.recipe import OpenClawRLRecipe
 from reef.train.algos.registry import register_loss_family_ref
 
 register_loss_family_ref("openclawrl", "recipes.openclawrl.slime:OpenclawrlAlgorithm")
 
-__all__ = ["OpenClawRLPreparer", "OpenClawRLProcessor", "OpenClawRLRecipe"]
+__all__ = ["OpenClawRLObjective", "OpenClawRLProcessor", "OpenClawRLRecipe"]

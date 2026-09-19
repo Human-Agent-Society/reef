@@ -8,9 +8,10 @@ import os
 import time
 import urllib.error
 import urllib.request
+from abc import ABC, abstractmethod
 from contextlib import suppress
 from dataclasses import dataclass, field
-from typing import Any, Protocol
+from typing import Any
 
 from .state import LLMRequest, LLMResponse
 
@@ -89,13 +90,14 @@ def openrouter_glm_5_2_backend(*, concurrency: int = 16) -> ExecutionBackend:
     )
 
 
-class ExecutionClient(Protocol):
+class ExecutionClient(ABC):
     backend: ExecutionBackend
 
+    @abstractmethod
     def complete(self, request: LLMRequest) -> LLMResponse: ...
 
 
-class OpenAICompatibleExecutionClient:
+class OpenAICompatibleExecutionClient(ExecutionClient):
     """Small synchronous client suitable for the harness thread pool."""
 
     def __init__(self, backend: ExecutionBackend) -> None:

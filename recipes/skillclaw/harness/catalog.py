@@ -30,10 +30,10 @@ from typing import Any
 import yaml
 
 from reef.core.errors import ReefError
-from reef.surface.skills import SkillLayer
+from reef.surface.skills import RequestSkillLayer
 
 
-class SkillCatalogModule(SkillLayer):
+class SkillCatalogModule(RequestSkillLayer):
     """The LLM-read layer for a skill pool: many skills, catalog-injected."""
 
     layer = "pi-agent"

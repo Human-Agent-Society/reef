@@ -8,7 +8,7 @@
 name: pi
 binary: pi
 # The vendor's install channel at the pinned version; consumed by the
-# GET /reef/harness/install script, never by episode runs.
+# GET /reef/harness/install script and harness evolution startup.
 install:
   kind: npm
   package: "@earendil-works/pi-coding-agent"
@@ -20,6 +20,23 @@ env:
   PI_CODING_AGENT_SESSION_DIR: "{root}/sessions"
   PI_OFFLINE: "1"
   PI_SKIP_VERSION_CHECK: "1"
+# An interactive run through reef-pi: online (it talks to reef), but reef pins
+# pi's version, so pi's own update notice would only mislead.
+client_env:
+  PI_SKIP_VERSION_CHECK: "1"
+# pi wants these on PATH at first start and otherwise downloads them from
+# GitHub releases, which rate-limits unauthenticated clients.
+# pi saves sessions under its agent dir, which reef-pi points at a temp copy
+# of the installed tree; kept in the installed tree, --resume and --continue
+# find them in a later run.
+client_state:
+  - path: "pi-agent/sessions"
+    kind: directory
+client_tools:
+  - command: rg
+    package: ripgrep
+  - command: fd
+    package: fd
 files:
   config:
     primary:
@@ -53,6 +70,20 @@ model_binding:
         providers:
           reef:
             api: openai-completions
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}/v1"
+            models:
+              - id: "{model}"
+    - target: primary
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef
+  responses:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: openai-responses
             apiKey: "{api_key}"
             baseUrl: "{base_url}/v1"
             models:

@@ -32,21 +32,15 @@ import shutil
 import tempfile
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
+
+from reef.core.batches import TrajectoryItem
+from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.episodes.run import EpisodeResult
 
 from . import evolver, night, prompts
 from .config import RUN, SUCCESS_THRESHOLD, UNSCORED_SENTINEL, WORKDIR
 from .sessions import annotate_score, build_aggregate_session, parse_recorded, read_skill_names
-
-
-class EpisodeResultLike(Protocol):
-    trajectory: tuple[dict[str, Any], ...]
-
-
-class TraceSampleLike(Protocol):
-    score: float
-    payload: dict[str, Any]
-    source_agent_record_id: str
 
 
 #: Expected final answers of the probe tasks, keyed by the stable prefix
@@ -59,7 +53,7 @@ ANSWERS = {
 
 
 def _report_index() -> dict[str, dict[str, Any]]:
-    """The day ledger: report metadata keyed by the referenced record id."""
+    """The day reports: metadata keyed by the referenced record id."""
     index: dict[str, dict[str, Any]] = {}
     for path in sorted((WORKDIR / RUN).glob("round-*/reports/*.json")):
         try:
@@ -74,17 +68,20 @@ def _report_index() -> dict[str, dict[str, Any]]:
     return index
 
 
-def _fallback_meta(sample: TraceSampleLike) -> dict[str, Any]:
+def _fallback_meta(sample: TrajectoryItem) -> dict[str, Any]:
     """Task metadata derived from the trace alone, for a sample without a
-    ledger entry. The -1.0 sentinel is the unscored report, never a grade.
+    saved report. The -1.0 sentinel is the unscored report, never a grade.
 
     The wire prompt is the composed one (preamble, optional hint, task
     text); the digest wants the task text, so the fixed preamble is
     stripped back off. Success cannot check the no-error rule here: the
-    error channel only exists in the ledger this sample is missing."""
-    score: float | None = None if sample.score == UNSCORED_SENTINEL else float(sample.score)
+    error information only exists in the saved report this sample is missing."""
+    from reef.core.trajectories import recorded_payload, source_record_id
+
+    reward = sample.metadata.get("reward")
+    score: float | None = None if reward is None or reward == UNSCORED_SENTINEL else float(reward)
     prompt = ""
-    for message in sample.payload.get("messages") or []:
+    for message in recorded_payload(sample).get("messages") or []:
         if isinstance(message, dict) and message.get("role") == "user":
             content = message.get("content")
             if isinstance(content, str):
@@ -99,9 +96,9 @@ def _fallback_meta(sample: TraceSampleLike) -> dict[str, Any]:
     preamble_tail = prompts.AGENT_PREAMBLE.rsplit("{timeout_seconds}", 1)[-1]
     if preamble_tail and preamble_tail in prompt:
         prompt = prompt.split(preamble_tail, 1)[1]
-    round_match = re.search(r"-r(\d+)-", sample.source_agent_record_id or "")
+    round_match = re.search(r"-r(\d+)-", source_record_id(sample) or "")
     return {
-        "task_id": sample.source_agent_record_id,
+        "task_id": source_record_id(sample),
         "prompt": prompt,
         "round": int(round_match.group(1)) if round_match else 0,
         "score": score,
@@ -111,10 +108,12 @@ def _fallback_meta(sample: TraceSampleLike) -> dict[str, Any]:
     }
 
 
-def digest(sample: TraceSampleLike, meta: dict[str, Any]) -> dict[str, Any]:
+def digest(sample: TrajectoryItem, meta: dict[str, Any]) -> dict[str, Any]:
     """One task's aggregated session from its recorded traffic and verdict."""
-    task_id = str(meta.get("task_id") or sample.source_agent_record_id)
-    source = parse_recorded(dict(sample.payload), task_id=task_id)
+    from reef.core.trajectories import recorded_payload, source_record_id
+
+    task_id = str(meta.get("task_id") or source_record_id(sample))
+    source = parse_recorded(dict(recorded_payload(sample)), task_id=task_id)
     score = meta.get("score")
     scored = isinstance(score, (int, float))
     if scored:
@@ -170,8 +169,8 @@ def _pool_mutations(incumbent: dict[str, str], evolved: dict[str, str]) -> Seque
 
 def propose(
     nodes: tuple[tuple[str, Any], ...],
-    samples: tuple[TraceSampleLike, ...],
-    models: evolver.ModelsLike,
+    samples: tuple[TrajectoryItem, ...],
+    models: ModelBindings,
 ) -> Sequence[object] | None:
     """One night step over a day of traffic: incumbent pool in, mutations out.
 
@@ -179,10 +178,12 @@ def propose(
     the unchanged night pipeline (summarize, judge backfill, group, one
     decision per skill group plus the no-skill bucket, with every change selected).
     """
+    from reef.core.trajectories import source_record_id
+
     if not samples:
         return None
     index = _report_index()
-    metas = [index.get(sample.source_agent_record_id) or _fallback_meta(sample) for sample in samples]
+    metas = [index.get(source_record_id(sample)) or _fallback_meta(sample) for sample in samples]
     round_index = max((int(meta.get("round") or 0) for meta in metas), default=0)
     # The sealed backend drains session files in name order.
     digests = sorted(
@@ -215,7 +216,7 @@ def propose(
         shutil.rmtree(incumbent, ignore_errors=True)
 
 
-def evaluate(task: str, result: EpisodeResultLike) -> float:
+def evaluate(task: str, result: EpisodeResult) -> float:
     """Grade the last line of the probe episode's final assistant text, 1.0 exact."""
     return grade_probe(task, _final_assistant_text(result.trajectory))
 

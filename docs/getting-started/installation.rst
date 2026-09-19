@@ -31,7 +31,7 @@ Or, to work on Reef itself:
 ``git lfs`` is required: Reef keeps release history in Git, with weight files
 under LFS. The checkout includes the core ``recipe`` example, the paper-backed
 methods under ``recipes/``, and the harness evolution demo under
-``tutorials/harness_evolve/``.
+``tutorials/evolve-your-harness/``.
 
 GPU image, for weight training
 ------------------------------

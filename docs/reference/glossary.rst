@@ -52,14 +52,14 @@ the recipe decides what they mean.
 Recipe
 ------
 
-The method a deployment runs. It binds a processor, a step preparer, a loss
-family, a runtime, and a surface. The core ``recipe`` records without
+The method a deployment runs. It binds a processor, a training objective, a
+runtime, and a surface. The core ``recipe`` records without
 producing updates.
 
 Recipe reference
 ----------------
 
-What ``reef.recipe`` selects. ``recipe`` is the core record-only implementation;
+What ``recipe.implementation`` selects. ``recipe`` is the core record-only implementation;
 a dotted ``package.module:ClassName`` selects an installed method class; any
 other bare name resolves only to a YAML preset under
 ``REEF_RECIPE_CONFIG_DIR``. Reef has no global recipe-implementation registry.
@@ -112,26 +112,29 @@ hooks, and an optional client-pulled file tree, composed as fields on one
 Processor
 ---------
 
-The method's data-side component. It judges each resolved unit, consisting of
-one record plus the reports referencing it, as ``TRAIN``, ``WAIT``, or
-``NEVER``, and assembles
-the accepted units into one typed batch. Reported and computed feedback pick
-different engines.
+The method's data-side component. It assembles records and feedback into a
+typed training batch. Reported feedback uses valid reports with existing
+inference references; computed feedback derives its signal from traffic.
+The engines share batching, consumption, and retention contracts.
 
-Preparer
---------
+Training objective
+------------------
 
-The function that converts a reserved batch into a ``StepSignal`` containing
-the loss family, advantages, and next algorithm state. It is backend neutral
-and imports no training stack. A recipe names it by registered name or dotted
-path.
+The method-owned ``TrainingObjective`` declares its backend loss family and
+prepares a complete reserved batch. Its ``prepare`` method returns advantages,
+metrics, and proposed algorithm state in a ``StepSignal`` before optimizer or
+worker partitioning. It imports no training stack. A recipe selects it by
+registered name or dotted class/instance path and binds the ``StepScheduling``
+the runtime cuts each batch with; the objective only rejects a schedule its
+loss cannot train.
 
 Loss family
 -----------
 
-The tensor objective the training backend runs, declared by
-``WeightTrainingSpec.loss_family``. Separate from the preparer. Bundled:
-``sao``, ``tttd``, ``openclawrl``.
+The backend implementation selected by ``TrainingObjective.loss_family`` and
+exposed through ``WeightTrainingSpec.loss_family``. It computes model-dependent
+terms and the tensor loss. Shipped method families include ``sao``, ``tttd``,
+and ``openclawrl``.
 
 Harness
 -------
@@ -145,7 +148,8 @@ Harness tree
 
 Reef's versioned representation of the mutable files in a harness: config,
 rules, prompt templates, skills, extension code, and, for the ``native``
-adapter, the loop's own tools and hook listeners. Reef serves it over
+adapter, the loop's own tools, hook listeners, and control flow graph. Reef
+serves it over
 ``GET /reef/harness``. An adapter combines the rendered tree with a harness
 executable; that harness and its configured model form the running agent.
 
@@ -159,13 +163,11 @@ the rest of the tree. Updating one needs no GPU.
 Runtime
 -------
 
-Two meanings.
-
-1. **The request-plane contract:** ``InferenceRuntime`` and
-   ``TrainingRuntime``: the external service that executes model work. Inference
-   is always required; GPU training only for weight recipes.
-2. **A training backend integration:** a concrete implementation of that
-   contract, such as Reef's Slime runtime.
+``InferenceRuntime`` executes inference requests and owns admission;
+``TrainingRuntime`` prepares training jobs and exports checkpoints. They are
+independent components. The existing ``RuntimeCandidateBackend`` coordinates
+candidate activation, publication and recovery for weight recipes. Concrete
+backend integrations implement the component operations.
 
 SAO
 ---
@@ -251,5 +253,5 @@ Preset
 ------
 
 A recipe configuration file, ``<name>.yaml`` under ``REEF_RECIPE_CONFIG_DIR``,
-named by ``reef.recipe``. It carries the recipe's own sections; it is not a
+named by ``recipe.implementation``. It carries the recipe's own sections; it is not a
 deployment config and ``reef serve -c`` cannot read it.

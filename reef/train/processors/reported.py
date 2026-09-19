@@ -1,65 +1,38 @@
-"""The reported-feedback processor and shared building blocks.
+"""Reported feedback: assemble existing records, group samples, and reserve batches.
 
-:class:`ReportedFeedbackProcessor` owns the exactly-once state that pairs asynchronously
-arriving inference and report records. Every structure it keeps answers one
-hard requirement of continual serving — delete any one and a documented
-failure returns:
-
-* dedup (``_seen_reports``) — exactly-once under client retries and crash
-  replay;
-* the waiting index — reports legally arrive before the inference records
-  they reference;
-* trained-source refusal — a rollout an acknowledged batch consumed must
-  never train twice, whatever the replay order;
-* groups and slots — grouped recipes need a complete-set barrier and
-  retry-safe coordinates;
-* recomputed retention — the store deletes records, so what is safe to
-  delete must be answerable at any moment, never latched at event time.
-
-Retention is derived, never authored per recipe: live reports and their
-references are protected, consumed and terminal records are releasable, and a
-source is releasable when a terminal report owns it (or training consumed it)
-and no live report still claims it.  That releasable-source set is recomputed
-from live state on every read — never latched at event time — so a late retry
-re-claims a not-yet-compacted source, and a claimant's later death frees the
-source it blocked.
-
+Ingress validates references against storage before accepting reports. The
+processor consumes records in append order, so references are already present.
+Deduplication, consumed-source tracking, and group slots preserve retry behavior;
+retention protects every live report and the inference records it references.
 """
 
 from __future__ import annotations
 
 import logging
 import math
+import time
 from abc import ABC, abstractmethod
-from collections import Counter
 from collections.abc import Callable, Hashable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from enum import Enum
 from typing import Any, cast
 
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.reports import ReportBase, ReportValidationError
+from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.common import (
-    make_multi_turn_policy_sample,
-    make_policy_sample,
-    report_is_trainable,
+    make_multi_turn_policy_trajectory,
+    make_policy_trajectory,
     report_score,
     sample_assembly_config_fields,
 )
-from reef.train.types import PolicySample, ProcessorContext, TrainingBatch
+from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
 
 __all__ = [
-    "NEVER",
-    "WAIT",
-    "BatchUnit",
-    "Candidate",
     "GroupDecision",
-    "Outcome",
     "ReportContext",
-    "ReportDecision",
     "ReportedFeedbackProcessor",
     "SampleAssembly",
 ]
@@ -68,60 +41,8 @@ __all__ = [
 # ---------------------------------------------------------------- value types
 
 
-class Outcome(Enum):
-    """The one tri-state answer ``judge`` returns per report."""
-
-    TRAIN = "train"
-    WAIT = "wait"
-    NEVER = "never"
-
-
-@dataclass(frozen=True)
-class ReportDecision:
-    """The decision for one report, plus its candidate when accepted for training.
-
-    ``group_key`` addresses the candidate into a group (``None`` means the
-    candidate is its own singleton batch unit). ``slot`` is an optional
-    idempotency key within the group: the first accepted report at a slot
-    wins, and a retry at an occupied slot is terminal.
-
-    ``reason`` names why a ``NEVER`` outcome was reached (a schema violation,
-    a tensor-contract failure); the engine logs each distinct reason once and
-    counts it, so malformed reports surface instead of vanishing silently.
-    """
-
-    outcome: Outcome
-    value: Any = None
-    group_key: Hashable | None = None
-    slot: Hashable | None = None
-    reason: str | None = None
-
-    def __post_init__(self) -> None:
-        # The engine branches on ``outcome is Outcome.X``; a non-Outcome (say,
-        # a ReportDecision passed where its outcome was meant) would silently fall
-        # through every branch and be treated as TRAIN. Fail at construction.
-        if not isinstance(self.outcome, Outcome):
-            raise TypeError(
-                f"ReportDecision.outcome must be an Outcome, got {type(self.outcome).__name__}: {self.outcome!r}"
-            )
-
-    @classmethod
-    def train(cls, value: Any, *, group_key: Hashable | None = None, slot: Hashable | None = None) -> ReportDecision:
-        return cls(Outcome.TRAIN, value=value, group_key=group_key, slot=slot)
-
-    @classmethod
-    def never(cls, reason: str) -> ReportDecision:
-        """A named terminal decision — use over bare :data:`NEVER` whenever the cause is known."""
-        return cls(Outcome.NEVER, reason=reason)
-
-
-#: Shared non-training report decisions.
-WAIT = ReportDecision(Outcome.WAIT)
-NEVER = ReportDecision(Outcome.NEVER)
-
-
 class GroupDecision(Enum):
-    """The decision for a candidate group: ready, incomplete, or invalid."""
+    """The decision for a report group: ready, incomplete, or invalid."""
 
     READY = "ready"
     INCOMPLETE = "incomplete"
@@ -130,83 +51,45 @@ class GroupDecision(Enum):
 
 @dataclass(frozen=True)
 class ReportContext:
-    """One report plus the score, eligibility, and references resolved for its decision.
-
-    ``inferences`` is ``None`` while at least one referenced inference has not
-    arrived (the only state where ``WAIT`` is a legal outcome) and the empty
-    tuple when the reference list itself is malformed (duplicate references).
-    ``parsed_report`` is the typed instance of the schema owned by the bound
-    recipe; it is ``None`` when that recipe deliberately keeps ingress open.
-    """
+    """A valid report and its inference records, in reference order."""
 
     report: AgentRecord
     score: float | None
-    trainable: bool
-    inferences: tuple[AgentRecord, ...] | None
+    inferences: tuple[AgentRecord, ...]
     parsed_report: ReportBase | None = None
 
     @property
     def references(self) -> tuple[str, ...]:
         return self.report.references
 
-    def eligibility(self) -> ReportDecision | None:
-        """The one eligibility gate every score-based judge applies first.
-
-        Returns the :data:`NEVER` decision for a report that can never train —
-        no references, no finite numeric score (``NaN``/``inf`` never train),
-        or an explicit ineligibility marker; the :data:`WAIT` decision while a
-        referenced inference has not arrived; and ``None`` for a resolved,
-        eligible report whose decision is now the recipe's own policy.
-        """
-        if not self.references or self.score is None or not math.isfinite(self.score) or not self.trainable:
-            return NEVER
-        if self.inferences is None:
-            return WAIT
-        return None
+    def require_score(self) -> float:
+        """Read a finite reward for a training method that needs one."""
+        if self.score is None or not math.isfinite(self.score):
+            raise ValueError("training data requires a finite report score")
+        return self.score
 
 
 @dataclass(frozen=True)
-class Candidate:
-    """One accepted report's contribution to a batch, cached at decision time."""
+class _PendingReport:
+    """Processor-owned assembly and consumption state; never passed to recipes."""
 
     order: int
-    value: Any
-    report_agent_record_id: str
-    source_agent_record_ids: frozenset[str]
-    slot: Hashable
-
-
-@dataclass(frozen=True)
-class BatchUnit:
-    """One batch unit: a singleton candidate or one ready group."""
-
+    item: TrainDataItem
+    report: AgentRecord
     group_key: Hashable | None
-    candidates: tuple[Candidate, ...]
+    slot: Hashable
 
 
 # ------------------------------------------------- reported-feedback processor
 
 
 class ReportedFeedbackProcessor(DataProcessor, ABC):
-    """The report↔inference engine: reports judged, paired, and batched.
+    """Assemble valid reports and their existing inference records into batches.
 
-    A recipe subclasses it and writes:
-
-    * ``judge`` — accept one resolved report (with the candidate it
-      contributes), wait for its references, or reject it;
-    * ``make_batch`` — shape the selected units into its batch type;
-    * ``decide_group`` — grouped recipes only: is a group ready, incomplete,
-      or invalid;
-    * one-line class attributes: ``output_schema``,
-      ``exclusive_sources``, ``ordered_groups``.
-
-    Everything else — dedup, the waiting index, exactly-once consumption,
-    retention, crash replay — is the engine's.
-
-    The line, in reading order: ``ingest`` (arrival), ``_judge`` (the
-    recipe's judge routed: WAIT / NEVER / TRAIN), ``build_batch`` (the
-    recipe's ``make_batch`` over the selected units), ``acknowledge``
-    (consumed; retention releases).
+    Recipes implement ``make_sample`` and ``make_batch``, plus ``grouping``
+    and ``decide_group`` for grouped methods. The engine owns deduplication, group slots, reservations,
+    consumption, and retention. Invalid references raise immediately; training
+    data failures propagate instead of silently dropping reports.
     """
 
     required_request_types = frozenset({RequestType.INFERENCE, RequestType.REPORT})
@@ -222,32 +105,40 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._inferences: dict[str, AgentRecord] = {}
 
         # --- report lifecycle ---
-        self._reports: dict[str, AgentRecord] = {}  # live: waiting or accepted-but-unconsumed
+        self._reports: dict[str, AgentRecord] = {}  # live: assembled or failed, not consumed
         self._seen_reports: set[str] = set()  # dedup
         self._consumed: set[str] = set()  # acknowledged batch members
         self._terminal: set[str] = set()  # terminal reports
-        #: Named NEVER reasons (``ReportDecision.never``), counted per reason so
-        #: violations are observable instead of silent drops.
-        self._never_reasons: Counter[str] = Counter()
 
         # --- source ownership ---
         self._trained_sources: set[str] = set()  # consumed by an acknowledged batch
         self._terminal_owned_sources: set[str] = set()  # owned by terminal reports
 
-        # --- waiting index ---
-        self._waiting: dict[str, set[str]] = {}  # inference id → waiting report ids
-
-        # --- candidate cache ---
-        self._singletons: dict[str, Candidate] = {}  # report id → singleton candidate
-        self._groups: dict[Hashable, dict[Hashable, Candidate]] = {}  # group key → slot → candidate
+        # --- buffered reports ---
+        self.singletons: dict[str, _PendingReport] = {}  # report id → buffered report
+        self._groups: dict[Hashable, dict[Hashable, _PendingReport]] = {}  # group key → slot → buffered report
         self._ready_groups: set[Hashable] = set()
         self._discarded_groups: set[Hashable] = set()
 
         # --- pending batch ---
-        self._pending_units: tuple[BatchUnit, ...] | None = None
+        self._pending_reports: tuple[_PendingReport, ...] | None = None
         self._next_order = 0
+        self._manual_limit_warned = False
 
     # ------------------------------------------------------- the recipe hooks
+
+    def operational_metrics(self) -> Mapping[str, float | int]:
+        """Unconsumed reports, excluding the reserved batch; readiness is recipe-owned."""
+        reserved = {pending.report.agent_record_id for pending in self._pending_reports or ()}
+        waiting = [report for record_id, report in self._reports.items() if record_id not in reserved]
+        return {
+            **super().operational_metrics(),
+            "unreserved_reports": len(waiting),
+            "reserved_reports": len(reserved),
+            "oldest_report_wait_seconds": (
+                max(0.0, time.time() - min(report.created_at for report in waiting)) if waiting else 0.0
+            ),
+        }
 
     #: The batch type ``make_batch`` returns; the trainer validates it.
     output_schema: type[TrainingBatch] = TrainingBatch
@@ -255,175 +146,178 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     exclusive_sources: bool = False
     #: Batch ready groups in group-key order instead of arrival order.
     ordered_groups: bool = False
+    #: Units held in manual mode beyond this many batches are released, oldest first.
+    manual_unit_cap_batches: int = 4
 
     @abstractmethod
-    def judge(self, context: ReportContext) -> ReportDecision:
-        """Accept, reject, or wait on one resolved report.
+    def make_sample(self, context: ReportContext) -> TrainDataItem:
+        """Assemble valid feedback into data; raise on a broken training contract.
 
-        Called inside ``ingest`` on the trainer's thread — a pure decision
-        on data already in hand, never a model call (the computed-feedback processor's
-        ``async def judge`` is the tier for that).
+        Runs on the trainer thread without network or model calls. Every
+        valid report produces a sample; this hook does not accept/reject reports.
         """
 
-    def decide_group(self, key: Hashable, candidates: tuple[Candidate, ...]) -> GroupDecision:
-        """Decide whether an accepted candidate group is ready, incomplete, or invalid."""
-        raise NotImplementedError(
-            f"{type(self).__name__} produced a grouped candidate without a decide_group override"
-        )
+    def is_training_report(self, report: AgentRecord) -> bool:
+        """Whether a valid report is this method's training data.
+
+        A report that is not, such as another role's signal sharing the
+        scenario, is released and never assembled; nothing about it can fail
+        ingestion. Its sources are released with it only under ``exclusive_sources``
+        or when it references more than one inference; a single referenced
+        inference stays retained for a report that trains on it. The default
+        takes every report.
+        """
+        return True
+
+    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        """Return the batching group and retry slot; defaults to an independent report.
+
+        These coordinates belong to ingestion, separately from an item's
+        comparison group. For example, TTTD batches a whole step containing
+        several comparison groups. A None slot uses the report id.
+        """
+        return None, None
+
+    def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
+        """Decide whether the group's assembled items are ready, incomplete, or invalid."""
+        raise NotImplementedError(f"{type(self).__name__} produced a group without a decide_group override")
 
     @abstractmethod
-    def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> TrainingBatch:
-        """Shape the selected units into the recipe's typed batch."""
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        """Build a batch from selected items, in group and arrival order.
 
-    @property
-    def never_reasons(self) -> Mapping[str, int]:
-        """Counts of named terminal rejections (``ReportDecision.never`` reasons) since construction."""
-        return dict(self._never_reasons)
-
-    # ---------------------------------------------------------------- ingest
+        The processor tracks consumption independently, including any selected
+        items the recipe omits from the resulting batch.
+        """
 
     def ingest(self, item: AgentRecord) -> None:
-        # 1. An inference record: store it and re-judge the reports that
-        #    were waiting on it, once their last reference has arrived.
+        if item.scenario != self.scenario:
+            raise ReportValidationError("records must belong to the processor's scenario")
+        if item.request_type is RequestType.TRAIN:
+            super().ingest(item)
+            return
         if item.request_type is RequestType.INFERENCE:
             self._inferences[item.agent_record_id] = item
-            for report_id in tuple(self._waiting.pop(item.agent_record_id, ())):
-                report = self._reports.get(report_id)
-                if report is not None and all(ref in self._inferences for ref in report.references):
-                    self._judge(report)
             return
-        if item.request_type is not RequestType.REPORT:
+        if item.request_type is not RequestType.REPORT or item.agent_record_id in self._seen_reports:
             return
-        # 2. A report, exactly once: a replayed or retried one changes
-        #    nothing.
-        if item.agent_record_id in self._seen_reports:
-            return
-        self._seen_reports.add(item.agent_record_id)
-        # 3. A source an acknowledged batch consumed must never train twice,
-        #    whatever the replay timing. (A source merely marked releasable
-        #    does not block a late retry — while the record exists, the
-        #    retry re-claims it.)
-        if any(ref in self._trained_sources for ref in item.references):
+        validate_report_payload(item.payload)
+        if not item.references or len(set(item.references)) != len(item.references):
+            raise ReportValidationError("report references must be non-empty and unique")
+        if any(ref in self._trained_sources for ref in item.references) or not self.is_training_report(item):
+            self._seen_reports.add(item.agent_record_id)
             self._terminate(item)
             return
-        # 4. The recipe's judge decides: TRAIN, WAIT, or NEVER.
-        self._judge(item)
-
-    # --------------------------------------------------------------- judging
-
-    def _judge(self, report: AgentRecord) -> None:
-        """Run the recipe's judge and route its report decision in one read."""
-        try:
-            context = self._report_context(report)
-        except ReportValidationError as violation:
-            # Ingress rejects malformed reports before persistence. This
-            # fallback covers direct processor use and durable records replayed
-            # after their recipe's schema has changed.
-            decision = ReportDecision.never(str(violation))
-        else:
-            decision = self.judge(context)
-        # 1. WAIT: park until every referenced inference has arrived; the
-        #    waiting index re-judges the report when the last one lands.
-        if decision.outcome is Outcome.WAIT:
-            missing = [ref for ref in set(report.references) if ref not in self._inferences]
-            if not missing:
-                raise RuntimeError(f"{type(self).__name__} judged resolved report {report.agent_record_id!r} as WAIT")
-            self._reports[report.agent_record_id] = report
-            for ref in missing:
-                self._waiting.setdefault(ref, set()).add(report.agent_record_id)
-            return
-        # 2. NEVER: count the named reason (warned once per distinct
-        #    reason), release the report.
-        if decision.outcome is Outcome.NEVER:
-            if decision.reason is not None:
-                if decision.reason not in self._never_reasons:
-                    logger.warning(
-                        "%s scenario %r rejected report %s: %s (further occurrences counted silently)",
-                        type(self).__name__,
-                        self.scenario,
-                        report.agent_record_id,
-                        decision.reason,
-                    )
-                self._never_reasons[decision.reason] += 1
-            self._terminate(report)
-            return
-        # 3. TRAIN: a retry at an occupied slot (or a discarded group) is
-        #    terminal; otherwise the candidate takes its singleton place or
-        #    its group slot.
-        key = decision.group_key
-        slot = report.agent_record_id if decision.slot is None else decision.slot
+        context = self._report_context(item)
+        # Retain the report before assembly: a contract failure must not let
+        # compaction delete its inputs or turn a retry into a successful no-op.
+        self._reports[item.agent_record_id] = item
+        sample = self.make_sample(context)
+        if not isinstance(sample, (TrajectoryItem, TaskItem)):
+            raise TypeError(f"{type(self).__name__}.make_sample must return a TrainDataItem")
+        key, slot = self.grouping(context)
+        slot = item.agent_record_id if slot is None else slot
+        hash(key)
+        hash(slot)
+        self._seen_reports.add(item.agent_record_id)
         if key is not None and (key in self._discarded_groups or slot in self._groups.get(key, {})):
-            self._terminate(report)
+            self._terminate(item)
             return
-        report_id = report.agent_record_id
-        self._reports[report_id] = report
         self._next_order += 1
-        candidate = Candidate(
+        pending = _PendingReport(
             order=self._next_order,
-            value=decision.value,
-            report_agent_record_id=report_id,
-            source_agent_record_ids=frozenset(report.references),
+            item=replace(sample, source_agent_record_ids=(*item.references, item.agent_record_id)),
+            report=item,
+            group_key=key,
             slot=slot,
         )
         if key is None:
-            self._singletons[report_id] = candidate
+            self.singletons[item.agent_record_id] = pending
         else:
-            self._groups.setdefault(key, {})[slot] = candidate
+            self._groups.setdefault(key, {})[slot] = pending
             self._refresh_group(key)
+        self.cap_manual_units()
+
+    def set_training_mode(self, training_mode: str) -> None:
+        super().set_training_mode(training_mode)
+        self.cap_manual_units()
+
+    def cap_manual_units(self) -> None:
+        """Manual mode batches on instructions, not units, so the pile is bounded here instead."""
+        limit = self._batch_size * self.manual_unit_cap_batches
+        if self.training_mode != "manual" or self._ready_count() <= limit:
+            return
+        # The reserved batch is handed out until acknowledged, so its units stay put.
+        reserved = {pending.report.agent_record_id for pending in self._pending_reports or ()}
+        for unit in self._ordered_units():
+            if self._ready_count() <= limit:
+                return
+            if unit[0].report.agent_record_id in reserved:
+                continue
+            self._release_unit(unit)
+            if not self._manual_limit_warned:
+                logger.warning(
+                    "%s scenario %r released report %s beyond the manual limit %d (further releases are not logged)",
+                    type(self).__name__,
+                    self.scenario,
+                    unit[0].report.agent_record_id,
+                    limit,
+                )
+                self._manual_limit_warned = True
+
+    def _release_unit(self, unit: tuple[_PendingReport, ...]) -> None:
+        """Release a whole buffered group or singleton and its sources."""
+        key = unit[0].group_key
+        if key is not None:
+            self._discard_group(key)
+        for pending in unit:
+            report_id = pending.report.agent_record_id
+            report = self._reports.pop(report_id, None)
+            self.singletons.pop(report_id, None)
+            if report is not None:
+                self._terminate(report)
+            self._terminal_owned_sources.update(pending.report.references)
 
     def _terminate(self, report: AgentRecord) -> None:
         """Drop a report from the live set and mark it terminal.
 
         Terminal reports release their own record, and the sources they own
-        outright: a report that claims more than one inference, an
-        ineligible one, or any report at all when the recipe declares
+        outright: a report that claims more than one inference,
+        or any report when the recipe declares
         ``exclusive_sources``.
         """
         report_id = report.agent_record_id
         self._reports.pop(report_id, None)
         self._terminal.add(report_id)
-        for ref in report.references:
-            waiting = self._waiting.get(ref)
-            if waiting is not None:
-                waiting.discard(report_id)
-                if not waiting:
-                    self._waiting.pop(ref)
         if not report.references:
             return
-        if self.exclusive_sources or len(report.references) > 1 or not report_is_trainable(report):
+        if self.exclusive_sources or len(report.references) > 1:
             self._terminal_owned_sources.update(report.references)
 
     def _report_context(self, report: AgentRecord) -> ReportContext:
-        references = report.references
-        inferences: tuple[AgentRecord, ...] | None
-        if len(set(references)) != len(references):
-            inferences = ()
-        else:
-            resolved = tuple(self._inferences[ref] for ref in references if ref in self._inferences)
-            inferences = resolved if len(resolved) == len(references) else None
+        missing = [ref for ref in report.references if ref not in self._inferences]
+        if missing:
+            raise ReportValidationError(f"report references unavailable inference records: {missing!r}")
+        inferences = tuple(self._inferences[ref] for ref in report.references)
         report_type = self.context.report_type
         parsed_report = None if report_type is None else report_type.from_dict(report.payload)
-        return ReportContext(
-            report,
-            report_score(report),
-            report_is_trainable(report),
-            inferences,
-            parsed_report,
-        )
+        return ReportContext(report, report_score(report), inferences, parsed_report)
 
     # ---------------------------------------------------------------- groups
 
-    def _group_candidates(self, key: Hashable) -> tuple[Candidate, ...]:
-        return tuple(sorted(self._groups[key].values(), key=lambda c: c.order))
+    def _group_reports(self, key: Hashable) -> tuple[_PendingReport, ...]:
+        return tuple(sorted(self._groups[key].values(), key=lambda pending: pending.order))
 
     def _refresh_group(self, key: Hashable) -> None:
-        decision = self.decide_group(key, self._group_candidates(key))
+        decision = self.decide_group(key, tuple(pending.item for pending in self._group_reports(key)))
         if decision is GroupDecision.READY:
             self._ready_groups.add(key)
         elif decision is GroupDecision.INCOMPLETE:
             self._ready_groups.discard(key)
-        else:
+        elif decision is GroupDecision.DISCARD:
             self._discard_group(key)
+        else:
+            raise TypeError("decide_group must return GroupDecision")
 
     def _discard_group(self, key: Hashable) -> None:
         self._ready_groups.discard(key)
@@ -433,66 +327,62 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         # release is not blocked by siblings of the same discarded group.
         members = [
             report
-            for candidate in group.values()
-            if (report := self._reports.pop(candidate.report_agent_record_id, None)) is not None
+            for pending in group.values()
+            if (report := self._reports.pop(pending.report.agent_record_id, None)) is not None
         ]
         for report in members:
             self._terminate(report)
 
     # ----------------------------------------------------------- batch cycle
     #
-    # A unit is one accepted singleton candidate or one ready group; the
+    # A unit is one accepted singleton report or one ready group; the
     # engine's half of the shared cycle in base.py is the three methods below.
 
     def _ready_count(self) -> int:
-        return len(self._singletons) + len(self._ready_groups)
+        return len(self.singletons) + len(self._ready_groups)
 
     def _make_pending(self, batch_number: int) -> TrainingBatch:
-        units = self._select_units()
-        self._pending_units = units
-        return self.make_batch(units, batch_number)
+        units = self._ordered_units()[: self._batch_size]
+        self._pending_reports = tuple(pending for unit in units for pending in unit)
+        return self.make_batch(tuple(pending.item for pending in self._pending_reports), batch_number)
 
-    def _select_units(self) -> tuple[BatchUnit, ...]:
-        """Select up to ``batch_size`` batch units in priority order.
-
-        By default everything shares arrival order. With ``ordered_groups``,
-        singletons batch first (arrival order), then groups in key order.
-        """
-        singletons = [BatchUnit(None, (candidate,)) for candidate in self._singletons.values()]
+    def _ordered_units(self) -> list[tuple[_PendingReport, ...]]:
+        """Ready groups and singleton reports, preserving the configured priority."""
+        singletons = [(pending,) for pending in self.singletons.values()]
         if self.ordered_groups:
-            # ordered_groups requires sortable group keys (step indices, say).
+            # Ordered groups require sortable keys, such as step indices.
             ordered = sorted(cast("set[Any]", self._ready_groups))
-            groups = [BatchUnit(key, self._group_candidates(key)) for key in ordered]
-            units = singletons + groups
-        else:
-            units = singletons + [BatchUnit(key, self._group_candidates(key)) for key in self._ready_groups]
-            units.sort(key=lambda unit: unit.candidates[0].order)
-        return tuple(units[: self._batch_size])
+            return singletons + [self._group_reports(key) for key in ordered]
+        units = singletons + [self._group_reports(key) for key in self._ready_groups]
+        units.sort(key=lambda unit: unit[0].order)
+        return units
 
     def _consume_pending(self) -> frozenset[str]:
-        if self._pending_units is None:
-            raise RuntimeError("cannot consume a batch before units are pending")
+        if self._pending_reports is None:
+            raise RuntimeError("cannot consume a batch before reports are pending")
         consumed_reports: set[str] = set()
         trained_sources: set[str] = set()
-        for unit in self._pending_units:
-            group = self._groups.get(unit.group_key) if unit.group_key is not None else None
-            for candidate in unit.candidates:
-                report_id = candidate.report_agent_record_id
-                self._consumed.add(report_id)
-                consumed_reports.add(report_id)
-                self._reports.pop(report_id, None)
-                self._singletons.pop(report_id, None)
-                trained_sources |= candidate.source_agent_record_ids
+        changed_groups: set[Hashable] = set()
+        for pending in self._pending_reports:
+            report_id = pending.report.agent_record_id
+            self._consumed.add(report_id)
+            consumed_reports.add(report_id)
+            self._reports.pop(report_id, None)
+            self.singletons.pop(report_id, None)
+            trained_sources.update(pending.report.references)
+            if pending.group_key is not None:
+                group = self._groups.get(pending.group_key)
                 if group is not None:
-                    group.pop(candidate.slot, None)
-            if unit.group_key is not None and group is not None:
-                if group:
-                    self._refresh_group(unit.group_key)
-                else:
-                    self._groups.pop(unit.group_key)
-                    self._ready_groups.discard(unit.group_key)
+                    group.pop(pending.slot, None)
+                    changed_groups.add(pending.group_key)
+        for key in changed_groups:
+            if self._groups[key]:
+                self._refresh_group(key)
+            else:
+                self._groups.pop(key)
+                self._ready_groups.discard(key)
         self._trained_sources.update(trained_sources)
-        self._pending_units = None
+        self._pending_reports = None
         return frozenset(consumed_reports | trained_sources)
 
     # -------------------------------------------------------------- retention
@@ -514,11 +404,12 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         protected = set(self._reports) | live_references
         protected.update(inference_id for inference_id in self._inferences if inference_id not in releasable_sources)
         return RetentionDecision(
-            protected_agent_record_ids=frozenset(protected),
-            releasable_agent_record_ids=frozenset(releasable),
+            protected_agent_record_ids=frozenset(protected | self._training_requests.keys()),
+            releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
         )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+        super().compaction_applied(agent_record_ids)
         # --- scalar id sets ---
         self._consumed -= agent_record_ids
         self._terminal -= agent_record_ids
@@ -528,14 +419,31 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
         # Stored records: only inferences can be here. The trainer compacts
         # ``releasable - protected``, and every live report, every reference
-        # a live report holds, and every candidate's report are protected —
-        # so a compacted id is never in _reports, _singletons, _waiting, or a
+        # a live report holds, and every buffered report are protected —
+        # so a compacted id is never in _reports, singletons, or a
         # group.
         for agent_record_id in agent_record_ids:
             self._inferences.pop(agent_record_id, None)
 
 
 # --------------------------------------------------------- shared helpers
+
+
+def reported_task(metadata: object) -> dict[str, Any] | None:
+    """The task a report names, so a recipe can group samples by task; None when the report names none.
+
+    ``metadata.task`` is a mapping with at least a ``name`` (the task player also sends ``path`` and
+    ``digest``); a Harbor report from the shipped harness names the task as ``metadata.harbor.task_name``.
+    """
+    if not isinstance(metadata, Mapping):
+        return None
+    task = metadata.get("task")
+    if isinstance(task, Mapping) and isinstance(task.get("name"), str) and task["name"]:
+        return dict(task)
+    harbor = metadata.get("harbor")
+    if isinstance(harbor, Mapping) and isinstance(harbor.get("task_name"), str) and harbor["task_name"]:
+        return {"name": harbor["task_name"]}
+    return None
 
 
 @dataclass(frozen=True)
@@ -545,43 +453,53 @@ class SampleAssembly:
     One model call becomes one sample via ``make_sample`` (default: the shared
     tensor reader); an ordered multi-reference report becomes one assembled
     multi-turn sample. ``accept_multi_turn`` gates consumption only —
-    assembly always runs first, so a rejected multi-turn report was still
-    fully resolved before the recipe refused its representation.
+    assembly always runs first. Unsupported or unassemblable trajectories
+    raise a training data error and retain their source records.
     """
 
     accept_multi_turn: bool = False
     realign_threshold: int = 1024
     scaffold_tolerance: int = 0
-    make_sample: Callable[[AgentRecord, float], PolicySample] | None = None
+    make_sample: Callable[[AgentRecord, float], TrajectoryItem] | None = None
 
     @classmethod
     def from_config(
         cls,
         context: ProcessorContext,
-        make_sample: Callable[[AgentRecord, float], PolicySample] | None = None,
+        make_sample: Callable[[AgentRecord, float], TrajectoryItem] | None = None,
     ) -> SampleAssembly:
         accept_multi_turn, realign_threshold, scaffold_tolerance = sample_assembly_config_fields(context.config)
         return cls(accept_multi_turn, realign_threshold, scaffold_tolerance, make_sample)
 
-    def build(self, context: ReportContext, score: float) -> PolicySample | None:
-        """Build the sample for a resolved report; ``None`` is unusable."""
+    def build(self, context: ReportContext, score: float) -> TrajectoryItem:
+        """Build training data, raising if the recorded trajectory cannot be used."""
         inferences = context.inferences
         if inferences is None:
             raise RuntimeError("sample assembly requires resolved inferences")
         if len(inferences) == 1:
-            sample: PolicySample | None = (
-                make_policy_sample(inferences[0], score)
+            sample: TrajectoryItem | None = (
+                make_policy_trajectory(inferences[0], score)
                 if self.make_sample is None
                 else self.make_sample(inferences[0], score)
             )
         else:
-            sample = make_multi_turn_policy_sample(
+            sample = make_multi_turn_policy_trajectory(
                 inferences,
                 score,
                 source_agent_record_id=context.report.agent_record_id,
                 realign_threshold=self.realign_threshold,
                 scaffold_tolerance=self.scaffold_tolerance,
             )
-        if sample is not None and sample.is_multi_turn and not self.accept_multi_turn:
-            return None
-        return sample
+        if sample is None:
+            raise ValueError("training data cannot assemble the recorded multi-turn trajectory")
+        if (sample.training.get("turn_count", 1) > 1) and not self.accept_multi_turn:
+            raise ValueError("training data requires accept_multi_turn_policy_samples for this trajectory")
+        fields: dict[str, Any] = {
+            "feedback": context.report.payload.get("feedback"),
+            "report_agent_record_id": context.report.agent_record_id,
+            "references": list(context.references),
+        }
+        task = reported_task(context.report.payload.get("metadata"))
+        if task is not None:
+            fields["task"] = task
+        return sample.with_metadata(**fields)

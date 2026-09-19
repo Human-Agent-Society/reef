@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.interfaces import InferenceHandler
 from reef.service.request_service import RequestService
 from reef.service.routes.inference import register_inference_routes
 from reef.service.routes.records import register_record_routes
@@ -14,13 +14,13 @@ def register_routes(
     app: web.Application,
     *,
     request_service: RequestService,
-    inference_backend: InferenceBackend | None,
+    inference_handler: InferenceHandler | None,
 ) -> None:
     register_health_route(app)
     register_inference_routes(
         app,
         request_service=request_service,
-        inference_backend=inference_backend,
+        inference_handler=inference_handler,
     )
     register_scenario_routes(app, request_service=request_service)
     register_system_routes(app, request_service=request_service)

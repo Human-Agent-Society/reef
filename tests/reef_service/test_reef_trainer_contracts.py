@@ -1,20 +1,20 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.records import RecordStore
+from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import (
+    CandidateBackend,
     DataProcessor,
     PreparedStep,
     ProcessorContext,
     RetentionDecision,
     Trainer,
-    TrainingBackend,
     TrainingBatch,
     TrainStepResult,
 )
@@ -23,7 +23,7 @@ from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCan
 
 @dataclass(frozen=True)
 class ExampleBatch(TrainingBatch):
-    values: tuple[str, ...]
+    values: tuple[str, ...] = field(kw_only=True)
 
 
 class ExampleProcessor(DataProcessor):
@@ -59,7 +59,7 @@ class ExampleProcessor(DataProcessor):
         return consumed
 
 
-class ExampleBackend(TrainingBackend):
+class ExampleBackend(CandidateBackend):
     def __init__(self, scenario: str, events: list[str]) -> None:
         self.scenario = scenario
         self.events = events
@@ -117,7 +117,7 @@ def test_data_processor_is_the_no_update_default() -> None:
 @pytest.mark.unit
 def test_training_backend_cannot_be_instantiated_without_contract_methods() -> None:
     with pytest.raises(TypeError):
-        TrainingBackend()
+        CandidateBackend()
 
 
 @pytest.mark.unit
@@ -142,12 +142,12 @@ def test_custom_processors_default_to_releasing_no_records() -> None:
 @pytest.mark.unit
 def test_trainer_dispatches_only_required_data_types() -> None:
     events: list[str] = []
-    records = RecordStore()
+    records = SQLiteRecordStore()
     trainer = Trainer.build(
         "math",
         records,
         processor_factory=lambda context: ExampleProcessor(context, events),
-        training_backend=ExampleBackend("math", events),
+        candidate_backend=ExampleBackend("math", events),
     )
 
     assert isinstance(trainer, Trainer)
@@ -172,12 +172,12 @@ def test_trainer_dispatches_only_required_data_types() -> None:
 @pytest.mark.unit
 def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     events: list[str] = []
-    records = RecordStore()
+    records = SQLiteRecordStore()
     trainer = Trainer.build(
         "math",
         records,
         processor_factory=lambda context: ExampleProcessor(context, events),
-        training_backend=ExampleBackend("math", events),
+        candidate_backend=ExampleBackend("math", events),
     )
     records.append(
         AgentRecord.create(
@@ -225,7 +225,7 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
         def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
             raise AssertionError("a skipped preparation must not be evaluated")
 
-    records = RecordStore()
+    records = SQLiteRecordStore()
     records.append(
         AgentRecord.create(
             scenario="math",
@@ -238,7 +238,7 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
         "math",
         records,
         processor_factory=lambda context: ExampleProcessor(context, []),
-        training_backend=SkippingBackend("math", []),
+        candidate_backend=SkippingBackend("math", []),
     )
 
     result = trainer.run_once()
@@ -251,7 +251,7 @@ def test_trainer_finishes_a_skipped_preparation_without_selection() -> None:
 @pytest.mark.unit
 def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
     events: list[str] = []
-    records = RecordStore()
+    records = SQLiteRecordStore()
 
     def fail_commit(result: TrainStepResult) -> None:
         assert result.state is not None
@@ -262,7 +262,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
         "math",
         records,
         processor_factory=lambda context: ExampleProcessor(context, events),
-        training_backend=ExampleBackend("math", events),
+        candidate_backend=ExampleBackend("math", events),
     )
     records.append(
         AgentRecord.create(
@@ -283,7 +283,7 @@ def test_trainer_keeps_pending_result_when_external_commit_fails() -> None:
 @pytest.mark.unit
 def test_trainer_reads_only_new_records() -> None:
     events: list[str] = []
-    records = RecordStore()
+    records = SQLiteRecordStore()
     report = AgentRecord.create(
         scenario="math", request_type=RequestType.REPORT, payload={"score": 1}, agent_record_id="report"
     )
@@ -292,7 +292,7 @@ def test_trainer_reads_only_new_records() -> None:
         "math",
         records,
         processor_factory=lambda context: ExampleProcessor(context, events),
-        training_backend=ExampleBackend("math", events),
+        candidate_backend=ExampleBackend("math", events),
     )
 
     first = trainer.run_once()

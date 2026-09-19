@@ -116,7 +116,7 @@ def reply_dictates_solution(reply: str, answer: str | int | float) -> bool:
     may only complain about style or ask to save. A persona LLM often ignores
     that and dictates the working anyway; the dictated turn then becomes the
     next state the PRM scores, which inflates the reward and starves the RL
-    signal (styled agent replies stop drawing a complaint). The sidecar uses
+    signal (styled agent replies stop drawing a complaint). The student service uses
     this to reject a dictating student turn, so the same check that grades the
     agent's shown work (``_WORK_STEP_RE``) also catches the student writing it.
     """

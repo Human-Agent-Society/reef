@@ -72,17 +72,18 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core.records_types import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.render import render_composition
+from reef.harness.tree.render import render_composition
+from reef.inference.http import HttpInferenceHandler, InferenceProxyRuntime, provider_request_headers
+from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.registry import build_recipe
-from reef.records import RecordStore
-from reef.runtime.adapters.inference_proxy import InferenceProxyRuntime
-from reef.runtime.inference import HttpInferenceBackend, provider_request_headers
 from reef.service.app import create_app
-from reef.service.deploy.config import load_config
+from reef.service.deploy.config_utils import load_config
 from reef.service.wire import SCENARIO_HEADER
+from reef.storage.records import RecordStore
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
-class Ledger:
+class EventLog:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._lock = threading.Lock()
@@ -101,7 +102,7 @@ def load_recipe() -> Any:
     served deployment. The method (harness/) never sees the endpoint.
     """
     config = load_config(HERE / "skillclaw.yaml")
-    sections = {key: config[key] for key in ("implementation", "model", "evolution", "data")}
+    sections = recipe_config_from_mapping(config)
     runtime = InferenceProxyRuntime(
         model_path=AGENT_MODEL,
         base_url=UPSTREAM_BASE,
@@ -142,7 +143,7 @@ class RunService:
         upstream_url: str,
         upstream_key: str,
         port: int,
-        inference_backend: Any | None = None,
+        inference_handler: Any | None = None,
     ) -> None:
         self.scenario = scenario
         self.port = port
@@ -152,11 +153,12 @@ class RunService:
             InMemoryRepositoryBackend.factory(bootstrap_pool, root=run_dir / "artifacts"),
             local_artifact_dir=run_dir / "staged",
             agent_record_dir=run_dir / "reef-data",
+            scenario_storage=SQLiteScenarioStorage(run_dir / "reef-data"),
         )
         self._app = create_app(
             self.dispatcher,
-            inference_backend=inference_backend
-            or HttpInferenceBackend(
+            inference_handler=inference_handler
+            or HttpInferenceHandler(
                 upstream_url,
                 request_headers=provider_request_headers(upstream_key),
                 timeout_s=600.0,
@@ -362,7 +364,7 @@ def run_day(
     client: ReefClient,
     round_dir: Path,
     round_index: int,
-    ledger: Ledger,
+    event_log: EventLog,
 ) -> list[dict[str, Any]]:
     key = brave_key()
     pool = round_dir / "pool"
@@ -411,9 +413,8 @@ def run_day(
             "error": str(result["error"]),
             "breakdown": result["breakdown"],
         }
-        # The day ledger the night's digests read (TraceSample carries no
-        # metadata channel); written before the report so the trigger report
-        # never races its own night.
+        # Persist task metadata for the night's digests before posting the
+        # trigger report, so the night can read the complete day.
         report_path = round_dir / "reports" / f"{slug}.json"
         report_path.parent.mkdir(parents=True, exist_ok=True)
         report_path.write_text(json.dumps(meta, indent=2, default=str) + "\n", encoding="utf-8")
@@ -427,7 +428,7 @@ def run_day(
                     "references": [reference],
                 },
             )
-        ledger.write({"event": "sc_task", "task": task_id, "score": score})
+        event_log.write({"event": "sc_task", "task": task_id, "score": score})
         return {
             "category": category,
             "task_id": task_id,
@@ -552,7 +553,7 @@ def _bootstrap_pool(run_dir: Path, scenario: str, recipe: Any) -> Path:
 def main() -> None:
     run_dir = WORKDIR / RUN
     run_dir.mkdir(parents=True, exist_ok=True)
-    ledger = Ledger(run_dir / "ledger.jsonl")
+    event_log = EventLog(run_dir / "events.jsonl")
     day.ensure_benchmark()
     recipe = load_recipe()
     service = RunService(
@@ -572,24 +573,24 @@ def main() -> None:
         if RUN != "frozen" and service.poke_night():
             # A crash between the day's last report and its commit left a full
             # batch behind; the step just ran, so persist what it published.
-            ledger.write({"event": "sc_night_recovered"})
+            event_log.write({"event": "sc_night_recovered"})
             _persist_pool(service, run_dir)
         for round_index in range(1, NIGHTS + 2):
             round_dir = run_dir / f"round-{round_index}"
             summary_path = round_dir / "summary.json"
             if summary_path.exists():
                 continue
-            ledger.write({"event": "sc_round_start", "round": round_index, "run": RUN})
+            event_log.write({"event": "sc_round_start", "round": round_index, "run": RUN})
             versions_before = service.training_versions()
             step_before = service.training_step()
-            results = run_day(service, client, round_dir, round_index, ledger)
+            results = run_day(service, client, round_dir, round_index, event_log)
             scores = category_scores(results)
             unscored = sum(1 for result in results if result["score"] is None)
             summary: dict[str, Any] = {"round": round_index, "run": RUN, "categories": scores, "unscored": unscored}
             if round_index == 1:
                 # Advisory only: one round varies too much to be a gate.
                 summary["regime"] = regime_verdict(scores)
-                ledger.write({"event": "sc_regime", **summary["regime"]})
+                event_log.write({"event": "sc_regime", **summary["regime"]})
             if RUN == "frozen":
                 if service.training_versions():
                     raise RuntimeError("the control run changed the pool; its scores would no longer be a reference")
@@ -604,7 +605,7 @@ def main() -> None:
                     summary["audit"] = json.loads(audit_path.read_text())["audit"]
             summary_path.parent.mkdir(parents=True, exist_ok=True)
             summary_path.write_text(json.dumps(summary, indent=2, default=str) + "\n")
-            ledger.write(
+            event_log.write(
                 {
                     "event": "sc_round_done",
                     "round": round_index,
@@ -612,7 +613,7 @@ def main() -> None:
                     "advanced": summary.get("advanced", False),
                 }
             )
-        ledger.write({"event": "sc_campaign_done", "run": RUN})
+        event_log.write({"event": "sc_campaign_done", "run": RUN})
     finally:
         # Never close the store under a night that is still committing. The
         # snapshot is best effort: the commit log is the recovery authority.

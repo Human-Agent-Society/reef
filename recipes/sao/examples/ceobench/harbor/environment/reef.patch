@@ -1,0 +1,244 @@
+diff --git a/src/saas_bench/customer_llm.py b/src/saas_bench/customer_llm.py
+index e5dff0a..4a8e720 100644
+--- a/src/saas_bench/customer_llm.py
++++ b/src/saas_bench/customer_llm.py
+@@ -521,8 +521,8 @@ Output ONLY the post text, nothing else."""
+                 ],
+             )
+             post_text = response.content[0].text.strip()
+-            input_tokens = response.usage.input_tokens
+-            output_tokens = response.usage.output_tokens
++            input_tokens = response.usage.input_tokens or 0
++            output_tokens = response.usage.output_tokens or 0
+         else:
+             # Fallback to OpenAI
+             print(f"[WARN] Social post using OpenAI fallback (provider={social_provider}, model={social_model}). Set social_post_llm_provider='bedrock' or 'anthropic' for Haiku 4.5.")
+@@ -536,8 +536,8 @@ Output ONLY the post text, nothing else."""
+                 max_output_tokens=1000,
+             )
+             post_text = response.output_text.strip()
+-            input_tokens = response.usage.input_tokens
+-            output_tokens = response.usage.output_tokens
++            input_tokens = response.usage.input_tokens or 0
++            output_tokens = response.usage.output_tokens or 0
+ 
+         # Debug: Log if empty response
+         if not post_text:
+@@ -758,8 +758,8 @@ Output JSON:
+                     ],
+                 )
+                 response_text = response.content[0].text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+             else:
+                 # Fallback to OpenAI
+                 print(f"[WARN] Negotiation response using OpenAI fallback (provider={enterprise_provider}, model={enterprise_model}). Set enterprise_llm_provider='bedrock' or 'anthropic' for Sonnet 4.5.")
+@@ -773,8 +773,8 @@ Output JSON:
+                     max_output_tokens=300
+                 )
+                 response_text = response.output_text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+ 
+             self._log_cost(day, 'customer_negotiation', input_tokens, output_tokens, model=enterprise_model)
+ 
+@@ -914,8 +914,8 @@ Output ONLY the message text."""
+                     ],
+                 )
+                 text = response.content[0].text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+             else:
+                 # Fallback to OpenAI
+                 print(f"[WARN] Initial outreach using OpenAI fallback (provider={enterprise_provider}, model={enterprise_model}). Set enterprise_llm_provider='bedrock' or 'anthropic' for Sonnet 4.5.")
+@@ -929,8 +929,8 @@ Output ONLY the message text."""
+                     max_output_tokens=150
+                 )
+                 text = response.output_text.strip()
+-                input_tokens = response.usage.input_tokens
+-                output_tokens = response.usage.output_tokens
++                input_tokens = response.usage.input_tokens or 0
++                output_tokens = response.usage.output_tokens or 0
+ 
+             self._log_cost(day, 'customer_initial_outreach', input_tokens, output_tokens, model=enterprise_model)
+ 
+@@ -1131,16 +1131,25 @@ SCORE: <number between -1.0 and 1.0>
+ REASON: <one sentence why>"""
+ 
+     social_model = config.social_post_llm_model
+-    response = bedrock_client.messages.create(
+-        model=social_model,
+-        max_tokens=100,
+-        temperature=0.3,
+-        messages=[{"role": "user", "content": prompt}],
+-    )
+-
+-    text = response.content[0].text.strip()
+-    input_tokens = response.usage.input_tokens
+-    output_tokens = response.usage.output_tokens
++    if config.social_post_llm_provider == "openai":
++        # OpenAI-compatible fallback, as generate_customer_post does it.
++        response = bedrock_client.responses.create(
++            model=social_model,
++            reasoning={"effort": "low"},
++            input=[{"role": "user", "content": prompt}],
++            max_output_tokens=100,
++        )
++        text = response.output_text.strip()
++    else:
++        response = bedrock_client.messages.create(
++            model=social_model,
++            max_tokens=100,
++            temperature=0.3,
++            messages=[{"role": "user", "content": prompt}],
++        )
++        text = response.content[0].text.strip()
++    input_tokens = response.usage.input_tokens or 0
++    output_tokens = response.usage.output_tokens or 0
+ 
+     # Parse structured response: "SCORE: <number>\nREASON: <text>"
+     effect = 0.0
+@@ -1209,15 +1218,24 @@ The NovaMind CEO posted:
+ Your reaction is {sentiment_desc} (score: {effect_score:.2f}). Write ONLY the reply tweet. Nothing else. Keep it SHORT — real people don't write essays in tweet replies. Do not include any meta-commentary or explanation."""
+ 
+     social_model = config.social_post_llm_model
+-    response = bedrock_client.messages.create(
+-        model=social_model,
+-        max_tokens=150,
+-        temperature=0.9,
+-        messages=[{"role": "user", "content": prompt}],
+-    )
+-
+-    text = response.content[0].text.strip()
++    if config.social_post_llm_provider == "openai":
++        # OpenAI-compatible fallback, as generate_customer_post does it.
++        response = bedrock_client.responses.create(
++            model=social_model,
++            reasoning={"effort": "low"},
++            input=[{"role": "user", "content": prompt}],
++            max_output_tokens=150,
++        )
++        text = response.output_text.strip()
++    else:
++        response = bedrock_client.messages.create(
++            model=social_model,
++            max_tokens=150,
++            temperature=0.9,
++            messages=[{"role": "user", "content": prompt}],
++        )
++        text = response.content[0].text.strip()
+     # Clean up any quotes/formatting artifacts
+     text = text.strip('"').strip("'").strip()
+ 
+-    return text, response.usage.input_tokens, response.usage.output_tokens
++    return text, response.usage.input_tokens or 0, response.usage.output_tokens or 0
+diff --git a/src/saas_bench/server_entry.py b/src/saas_bench/server_entry.py
+index fa76401..478720c 100644
+--- a/src/saas_bench/server_entry.py
++++ b/src/saas_bench/server_entry.py
+@@ -125,12 +125,24 @@ def _resolve_session(base: Path, session_id: Optional[str]) -> str:
+ 
+ def _apply_simulator_llm_config(config: BenchmarkConfig) -> dict:
+     """Validate and serialize simulator-side LLM provider/model config."""
+-    valid_providers = {"bedrock", "anthropic", "openai"}
++    # SAAS_BENCH_<FIELD> overrides the simulator roles' provider and model
++    # without rebuilding the bundle, e.g. SAAS_BENCH_SOCIAL_POST_LLM_PROVIDER.
++    for attr in _SIMULATOR_LLM_CONFIG_FIELDS:
++        override = os.environ.get(f"SAAS_BENCH_{attr.upper()}")
++        if override:
++            setattr(config, attr, override)
++    # "none" runs the simulator without a customer LLM: social, macro, and
++    # competitor posts come from the built-in templates and agent posts are
++    # not judged. Both roles must agree; the engine has one customer simulator.
++    valid_providers = {"bedrock", "anthropic", "openai", "none"}
+     for attr in ("social_post_llm_provider", "enterprise_llm_provider"):
+         provider = getattr(config, attr)
+         if provider not in valid_providers:
+             print(f"Error: invalid simulator LLM provider for {attr}: {provider!r}", file=sys.stderr)
+             sys.exit(1)
++    if (config.social_post_llm_provider == "none") != (config.enterprise_llm_provider == "none"):
++        print("Error: simulator LLM provider 'none' must be set for both roles or neither", file=sys.stderr)
++        sys.exit(1)
+ 
+     if (
+         config.social_post_llm_provider == "anthropic"
+@@ -165,6 +177,17 @@ def _restore_simulator_llm_config(config: BenchmarkConfig, meta: dict) -> None:
+             setattr(config, attr, value)
+ 
+ 
++def _create_customer_simulator(config: BenchmarkConfig, conn):
++    """The customer simulator for the configured providers; None runs templates."""
++    if config.social_post_llm_provider == "none":
++        return None
++    return CustomerSimulator(
++        client=_create_simulator_openai_client(config),
++        conn=conn,
++        config=config,
++    )
++
++
+ def _create_simulator_openai_client(config: BenchmarkConfig):
+     if (
+         config.social_post_llm_provider != "openai"
+@@ -174,7 +197,10 @@ def _create_simulator_openai_client(config: BenchmarkConfig):
+ 
+     from openai import OpenAI
+ 
+-    return OpenAI()
++    # SAAS_BENCH_SIMULATOR_TIMEOUT_S bounds one simulator request (the SDK's
++    # default is 600 s with two retries); unset keeps the SDK default.
++    timeout_s = os.environ.get("SAAS_BENCH_SIMULATOR_TIMEOUT_S")
++    return OpenAI(timeout=float(timeout_s)) if timeout_s else OpenAI()
+ 
+ 
+ # =========================================================================
+@@ -203,11 +229,7 @@ def cmd_new_session(args, base: Path):
+     conn = init_database(":memory:")
+ 
+     # Initialize simulator with customer simulator
+-    customer_sim = CustomerSimulator(
+-        client=_create_simulator_openai_client(config),
+-        conn=conn,
+-        config=config,
+-    )
++    customer_sim = _create_customer_simulator(config, conn)
+     simulator = Simulator(conn, config, rng, customer_simulator=customer_sim)
+     simulator.initialize()
+ 
+@@ -289,11 +311,7 @@ def cmd_start_server(args, base: Path):
+     _restore_simulator_llm_config(config, meta)
+     meta["simulator_llm"] = _apply_simulator_llm_config(config)
+ 
+-    customer_sim = CustomerSimulator(
+-        client=_create_simulator_openai_client(config),
+-        conn=conn,
+-        config=config,
+-    )
++    customer_sim = _create_customer_simulator(config, conn)
+     simulator = Simulator(conn, config, rng, customer_simulator=customer_sim)
+     simulator.initialize(resume=True)  # resume=True: skip DB writes, just set up _group_rngs
+     current_day = meta.get("current_day", 0)
+diff --git a/src/saas_bench/simulation.py b/src/saas_bench/simulation.py
+index aefe17e..bac9819 100644
+--- a/src/saas_bench/simulation.py
++++ b/src/saas_bench/simulation.py
+@@ -4638,7 +4638,12 @@ class Simulator:
+         """).fetchone()[0]
+ 
+         # Use social_post_client (bedrock or direct anthropic) — both expose the same .messages.create() API
+-        bedrock_client = self.customer_simulator.social_post_client
++        # The OpenAI provider judges and replies through the simulator's
++        # OpenAI client (see customer_llm.judge_agent_social_post).
++        if self.config.social_post_llm_provider == "openai":
++            bedrock_client = self.customer_simulator.client
++        else:
++            bedrock_client = self.customer_simulator.social_post_client
+         social_model = self.config.social_post_llm_model
+         viral_threshold = 0.6
+ 

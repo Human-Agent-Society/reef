@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 
 import pytest
+from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 import reef
 from reef.train import processors
@@ -104,7 +105,7 @@ def test_old_naming_modules_are_removed(module: str) -> None:
         "AgentDataStore",
         "AgentDataCodec",
         "AgentDataConflict",
-        # Inlined into RecordStore as private methods; never a public class again.
+        # Inlined into SQLiteRecordStore as private methods; never a public class again.
         "RecordCodec",
     ],
 )
@@ -140,6 +141,7 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
     # Test-only accessors migrated to canonical paths.
     assert not hasattr(Dispatcher, "recipes")
     assert not hasattr(Scenario, "checkpoint_strategy")
+    assert not hasattr(Scenario, "commit_log")
     # Capabilities are explicit fields rather than inferred method overrides.
     assert not hasattr(Surface, "kind")
     assert not hasattr(Surface, "validator")
@@ -149,19 +151,19 @@ def test_dead_accessors_and_symbols_are_removed() -> None:
 @pytest.mark.unit
 def test_naming_unification_renames_are_complete() -> None:
     """One concept, one name: the renamed-away spellings must stay gone."""
-    import reef.records
+    import reef.storage.records
     import reef.surface.base
     from reef.recipe.base import WeightTrainingRecipe
     from reef.scenario.scenario import Scenario
     from reef.train.trainer import Trainer
 
-    # The step-preparer id is no longer called "algorithm".
+    # The objective id is no longer called "algorithm".
     assert not hasattr(WeightTrainingRecipe, "algorithm")
-    assert WeightTrainingRecipe.training_spec().step_preparer == ""
+    assert WeightTrainingRecipe.training_spec().objective == ""
     assert not hasattr(Trainer, "algorithm")
-    assert not hasattr(Trainer, "step_preparer")
+    assert not hasattr(Trainer, "objective")
     assert not hasattr(Scenario, "algorithm")
-    assert not hasattr(Scenario, "step_preparer")
+    assert not hasattr(Scenario, "objective")
     # Surface-side protocols use serving vocabulary without duplicating the
     # concrete runtime package's InferenceRuntime / TrainingRuntime names.
     for name in ("SurfaceRuntime", "TrainingSurfaceRuntime", "ServingHost", "TrainingHost"):
@@ -174,10 +176,9 @@ def test_naming_unification_renames_are_complete() -> None:
     assert not hasattr(routes, "register_agent_record_routes")
     assert hasattr(routes, "register_record_routes")
     # The Ray runtime speaks of one train group handle.
-    from reef.runtime.adapters.ray_runtime import RayRuntime
 
-    assert not hasattr(RayRuntime, "train_group")
-    assert hasattr(RayRuntime, "train_group_handle")
+    assert not hasattr(ExecutorRuntimeFixture, "train_group")
+    assert hasattr(ExecutorRuntimeFixture, "train_group_handle")
 
 
 @pytest.mark.unit
@@ -216,19 +217,19 @@ def test_recipe_config_field_declarations_replaced_the_config_spelling_quartet()
 
 
 @pytest.mark.unit
-def test_online_grpo_preparer_and_recipe_are_removed() -> None:
-    """Neither the online_grpo step preparer nor its recipe class may come back.
+def test_online_grpo_objective_and_recipe_are_removed() -> None:
+    """Neither the online_grpo training objective nor its recipe class may come back.
 
-    Grouped preparers are cookbook-owned now; the grouped machinery (group
+    Grouped objectives are cookbook-owned now; the grouped machinery (group
     keys, slots, the decide_group barrier in the reported-feedback processor) stays. The
     ``online_rft`` kind that replaced this arm is gone too — a filtered-SFT
     data recipe, with nothing in it addressing drift on a continually updated
     policy."""
     from reef.recipe.registry import recipe_class_for
-    from reef.train.algos.registry import resolve_preparer
+    from reef.train.algos.registry import resolve_objective
 
-    with pytest.raises(ValueError, match="unknown step preparer"):
-        resolve_preparer("online_grpo")
+    with pytest.raises(ValueError, match="unknown objective"):
+        resolve_objective("online_grpo")
     assert recipe_class_for("online_grpo") is None
     assert recipe_class_for("online_rft") is None
 

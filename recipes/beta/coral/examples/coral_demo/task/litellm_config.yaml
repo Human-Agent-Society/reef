@@ -1,0 +1,17 @@
+# CORAL gateway upstreams for the Reef TTT example: exactly one model, the
+# Reef-served policy. Agents ask for "reef-policy"; LiteLLM forwards to the
+# Reef service's OpenAI-compatible /v1. run.py exports both environment
+# references before the gateway initializes (REEF_API_BASE from --reef-url,
+# REEF_TOKEN from --reef-token).
+model_list:
+  - model_name: reef-policy
+    litellm_params:
+      model: openai/reef-policy
+      api_base: os.environ/REEF_API_BASE
+      api_key: os.environ/REEF_TOKEN
+
+litellm_settings:
+  drop_params: true
+  # Surface the upstream's response headers (prefixed) so the reef layer can
+  # capture the x-reef-agent-record-id / x-reef-release-id receipts.
+  return_response_headers: true

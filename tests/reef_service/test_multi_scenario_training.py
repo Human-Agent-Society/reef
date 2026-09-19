@@ -8,9 +8,9 @@ import pytest
 from reef_service.test_commit_log import RecordingRuntime, build_training_dispatcher, wait_for_step
 
 from reef.artifact import InMemoryRepositoryBackend
+from reef.core import AgentRecord
 from reef.core.errors import ReefError
 from reef.core.records_types import RequestType
-from reef.records import AgentRecord
 from reef.surface import adapter_name
 
 

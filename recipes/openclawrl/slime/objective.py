@@ -18,6 +18,7 @@
 
 from __future__ import annotations
 
+import logging
 from argparse import Namespace
 from collections.abc import Callable
 from typing import Any
@@ -29,6 +30,8 @@ from slime.backends.megatron_utils.loss import get_log_probs_and_entropy, get_re
 from slime.utils.ppo_utils import compute_approx_kl, compute_policy_loss
 
 from reef.train.slime_backend.algorithm import objective
+
+logger = logging.getLogger(__name__)
 
 _NEG_INF = float("-inf")
 # verl-style numerical guard on the log-ratio before exp(). Prevents
@@ -430,27 +433,6 @@ def _gather_along_K(
 # stabilizing the training".
 
 
-def _w_rl(args: Namespace) -> float:
-    return float(getattr(args, "openclawrl_w_rl", 1.0))
-
-
-def _w_opd(args: Namespace) -> float:
-    return float(getattr(args, "openclawrl_w_opd", 1.0))
-
-
-def _eps_clip_lo(args: Namespace) -> float:
-    return float(args.eps_clip)
-
-
-def _eps_clip_hi(args: Namespace) -> float:
-    return float(args.eps_clip_high)
-
-
-def _adv_diff_clip(args: Namespace) -> float | None:
-    val = float(getattr(args, "openclawrl_adv_diff_clip", 1.0))
-    return val if val > 0.0 else None
-
-
 @objective("custom_advantage_function_path")
 def openclawrl_advantages(args: Namespace, rollout_data: dict) -> None:
     """Keep Reef's advantages through Slime's old-policy preparation pass."""
@@ -486,8 +468,8 @@ def openclawrl_loss(
         across k); the per-(k, t) selection signal travels in
         ``prm_teacher_native_topk_indices_cand``.
     """
-    hint_selection = str(getattr(args, "openclawrl_hint_selection", "sequence_optimal"))
-    subset_mode = str(getattr(args, "openclawrl_subset_mode", "student"))
+    hint_selection = args.openclawrl_hint_selection
+    subset_mode = args.openclawrl_subset_mode
     if hint_selection not in ("shortest", "token_optimal", "sequence_optimal"):
         raise ValueError(
             f"Unknown --openclawrl-hint-selection: {hint_selection!r}. Expected one of "
@@ -501,11 +483,12 @@ def openclawrl_loss(
     response_lengths = batch["response_lengths"]
     total_lengths = batch["total_lengths"]
 
-    w_rl = _w_rl(args)
-    w_opd = _w_opd(args)
-    eps_lo = _eps_clip_lo(args)
-    eps_hi = _eps_clip_hi(args)
-    diff_clip = _adv_diff_clip(args)
+    w_rl = float(args.openclawrl_w_rl)
+    w_opd = float(args.openclawrl_w_opd)
+    eps_lo = float(args.eps_clip)
+    eps_hi = float(args.eps_clip_high)
+    configured_diff_clip = float(args.openclawrl_adv_diff_clip)
+    diff_clip = configured_diff_clip if configured_diff_clip > 0.0 else None
     entropy_coef = float(getattr(args, "entropy_coef", 0.0) or 0.0)
     need_entropy_for_loss = entropy_coef != 0.0
 
@@ -833,25 +816,53 @@ def openclawrl_loss(
 
 @objective("reef_actor_init_hook_path")
 def openclawrl_actor_init(actor: Any) -> None:
-    """Back up the freshly loaded actor weights as the frozen Megatron teacher.
+    """Back up the frozen base weights as the Megatron teacher.
 
     The topk-select objective requires the frozen-base Megatron teacher
-    (upstream forces OPENCLAW_COMBINE_OPD_TEACHER_SOURCE=megatron). Fresh init
-    just bridge-loaded exactly those weights, so the backup IS the frozen PRM.
-    A resumed Megatron checkpoint holds trained weights instead — backing
-    those up would silently swap the teacher for the student, so it is
-    refused outright. Fresh-vs-resumed is the loader's own dispatch (the
-    bridge path reports iteration 0, so the returned rollout id cannot tell).
+    (upstream forces OPENCLAW_COMBINE_OPD_TEACHER_SOURCE=megatron). A fresh
+    init just bridge-loaded exactly those weights, so the backup IS the
+    frozen PRM. A resumed Megatron checkpoint holds trained weights instead —
+    backing those up would silently swap the teacher for the student — so a
+    resume bridge-loads the base HF weights (``--hf-checkpoint``) into the
+    model, backs them up as the teacher, and puts the trained weights back
+    from the actor backup init took. Without this a stack could never be
+    restarted once it had trained. Fresh-vs-resumed is the loader's own
+    dispatch (the bridge path reports iteration 0, so the returned rollout
+    id cannot tell).
     """
     from slime.backends.megatron_utils.checkpoint import _is_megatron_checkpoint
 
-    if actor.args.load and _is_megatron_checkpoint(actor.args.load):
+    if not (actor.args.load and _is_megatron_checkpoint(actor.args.load)):
+        actor.weights_backuper.backup("openclaw_teacher")
+        return
+    base = getattr(actor.args, "hf_checkpoint", None)
+    if not base:
         raise RuntimeError(
-            "openclawrl resumed from a Megatron checkpoint, so the current weights are "
-            "not the frozen base and cannot serve as its teacher. Start from a fresh run "
-            "directory (a base-weight reload on resume is not implemented)."
+            "openclawrl resumed from a Megatron checkpoint, so the current weights are not the "
+            "frozen base; reloading the base as the teacher needs --hf-checkpoint"
         )
-    actor.weights_backuper.backup("openclaw_teacher")
+    # slime's tagged loader: load ``base`` into the model, back it up under
+    # the tag and leave it active. The actor backup init took still holds the
+    # trained weights, so switching back restores them.
+    actor.load_other_checkpoint("openclaw_teacher", base)
+    actor._switch_model("actor")
+    if _same_weights(actor.weights_backuper, "openclaw_teacher", "actor"):
+        logger.warning(
+            "openclawrl: the frozen-base teacher reloaded from %s equals the actor resumed from %s",
+            base,
+            actor.args.load,
+        )
+    else:
+        logger.info("openclawrl: resumed from %s; frozen-base teacher reloaded from %s", actor.args.load, base)
+
+
+def _same_weights(backuper: Any, left: str, right: str) -> bool:
+    """Whether two weight backups hold identical tensors (stops at the first difference)."""
+    left_weights = backuper.get(left)
+    right_weights = backuper.get(right)
+    if set(left_weights) != set(right_weights):
+        return False
+    return all(torch.equal(left_weights[name], right_weights[name]) for name in left_weights)
 
 
 @objective("reef_actor_pre_train_hook_path")

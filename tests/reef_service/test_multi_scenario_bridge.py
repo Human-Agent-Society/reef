@@ -5,15 +5,17 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import ray
 
 pytest.importorskip("ray")
 
+from reef_service.slime_coordinator import build_slime_coordinator
 from reef_service.test_sao_bridge import _RecordingGroup
 
-from reef.runtime.adapter_residency import AdapterCapacityExhausted
-from reef.train.slime_backend.reef_adapters import bridge
+from reef.runtime.publication import AdapterCapacityExhausted, AdapterEvictionFailed, AdapterResidencyError
+from reef.runtime.recovery import ScenarioHistory, history_path
+from reef.runtime.scheduler import InferenceMemory
 from reef.train.slime_backend.reef_adapters.megatron.lora import scenario_adapter_name
-from reef.train.slime_backend.reef_adapters.training_job.scenarios import ScenarioLedger, ledger_path
 
 from .test_sao_bridge import _FakeRank, _FakeRolloutManager, _payload, _RemoteMethod, _sao_row
 
@@ -68,8 +70,23 @@ class _SlottedGroup:
         self.version.sequence += 1
         self.publications.append((self.active or "?", str(self.version)))
 
-    def sync_serving_runtime_load_id(self) -> str:
-        return str(self.version)
+    def register_failure_listener(self, listener):
+        pass
+
+    def initialize_runtime_load_id(self, runtime_load_id):
+        self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1])
+
+    def next_runtime_load_id(self):
+        return f"{INCARNATION}:{self.version.sequence + 1}"
+
+    def prepare_weight_update(self, runtime_load_id, *, force_full):
+        self.set_runtime_load_id_for_update(runtime_load_id)
+
+    def send_prepared_weights(self, runtime_load_id, *, force_full):
+        self.update_weights(manage_generation=False, force_full=force_full)
+
+    def set_runtime_load_id_for_update(self, runtime_load_id):
+        self.restore_runtime_load_id_for_republication(runtime_load_id)
 
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1]) - 1
@@ -115,23 +132,108 @@ class _Manager(_FakeRolloutManager):
         self.engine = _Engine()
 
 
+class _MemoryRegions:
+    def __init__(self):
+        self.resident = {"weights", "kv_cache", "cuda_graph"}
+
+    def release(self, regions):
+        assert set(regions) <= self.resident
+        self.resident.difference_update(regions)
+
+    def resume(self, regions):
+        assert not set(regions) & self.resident
+        self.resident.update(regions)
+
+
+class _ColocatedManager(_Manager):
+    """CPU engine fixture that enforces acknowledged memory transitions."""
+
+    def __init__(self, version):
+        super().__init__(version)
+        self.regions = _MemoryRegions()
+        self.memory = InferenceMemory(self.regions, ("weights", "kv_cache", "cuda_graph"))
+        self.memory.release()  # Inference owner makes room before the trainer starts.
+        self.generation_paused = True
+        self.pause_generation_for_update = _RemoteMethod(self._pause)
+        self.continue_generation_after_update = _RemoteMethod(self._continue)
+        self.onload_weights = _RemoteMethod(self._weights)
+        self.onload_kv = _RemoteMethod(self._kv)
+
+    def _pause(self):
+        self.generation_paused = True
+        self.paused.append("pause")
+
+    def _continue(self):
+        assert self.regions.resident == {"weights", "kv_cache", "cuda_graph"}
+        self.generation_paused = False
+        self.paused.append("continue")
+
+    def _offload(self, tags=None):
+        assert self.generation_paused
+        self.memory.release(tags)
+        super()._offload(tags)
+
+    def _weights(self):
+        self.memory.resume(["weights"])
+        self.memory_calls.append("onload_weights")
+
+    def _kv(self):
+        self.memory.resume(["kv_cache", "cuda_graph"])
+        self.memory_calls.append("onload_kv")
+
+    def _recover(self):
+        super()._recover()
+        self.regions = _MemoryRegions()
+        self.memory = InferenceMemory(self.regions, ("weights", "kv_cache", "cuda_graph"))
+        self.memory.release()
+        self.memory.resume(["weights"])
+
+
+class _ColocatedGroup(_SlottedGroup):
+    def __init__(self, template, version, manager):
+        super().__init__(template, version)
+        self.manager = manager
+
+    def _check_publication(self):
+        assert self.manager.generation_paused
+        assert self.manager.regions.resident == {"weights"}
+
+    def publish_adapter(self, scenario, lora_name):
+        self._check_publication()
+        super().publish_adapter(scenario, lora_name)
+
+    def update_weights(self, **kwargs):
+        self._check_publication()
+        super().update_weights(**kwargs)
+
+    def async_train(self, rollout_id, rollout_data_ref, external_data=None):
+        assert self.manager.generation_paused
+        assert not {"kv_cache", "cuda_graph"} & self.manager.regions.resident
+        return super().async_train(rollout_id, rollout_data_ref, external_data)
+
+
 def _actor(
     tmp_path: Path,
     version: _EngineVersion,
     *,
     start_rollout_id: int = 0,
     adapter_capacity: int | None = None,
+    colocate: bool = False,
+    keep_lora_base_resident: bool = False,
 ):
     template = str(tmp_path / "hf" / "checkpoint-{rollout_id}")
-    group = _SlottedGroup(template, version)
-    manager = _Manager(version)
-    actor = bridge.TrainBridgeActorImpl(
+    manager = _ColocatedManager(version) if colocate else _Manager(version)
+    group = _ColocatedGroup(template, version, manager) if colocate else _SlottedGroup(template, version)
+    actor = build_slime_coordinator(
         group,
         manager,
+        batch_processor=manager,
         save_hf_template=template,
         start_rollout_id=start_rollout_id,
         lora=True,
         adapter_capacity=adapter_capacity,
+        colocate=colocate,
+        keep_lora_base_resident=keep_lora_base_resident,
         critic_group=_RecordingGroup(template, critic=True),
         loss_family="sao",
     )
@@ -157,7 +259,7 @@ def _run(actor, payload):
 
 @pytest.fixture
 def _local_ray_get(monkeypatch):
-    monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
+    monkeypatch.setattr(ray, "get", lambda value, **kwargs: value)
 
 
 @pytest.mark.unit
@@ -180,15 +282,15 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     assert group.publications == [("a", "inc:1"), ("b", "inc:2"), ("a", "inc:3")]
     assert Path(template.format(rollout_id=2)).is_dir()
 
-    ledger = ScenarioLedger(ledger_path(template))
-    assert ledger.status()["a"] == {
+    history = ScenarioHistory(history_path(template))
+    assert history.status()["a"] == {
         "runtime_load_id": "inc:3",
         "adapter": scenario_adapter_name("a", "inc:3"),
         "publications": 2,
         "rollout_id": 2,
         "steps": 2,
     }
-    assert ledger.status()["b"]["adapter"] == scenario_adapter_name("b", "inc:2")
+    assert history.status()["b"]["adapter"] == scenario_adapter_name("b", "inc:2")
     health = actor.health()
     assert health["lora_mode"] == "scenario" and health["lora_adapter"] is None
     assert health["lora_adapters"]["b"]["runtime_load_id"] == "inc:2"
@@ -217,6 +319,34 @@ def test_staleness_counts_only_the_scenarios_own_publications(tmp_path, _local_r
 
 
 @pytest.mark.unit
+def test_sample_remains_admissible_after_the_adapter_that_produced_it_is_evicted(tmp_path, _local_ray_get) -> None:
+    # Issue #26's last open item asked whether the residency window has to be
+    # sized against the staleness bound, the way AReaL ties lora_keep_versions
+    # to max_head_offpolicyness. It does not: a Reef sample carries its own
+    # rollout_log_probs and producing runtime load ID, so admission is sequence
+    # arithmetic over recorded data and never reaches for the producing engine.
+    version = _EngineVersion(0)
+    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
+    assert _run(actor, _job("a", 0, "inc:0")).outcome == "complete"  # engine inc:1
+    assert _run(actor, _job("a", 1, "inc:1")).outcome == "complete"  # engine inc:2
+
+    # One slot, so publishing inc:2 unloaded the adapter that served inc:1.
+    assert manager.engine.unloaded == [scenario_adapter_name("a", "inc:1")]
+    assert actor.health()["adapter_residency"]["scenarios"]["a"]["resident"] == ["inc:2"]
+
+    # A rollout that inc:1 produced is one publication behind and its adapter
+    # is gone. The staleness bound alone decides: refused at zero lag,
+    # admitted at one, with nothing reloaded either way.
+    assert _run(actor, _job("a", 2, "inc:1")).outcome == "stale"
+    admitted = _run(actor, _job("a", 2, "inc:1", max_staleness=1))
+    assert admitted.outcome == "complete"
+    assert manager.engine.unloaded == [
+        scenario_adapter_name("a", "inc:1"),
+        scenario_adapter_name("a", "inc:2"),
+    ]
+
+
+@pytest.mark.unit
 def test_per_scenario_jobs_must_name_their_scenario(tmp_path, _local_ray_get) -> None:
     actor, _, _, _ = _actor(tmp_path, _EngineVersion(0))
     payload = _job("a", 0, "inc:0")
@@ -226,9 +356,10 @@ def test_per_scenario_jobs_must_name_their_scenario(tmp_path, _local_ray_get) ->
 
 
 @pytest.mark.unit
-def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray_get) -> None:
+@pytest.mark.parametrize("colocate,keep_base", [(False, False), (True, False), (True, True)])
+def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray_get, colocate, keep_base) -> None:
     version = _EngineVersion(0)
-    actor, _, _, _ = _actor(tmp_path, version)
+    actor, _, _, _ = _actor(tmp_path, version, colocate=colocate, keep_lora_base_resident=keep_base)
     _run(actor, _job("a", 0, "inc:0"))
     _run(actor, _job("b", 0, "inc:1"))
     _run(actor, _job("c", 0, "inc:2"))
@@ -236,7 +367,9 @@ def test_restart_re_registers_every_scenario_before_serving(tmp_path, _local_ray
 
     # A new bridge over the same checkpoints (engines restarted at inc:0).
     restarted_version = _EngineVersion(4)
-    restarted, group, manager, _ = _actor(tmp_path, restarted_version, start_rollout_id=4)
+    restarted, group, manager, _ = _actor(
+        tmp_path, restarted_version, start_rollout_id=4, colocate=colocate, keep_lora_base_resident=keep_base
+    )
     # Other scenarios came back under their recorded names; the marker's
     # scenario was activated last and republished under its recorded version.
     assert group.published == [
@@ -306,11 +439,30 @@ def test_a_full_engine_refuses_to_evict_another_scenarios_current_revision(tmp_p
     _run(actor, _job("a", 0, "inc:0"))
     result = actor.execute_training_job(_job("b", 0, "inc:1"))
     assert result.outcome == "checkpoint"
+    with pytest.raises(AdapterCapacityExhausted, match="max-loaded-loras") as raised:
+        actor.update_serving_weights(result.training_job_id)
+    # A refusal, not a wedged engine: the eviction never even ran.
+    assert not isinstance(raised.value, AdapterEvictionFailed)
+    assert manager.engine.unloaded == []
+    assert actor.health()["adapter_residency"]["counters"]["capacity_rejections"] == 1
+
+
+@pytest.mark.unit
+def test_a_rejected_publication_leaves_every_scenario_serving(tmp_path, _local_ray_get) -> None:
+    # Issue #65: the capacity check runs before update_weights touches an
+    # engine, so a rejection means nothing was published and nothing is
+    # inconsistent. Terminating the engines for it took down the innocent
+    # scenario's serving too, and cost a full stack restart.
+    version = _EngineVersion(0)
+    actor, _, manager, _ = _actor(tmp_path, version, adapter_capacity=1)
+    _run(actor, _job("a", 0, "inc:0"))
+    result = actor.execute_training_job(_job("b", 0, "inc:1"))
     with pytest.raises(AdapterCapacityExhausted, match="exhausted"):
         actor.update_serving_weights(result.training_job_id)
-    assert manager.engine.unloaded == []
-    assert actor.health()["phase"] == "weight_sync_failed"
-    assert actor.health()["adapter_residency"]["counters"]["capacity_rejections"] == 1
+    health = actor.health()
+    assert health["phase"] != "weight_sync_failed"
+    assert manager.recovered == 0, "engines were terminated for a publication that never started"
+    assert health["adapter_residency"]["scenarios"]["a"]["resident"] == ["inc:1"]
 
 
 @pytest.mark.unit
@@ -358,3 +510,98 @@ def test_an_unload_the_engine_refuses_leaks_visibly(tmp_path, _local_ray_get) ->
     residency = actor.health()["adapter_residency"]
     assert residency["leaked"] == 1 and residency["counters"]["unload_failures"] == 1
     assert residency["recent_actions"][-1]["action"] == "leaked"
+
+
+@pytest.mark.unit
+def test_keeping_the_base_resident_releases_only_kv_and_graphs(tmp_path, _local_ray_get) -> None:
+    # Issue #203: the base is frozen for the whole run, so releasing it copies
+    # identical bytes to the host and back on every training step.
+    actor, _, manager, _ = _actor(tmp_path, _EngineVersion(0), colocate=True, keep_lora_base_resident=True)
+    manager.memory_calls.clear()
+    manager.release_tags.clear()
+
+    _run(actor, _job("a", 0, "inc:0"))
+
+    assert manager.release_tags == [("kv_cache", "cuda_graph"), ("kv_cache", "cuda_graph")]
+    # SGLang resumes a region by removing its tag from the set release added it
+    # to, so resuming weights that were never released raises. The restore has
+    # to drop the same half the release did.
+    assert manager.memory_calls == ["offload", "offload", "onload_kv"]
+
+
+@pytest.mark.unit
+def test_the_default_still_releases_everything_and_restores_both_halves(tmp_path, _local_ray_get) -> None:
+    actor, _, manager, _ = _actor(tmp_path, _EngineVersion(0), colocate=True)
+    manager.memory_calls.clear()
+    manager.release_tags.clear()
+
+    _run(actor, _job("a", 0, "inc:0"))
+
+    assert manager.release_tags == [None, None]
+    assert manager.memory_calls == ["offload", "offload", "onload_weights", "onload_kv"]
+
+
+@pytest.mark.unit
+def test_the_base_stays_released_without_lora_or_colocation(tmp_path, _local_ray_get) -> None:
+    """Full-weight training rewrites the served weights; releasing them is the point."""
+    actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), keep_lora_base_resident=True)
+    assert actor._weight_publisher.release_tags is None
+
+
+@pytest.mark.unit
+def test_republication_restores_peer_adapters_without_advancing_scenario_versions(tmp_path, _local_ray_get):
+    actor, group, manager, _ = _actor(tmp_path, _EngineVersion(0))
+    _run(actor, _job("a", 0, "inc:0"))
+    _run(actor, _job("b", 0, "inc:1"))
+    before = actor.health()
+    group.published.clear()
+    manager.paused.clear()
+    assert actor.republish_serving() == "inc:2"
+    assert manager.recovered == 1
+    assert group.published == [("a", scenario_adapter_name("a", "inc:1"))]
+    after = actor.health()
+    assert after["lora_adapters"] == before["lora_adapters"]
+    assert after["completed_train_steps"] == before["completed_train_steps"]
+    assert after["training_job"] == before["training_job"]
+    assert manager.paused[0] == "pause" and manager.paused[-1] == "continue"
+    assert after["phase"] == "serving"
+
+
+@pytest.mark.parametrize("colocate,keep_base", [(False, False), (True, False), (True, True)])
+def test_cold_lora_recovery_waits_for_commit_before_resuming(tmp_path, _local_ray_get, colocate, keep_base):
+    options = {"colocate": colocate, "keep_lora_base_resident": keep_base}
+    actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), **options)
+    _run(actor, _job("a", 0, "inc:0"))
+    checkpoint = actor.execute_training_job(_job("b", 0, "inc:1"))
+    published = actor.update_serving_weights(checkpoint.training_job_id)
+    # A crash loses all engines after publication, before Reef acknowledges its head.
+    restarted, group, manager, _ = _actor(tmp_path, _EngineVersion(0), start_rollout_id=2, **options)
+    assert group.published == [("a", scenario_adapter_name("a", "inc:1"))]
+    assert group.publications == [("b", "inc:2")]
+    assert manager.paused == ["pause"]
+    assert restarted.serving_runtime_load_id() == published.runtime_load_id
+    assert group.train_calls == []
+    restarted.acknowledge_training_commit(published.training_job_id)
+    assert manager.paused == ["pause", "continue"]
+    assert restarted.health()["phase"] == "serving"
+
+
+@pytest.mark.parametrize("keep_base", [False, True])
+def test_failed_colocated_adapter_restore_never_resumes_generation(tmp_path, _local_ray_get, monkeypatch, keep_base):
+    options = {"colocate": True, "keep_lora_base_resident": keep_base}
+    actor, _, _, _ = _actor(tmp_path, _EngineVersion(0), **options)
+    _run(actor, _job("a", 0, "inc:0"))
+    _run(actor, _job("b", 0, "inc:1"))
+    managers = []
+
+    def fail_restore(group, scenario, name):
+        group._check_publication()
+        managers.append(group.manager)
+        raise RuntimeError("adapter reload failed")
+
+    monkeypatch.setattr(_ColocatedGroup, "publish_adapter", fail_restore)
+    with pytest.raises(AdapterResidencyError, match="adapter reload failed"):
+        _actor(tmp_path, _EngineVersion(0), start_rollout_id=2, **options)
+    assert len(managers) == 1
+    assert managers[0].generation_paused
+    assert "continue" not in managers[0].paused

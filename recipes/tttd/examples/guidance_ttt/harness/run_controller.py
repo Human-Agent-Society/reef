@@ -19,16 +19,21 @@ import shutil
 import time
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 
 RESUME_FORMAT_VERSION = 1
 
 
 class GuidanceRunStateError(RuntimeError):
     """The Guidance archive and Reef's durable training state do not align."""
+
+
+class GuidanceTrainingTimeoutError(RuntimeError):
+    """Reef did not commit a Guidance-TTT training step before its deadline."""
 
 
 @dataclass(frozen=True)
@@ -55,19 +60,22 @@ class GuidanceRunOutcome:
     runtime_load_id: str | None
 
 
-class SearchHarness(Protocol):
+class SearchHarness(ABC):
+    @abstractmethod
     def run_step(self, step: int) -> Sequence[Any]: ...
 
 
-class TrainingBridge(Protocol):
+class TrainingBridge(ABC):
     """Reef's durable training transaction, seen from the harness."""
 
+    @abstractmethod
     def start_step(self) -> int: ...
 
+    @abstractmethod
     def wait_for_step(self, *, expected_completed_steps: int, expected_rollout_id: int) -> Mapping[str, Any]: ...
 
 
-class RayTrainingBridge:
+class RayTrainingBridge(TrainingBridge):
     """Read the durable training job through Reef's Ray train bridge.
 
     The bridge exposes the optimizer transaction (grad norm, LoRA parameter
@@ -81,7 +89,7 @@ class RayTrainingBridge:
         scenario: str,
         *,
         token: str | None = None,
-        ray_address: str = "127.0.0.1:6379",
+        ray_address: str,
         ray_namespace: str = "reef",
         ray_actor_name: str = "reef-train-bridge",
         timeout_s: float = 14_400.0,
@@ -156,7 +164,7 @@ def wait_for_training_step(
                 return last_health
         if poll_interval_s:
             time.sleep(poll_interval_s)
-    raise TimeoutError(
+    raise GuidanceTrainingTimeoutError(
         f"training rollout {expected_rollout_id} did not complete after {timeout_s:g}s: "
         f"bridge={last_health}; reef={last_status}"
     )
@@ -422,6 +430,7 @@ __all__ = [
     "GuidanceRunOutcome",
     "GuidanceRunStateError",
     "GuidanceRunStateStore",
+    "GuidanceTrainingTimeoutError",
     "RayTrainingBridge",
     "atomic_copy",
     "failed_training_step",

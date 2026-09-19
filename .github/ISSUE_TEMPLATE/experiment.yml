@@ -6,7 +6,7 @@ body:
   - type: markdown
     attributes:
       value: |
-        Define the empirical question and the evidence needed to answer it.
+        Define the research question and the measurements needed to answer it.
         Pin models, datasets, prompts, code revisions, and evaluation methods
         closely enough that another contributor can reproduce the result.
 
@@ -77,5 +77,5 @@ body:
           required: true
         - label: I separated the empirical question from a preferred implementation.
           required: true
-        - label: I identified enough pinned inputs and retained evidence for an independent reproduction.
+        - label: I identified enough pinned inputs and saved results for an independent reproduction.
           required: true

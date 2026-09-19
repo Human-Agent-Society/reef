@@ -10,49 +10,48 @@ installed Reef package.
 """
 
 # isort: skip_file
-from importlib.metadata import PackageNotFoundError, version
-
-try:
-    __version__ = version("reef-infra")
-except PackageNotFoundError:
-    __version__ = "0.0.0.dev0"
+from reef.core.version import __version__
 
 from reef.core import ReefError, RequestType, AgentRecord, ReportBase, ReportValidationError
 from reef.service.wire import ReportPayload, RequestHeaders, parse_request_headers
-from reef.records import RecordStore
+from reef.storage.records import RecordStore
 from reef.train.evaluation import (
-    AlwaysSelect,
+    AlwaysSelectMixin,
+    BackendAlwaysSelectPlugin,
+    BackendEvaluateMixin,
     CandidateEvaluationConfig,
     CandidateEvaluationConfigError,
     CandidateEvaluationPlugin,
     CandidateEvaluationPluginFactory,
     CandidateEvaluator,
     CandidateSelector,
-    DefaultCandidateEvaluationPlugin,
     EvaluationResult,
+    RegressionCheckMixin,
     SelectionDecision,
     UpdateCandidate,
     build_candidate_evaluation,
 )
-from reef.scenario import (
-    SCENARIO_SNAPSHOT_METADATA_KEY,
-    CheckpointStrategy,
-    EveryNVersions,
-    Scenario,
-)
+from reef.storage.commits import SCENARIO_METADATA_KEY
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.scenario import Scenario
 from reef.recipe import (
     RecipeConfigError,
     Recipe,
 )
 from reef.dispatcher import Dispatcher, build_default_dispatcher
 from reef.train import DataProcessor, Trainer
-from reef.runtime import ActivatedModel, InferenceRuntime, ModelCandidate, TrainingRuntime
+from reef.runtime.interfaces import ActivatedModel, InferenceRuntime, ModelCandidate, TrainingRuntime
+
+# Compatibility aliases for existing imports.
+RegressionGateMixin = RegressionCheckMixin
 
 __all__ = [
-    "SCENARIO_SNAPSHOT_METADATA_KEY",
+    "SCENARIO_METADATA_KEY",
     "ActivatedModel",
     "AgentRecord",
-    "AlwaysSelect",
+    "AlwaysSelectMixin",
+    "BackendAlwaysSelectPlugin",
+    "BackendEvaluateMixin",
     "CandidateEvaluationConfig",
     "CandidateEvaluationConfigError",
     "CandidateEvaluationPlugin",
@@ -61,27 +60,44 @@ __all__ = [
     "CandidateSelector",
     "CheckpointStrategy",
     "DataProcessor",
-    "DefaultCandidateEvaluationPlugin",
     "Dispatcher",
     "EvaluationResult",
     "EveryNVersions",
     "InferenceRuntime",
     "ModelCandidate",
+    "PostgresRecordStore",
     "Recipe",
     "RecipeConfigError",
     "RecordStore",
     "ReefError",
+    "RegressionCheckMixin",
+    "RegressionGateMixin",
     "ReportBase",
     "ReportPayload",
     "ReportValidationError",
     "RequestHeaders",
     "RequestType",
+    "SQLiteRecordStore",
     "Scenario",
     "SelectionDecision",
     "Trainer",
     "TrainingRuntime",
     "UpdateCandidate",
+    "__version__",
     "build_candidate_evaluation",
     "build_default_dispatcher",
     "parse_request_headers",
 ]
+
+
+def __getattr__(name: str) -> type:
+    # Preserve convenient root imports without loading databases for interface users.
+    if name == "SQLiteRecordStore":
+        from reef.storage.sqlite import SQLiteRecordStore
+
+        return SQLiteRecordStore
+    if name == "PostgresRecordStore":
+        from reef.storage.postgres import PostgresRecordStore
+
+        return PostgresRecordStore
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

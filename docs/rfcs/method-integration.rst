@@ -76,7 +76,7 @@ registers ``POST /reef/report``, but nothing reads,
 queries, or subscribes. An external component that needs to see exchanges has
 exactly one option: sit on the traffic path and keep its own copy. Meanwhile
 the storage primitive for egress already exists.
-`RecordStore.replay_page <../../reef/records.py>`__ is keyset-paginated and
+`RecordStore.replay_page <../../reef/storage/records.py>`__ is keyset-paginated and
 documented "for internal streaming consumers," but it has no HTTP surface.
 
 The same forces will apply to every future method whose grading is
@@ -219,7 +219,7 @@ Milestones, each independently shippable:
    correlate by tags → judge with the PRM → ``POST /reef/report``. Its session
    table becomes derived state; the retry queue survives because report ids
    stay deterministic (``openclawrl:<receipt>``) and
-   `records.py <../../reef/records.py>`__ dedup is unchanged.
+   `records.py <../../reef/storage/records.py>`__ dedup is unchanged.
 3. **M3: graduate the package.** Move grader, sessions, and PRM client into
    ``reef/methods/openclawrl/`` beside the recipe and processor; CI runs the
    exclusion-semantics tests against the processor contract (P1, P7).

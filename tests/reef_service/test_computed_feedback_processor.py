@@ -11,21 +11,23 @@ import time
 from dataclasses import dataclass
 
 import pytest
+from reef_service._trajectories import policy_trajectory
 
 from reef.core import AgentRecord, RequestType
-from reef.train.processors.computed import ComputedFeedbackProcessor, Failed, JudgingWorker
-from reef.train.types import PolicyBatch, PolicySample, ProcessorContext
+from reef.core.trajectories import source_record_id
+from reef.train.processors.computed import ComputedFeedbackProcessor, Failed, JudgingWorker, SupportsReceipt
+from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem
 
 pytestmark = pytest.mark.unit
 
 
 @dataclass(frozen=True)
-class _Job:
+class _Job(SupportsReceipt):
     receipt: str
 
 
 @dataclass(frozen=True)
-class _Judgment:
+class _Judgment(SupportsReceipt):
     receipt: str
     good: bool = True
 
@@ -68,10 +70,10 @@ class _ToyProcessor(ComputedFeedbackProcessor):
     async def judge(self, job: _Job) -> _Judgment:
         return _Judgment(job.receipt)
 
-    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> PolicySample | None:
+    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> TrajectoryItem | None:
         if not judgment.good:
             return None
-        return PolicySample(
+        return policy_trajectory(
             source_agent_record_id=record.agent_record_id,
             tokens=(1, 2),
             loss_mask=(1,),
@@ -80,8 +82,8 @@ class _ToyProcessor(ComputedFeedbackProcessor):
             runtime_load_id=record.payload.get("version", "v1"),
         )
 
-    def make_batch(self, samples: tuple[PolicySample, ...], batch_number: int) -> PolicyBatch:
-        return PolicyBatch(f"{self.scenario}:toy:{batch_number}", samples)
+    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"{self.scenario}:toy:{batch_number}", tuple(sample for sample in samples))
 
 
 def _record(agent_record_id: str, **payload) -> AgentRecord:
@@ -106,7 +108,7 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     worker.push(_Judgment("r1"))
     assert processor.ready()
     batch = processor.build_batch()
-    assert batch.samples[0].source_agent_record_id == "r1"
+    assert source_record_id(batch.items[0]) == "r1"
     processor.acknowledge(batch.batch_id)
     decision = processor.retention_decision()
     assert "r1" in decision.releasable_agent_record_ids

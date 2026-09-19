@@ -69,11 +69,12 @@ def test_recovery_checks_the_scenario_adapter_not_the_global_version() -> None:
         content_id="live:x", release_id="live:p:4", parent_release_id=None, runtime_load_id="inc:4"
     )
     checkpoint_ref = ArtifactRef("ckpt", "c0", None)
-    assert WeightLoader("math").recover(current, checkpoint_ref, Runtime()) == current
-    assert WeightLoader().recover(current, checkpoint_ref, Runtime()) == checkpoint_ref
+    runtime = Runtime().inference
+    assert WeightLoader("math").recover(current, checkpoint_ref, runtime) == current
+    assert WeightLoader().recover(current, checkpoint_ref, runtime) == checkpoint_ref
     # The engine holds no adapter for code: its live head is unservable, so
     # serving falls back to the exact checkpoint instead of routing to a
     # name the engine would reject.
-    assert WeightLoader("code").recover(current, checkpoint_ref, Runtime()) == checkpoint_ref
+    assert WeightLoader("code").recover(current, checkpoint_ref, runtime) == checkpoint_ref
     surface = create_weight_surface(scenario="math")
     assert isinstance(surface.loader, WeightLoader) and isinstance(surface.inference, WeightInferenceHooks)

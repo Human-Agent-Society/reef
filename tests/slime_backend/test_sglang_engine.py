@@ -10,13 +10,18 @@ from pathlib import Path
 
 import pytest
 
-from reef.train.slime_backend.reef_adapters.preflight import configure_sglang_runtime
-from reef.train.slime_backend.reef_adapters.sglang import plugin as sglang_plugin
-from reef.train.slime_backend.reef_adapters.sglang.lora_schema import (
+from reef.inference.sglang import config as sglang_config
+from reef.inference.sglang import deployment as sglang_deployment
+from reef.inference.sglang import plugin as sglang_plugin
+from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.deployment import create_inference
+from reef.inference.sglang.launch import engine_environment
+from reef.inference.sglang.lora_schema import (
+    adapter_scoped_prefix_cache_supported,
     require_lora_distributed_request_schema,
     require_lora_tensor_request_schema,
 )
-from reef.train.slime_backend.reef_adapters.sglang.plugin import (
+from reef.inference.sglang.plugin import (
     REEF_SGLANG_PLUGIN_ENV,
     install_colocated_retract_offload,
     install_scheduler_runtime_load_id_tracking,
@@ -90,7 +95,7 @@ def _load_sglang_engine_module(monkeypatch: pytest.MonkeyPatch):
     raw_engine.SGLangEngine = BaseEngine  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "slime.backends.sglang_utils.sglang_engine", raw_engine)
 
-    path = Path(__file__).parents[2] / "reef" / "train" / "slime_backend" / "reef_adapters" / "sglang" / "engine.py"
+    path = Path(__file__).parents[2] / "reef" / "inference" / "sglang" / "engine.py"
     spec = importlib.util.spec_from_file_location("_reef_test_sglang_engine", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -263,7 +268,7 @@ def test_get_runtime_load_id_uses_model_info(monkeypatch: pytest.MonkeyPatch) ->
     engine.node_rank = 0
     engine.server_host = "127.0.0.1"
     engine.server_port = 30000
-    engine.args = types.SimpleNamespace(distributed_timeout_minutes=10)
+    engine.config = SGLangConfig("model", 1, 1, 1)
 
     assert engine.get_runtime_load_id() == "training-incarnation:3"
     assert requested == [("http://127.0.0.1:30000/model_info", 30.0)]
@@ -281,9 +286,9 @@ def test_engine_preflights_scheduler_runtime_load_id_tracking_before_registratio
     engine.get_runtime_load_id = lambda: "engine:3"
     engine._make_request = lambda endpoint, payload, **_kwargs: events.append((endpoint, payload)) or [True]
 
-    assert engine._register_to_router({"model_path": "model"}) == "registered"
+    engine.router_ip = None
+    assert engine._register_to_router({"model_path": "model"}) is None
     assert events == [("set_internal_state", {"server_args": {"weight_version": "engine:3"}})]
-    assert engine.registered == {"model_path": "model"}
 
 
 @pytest.mark.unit
@@ -316,81 +321,88 @@ def test_disk_weight_update_does_not_implicitly_flush_kv_cache(monkeypatch: pyte
     ]
 
 
-@pytest.mark.unit
-def test_install_sglang_extensions_selects_reef_engine(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_sglang_engine_module(monkeypatch)
-    rollout = types.ModuleType("slime.ray.rollout")
-    rollout.SGLangEngine = object  # type: ignore[attr-defined]
-    monkeypatch.setitem(sys.modules, "slime.ray.rollout", rollout)
-    monkeypatch.setattr(importlib.import_module("slime.ray"), "rollout", rollout, raising=False)
-    ray_utils = importlib.import_module("slime.ray.utils")
-    monkeypatch.setenv("SLIME_HOST_IP", "127.0.0.1")
-    for name in ("SLIME_HOST_IP", "NO_PROXY", "no_proxy"):
-        monkeypatch.delitem(ray_utils.RAY_DEFAULT_ENV_VARS, name, raising=False)
-
-    module.install_sglang_extensions()
-
-    assert rollout.SGLangEngine is module.ReefSGLangEngine
-    assert ray_utils.RAY_DEFAULT_ENV_VARS["SLIME_HOST_IP"] == "127.0.0.1"
-    assert "127.0.0.1" in ray_utils.RAY_DEFAULT_ENV_VARS["NO_PROXY"].split(",")
+def _training_inference_config(**options):
+    return SGLangConfig(**_training_inference_values(**options))
 
 
-@pytest.mark.unit
-def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_sglang_engine_module(monkeypatch)
-    monkeypatch.setattr(module, "megatron_lora_enabled", lambda _args: True)
-    monkeypatch.setattr(module, "sglang_lora_target_modules", lambda _args: ["q_proj"])
-    checked: list[bool] = []
-    monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: checked.append(True))
-    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: checked.append(True))
+def _training_inference_values(**options):
+    from reef.train.slime_backend.inference import inference_config
 
-    engine = module.ReefSGLangEngine(
-        types.SimpleNamespace(megatron_lora_rank=8),
-        0,
-        sglang_overrides={"mem_fraction_static": 0.5},
+    return inference_config(
+        types.SimpleNamespace(
+            **{
+                "hf_checkpoint": "model",
+                "seed": 1,
+                "offload_rollout": False,
+                "fp16": False,
+                "use_rollout_routing_replay": False,
+                "megatron_lora_rank": 0,
+                "rollout_num_gpus": 1,
+                "rollout_num_gpus_per_engine": 1,
+                "num_gpus_per_node": 1,
+                "actor_num_nodes": 1,
+                "actor_num_gpus_per_node": 1,
+                "colocate": False,
+                "disjoint_prefix_sharing": False,
+                **options,
+            },
+        )
     )
 
+
+def test_training_inference_forces_the_flags_reef_serving_relies_on():
+    # Slime's parser defaults --sglang-disable-radix-cache to off; the config
+    # validation rejects that, so the translation must set the flags itself.
+    config = _training_inference_config(sglang_disable_radix_cache=False)
+    assert config.options["disable_radix_cache"] is True
+    assert config.options["incremental_streaming_output"] is True
+    opted_out = _training_inference_config(colocate=True, offload_rollout=True, sglang_disable_radix_cache=True)
+    assert opted_out.options["disable_radix_cache"] is True, "a launch may always opt out of sharing"
+
+
+def test_inference_engine_does_not_inherit_or_patch_slime(monkeypatch):
+    module = _load_sglang_engine_module(monkeypatch)
+    assert module.ReefSGLangEngine.__bases__ == (object,)
+    assert not hasattr(module, "install_sglang_extensions")
+
+
+def test_reef_engine_carries_lora_server_args_across_ray_process(monkeypatch):
+    module = _load_sglang_engine_module(monkeypatch)
+    import pickle
+
+    lora = sys.modules["reef.train.slime_backend.reef_adapters.megatron.lora"]
+    monkeypatch.setattr(lora, "sglang_lora_target_modules", lambda args: ["q_proj"])
+    checked = []
+    monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: checked.append(True))
+    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: checked.append(True))
+    config = pickle.loads(pickle.dumps(_training_inference_config(megatron_lora_rank=8)))
+    engine = module.ReefSGLangEngine(config, 0, sglang_overrides={"mem_fraction_static": 0.5})
     assert checked == [True, True]
-    assert engine.sglang_overrides == {
-        "mem_fraction_static": 0.5,
-        "enable_lora": True,
-        "max_loras_per_batch": 1,
-        "max_loaded_loras": 1,
-        "max_lora_rank": 8,
-        "lora_target_modules": ["q_proj"],
-        "enable_weights_cpu_backup": True,
-        "tokenizer_worker_num": 1,
-    }
+    assert engine.config.options["enable_lora"] is True
+    assert engine.config.options["lora_target_modules"] == ["q_proj"]
+    assert engine.config.options["max_lora_rank"] == 8
+    assert engine.config.options["max_loaded_loras"] == 1
+    assert engine.config.options["enable_weights_cpu_backup"] is True
+    assert engine.config.options["tokenizer_worker_num"] == 1
+    assert engine.sglang_overrides == {"mem_fraction_static": 0.5}
 
 
-@pytest.mark.unit
-def test_reef_engine_sizes_lora_slots_from_max_loaded_loras(monkeypatch: pytest.MonkeyPatch) -> None:
-    module = _load_sglang_engine_module(monkeypatch)
-    monkeypatch.setattr(module, "megatron_lora_enabled", lambda _args: True)
-    monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: None)
-    monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: None)
-    monkeypatch.setattr(module, "sglang_lora_target_modules", lambda _args: ["q_proj"])
-
-    engine = module.ReefSGLangEngine(types.SimpleNamespace(megatron_lora_rank=8, max_loaded_loras=4), 0)
-    assert engine.sglang_overrides["max_loaded_loras"] == 4
-    assert engine.sglang_overrides["max_loras_per_batch"] == 4
-
+def test_reef_engine_sizes_lora_slots_from_max_loaded_loras(monkeypatch):
+    _load_sglang_engine_module(monkeypatch)
+    config = _training_inference_config(megatron_lora_rank=8, max_loaded_loras=4)
+    assert config.options["max_loaded_loras"] == 4
+    assert config.options["max_loras_per_batch"] == 4
     with pytest.raises(ValueError, match="max-loaded-loras"):
-        module.ReefSGLangEngine(types.SimpleNamespace(megatron_lora_rank=8, max_loaded_loras=0), 0)
+        _training_inference_config(megatron_lora_rank=8, max_loaded_loras=0)
 
 
-@pytest.mark.unit
-def test_reef_engine_rejects_conflicting_lora_override(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reef_engine_rejects_conflicting_lora_override(monkeypatch):
     module = _load_sglang_engine_module(monkeypatch)
-    monkeypatch.setattr(module, "megatron_lora_enabled", lambda _args: True)
     monkeypatch.setattr(module, "require_lora_tensor_request_schema", lambda: None)
     monkeypatch.setattr(module, "require_lora_distributed_request_schema", lambda: None)
-
     with pytest.raises(ValueError, match="conflict"):
         module.ReefSGLangEngine(
-            types.SimpleNamespace(megatron_lora_rank=8),
-            0,
-            sglang_overrides={"enable-lora": False},
+            SGLangConfig("model", 1, 1, 1, options={"enable_lora": True}), 0, sglang_overrides={"enable-lora": False}
         )
 
 
@@ -399,106 +411,59 @@ def test_reef_config_selects_pause_mode_and_scopes_shared_prefix_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SGLANG_PLUGINS", "telemetry")
-    disjoint = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=None)
-    configure_sglang_runtime(disjoint)
+    disjoint = create_inference(_training_inference_values()).config
+    assert disjoint.options["disable_radix_cache"] is True
+    assert disjoint.options["incremental_streaming_output"] is True
+    assert disjoint.pause_mode == "in_place"
+    assert engine_environment(disjoint)[REEF_SGLANG_PLUGIN_ENV] == "1"
+    assert engine_environment(disjoint)["SGLANG_PLUGINS"] == "telemetry,reef"
+    assert os.environ["SGLANG_PLUGINS"] == "telemetry"
 
-    assert disjoint.sglang_disable_radix_cache is True
-    assert disjoint.sglang_incremental_streaming_output is True
-    assert disjoint.weight_update_pause_mode == "in_place"
-    assert os.environ[REEF_SGLANG_PLUGIN_ENV] == "1"
-    assert os.environ["SGLANG_PLUGINS"] == "telemetry,reef"
-
-    colocated = types.SimpleNamespace(
-        colocate=True,
-        megatron_lora_rank=0,
-        prefill_num_servers=0,
-        sglang_config=None,
-    )
-    configure_sglang_runtime(colocated)
-    assert colocated.weight_update_pause_mode == "retract"
-    assert colocated.sglang_incremental_streaming_output is True
+    colocated = create_inference(_training_inference_values(colocate=True, offload_rollout=True)).config
+    assert colocated.pause_mode == "retract"
+    assert colocated.options["incremental_streaming_output"] is True
     # A colocated step releases the KV cache before every publication, so a
     # shared entry cannot outlive the weights that built it.
-    assert colocated.sglang_disable_radix_cache is False
+    assert colocated.options["disable_radix_cache"] is False
 
 
 @pytest.mark.unit
 def test_disjoint_shares_prefixes_only_by_opting_into_retraction() -> None:
     """Sharing entries and retracting in-flight KV are one decision."""
-    default = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=None)
-    configure_sglang_runtime(default)
+    default = _training_inference_config()
+    assert default.options["disable_radix_cache"] is True
+    assert default.pause_mode == "in_place"
 
-    assert default.sglang_disable_radix_cache is True
-    assert default.weight_update_pause_mode == "in_place"
+    sharing = _training_inference_config(disjoint_prefix_sharing=True)
+    assert sharing.options["disable_radix_cache"] is False
+    assert sharing.pause_mode == "retract", "the cache can only be cleared once no request holds KV"
 
-    sharing = types.SimpleNamespace(
-        colocate=False,
-        megatron_lora_rank=0,
-        disjoint_prefix_sharing=True,
-        sglang_config=None,
-    )
-    configure_sglang_runtime(sharing)
-
-    assert sharing.sglang_disable_radix_cache is False
-    assert sharing.weight_update_pause_mode == "retract", "the cache can only be cleared once no request holds KV"
+    with pytest.raises(ValueError, match="disable_radix_cache=true"):
+        SGLangConfig("model", 1, 1, 1, options={"disable_radix_cache": False})
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("adapter_scoped", [True, False])
 def test_colocated_lora_shares_prefixes_only_when_sglang_keys_them_by_adapter(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, adapter_scoped: bool
 ) -> None:
     """One engine holds several scenarios' adapters; the engine must keep them apart."""
-    preflight = importlib.import_module("reef.train.slime_backend.reef_adapters.preflight")
-    monkeypatch.setattr(preflight, "require_lora_tensor_request_schema", lambda: None)
-    monkeypatch.setattr(preflight, "require_lora_distributed_request_schema", lambda: None)
+    _load_sglang_engine_module(monkeypatch)
+    monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
 
-    def _args():
-        return types.SimpleNamespace(
-            colocate=True,
-            megatron_lora_rank=8,
-            prefill_num_servers=0,
-            sglang_config=None,
-        )
+    config = _training_inference_config(colocate=True, offload_rollout=True, megatron_lora_rank=8)
 
-    monkeypatch.setattr(preflight, "_adapter_scoped_prefix_cache_supported", lambda: True)
-    keyed = _args()
-    preflight.configure_sglang_runtime(keyed)
-    assert keyed.sglang_disable_radix_cache is False
-
-    monkeypatch.setattr(preflight, "_adapter_scoped_prefix_cache_supported", lambda: False)
-    unkeyed = _args()
-    preflight.configure_sglang_runtime(unkeyed)
-    assert unkeyed.sglang_disable_radix_cache is True, "an engine that cannot isolate adapters shares nothing"
-
-
-@pytest.mark.unit
-def test_reef_config_enables_sglang_plugin_without_preexisting_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("SGLANG_PLUGINS", raising=False)
-    args = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=None)
-
-    configure_sglang_runtime(args)
-
-    assert os.environ["SGLANG_PLUGINS"] == "reef"
-
-
-@pytest.mark.unit
-def test_sglang_plugin_environment_crosses_ray_actor_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
-    env = {
-        "SGLANG_PLUGINS": "telemetry,reef",
-        REEF_SGLANG_PLUGIN_ENV: "1",
-        "UNRELATED": "ignored",
-    }
-
-    assert reef_rollout_env_vars(env) == {
-        "SGLANG_PLUGINS": "telemetry,reef",
-        REEF_SGLANG_PLUGIN_ENV: "1",
-    }
+    assert config.options["enable_lora"] is True
+    assert (
+        config.options["disable_radix_cache"] is not adapter_scoped
+    ), "an engine that cannot isolate adapters shares nothing"
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("broken", [None, "request", "radix", "request_id", "unsupported", "unforeseen"])
-def test_adapter_prefix_probe_checks_actual_key_isolation(monkeypatch: pytest.MonkeyPatch, broken: str | None) -> None:
-    preflight = importlib.import_module("reef.train.slime_backend.reef_adapters.preflight")
+def test_adapter_prefix_check_exercises_actual_key_isolation(
+    monkeypatch: pytest.MonkeyPatch, broken: str | None
+) -> None:
     requests = types.ModuleType("sglang.srt.managers.schedule_batch")
     radix = types.ModuleType("sglang.srt.mem_cache.radix_cache")
     sampling = types.ModuleType("sglang.srt.sampling.sampling_params")
@@ -528,8 +493,34 @@ def test_adapter_prefix_probe_checks_actual_key_isolation(monkeypatch: pytest.Mo
     sampling.SamplingParams = lambda **kwargs: types.SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
     for module in (requests, radix, sampling):
         monkeypatch.setitem(sys.modules, module.__name__, module)
+    adapter_scoped_prefix_cache_supported.cache_clear()
 
-    assert preflight._adapter_scoped_prefix_cache_supported() is (broken is None)
+    try:
+        assert adapter_scoped_prefix_cache_supported() is (broken is None)
+    finally:
+        adapter_scoped_prefix_cache_supported.cache_clear()
+
+
+@pytest.mark.unit
+def test_reef_config_enables_sglang_plugin_without_preexisting_plugins(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("SGLANG_PLUGINS", raising=False)
+    config = create_inference(_training_inference_values()).config
+    assert engine_environment(config)["SGLANG_PLUGINS"] == "reef"
+    assert "SGLANG_PLUGINS" not in os.environ
+
+
+@pytest.mark.unit
+def test_sglang_plugin_environment_crosses_ray_actor_boundaries(monkeypatch: pytest.MonkeyPatch) -> None:
+    env = {
+        "SGLANG_PLUGINS": "telemetry,reef",
+        REEF_SGLANG_PLUGIN_ENV: "1",
+        "UNRELATED": "ignored",
+    }
+
+    assert reef_rollout_env_vars(env) == {
+        "SGLANG_PLUGINS": "telemetry,reef",
+        REEF_SGLANG_PLUGIN_ENV: "1",
+    }
 
 
 @pytest.mark.unit
@@ -570,27 +561,18 @@ sglang:
 """,
         encoding="utf-8",
     )
-    args = types.SimpleNamespace(colocate=False, megatron_lora_rank=0, sglang_config=str(config))
-
     with pytest.raises(ValueError, match="disable_radix_cache=true"):
-        configure_sglang_runtime(args)
+        create_inference(_training_inference_values(sglang_config=str(config)))
 
-    colocated = types.SimpleNamespace(
-        colocate=True,
-        megatron_lora_rank=0,
-        prefill_num_servers=0,
-        sglang_config=str(config),
-    )
-
-    configure_sglang_runtime(colocated)
-
-    assert colocated.sglang_disable_radix_cache is False, "a colocated group may choose either setting"
+    colocated = create_inference(
+        _training_inference_values(colocate=True, offload_rollout=True, sglang_config=str(config))
+    ).config
+    assert colocated.models[0].groups[0].options["disable_radix_cache"] is False, "a colocated group may share"
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("colocate", [True, False])
 @pytest.mark.parametrize("via_yaml", [True, False])
-def test_retracting_reef_config_rejects_pd_disaggregation(tmp_path: Path, colocate: bool, via_yaml: bool) -> None:
+def test_disjoint_prefix_sharing_rejects_pd_disaggregation(tmp_path: Path, via_yaml: bool) -> None:
     config = tmp_path / "sglang.yaml"
     config.write_text(
         """\
@@ -604,16 +586,11 @@ sglang:
 """,
         encoding="utf-8",
     )
-    args = types.SimpleNamespace(
-        colocate=colocate,
-        disjoint_prefix_sharing=not colocate,
-        megatron_lora_rank=0,
-        prefill_num_servers=0 if via_yaml else 1,
-        sglang_config=str(config) if via_yaml else None,
-    )
-
-    with pytest.raises(ValueError, match="regular SGLang engine"):
-        configure_sglang_runtime(args)
+    topology = {"sglang_config": str(config)} if via_yaml else {"prefill_num_servers": 1}
+    with pytest.raises(ValueError, match="regular SGLang engines"):
+        create_inference(_training_inference_values(disjoint_prefix_sharing=True, rollout_num_gpus=2, **topology))
+    # Without the opt-in, a disjoint PD deployment keeps in-flight KV and remains valid.
+    create_inference(_training_inference_values(rollout_num_gpus=2, **topology))
 
 
 @pytest.mark.unit
@@ -623,24 +600,51 @@ sglang:
 def test_lora_yaml_cannot_override_required_cache_isolation(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, colocate: bool, adapter_scoped: bool, disabled: bool
 ) -> None:
-    preflight = importlib.import_module("reef.train.slime_backend.reef_adapters.preflight")
-    monkeypatch.setattr(preflight, "require_lora_tensor_request_schema", lambda: None)
-    monkeypatch.setattr(preflight, "require_lora_distributed_request_schema", lambda: None)
-    monkeypatch.setattr(preflight, "_adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
+    _load_sglang_engine_module(monkeypatch)
+    monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
     config = tmp_path / "sglang.yaml"
     config.write_text(
         "sglang:\n  - name: actor\n    server_groups:\n      - worker_type: regular\n"
         f"        num_gpus: 1\n        overrides:\n          disable-radix-cache: {str(disabled).lower()}\n",
         encoding="utf-8",
     )
-    args = types.SimpleNamespace(
-        colocate=colocate, disjoint_prefix_sharing=not colocate, megatron_lora_rank=8, sglang_config=str(config)
+    values = _training_inference_values(
+        colocate=colocate,
+        offload_rollout=colocate,
+        disjoint_prefix_sharing=not colocate,
+        megatron_lora_rank=8,
+        sglang_config=str(config),
     )
+    monkeypatch.setattr(sglang_deployment, "require_lora_tensor_request_schema", lambda: None)
+    monkeypatch.setattr(sglang_deployment, "require_lora_distributed_request_schema", lambda: None)
     if not adapter_scoped and not disabled:
         with pytest.raises(ValueError, match="disable_radix_cache=true"):
-            configure_sglang_runtime(args)
+            create_inference(values)
     else:
-        configure_sglang_runtime(args)
+        create_inference(values)
+
+
+@pytest.mark.unit
+def test_colocated_reef_config_rejects_pd_disaggregation(tmp_path: Path) -> None:
+    config = tmp_path / "sglang.yaml"
+    config.write_text(
+        """\
+sglang:
+  - name: actor
+    server_groups:
+      - worker_type: prefill
+        num_gpus: 1
+      - worker_type: decode
+        num_gpus: 1
+""",
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="regular engines"):
+        create_inference(
+            _training_inference_values(
+                colocate=True, offload_rollout=True, rollout_num_gpus=2, sglang_config=str(config)
+            )
+        )
 
 
 @pytest.mark.unit
@@ -986,3 +990,56 @@ def test_retract_flush_preserves_pending_grammar_and_gpu_guards(monkeypatch: pyt
     assert scheduler.is_fully_idle() is False
     future.set_result("compiled grammar")
     assert scheduler.grammar_manager.grammar_queue.pop().grammar.result() == "compiled grammar"
+
+
+@pytest.mark.unit
+def test_memory_transitions_pair_cold_startup_with_keep_base_training(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_sglang_engine_module(monkeypatch)
+    calls: list[tuple[str, object]] = []
+    engine = object.__new__(module.ReefSGLangEngine)
+    engine.node_rank = 0
+    engine._make_request = lambda route, payload=None, **_kw: calls.append((route, payload))
+    engine.flush_cache = lambda: calls.append(("flush_cache", None))
+
+    engine.release_memory_occupation()
+    engine.release_memory_occupation(["kv_cache", "cuda_graph"])
+    engine.resume_memory_occupation(["weights"])
+    engine.resume_memory_occupation(["weights"])
+    engine.resume_memory_occupation()
+    engine.release_memory_occupation(["kv_cache", "cuda_graph"])
+    engine.resume_memory_occupation()
+
+    assert calls == [
+        ("flush_cache", None),
+        ("release_memory_occupation", {"tags": ["weights", "kv_cache", "cuda_graph"]}),
+        ("resume_memory_occupation", {"tags": ["weights"]}),
+        ("resume_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
+        ("flush_cache", None),
+        ("release_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
+        ("resume_memory_occupation", {"tags": ["kv_cache", "cuda_graph"]}),
+    ]
+
+
+@pytest.mark.parametrize("failure", ["release_memory_occupation", "resume_memory_occupation"])
+def test_uncertain_memory_transition_requires_engine_replacement(monkeypatch, failure):
+    module = _load_sglang_engine_module(monkeypatch)
+    engine = object.__new__(module.ReefSGLangEngine)
+    calls = []
+
+    def request(route, payload):
+        calls.append(route)
+        return {"success": route != failure}
+
+    engine._make_request = request
+    engine.flush_cache = lambda: None
+    with pytest.raises(RuntimeError, match=failure):
+        engine.release_memory_occupation()
+        engine.resume_memory_occupation()
+    before = list(calls)
+    with pytest.raises(RuntimeError, match="uncertain"):
+        engine.resume_memory_occupation()
+    with pytest.raises(RuntimeError, match="uncertain"):
+        engine.release_memory_occupation()
+    assert calls == before

@@ -1,13 +1,15 @@
 from __future__ import annotations
 
 import dataclasses
+import time
 
 import pytest
 
 from reef.core.artifact_ref import LiveWeightArtifactRef
 from reef.observability.base import RollbackExperimentEvent, TrainingExperimentContext, TrainingExperimentEvent
+from reef.observability.operations import OperationMetrics
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
-from reef.service.deploy.settings import service_settings_from_config
+from reef.service.deploy.service_config import service_config_from_mapping
 
 
 class _StubRun:
@@ -303,6 +305,15 @@ def test_disabled_and_failed_tracking_never_fail_training() -> None:
     logging_tracker = _tracker(logging_client)
     logging_tracker.record(_event())
     assert len(logging_client.init_calls) == 1
+    context = _context()
+    component_logger = logging_tracker.bind_scenario(
+        scenario=context.scenario,
+        recipe=context.recipe,
+        source_artifact_ref=context.source_artifact_ref,
+        run_segment=0,
+    )
+    component_logger.log({"training/error": 1}, namespace="operations")
+    assert logging_client.runs[0].logged == []
 
 
 @pytest.mark.unit
@@ -316,7 +327,7 @@ def test_config_surface_is_generic_and_rejects_credentials() -> None:
     ).correlation_metrics(_context())
     assert default_group["experiment/group"] == "math"
 
-    settings = service_settings_from_config(
+    settings = service_config_from_mapping(
         {
             "reef": {"recipe": "pg"},
             "observability": {
@@ -407,3 +418,59 @@ def test_backend_train_step_in_metrics_never_overrides_the_run_step_axis() -> No
     assert job_row["train/step"] == 2
     step_row = next(row for row in rows if "step/loss" in row)
     assert step_row["step/step"] == 0
+
+
+def test_operational_metrics_use_wall_time_without_advancing_the_training_axis() -> None:
+    client = _StubClient()
+    tracker = _tracker(client)
+    context = _context()
+    scenario_logger = tracker.bind_scenario(
+        scenario=context.scenario,
+        recipe=context.recipe,
+        source_artifact_ref=context.source_artifact_ref,
+        run_segment=0,
+    )
+    before = time.time()
+    for waiting in (2, 3):
+        scenario_logger.log({"records/unread_count": waiting, "time_seconds": -1}, namespace="operations")
+    run = client.runs[0]
+    rows = [metrics for metrics, _ in run.logged]
+    assert [row["operations/records/unread_count"] for row in rows] == [2, 3]
+    assert all(before <= row["operations/time_seconds"] <= time.time() for row in rows)
+    assert all("train/step" not in row and "reef/step" not in row for row in rows)
+    assert (("operations/*",), {"step_metric": "operations/time_seconds"}) in run.defined
+    tracker.record_rollback(
+        RollbackExperimentEvent(
+            scenario=context.scenario,
+            recipe=context.recipe,
+            step=8,
+            run_segment=0,
+            source_artifact_ref=_event().produced_artifact_ref,
+            produced_artifact_ref=context.source_artifact_ref,
+            target_release_id="artifact:6",
+        )
+    )
+    scenario_logger.log({"records/unread_count": 0}, namespace="operations")
+    assert run.finished
+    assert len(run.logged) == 2
+    assert client.runs[1].logged[0][0]["operations/event"] == 0
+    assert tracker.operational_metrics_enabled
+    assert not _tracker(_StubClient(), enabled=False).operational_metrics_enabled
+
+
+def test_operation_measurements_remain_readable_and_preserve_failures() -> None:
+    metrics = OperationMetrics(("weight_sync",))
+    with pytest.raises(ConnectionError), metrics.measure("weight_sync"):
+        assert metrics.snapshot()["weight_sync/active"] == 1
+        assert metrics.snapshot()["weight_sync/elapsed_seconds"] >= 0
+        raise ConnectionError("transfer failed")
+    failed = metrics.snapshot()
+    assert failed["weight_sync/active"] == 0
+    assert failed["weight_sync/failed_total"] == 1
+    assert failed["weight_sync/completed_total"] == 0
+    with metrics.measure("weight_sync"):
+        pass
+    recovered = metrics.snapshot()
+    assert recovered["weight_sync/failed_total"] == 1
+    assert recovered["weight_sync/completed_total"] == 1
+    assert recovered["weight_sync/duration_seconds_total"] >= failed["weight_sync/duration_seconds_total"]

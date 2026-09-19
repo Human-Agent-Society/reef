@@ -4,16 +4,20 @@ A report is the second thing a harness sends Reef, after the inference it
 refers to (``AgentRecord``); both live in ``core`` because the service
 validates a report at ingress, the scenario binds its type, the recipe
 declares it, and the processors rehydrate it — packages that do not depend
-on each other. ``ReportBase`` is the contract and ``ScoredRolloutReport`` is
-the shared score-only vocabulary; method-specific contracts live with their
-method packages.
+on each other. ``ReportBase`` is the contract; ``ScoredRolloutReport`` is
+the shared score-only vocabulary and ``TeacherContextReport`` the shared
+vocabulary of the distilling recipes (a rollout and the text its teacher
+sees); method-specific contracts live with their method packages.
 """
 
-from reef.core.reports.base import ReportBase, ReportValidationError
+from reef.core.reports.base import ReportBase, ReportValidationError, validate_report_payload
 from reef.core.reports.scored_rollout import ScoredRolloutReport
+from reef.core.reports.teacher_context import TeacherContextReport
 
 __all__ = [
     "ReportBase",
     "ReportValidationError",
     "ScoredRolloutReport",
+    "TeacherContextReport",
+    "validate_report_payload",
 ]

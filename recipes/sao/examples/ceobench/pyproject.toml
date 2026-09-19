@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-sao-ceobench-harness"
+version = "0.1.0"
+description = "CEO-Bench's bash agent as a Harbor agent, served by Reef and scored week by week"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx",
+    "openai",
+    "reef-client",
+    "reef-eval[harbor]",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

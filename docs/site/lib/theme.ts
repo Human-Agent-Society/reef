@@ -22,5 +22,4 @@ export function resolve(mode: Mode): "light" | "dark" {
 
 export function apply(mode: Mode) {
   document.documentElement.dataset.theme = resolve(mode);
-  document.documentElement.dataset.themeMode = mode;
 }

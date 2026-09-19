@@ -67,8 +67,24 @@ def lora_engine_slots(args: Namespace) -> int:
     of scenarios plus one. With fewer slots the residency manager evicts the
     publishing scenario's own current revision first (generation is paused,
     so no request observes the gap); with exactly one slot that is the only
-    option, which is fine for one scenario but leaves a second scenario's
-    adapter unloaded whenever the other publishes.
+    option, which is fine for one scenario.
+
+    Sizing below the scenario count does NOT degrade gracefully: a peer's
+    current revision is never evicted, so the second scenario's publication is
+    refused with ``AdapterCapacityExhausted`` naming the slot count to set
+    here. That refusal is deliberate — evicting a serving peer would route its
+    next request to an adapter the engine no longer holds, and nothing reloads
+    it on demand.
+
+    Do not size this against ``max_staleness``. AReaL ties
+    ``lora_keep_versions`` to its staleness bound because its off-policy
+    correction scores samples through the producing adapter, which must
+    therefore stay loaded. Reef records ``rollout_log_probs`` and the
+    producing runtime load ID on the sample itself, so admission is sequence
+    arithmetic over recorded data: a sample stays admissible for exactly as
+    long as the bound says, whether or not the adapter that produced it is
+    still resident. The scenario count sizes this; the staleness bound does
+    not.
     """
 
     value = getattr(args, "max_loaded_loras", None)

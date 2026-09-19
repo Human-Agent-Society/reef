@@ -19,7 +19,7 @@ weights it produced.
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a backend that captures tokens and log-probs     |
 +-------------+------------------------------------------------------------+
-| Example     | ``recipes/sao/examples/sao/``                              |
+| Example     | ``recipes/sao/examples/imo_answerbench/``                  |
 +-------------+------------------------------------------------------------+
 
 What it does
@@ -41,7 +41,7 @@ How Reef implements it
 ----------------------
 
 The processor turns every eligible ``ScoredRolloutReport`` into one
-``PolicySample``. With the default ``batch_size`` of 1, each sample is its
+``TrajectoryItem``. With the default ``batch_size`` of 1, each sample is its
 own training step. The ``sao`` loss family runs Slime's ``policy_loss`` with
 SAO's per-token primitive and a critic colocated on the actor GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages
@@ -50,6 +50,12 @@ inside the training backend.
 The DIS ratio compares the current policy against the log-probabilities
 recorded when the rollout was generated. SAO therefore requires an inference
 backend that attaches engine-native tensors.
+
+The value model carries the paper's cold-start mitigations: it trains at its
+own, higher learning rate (``--critic-lr``) and the first
+``--num-critic-only-steps`` rollout steps fit the zero-initialized value head
+before any policy update. Warmup steps still commit one training release per
+rollout; the policy's weights first move after the warmup.
 
 Configuration
 -------------
@@ -62,7 +68,7 @@ Configuration
 Run the example
 ---------------
 
-The `example <../../../recipes/sao/examples/sao>`__ runs three IMOAnswerBench
+The `example <../../../recipes/sao/examples/imo_answerbench>`__ runs three IMOAnswerBench
 problems in order on a two-GPU stack. For each problem the agent makes six
 attempts through Reef, extracts the ``\boxed{}`` answer, then checks it against
 the gold answer for a binary reward and finally reports the result against its
@@ -70,7 +76,7 @@ receipt. The next problem is served by the weights the previous one produced.
 
 .. code:: bash
 
-   cd recipes/sao/examples/sao
+   cd recipes/sao/examples/imo_answerbench
    pip install -e . "reef-eval[harbor]"
    hf download Qwen/Qwen2.5-1.5B-Instruct --local-dir ~/models/Qwen2.5-1.5B-Instruct
    ./run.sh
@@ -88,6 +94,30 @@ rollout adds one ``training`` entry to the scenario's version chain:
 The runtime reports ``pg_clipfrac``, ``critic/explained_variance``, actor and
 critic ``grad_norm``, and the asynchrony metrics ``sao/policy_lag_*``,
 ``sao/queue_age_s_*``, and ``sao/effective_token_rate``.
+
+CEO-Bench
+~~~~~~~~~
+
+The `CEO-Bench example <../../../recipes/sao/examples/ceobench>`__ trains the
+same recipe on `CEO-Bench <https://ceobench.com>`__, a 500-day simulated
+startup. The harness is the benchmark's own bash agent played from the host,
+its prompt, tools, and tool executor taken from the pinned checkout in the
+task image and its model calls served by Reef; the two simulator roles stay
+outside Reef, and the verifier reads final cash, survival days, and bankruptcy
+from the run's ``world.nmdb``. The reward is weekly and online: when the
+next week's dashboard appears, the finished week's decision turns (the tool
+calls that changed the company) are reported with the week's credit, its
+change in company value (cash plus the engine's subscription run-rate over
+the weeks left) and the discounted changes of the weeks after it, scaled
+against the weeks before, so the recipe trains while the episode runs. The
+example's README records the reward-shaping choices and the recorded episodes.
+
+.. code:: bash
+
+   cd recipes/sao/examples/ceobench
+   hf download Qwen/Qwen3.6-27B --local-dir ~/models/Qwen3.6-27B
+   export ANTHROPIC_API_KEY=...        # the simulator roles' provider
+   CEOBENCH_DAYS=500 CEOBENCH_SEED=42 ./run.sh
 
 Results
 -------

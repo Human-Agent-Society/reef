@@ -1,9 +1,7 @@
 """Structural validity of one tokenized policy row.
 
-The Slime bridge rejects malformed rows at train time; reported-feedback processors
-refuse the same rows at ingest time so a bad rollout is dropped as terminal
-instead of failing a whole training step. Both sides call this one predicate
-so the two judgments can never drift apart.
+The training backend validates these fields before executing an update.
+A violation is a training data error, not a reason to silently discard a report.
 """
 
 from __future__ import annotations

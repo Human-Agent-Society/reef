@@ -1,10 +1,11 @@
-"""OpenClaw-RL reef-eval stream example: student sidecar, tasks, harness."""
+"""OpenClaw-RL reef-eval stream example: student service, tasks, harness."""
 
 from __future__ import annotations
 
 import ast
 import importlib
 import json
+import os
 import sys
 import threading
 import time
@@ -51,7 +52,7 @@ def harbor_runtime(monkeypatch):
 
 @pytest.fixture(scope="module")
 def student_server():
-    """Import the sidecar the way the judge image does: personas beside it."""
+    """Import the student service the way the judge image does: personas beside it."""
     sys.path.insert(0, str(EXAMPLE / "user_sim"))
     try:
         module = importlib.import_module("student_server")
@@ -177,11 +178,11 @@ class TestStreamTasks:
         assert len(tasks) == 72, "the committed stream is the paper's Exp. 1 length"
 
     def test_judge_images_build_from_the_shared_user_sim_image(self):
-        """The sidecar is one image built from user_sim/, not a copy per task.
+        """The student service is one image built from user_sim/, not a copy per task.
 
         Every task's Dockerfile.judge names openclawrl-user-sim at the tag
         run.sh derives from user_sim/'s content, so a change there without a
-        re-stamp fails here instead of running a stale sidecar. The task
+        re-stamp fails here instead of running a stale student service. The task
         environments carry only their own problem.json besides the build files.
         """
         import hashlib
@@ -219,8 +220,8 @@ class TestStreamTasks:
             assert "hermes-agent" in (task / "environment" / "Dockerfile").read_text()
 
     def test_container_scripts_are_stdlib_only(self):
-        """The judge sidecar runs on python:3.12-slim: no third-party imports."""
-        allowed_prefixes = ("personas",)  # baked beside the sidecar
+        """The judge service runs on python:3.12-slim: no third-party imports."""
+        allowed_prefixes = ("personas",)  # baked beside the student service
         for path in (EXAMPLE / "user_sim" / "student_server.py",):
             tree = ast.parse(path.read_text())
             for node in ast.walk(tree):
@@ -261,25 +262,32 @@ class TestHarness:
         states = iter(
             [
                 {"message": "hey, do my homework", "done": False, "turn": 0},
-                {"message": "HOMEWORK_DONE", "done": True, "turn": 1},
+                {"message": "too robotic, redo it", "done": False, "turn": 1, "ready": True},
+                {"message": "HOMEWORK_DONE", "done": True, "turn": 2},
             ]
         )
 
         class FakeEnvironment:
             def __init__(self):
                 self.commands = []
+                self.users = []
 
-            async def exec(self, command):
+            async def exec(self, command, user=None):
                 self.commands.append(command)
+                self.users.append(user)
                 if "cat /agent/problem.json" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(problem), stderr="")
                 if "cat /reef_eval/state/scenario" in command:
                     return SimpleNamespace(return_code=0, stdout="", stderr="")
                 if "$JUDGE_URL/state" in command or "$JUDGE_URL/reply" in command:
                     return SimpleNamespace(return_code=0, stdout=json.dumps(next(states)), stderr="")
-                if "hermes -z" in command:
+                if "hermes chat" in command:
+                    # Quiet single-query mode: the reply alone on stdout, the
+                    # session id (and, on a resumed turn, the notice) on stderr.
                     return SimpleNamespace(
-                        return_code=0, stdout="<think>hm</think>we add 2 plus 2 equals 4, so 4", stderr=""
+                        return_code=0,
+                        stdout="we add 2 plus 2 equals 4, so 4\n",
+                        stderr="\nsession_id: 20260907_140709_77ea97\n",
                     )
                 return SimpleNamespace(return_code=0, stdout="", stderr="")
 
@@ -292,7 +300,7 @@ class TestHarness:
             def server_close(self):
                 pass
 
-        health = iter([(0, ""), (1, "")])
+        health = iter([(0, ""), (1, ""), (1, ""), (2, "")])
         stamped: list[str] = []
         monkeypatch.setattr(agent, "_start_shim", lambda _scenario, session: (stamped.append(session), FakeShim())[1])
         monkeypatch.setattr(agent, "_upstream_health", lambda: next(health))
@@ -300,23 +308,45 @@ class TestHarness:
         context = SimpleNamespace(metadata=None)
         asyncio.run(agent.run("ignored", environment, context))
 
-        assert context.metadata["openclawrl"]["turns"] == 1
+        assert context.metadata["openclawrl"]["turns"] == 2
         assert context.metadata["openclawrl"]["failure"] is None
         assert context.metadata["openclawrl"]["scenario"].startswith("openclawrl-stream-")
         # One position, one tagged conversation: the processor correlates on
-        # this instead of on a transcript hermes never resends.
+        # this rather than on whatever transcript hermes resends.
         assert stamped == [f"{context.metadata['openclawrl']['scenario']}-s0"]
-        hermes_calls = [c for c in environment.commands if "hermes -z" in c]
-        assert len(hermes_calls) == 1
+        hermes_calls = [c for c in environment.commands if "hermes chat" in c]
+        assert len(hermes_calls) == 2
+        # Quiet single-query chat mode, never the one-shot ``hermes -z``: that
+        # path ignores ``--resume``, so the second turn would forget the first.
+        # The working directory is the hermes home, where the homework lands;
+        # stderr is dropped because the exec transport folds it into stdout.
+        stderr = "2>/reef_eval/state/hermes/.hermes/turn.stderr || { rc=$?; cat /reef_eval/state/hermes/.hermes/turn.stderr >&2; exit $rc; }"
+        assert all(
+            "hermes chat -Q -q " in c and "--in /reef_eval/state/hermes" in c and c.endswith(stderr)
+            for c in hermes_calls
+        )
         assert "--resume" not in hermes_calls[0]  # first turn starts fresh
+        assert f"--resume latest {stderr}" in hermes_calls[1]  # later turns continue the session
+        assert "hermes -z" not in " ".join(environment.commands)
+        # Every command runs as the host user, so nothing on the state mount
+        # ends up root-owned; only the wipe that hands the home over runs as root.
+        host_user = f"{os.getuid()}:{os.getgid()}"
+        root_commands = [c for c, u in zip(environment.commands, environment.users, strict=True) if u is None]
+        assert len(root_commands) == 1 and f"chown -R {host_user} /reef_eval/state/hermes" in root_commands[0]
+        assert all(
+            u == host_user for c, u in zip(environment.commands, environment.users, strict=True) if "hermes chat" in c
+        )
         config_writes = [c for c in environment.commands if ".hermes/config.yaml" in c]
         assert config_writes and "enabled: false" in config_writes[0]  # compression off
+        assert "show_reasoning: false" in config_writes[0]  # stdout is the reply alone
+        assert "tirith_enabled: false" in config_writes[0]  # no scanner warning ahead of the reply
+        assert "[ -f" not in config_writes[0]  # rewritten every position, never kept stale
 
 
 def test_reply_returns_before_the_reaction_exists(student_server):
     """The HTTP response must not wait on a persona-LLM generation.
 
-    An egress proxy between the agent and this sidecar gives up on a response
+    An egress proxy between the agent and this student service gives up on a response
     head long before a 32B finishes — harbor's gost defaults to 15s — and the
     agent then sees an empty reply it cannot tell from a crash. So /reply
     records the turn and returns; /state reports when the reaction landed.

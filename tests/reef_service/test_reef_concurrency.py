@@ -11,6 +11,7 @@ import threading
 import time
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.artifact import (
     Artifact,
@@ -22,15 +23,16 @@ from reef.artifact import (
 )
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
-from reef.scenario.checkpoint_strategy import EveryNVersions
+from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.evaluation import SelectionDecision
 from reef.train.types import TrainStepResult
 
 from ._policy_recipe import TestPolicyRecipe
 
 
-class CountingRuntime(TrainingRuntime):
+class CountingRuntime(StubTrainingRuntime):
     """Training runtime that counts durable jobs across threads."""
 
     def __init__(self) -> None:
@@ -39,11 +41,13 @@ class CountingRuntime(TrainingRuntime):
         self.train_calls = 0
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
-        del batch, step_preparer
+    def prepare_training_step(
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+    ):
+        del batch, objective
         return PreparedTrainingStep(
             action="train",
             payload={"rollout_id": scenario_step},
@@ -149,9 +153,10 @@ def test_concurrent_accepts_train_and_commit_exactly_once_per_batch(tmp_path) ->
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(),
     )
     pairs_per_thread = 4
     thread_count = 4
@@ -189,9 +194,10 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     initial.mkdir()
     runtime = CountingRuntime()
     dispatcher = Dispatcher(
-        TestPolicyRecipe(runtime, batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
+        TestPolicyRecipe(**runtime_bindings(runtime), batch_size=1, checkpoint_strategy=EveryNVersions(1000)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(),
     )
     scenario = dispatcher.get_or_create_scenario("math")
     original_prepare_commit = scenario.trainer.prepare_commit
@@ -222,6 +228,7 @@ def test_concurrent_checkpoint_commits_form_one_linear_chain(tmp_path) -> None:
         backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         checkpoint_strategy=EveryNVersions(1),
         local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(),
     )
     dispatcher.get_or_create_scenario("chat")
     commits_per_thread = 3
@@ -265,6 +272,7 @@ def test_saved_commit_fails_loudly_when_head_moves_mid_commit(tmp_path, monkeypa
         backend_factory=InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         checkpoint_strategy=EveryNVersions(1000),
         local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(),
     )
     scenario = dispatcher.get_or_create_scenario("chat")
     repository = scenario.repository

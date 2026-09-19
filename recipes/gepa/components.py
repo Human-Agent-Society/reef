@@ -20,7 +20,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from reef.train.cordis_backend.strategies import Mutation
+from reef.harness.tree.mutations import Mutation
 
 #: The node kinds whose config carries one free-text field GEPA can rewrite.
 #: ``config`` and ``code_extension`` nodes are structure, not instructions:

@@ -7,9 +7,14 @@ from pathlib import Path
 
 import pytest
 
-from reef.train.slime_backend.reef_adapters.training_job import durable_io
+from reef.runtime import recovery as durable_io
 from reef.train.slime_backend.reef_adapters.training_job import storage as checkpoint_storage
-from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
+from reef.train.slime_backend.reef_adapters.training_job.storage import (
+    CheckpointStorage,
+    CheckpointStorageError,
+    RetentionConfig,
+    critic_checkpoint_due,
+)
 
 Usage = namedtuple("Usage", "total used free")
 
@@ -32,6 +37,9 @@ def _storage(
     cap: int = 1000,
     free: int = 1000,
     min_free: int = 0,
+    lora: bool = False,
+    critic: bool = False,
+    critic_save_interval: int = 1,
 ) -> CheckpointStorage:
     root = tmp_path / "checkpoints"
     source_hf, source_megatron = tmp_path / "source-hf", tmp_path / "source-megatron"
@@ -46,6 +54,9 @@ def _storage(
         source_megatron=source_megatron,
         measure=_logical_bytes,
         disk_usage=lambda path: Usage(1000, 1000 - free, free),
+        lora=lora,
+        critic_root=root / "megatron-critic" if critic else None,
+        critic_save_interval=critic_save_interval,
     )
 
 
@@ -66,6 +77,42 @@ def _completed_storage(tmp_path: Path, rewards, **options) -> CheckpointStorage:
 
 
 @pytest.mark.unit
+def test_complete_requires_the_critic_asset_only_on_its_save_commits(tmp_path: Path) -> None:
+    # A critic checkpointed every second commit leaves nothing under its root
+    # on the commits in between; completing those must not demand a critic
+    # asset, while a commit on the cadence still refuses to record a durable
+    # checkpoint without one.
+    storage = _storage(tmp_path, critic=True, critic_save_interval=2)
+    assert storage.critic_root is not None
+    critic_root = storage.critic_root
+
+    assert storage.required_assets(0) == storage.pair_paths(0)
+    assert storage.asset_paths(0) == (*storage.pair_paths(0), critic_root / "iter_0000000")
+    _complete(storage, 0, reward=1.0)
+
+    with storage.admit(rollout_id=1) as plan:
+        assert not plan["blocked"], plan
+        for path, size in zip(storage.pair_paths(1), (40, 60), strict=True):
+            _write_bytes(path, size)
+        (storage.megatron_root / "latest_checkpointed_iteration.txt").write_text("1", encoding="utf-8")
+        with pytest.raises(CheckpointStorageError, match="missing or unsafe"):
+            storage.complete("job-1", 1, reward=1.0)
+        _write_bytes(critic_root / "iter_0000001", 30)
+        (critic_root / "latest_checkpointed_iteration.txt").write_text("1", encoding="utf-8")
+        storage.complete("job-1", 1, reward=1.0)
+
+    assert storage.required_assets(1) == (*storage.pair_paths(1), critic_root / "iter_0000001")
+
+
+@pytest.mark.unit
+def test_critic_checkpoint_cadence_counts_from_the_first_commit(tmp_path: Path) -> None:
+    assert all(critic_checkpoint_due(rollout_id, 1) for rollout_id in range(4))
+    assert [rollout_id for rollout_id in range(17) if critic_checkpoint_due(rollout_id, 8)] == [7, 15]
+    with pytest.raises(ValueError, match="critic_save_interval"):
+        _storage(tmp_path, critic=True, critic_save_interval=0)
+
+
+@pytest.mark.unit
 class TestCheckpointStorage:
     def test_retention_config_validates_fraction_budget(self) -> None:
         assert RetentionConfig().capacity_bytes(1000) == 800
@@ -83,6 +130,18 @@ class TestCheckpointStorage:
         storage = _storage(tmp_path)
         _write_bytes(storage._source_megatron_checkpoint, 10)
         assert storage.validate_capacity()["reservation_bytes"] == 80
+
+    def test_lora_estimate_reserves_base_weights_plus_adapter_margin(self, tmp_path: Path) -> None:
+        full = _storage(tmp_path).validate_capacity()["reservation_bytes"]
+        lora = _storage(tmp_path, lora=True).validate_capacity()["reservation_bytes"]
+        assert lora == int(1.2 * 90)  # 1.2 x max(hf, megatron source)
+        assert lora > 90  # still covers the base weights themselves
+        assert full == 100  # unchanged full-training estimate
+
+    def test_lora_estimate_does_not_double_count_the_base_model(self, tmp_path: Path) -> None:
+        storage = _storage(tmp_path, lora=True)
+        _write_bytes(storage._source_megatron_checkpoint, 10)
+        assert storage.validate_capacity()["reservation_bytes"] == int(1.2 * 10)
 
     def test_cold_start_estimates_from_the_hf_source_alone(self, tmp_path: Path) -> None:
         # The first boot of a fresh deployment has saved nothing yet, and
@@ -292,12 +351,13 @@ class TestCheckpointStorage:
             pass
 
     def test_lora_control_files_are_owned_not_unknown(self, tmp_path: Path) -> None:
-        """The scenario ledger and adapter-slot snapshots live in the managed roots by design."""
-        from reef.runtime.names import ADAPTER_SLOTS_DIRNAME, SCENARIO_LEDGER_FILENAME
+        """The scenario history and adapter-slot snapshots live in the managed roots by design."""
+        from reef.runtime.recovery import SCENARIO_HISTORY_FILENAME
+        from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 
         storage = _storage(tmp_path)
         _complete(storage, 0)
-        (storage.hf_root / SCENARIO_LEDGER_FILENAME).write_text("{}", encoding="utf-8")
+        (storage.hf_root / SCENARIO_HISTORY_FILENAME).write_text("{}", encoding="utf-8")
         _write_bytes(storage.megatron_root / ADAPTER_SLOTS_DIRNAME / "bWF0aA" / "rank_00000.pt", 5)
 
         plan = _storage(tmp_path).validate_capacity(active_rollouts={0})

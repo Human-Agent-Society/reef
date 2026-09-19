@@ -6,7 +6,7 @@ could not boot, and nothing in CI noticed because no test ever
 re-parsed a cookbook YAML's flags. These tests close that hole: for each
 ``training-*.yaml`` they materialize the slime-driver command exactly as
 ``reef serve`` would, strip the driver/retention/loss-family options exactly as
-``reef_adapters.driver`` does, and then feed the remaining flags to the actual
+``reef.train.slime_backend.driver`` does, and then feed the remaining flags to the actual
 Slime argparse surface plus the recipe's ``validate_backend_args`` and the
 bridge preflight.
 
@@ -39,28 +39,45 @@ Slime driver is therefore part of this contract automatically.
 from __future__ import annotations
 
 import argparse
+import importlib.machinery
 import os
-import shlex
 import sys
 import types
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+import yaml
+from reef_service.config_helpers import load_deployment
 
 pytest.importorskip("torch")
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ROOTS = (REPO_ROOT / "recipes", REPO_ROOT / "tutorials")
-SLIME_DRIVER_MODULE = "reef.train.slime_backend.reef_adapters.driver"
+SLIME_DRIVER_MODULE = "reef.service.training_driver"
 
 
 def _iter_config_files() -> list[Path]:
-    return [path for root in CONFIG_ROOTS if root.is_dir() for path in root.rglob("*.yaml")]
+    # Running an example materializes runtime YAML under its ignored work/.
+    # Those are local deployment state, not shipped configuration contracts.
+    return [
+        path
+        for root in CONFIG_ROOTS
+        if root.is_dir()
+        for path in root.rglob("*.yaml")
+        if "work" not in path.relative_to(root).parts
+    ]
 
 
 def _discover_training_configs() -> list[Path]:
-    return sorted(path for path in _iter_config_files() if SLIME_DRIVER_MODULE in path.read_text())
+    configs = []
+    for path in _iter_config_files():
+        text = path.read_text()
+        config = yaml.safe_load(text)
+        training = config.get("training", {}) if isinstance(config, dict) else {}
+        if SLIME_DRIVER_MODULE in text or (isinstance(training, dict) and training.get("backend") == "slime"):
+            configs.append(path)
+    return sorted(configs)
 
 
 TRAINING_CONFIGS = _discover_training_configs()
@@ -70,7 +87,7 @@ def _discover_example_deployments() -> list[Path]:
     deployments: list[Path] = []
     for path in _iter_config_files():
         text = path.read_text()
-        if "\nservices:" in text and (text.startswith("reef:") or "\nreef:" in text):
+        if "\nreef:" in text:
             deployments.append(path)
     return sorted(deployments)
 
@@ -84,7 +101,7 @@ def _config_id(path: Path) -> str:
 
 def _resolved_strings(config: dict, value):
     """Yield every string after applying the orchestrator's config pass."""
-    from reef.service.deploy.config import interpolate_config
+    from reef.service.deploy.config_utils import interpolate_config
 
     if isinstance(value, dict):
         for item in value.values():
@@ -118,7 +135,11 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--hidden-dropout",
         "--lr-decay-style",
         "--normalization",
+        "--no-save-optim",
         "--optimizer",
+        "--optimizer-cpu-offload",
+        "--overlap-cpu-optimizer-d2h-h2d",
+        "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
         "--pipeline-model-parallel-size",
@@ -130,6 +151,11 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--rotary-base",
         "--seq-length",
         "--sequence-parallel",
+        "--spec",
+        "--use-gated-attention",
+        "--rotary-percent",
+        "--attention-output-gate",
+        "--apply-layernorm-1p",
         "--swiglu",
         "--tensor-model-parallel-size",
         "--weight-decay",
@@ -141,9 +167,10 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
     "REEF_TOKEN": "config-test-token",
+    "REEF_UPSTREAM_URL": "http://127.0.0.1:8000/v1",
+    "REEF_UPSTREAM_MODEL": "config-test-model",
     "TTTD_CHECKPOINT_INTERVAL": "2",
     "TTTD_CUDA_GRAPH_MAX_BS": "8",
-    "TTTD_CUDA_VISIBLE_DEVICES": "0,1",
     "TTTD_GLOBAL_BATCH_SIZE": "8",
     "TTTD_GROUPS_PER_STEP": "2",
     "TTTD_INFERENCE_HOST": "127.0.0.1",
@@ -189,6 +216,11 @@ def _install_slime_parser_stubs() -> None:
             __import__(name)
         except ImportError:
             module = types.ModuleType(name)
+            # A bare ModuleType has __spec__ set to None, and these stubs
+            # stay in sys.modules after the test that installed them. Later
+            # code that asks the import system about the name then fails:
+            # importing peft reaches accelerate, which looks up wandb this way.
+            module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
             for attr, value in attrs.items():
                 setattr(module, attr, value)
             sys.modules[name] = module
@@ -208,18 +240,22 @@ def _build_slime_parser() -> argparse.ArgumentParser:
 
 def _driver_tokens(config: dict) -> tuple[list[str], str]:
     """Materialize the driver command and deployment recipe reference."""
-    from reef.service.deploy.config import interpolate_config
 
     services = {service["name"]: service for service in config["services"]}
-    command = interpolate_config(config, services["slime-driver"]["command"])
-    tokens = shlex.split(command)
+    from reef.service.deploy.process import _command_argv
+    from reef.train.slime_backend.launch import driver_arguments
+
+    tokens = _command_argv(config, services["slime-driver"]["command"])
     module = SLIME_DRIVER_MODULE
     assert module in tokens, f"slime-driver service must invoke {module}"
     driver_env = services["slime-driver"].get("env") or {}
     assert "REEF_TRAINING_RECIPE" not in driver_env
     assert "REEF_TRAINING_LOSS" not in driver_env
     recipe = config["reef"]["recipe"]
-    return tokens[tokens.index(module) + 1 :], recipe
+    return [
+        *driver_arguments(config),
+        *tokens[tokens.index(module) + 1 :],
+    ], recipe
 
 
 def _strip_sglang_flags(tokens: list[str]) -> list[str]:
@@ -243,17 +279,15 @@ def _parse_config(config_path: Path):
     Returns ``(args, spec, options, recipe)`` with ``args`` parsed by the real
     Slime parser and Megatron-only leftovers verified against the allowlist.
     """
-    from reef.service.deploy.config import load_config
-    from reef.train.slime_backend.reef_adapters.driver import (
-        _driver_options,
-        _resolve_training_recipe,
-        _retention_options,
-    )
+    from reef.service.training_driver import _driver_options, _resolve_training_recipe
+    from reef.train.slime_backend.driver import _retention_options
+    from reef.train.slime_backend.loss_families import resolve_loss_family
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
-        config = load_config(config_path)
+        config = load_deployment(config_path)
     tokens, recipe = _driver_tokens(config)
-    _loss_family, resolved_recipe, spec = _resolve_training_recipe(config)
+    _loss_family, resolved_recipe = _resolve_training_recipe(config)
+    spec = resolve_loss_family(_loss_family)
     assert resolved_recipe == recipe
 
     _, tokens = _driver_options(tokens)
@@ -262,12 +296,22 @@ def _parse_config(config_path: Path):
     tokens = _strip_sglang_flags(tokens)
 
     parser = _build_slime_parser()
-    args, leftover = parser.parse_known_args(tokens)
+    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+
+    # The full parser adds these bootstrap flags before its Slime option provider.
+    parser.add_argument("--debug-train-only", action="store_true")
+    parser.add_argument("--debug-rollout-only", action="store_true")
+    args, leftover = parser.parse_known_args(tokens, namespace=SlimeArguments())
 
     index = 0
     while index < len(leftover):
         token = leftover[index]
         flag = token.split("=", 1)[0]
+        if flag == "--spec":
+            # ``--spec <module> <function>`` names a layer spec (Slime's Qwen3.5
+            # plugin); Megatron consumes exactly two values.
+            index += 3
+            continue
         assert flag.startswith("--") and flag in _MEGATRON_ONLY_FLAGS, (
             f"{config_path.name} passes {token!r}, which neither the Slime parser nor the "
             "Megatron-only allowlist recognizes — a typo or a removed flag"
@@ -310,11 +354,23 @@ def _apply_validation_derivations(args) -> None:
 
 
 @pytest.mark.unit
+def test_config_discovery_excludes_materialized_runtime_files(tmp_path, monkeypatch):
+    shipped = tmp_path / "example" / "serve.yaml"
+    generated = tmp_path / "example" / "work" / "deployment" / "runtime.yaml"
+    for path in (shipped, generated):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("schema-version: 2\nreef: {}\ntraining:\n  backend: slime\n")
+    monkeypatch.setattr(sys.modules[__name__], "CONFIG_ROOTS", (tmp_path,))
+    assert _discover_example_deployments() == [shipped]
+
+
+@pytest.mark.unit
 def test_cookbook_training_configs_are_discovered() -> None:
     paths = {_config_id(path) for path in TRAINING_CONFIGS}
     assert paths >= {
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
+        "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -325,13 +381,20 @@ def test_user_facing_example_deployments_are_discovered() -> None:
     paths = {_config_id(path) for path in EXAMPLE_DEPLOYMENTS}
     assert paths == {
         "recipes/basic/external-provider.yaml",
+        "recipes/beta/coral/examples/coral_demo/serve.yaml",
+        "recipes/beta/spade/examples/tinker/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
-        "tutorials/harness_evolve/serve-native.yaml",
-        "tutorials/harness_evolve/serve.yaml",
-        "recipes/sao/examples/sao/serve.yaml",
+        "tutorials/reefine/configs/deployment.yaml",
+        "tutorials/tinker/serve.yaml",
+        "tutorials/evolve-your-harness/configs/deployment.yaml",
+        "tutorials/evolve-your-harness/configs/serve-native.yaml",
+        "tutorials/evolve-your-harness/configs/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve.yaml",
+        "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
+        "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }
 
 
@@ -340,16 +403,17 @@ def test_user_facing_example_deployments_are_discovered() -> None:
 def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
     from reef.recipe import load_recipe_config
     from reef.recipe.registry import recipe_class_for
-    from reef.service.assembly import _configured_inference_backend_factory, _recipe_owned_settings
-    from reef.service.deploy.config import load_config, validate_services
-    from reef.service.deploy.settings import service_settings_from_config
+    from reef.service.assembly import _recipe_owned_settings
+    from reef.service.deploy.execution import validate_services
+    from reef.service.deploy.service_config import service_config_from_mapping
+    from reef.train.deployment import inference_handler_factory_for
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
-        config = load_config(config_path)
+        config = load_deployment(config_path)
 
-    settings = service_settings_from_config(config)
-    if settings.inference_backend_factory is not None:
-        assert callable(_configured_inference_backend_factory(settings.inference_backend_factory))
+    settings = service_config_from_mapping(config)
+    if settings.inference_handler_factory is not None:
+        assert callable(inference_handler_factory_for(settings.inference_handler_factory))
     services = validate_services(config, config_path)
     names = [service.get("name") for service in services]
     assert all(isinstance(name, str) and name for name in names)
@@ -386,13 +450,12 @@ def test_user_facing_example_deployment_resolves(config_path: Path) -> None:
 
 @pytest.mark.unit
 def test_tttd_deployment_anchors_git_and_checkpoint_state_to_absolute_root() -> None:
-    from reef.service.deploy.config import load_config
-    from reef.service.deploy.settings import service_settings_from_config
+    from reef.service.deploy.service_config import service_config_from_mapping
 
     with patch.dict(os.environ, _CONFIG_ENV, clear=False):
-        config = load_config(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")
+        config = load_deployment(REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "serve.yaml")
 
-    settings = service_settings_from_config(config)
+    settings = service_config_from_mapping(config)
     state_dir = Path(_CONFIG_ENV["TTTD_STATE_DIR"])
     assert Path(settings.artifact_repository) == state_dir / "artifacts.git"
     assert Path(settings.artifact_work_dir) == state_dir / "artifact-work"
@@ -420,7 +483,7 @@ def test_cookbook_training_config_parses_and_validates(config_path: Path) -> Non
 
 @pytest.mark.unit
 def test_sao_config_uses_the_hook_based_contract() -> None:
-    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "sao" / "serve.yaml"
+    config_path = REPO_ROOT / "recipes" / "sao" / "examples" / "imo_answerbench" / "serve.yaml"
     args, spec, options, _ = _parse_config(config_path)
     _apply_validation_derivations(args)
     spec.apply_driver_options(args, options)

@@ -7,11 +7,13 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
 from reef.recipe.registry import build_named_recipe
-from reef.runtime import InferenceProxyRuntime, InferenceRuntime, RuntimeConfigError, RuntimeRegistry
-from reef.runtime.inference import InferenceBackend
+from reef.runtime.deployment import RuntimeConfigError, RuntimeRegistry
+from reef.runtime.interfaces import InferenceHandler, InferenceRuntime
 from reef.service.app import create_app
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 
 @pytest.mark.unit
@@ -23,7 +25,15 @@ def test_runtime_repository_builds_all_available_runtime_types() -> None:
     )
 
     assert isinstance(proxy, InferenceProxyRuntime)
-    assert repository.names == ("inference_proxy", "ray_training")
+    assert repository.names == (
+        "coordinator_training",
+        "executor_training",
+        "inference_proxy",
+        "ray_training",
+        "sglang",
+        "slime_training",
+        "tinker",
+    )
 
 
 @pytest.mark.unit
@@ -93,6 +103,7 @@ model:
     dispatcher = Dispatcher(
         build_named_recipe("qwen", config_directory=recipes),
         InMemoryRepositoryBackend.factory(initial),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
     scenario = dispatcher.get_or_create_scenario("math")
@@ -109,8 +120,8 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
                 self.recipe = recipe
 
             @property
-            def inference_backend(self) -> InferenceBackend:
-                class _Backend(InferenceBackend):
+            def inference_handler(self) -> InferenceHandler:
+                class _Backend(InferenceHandler):
                     async def inference(self, artifact, path, payload):
                         del artifact, path, payload
                         return {"runtime": recipe}
@@ -124,6 +135,7 @@ def test_http_app_routes_scenarios_to_runtime_specific_inference_services(tmp_pa
             recipe: Dispatcher(
                 Recipe(name=recipe, runtime=RoutingRuntime(recipe)),
                 backend_factory,
+                scenario_storage=SQLiteScenarioStorage(),
             )
             for recipe in ("qwen", "gemma")
         }
@@ -171,7 +183,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
             api_key="secret",
         )
         try:
-            response = await runtime.inference_backend.inference(
+            response = await runtime.inference_handler.inference(
                 Artifact(LiveWeightArtifactRef("id", "version-1", None, "weight-1"), None),
                 "/v1/chat/completions",
                 {"messages": [{"role": "user", "content": "hi"}]},
@@ -184,7 +196,7 @@ def test_recipe_runtime_advertises_itself_and_proxies_provider_api() -> None:
                 "authorization": "Bearer secret",
             }
 
-            stream = await runtime.inference_backend.inference_stream(
+            stream = await runtime.inference_handler.inference_stream(
                 Artifact(LiveWeightArtifactRef("id", "version-1", None, "weight-1"), None),
                 "/v1/chat/completions",
                 {"messages": [], "stream": True},
@@ -226,7 +238,7 @@ def test_recipe_runtime_proxies_anthropic_auth_and_version() -> None:
             api_key="anthropic-secret",
         )
         try:
-            response = await runtime.inference_backend.inference(
+            response = await runtime.inference_handler.inference(
                 Artifact(LiveWeightArtifactRef("id", "rev", None, "weight-1"), None),
                 "/v1/messages",
                 {"model": "claude-compatible", "messages": []},

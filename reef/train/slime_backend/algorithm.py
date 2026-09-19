@@ -34,7 +34,7 @@ implementations — override only what your algorithm needs):
        train step, for families that keep state on the actor (a frozen
        teacher, for one).
     6. **train step**  — ``train``: critic→actor orchestration on the bridge
-       actor; ``provenance_metrics`` for telemetry.
+       actor; ``rollout_metrics`` for telemetry.
 
 Stages 1-4 and 6 run in the driver process.  Stage 5 runs in Megatron workers
 that only receive a serialized ``args`` Namespace.  The driver stamps
@@ -82,6 +82,9 @@ from argparse import Namespace
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any, Literal
+
+from reef.core.batches import TrajectoryItem
+from reef.core.trajectories import source_record_id, trajectory_reward
 
 
 @dataclass(frozen=True)
@@ -188,7 +191,7 @@ class SlimeAlgorithm(ABC):
         ``bind``                      — return a runtime-bound instance.
         ``prepare_rollout``           — pre-training work on the bridge actor.
         ``train``                     — critic→actor orchestration.
-        ``provenance_metrics``        — telemetry after training.
+        ``rollout_metrics``           — telemetry after training.
     """
 
     # --- required class attributes (set in subclass) ---
@@ -206,7 +209,7 @@ class SlimeAlgorithm(ABC):
     # --- optional wire-surface declarations (consumed generically by the
     # reef_adapters layer via ``configure_reef_loss_args``) ---
     rollout_data_keys: tuple[str, ...] = ()
-    """Extra per-sample payload keys the rollout manager partitions across DP ranks."""
+    """Extra per-sample payload keys the training coordinator partitions across DP ranks."""
     rollout_tensor_dtypes: Mapping[str, str] = {}
     """Payload keys to tensorize before training, as {key: "int"|"long"|"float32"}."""
     external_batch_keys: tuple[str, ...] = ()
@@ -275,17 +278,17 @@ class SlimeAlgorithm(ABC):
 
     # --- stage 2: shape row ---
 
-    def shape_sample_row(self, sample: Any) -> list[Any]:
+    def shape_sample_row(self, sample: TrajectoryItem) -> list[Any]:
         """Shape one Reef sample into this family's wire row.
 
         Default: ``[source_id, tokens, loss_mask, rollout_log_probs, reward]``.
         """
         return [
-            sample.source_agent_record_id,
-            list(sample.tokens),
-            list(sample.loss_mask),
-            list(sample.rollout_log_probs),
-            sample.reward,
+            source_record_id(sample),
+            list(sample.training.get("tokens", [])),
+            list(sample.training.get("loss_mask", [])),
+            list(sample.training.get("rollout_log_probs", [])),
+            trajectory_reward(sample),
         ]
 
     # --- stage 3: build batch ---
@@ -334,7 +337,7 @@ class SlimeAlgorithm(ABC):
         results = resolve(actor_group.async_train(rollout_id, rollout_data_refs))
         return TrainResult(worker_results=list(results or ()))
 
-    def provenance_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
+    def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
         """Return telemetry metrics after training. Default: none."""
         return {}
 

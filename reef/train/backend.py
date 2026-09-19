@@ -1,13 +1,14 @@
-"""Backend contract for producing and selecting training candidates."""
+"""Candidate lifecycle shared by weight training and harness evolution."""
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
-from reef.train.evaluation.contracts import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
 from reef.train.types import TrainingBatch, TrainStepResult
 
 
@@ -96,19 +97,33 @@ class StepExecution:
             raise ValueError(f"a {self.outcome} execution cannot carry storage status")
 
 
-class TrainingBackend(CandidateEvaluator, ABC):
+class CandidateBackend(CandidateEvaluator, ABC):
     """Prepare and evaluate updates while Reef owns candidate selection.
 
     The backend owns method-specific candidate construction and settlement,
     and supplies the default evaluator. A recipe may inject a cohesive
     :class:`reef.train.evaluation.CandidateEvaluationPlugin`; otherwise the trainer
-    wraps this evaluator in :class:`reef.train.evaluation.DefaultCandidateEvaluationPlugin`.
+    wraps this evaluator in :class:`reef.train.evaluation.BackendAlwaysSelectPlugin`.
     Every backend therefore follows the same evaluate-then-decide lifecycle
     between preparation and settlement.
     """
 
     @abstractmethod
     def initial_state(self) -> Mapping[str, Any]: ...
+
+    def retire_scenario(self, scenario: str) -> None:
+        """The scenario is being deleted: release what the backend holds for it beyond Reef's own state.
+
+        The default releases nothing. A backend that keeps per-scenario
+        residency in a serving engine or publication history in a training job overrides
+        this to let those go; until it does, the deletion is Reef-side only
+        and the engine keeps the scenario's adapter until it is evicted or
+        the group restarts.
+        """
+
+    def close(self) -> None:
+        """Release resources owned by this backend; safe to call repeatedly."""
+        return
 
     @property
     def dispatched(self) -> bool:
@@ -138,8 +153,28 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """
         return
 
+    def shipped_content_update(self, state: Mapping[str, Any], published_tree: Path) -> TrainStepResult | None:
+        """A result that republishes the content this Reef ships, when the served tree no longer carries it.
+
+        Content a backend ships with Reef itself (the harness backend's reef-owned
+        entries) is fixed when a scenario is created and carried unchanged by every
+        later step, so a scenario opened by an upgraded Reef compares it against
+        ``published_tree``, the served release's files. The result carries the
+        refreshed ``state`` and a durable ``artifact``; it is committed without an
+        evaluation. The default ships nothing.
+        """
+        return None
+
     def experiment_config(self) -> Mapping[str, Any]:
         """Non-secret backend identity/config attached to experiment runs."""
+        return {}
+
+    def operational_metrics(self) -> Mapping[str, float | int]:
+        """Nonblocking process-local measurements, independent of successful commits."""
+        return {}
+
+    def failed_step_metrics(self) -> Mapping[str, Any]:
+        """Metadata to retain when the current instruction fails before producing a result."""
         return {}
 
     @abstractmethod
@@ -151,7 +186,13 @@ class TrainingBackend(CandidateEvaluator, ABC):
     ) -> PreparedStep: ...
 
     @abstractmethod
-    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult: ...
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        """Measure ``candidate``; the trainer's default plugin calls this with the candidate alone.
+
+        A backend may accept further keyword-only options with defaults (the
+        harness backend's ``sides``) for the plugins it ships; this contract
+        stays the one every plugin can rely on.
+        """
 
     @abstractmethod
     def settle_step(
@@ -165,4 +206,4 @@ class TrainingBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["PreparedStep", "StepExecution", "TrainingBackend"]
+__all__ = ["CandidateBackend", "PreparedStep", "StepExecution"]

@@ -96,6 +96,16 @@ def hf_architecture_arguments(arguments: Sequence[str], config: Any) -> list[str
     ):
         result.append("--untie-embeddings-and-output-weights")
 
+    # Megatron defaults both dropouts to 0.1; the checkpoints Reef trains are
+    # served without dropout, and a trainer forward with dropout on gives
+    # log-probabilities that disagree with the engine's on every token, which
+    # the importance ratio then masks or mis-weights. Take the HF value, and 0
+    # where the config has none (Qwen and Llama configs mean 0 by omission).
+    if "--attention-dropout" not in explicit:
+        result.append(f"--attention-dropout={float(getattr(language, 'attention_dropout', 0.0) or 0.0)}")
+    if "--hidden-dropout" not in explicit:
+        result.append(f"--hidden-dropout={float(getattr(language, 'hidden_dropout', 0.0) or 0.0)}")
+
     if "--num-experts" not in explicit:
         for attribute in ("num_experts", "n_routed_experts", "num_local_experts"):
             value = getattr(language, attribute, None)

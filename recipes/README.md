@@ -1,4 +1,4 @@
-# Examples
+# Recipes and examples
 
 Setup, once per example directory (installs the example's harness and its
 declared dependencies, including `reef-client` and, where used,
@@ -11,49 +11,24 @@ pip install -e .
 Then `./run.sh` — it starts Reef (the example's stack YAML) and runs the loop
 (`run.py`).
 
-[Basic](basic/) is everything on the core, record-only `recipe` — the
-deployment that learns nothing, and the smallest complete loop around it.
-Its two stack files are where a deployment starts before it picks a method,
-and what the quickstart serves:
+The catalog below groups recipes by the **task type** they serve and by
+**what they evolve**, model weights or the agent harness. Weight recipes need
+the GPU training stack, while harness recipes need only a model endpoint.
+Reefine ships with `reef-infra` and every other recipe here is a cookbook
+package. [Basic](#basic) is the record-only starting stack and stays outside
+the catalog, and [beta recipes](#beta-recipes) join it once they publish
+learning results. The root [README](../README.md#-recipes-and-examples) and the
+[recipes guide](../docs/user-guide/recipes.rst) show the same catalog.
 
-- `external-provider.yaml` — no GPU, no local model: one Reef process
-  proxying to an HTTP provider (`reef serve -c recipes/basic/external-provider.yaml`).
-- `local-sglang.yaml` — local inference: an SGLang server plus Reef, no
-  training.
+## Scientific discovery
 
-Each is complete and runnable: a flat `reef:` section (translated into the
-frozen `ServiceSettings` by
-[`reef/service/deploy/settings.py`](../reef/service/deploy/settings.py)) plus
-a `services:` list the orchestrator starts in dependency order, with `${VAR}`
-environment and `${dotted.path}` config interpolation. `${REEF_PYTHON}`
-defaults to the interpreter running `reef serve`, so Python services that use
-it share Reef's environment without changing the meaning of literal `python`
-commands. Copy one and adapt it;
-`reef serve -c <stack> --<key> <value>` overrides any `reef.*` setting. The
-`recipe` they bind is the base contract in
-[`reef/recipe/base.py`](../reef/recipe/base.py); a stack that binds a method
-lives with that method (`recipes/<method>/examples/<example>/serve.yaml`; the
-smallest weight-training one is
-[`recipes/sao/examples/sao/serve.yaml`](sao/examples/sao/serve.yaml)).
-Two contracts hold the set honest:
-[`test_training_server.py`](../tests/reef_service/test_training_server.py)
-boots the internal service from every cookbook stack, and
-[`docs/site/scripts/check-doc-contracts.mjs`](../docs/site/scripts/check-doc-contracts.mjs)
-derives the documented port and health route from `local-sglang.yaml`.
+One hard problem with a measurable objective, where the recipe makes repeated
+attempts and trains on those attempts at test time.
 
-Around those stacks, the loop on the Harbor task standard: a
-[Harbor](https://github.com/laude-institute/harbor) task (`harbor/`), a
-Harbor agent harness that records its model call through Reef and reports
-the verifier reward back at trial end (`harness/`), the loop written out
-(`run.py` — [reef-eval](https://github.com/Human-Agent-Society/reef-eval)'s
-`Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
-`external-provider.yaml` with local overrides and runs it.
-
-[SAO](sao/examples/sao/README.md) is the functional smoke for the cookbook
-SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
-run in order by `run.py`, each driving six scored rollouts through Reef with a
-verifiable binary reward, and every scored rollout is one training step. Its
-README keeps a comparison against GRPO(+DIS) at Qwen3-30B-A3B scale.
+| Recipe | Evolves | Code | Docs | Example |
+|---|---|---|---|---|
+| TTT-Discover | model weights | [`recipes/tttd/`](tttd/) | [TTT-Discover](../docs/user-guide/recipes/tttd.rst) | [TTT-Discover on circle packing and Erdős minimum overlap](tttd/examples/tttd/README.md) |
+| Guidance-TTT | guidance-model weights; the executor stays frozen | [`recipes/tttd/`](tttd/) | [Guidance-TTT](tttd/examples/guidance_ttt/README.md) | [Guidance-TTT on TriMul](tttd/examples/guidance_ttt/README.md) |
 
 [TTT-Discover](tttd/examples/tttd/README.md) separates a normal, service-agnostic rollout
 harness from its Reef adapter. It demonstrates grouped discovery rollouts,
@@ -66,13 +41,32 @@ policy while a frozen external execution model writes verifier-scored
 programs. It demonstrates how to attach an execution model without adding it
 to Reef's training or inference-token capture path.
 
-[Harness-Evolve quickstart](../tutorials/harness_evolve/README.md) runs the smallest skill
-evolution on the harness evolution mechanism: the served model proposes one
-skill mutation over its own failing traffic, gated real episodes on three
-exact-answer coding tasks decide it, and the winning composition publishes
-for client pull via `GET /reef/harness`. Setup here is just
-`pip install reef-client`: the loop drives `reef_client` directly,
-no Harbor task or reef-eval.
+## Continual learning on a task stream
+
+A stream of independent tasks that a verifier scores one by one, so the recipe
+learns from each score before the next task arrives.
+
+| Recipe | Evolves | Code | Docs | Example |
+|---|---|---|---|---|
+| SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/imo_answerbench/README.md), [SAO on CEO-Bench](sao/examples/ceobench/README.md) |
+| GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
+| Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
+
+[SAO](sao/examples/imo_answerbench/README.md) is the functional smoke for the cookbook
+SAO recipe, the smallest weight-updating loop. Three IMOAnswerBench problems
+run in order by `run.py`, each driving six scored rollouts through Reef with a
+verifiable binary reward, and every scored rollout is one training step.
+
+[SAO on CEO-Bench](sao/examples/ceobench/README.md) runs
+[CEO-Bench](https://ceobench.com), a 500-day simulated startup, as one Harbor
+task. The harness is the benchmark's own bash agent, played from the host
+with its prompt, tools, and tool executor taken from the pinned checkout in
+the task image and its model calls served by Reef; the two simulator roles
+stay outside Reef, the verifier scores the run from its `world.nmdb`, and
+each finished week's change in company value is reported against the
+week's decision turns while the episode runs. It demonstrates how to adopt
+a benchmark's agent as a Reef harness and how to shape an online,
+per-period reward for one long episode.
 
 [GEPA](gepa/examples/aime/README.md) rebuilds reflective prompt evolution as a
 method package on the same mechanism: `propose` is one GEPA iteration - Pareto
@@ -86,6 +80,31 @@ three at a time, and seals the two 150-problem test passes against the retained
 official record (26.67% to 38.67% on AIME 2025, seed 0); the method's own seed-0
 run reflected from the same parents on the same problems and reached 46.67%, and
 its seed-1 run gained the official 12 points.
+
+[Meta-Harness](meta_harness/README.md) searches complete harness compositions
+using all retained candidates and scores. It selects strict mean-score
+improvements and commits the population with Reef's serving state. See the
+[Terminal-Bench example](meta_harness/examples/terminal_bench/README.md),
+[results](meta_harness/RESULTS.md), and selected harness.
+
+## Learning from usage
+
+Real interaction where no one reports a score or the feedback arrives late, so
+the recipe reads the signal out of the traffic it already serves.
+
+| Recipe | Evolves | Code | Docs | Example |
+|---|---|---|---|---|
+| OpenClaw-RL | model weights | [`recipes/openclawrl/`](openclawrl/) | [OpenClaw-RL](../docs/user-guide/recipes/openclawrl.rst) | [OpenClaw-RL on the GSM8K homework stream](openclawrl/examples/openclawrl/README.md) |
+| SkillClaw | harness skill pool | [`recipes/skillclaw/`](skillclaw/) | [SkillClaw](../docs/user-guide/recipes/skillclaw.rst) | [SkillClaw on WildClawBench](skillclaw/README.md) |
+| Reefine | harness: skills, rules, agent commands, and pi extensions | [`reef/recipe/reefine/`](../reef/recipe/reefine/) | [Reefine](../docs/user-guide/recipes/reefine.rst) | [Reefine on reef-pi](../tutorials/reefine/README.md) |
+
+[OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
+personal-agent experiment as a reef-eval task stream: a simulated student brings
+72 GSM8K homework problems to a Hermes agent whose model calls go through
+reef, and the metric is the number of sessions before the agent's answers
+match the student's taste. The method (session correlation, PRM judging, the
+hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
+contains only the harness side.
 
 [SkillClaw](skillclaw/README.md) rebuilds the SkillClaw
 reproduction as a method package on the same mechanism: `propose` is the
@@ -101,12 +120,84 @@ WildClawBench task vendored in the standard Harbor format (self-contained
 image, the benchmark's own programmatic grader), and `run.py solve` is the
 one-episode reef-eval smoke over it.
 
-[OpenClaw-RL](openclawrl/examples/openclawrl/README.md) runs the paper's
-personal-agent experiment as a reef-eval task stream: a simulated student brings
-72 GSM8K homework problems to a Hermes agent whose model calls go through
-reef, and the metric is the number of sessions before the agent's answers
-match the student's taste. The method (session correlation, PRM judging, the
-hint-conditioned teacher) is the `openclawrl` cookbook package, so the example
-contains only the harness side: the task stream, the Hermes agent wrapper,
-the student sidecar, and the analysis scripts. Its README keeps the learning
-curve and training curves of a complete run.
+[Reefine](../docs/user-guide/recipes/reefine.rst) is the built-in recipe that
+turns a plain-language request into a harness update. The served model
+proposes the change and the gate scores it, and code extensions wait for a
+promote before they run. `reef serve --recipe reefine` starts its profile
+without a checkout, and the [Reefine tutorial](../tutorials/reefine/README.md)
+records a bug-fix flow, a research loop, and which requests won the gate.
+
+## Basic
+
+[Basic](basic/) is everything on the core, record-only `recipe` — the
+deployment that learns nothing, and the smallest complete loop around it.
+Its two stack files are where a deployment starts before it picks a method,
+and what the quickstart serves:
+
+- `external-provider.yaml` — no GPU, no local model: one Reef process
+  proxying to an HTTP provider (`reef serve -c recipes/basic/external-provider.yaml`).
+- `local-sglang.yaml` — local inference: an SGLang server plus Reef, no
+  training.
+
+Each is complete and runnable: a flat `reef:` section (translated into the
+frozen `ServiceConfig` by
+[`reef/service/deploy/service_config.py`](../reef/service/deploy/service_config.py)) plus
+a `services:` list the orchestrator starts in dependency order, with `${VAR}`
+environment and `${dotted.path}` config interpolation. `${REEF_PYTHON}`
+defaults to the interpreter running `reef serve`, so Python services that use
+it share Reef's environment without changing the meaning of literal `python`
+commands. Copy one and adapt it;
+`reef serve -c <stack> --<section.field> <value>` overrides the matching YAML setting,
+for example `--inference.model-path /models/demo` or `--reef.port 9000`. The
+`recipe` they bind is the base contract in
+[`reef/recipe/base.py`](../reef/recipe/base.py); a stack that binds a method
+lives with that method (`recipes/<method>/examples/<example>/serve.yaml`; the
+smallest weight-training one is
+[`recipes/sao/examples/imo_answerbench/serve.yaml`](sao/examples/imo_answerbench/serve.yaml)).
+Two contracts hold the set honest:
+[`test_training_server.py`](../tests/reef_service/test_training_server.py)
+boots the internal service from every cookbook stack, and
+[`docs/site/scripts/check-doc-contracts.mjs`](../docs/site/scripts/check-doc-contracts.mjs)
+derives the documented port and health route from `local-sglang.yaml`.
+
+Around those stacks, the loop on the Harbor task standard: a
+[Harbor](https://github.com/laude-institute/harbor) task (`harbor/`), a
+Harbor agent harness that records its model call through Reef and reports
+the verifier reward back at trial end (`harness/`), the loop written out
+(`run.py` — [reef-eval](https://github.com/Human-Agent-Society/reef-eval)'s
+`Lab.run`, one episode), and a launcher (`run.sh`) that starts Reef from
+`external-provider.yaml` with local overrides and runs it.
+
+## Beta recipes
+
+[CORAL TTT](beta/coral/README.md) and its
+[`coral_demo`](beta/coral/examples/coral_demo/) example are beta. They live
+under `recipes/beta/coral/` until complete, reproducible learning results are
+published. Integration and smoke tests validate the wiring but do not
+establish learning performance. See the recipe's
+[validation instructions](beta/coral/README.md#verifying-without-gpus).
+
+[CORAL TTT](beta/coral/README.md) runs a
+[CORAL](https://github.com/Human-Agent-Society/CORAL) discovery task — parallel
+coding agents in git worktrees, graded attempts on one problem — with every
+agent call served and attributed through Reef. CORAL's gateway traffic carries
+Reef receipts into an append-only call journal; a watcher reports each
+finalized attempt exactly once with its exact inference references, and
+sibling attempts of one parent commit train as one grouped relative-reward
+step (reusing the TTT-Discover objective and loss family). Its example is a
+real CORAL task driven by CORAL's own runtime, plus a no-GPU smoke lane that
+runs the whole loop against the production Reef service with a canned model.
+
+[SPADE](beta/spade/README.md) (self play in adaptive synthetic executable
+environments, [arXiv:2608.19197](https://arxiv.org/abs/2608.19197)) is beta
+under `recipes/beta/spade/`: one policy plays an Environment Designer that
+writes executable environments and a Reasoning Agent that learns in them.
+Reef knows one task format, Harbor, and the Designer writes it directly: an
+instruction, a container, a verifier and a reference solution, a task any
+Harbor agent can play. Writing, checking and playing those tasks is Reef's
+(`reef.record2dataset`, the generator service `reef serve` starts beside the
+HTTP service); the package holds the method: the Designer's adversarial
+experience section, the two arms each task is played with, the hint based
+regret reported against the Designer's receipt, and the Reasoning Agent's
+group relative training on the plain arm's episodes, all driven from its
+processor. The Designer's own training follows.

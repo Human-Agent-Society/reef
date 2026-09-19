@@ -29,7 +29,7 @@ caches. Those live in ``train/``, ``artifact/``, ``scenario/``,
 
 Admission is deliberately adjacent rather than a field on ``Surface``. A
 recipe selects it through ``build_artifact_validator()``, the scenario factory
-freezes it on ``ScenarioBinding.artifact_validator``, and the commit protocol
+freezes it on ``ScenarioBinding.artifact_validator``, and the committer
 runs it before publication and rollback, so the decision stays in the commit
 path instead of looking like a serving capability.
 
@@ -48,7 +48,7 @@ once per lifecycle event that makes a version servable:
 | ``loader.recover(current, checkpoint, runtime)``  | ``scenario/factory.py``             | Choose the head the runtime can still serve after startup. Without   |
 |                                                   |                                     | a loader, recovery uses the durable checkpoint.                      |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
-| ``loader.load(artifact, runtime)``                | ``scenario/commit_protocol.py``     | Load a durable rollback target before the rollback commit becomes    |
+| ``loader.load(artifact, runtime)``                | ``scenario/committer.py``           | Load a durable rollback target before the rollback commit becomes    |
 |                                                   |                                     | authoritative. Without a loader, moving the head is sufficient.      |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``inference.prepare_request(...)``                | ``service/request_service.py``      | Address or inject the frozen artifact before forwarding. The         |
@@ -61,7 +61,7 @@ once per lifecycle event that makes a version servable:
 |                                                   |                                     | harness file routes reject the scenario before materialization.      |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``loader.activate(artifact, runtime, source=...)``| ``scenario/factory.py``,            | Optional ``ArtifactActivator``. Make a final version servable: after |
-|                                                   | ``scenario/commit_protocol.py``     | recovery, and after a publication or rollback minted its version but |
+|                                                   | ``scenario/committer.py``           | recovery, and after a publication or rollback minted its version but |
 |                                                   |                                     | before the commit record makes it the head.                          |
 +---------------------------------------------------+-------------------------------------+----------------------------------------------------------------------+
 | ``inference.begin_request(artifact, path)``       | ``service/request_service.py``      | Optional ``LeasingInferenceHooks``. Hold serving state for one       |
@@ -151,3 +151,17 @@ capability protocol only when no existing call site can express the consumer
 interaction. The package depends only on ``artifact/`` and ``core/``; it sees
 runtimes structurally, through the ``ServingRuntime`` and ``WeightRuntime``
 protocols, and never imports a concrete one.
+
+Remote weight snapshots
+------------------------
+
+``WeightLoader.activate`` calls the inference runtime's
+``activate_checkpoint(artifact)`` when a materializable head becomes
+available, including startup recovery and rollback. ``WeightRuntime`` binds
+nothing by default, since a local engine already serves what the artifact
+names. An inference runtime that serves immutable remote snapshots overrides
+it to validate the checkpoint and bind its remote sampler and training state.
+Tinker's inference runtime uses this to restore the authoritative artifact
+before the scenario serves requests; its training runtime learns the same
+head through ``TrainingRuntime.commit_candidate`` and rollback's
+``restore_checkpoint``. The surface layer never imports the concrete SDK.

@@ -1,0 +1,47 @@
+# TTT-Discover on Tinker: hosted LoRA training and sampling, no local GPU.
+# Same method settings as serve.yaml (rank-32 LoRA, Adam lr 4e-5, KL 0.1,
+# temperature 1, thinking, 26,000-token completions); only the grid and step
+# count are the reduced integration smoke the recipe page describes.
+# TTTD_STATE_DIR is the absolute root all durable state hangs off.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: ${TTTD_STATE_DIR}/stack
+  # The in-process Tinker runtime saves the initial checkpoint and fetches
+  # tokenizer files before /healthz answers.
+  ready-timeout: 600
+
+inference:
+  model-path: Qwen/Qwen3-8B
+  timeout-s: 7200
+recipe:
+  implementation: recipes.tttd.recipe:TTTDRecipe
+  config:
+    groups-per-step: 2
+    rollouts-per-group: 2
+    checkpoint-every-n-versions: 1
+training:
+  backend: tinker
+  ready-timeout: 1800
+  timeout-s: 7200
+  config:
+    # The grid and completion limit. harness/harbor_agent.py reads these same
+    # keys, so the harness and the stack cannot disagree about the step.
+    steps: 1
+    max_new_tokens: 26000
+    enable_thinking: true
+  options:
+    state-dir: ${TTTD_STATE_DIR}/tinker
+    lora-rank: 32
+    learning-rate: 0.00004
+    kl-coef: 0.1
+    # One optimizer step over the whole grid, as global-batch-size does for Slime.
+    batch-size: "${recipe.config.groups-per-step}"
+storage:
+  artifact-repository: ${TTTD_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${TTTD_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${TTTD_STATE_DIR}/artifact-cache
+  agent-record-dir: ${TTTD_STATE_DIR}/agent-record

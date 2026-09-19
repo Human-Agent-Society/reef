@@ -4,10 +4,17 @@ on:
   push:
     branches: [main]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
+
+env:
+  COVERAGE_VERSION: "7.16.1"
+  UV_CACHE_DIR: ${{ github.workspace }}/.uv-cache
+  UV_INSTALL_DIR: ${{ github.workspace }}/.ci-uv
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
@@ -15,7 +22,7 @@ concurrency:
 
 jobs:
   lint:
-    runs-on: ubuntu-latest
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -24,12 +31,27 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
+      # Cache uv itself as well as packages; only a cold cache needs pip.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
+        with:
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-lint-3.12-${{ hashFiles('pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.cache/pre-commit
           key: pre-commit-${{ hashFiles('.pre-commit-config.yaml') }}
       - name: Validate community automation
         run: python .github/scripts/check_community_files.py
+      - name: Validate README translations
+        run: python .github/scripts/check_readme_i18n.py
       - name: Validate GitHub Actions workflows
         run: |
           archive=actionlint_1.7.12_linux_amd64.tar.gz
@@ -41,6 +63,9 @@ jobs:
           tar --extract --gzip --file "$archive" actionlint
           ./actionlint
       - run: pipx run pre-commit run --all-files --show-diff-on-failure
+        env:
+          # These repository-wide checks have dedicated steps in this job.
+          SKIP: python-design-policy,python-statement-policy,readme-i18n
       # Keep this explicit in CI as well as pre-commit: TYPE_CHECKING and new
       # Callable-based object state are architectural policy violations.
       - name: Enforce Python design policy
@@ -50,44 +75,121 @@ jobs:
       # Type check the service package, including its training-runtime adapters.
       # huggingface_hub is a declared core dependency (pyproject.toml);
       # without it installed mypy degrades its call sites to Any.
-      - run: python -m pip install mypy aiohttp pyyaml huggingface_hub tomli-w
+      - run: uv pip install --system --python python mypy aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w
       - run: python -m mypy
 
-  test:
+  select-tests:
+    needs: [lint]
+    if: '!github.event.pull_request.draft'
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      python-versions: ${{ steps.select.outputs.python-versions }}
+    steps:
+      - name: Select routine or full validation
+        id: select
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          EXPECTED_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          versions='["3.12"]'
+          if [ "$GITHUB_EVENT_NAME" = pull_request ]; then
+            current=$(gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" \
+              --jq '[.state, .draft, .head.sha] | @tsv')
+            expected=$(printf 'open\tfalse\t%s' "$EXPECTED_HEAD_SHA")
+            if [ "$current" != "$expected" ]; then
+              echo "::error::This PR is closed, draft, or has newer commits. Use its latest ready run."
+              exit 1
+            fi
+          fi
+          echo "python-versions=$versions" >> "$GITHUB_OUTPUT"
+
+  test-suites:
+    needs: [select-tests]
+    name: ${{ matrix.suite }} tests (${{ matrix.python-version }})
+    # Real nested network namespaces are only proven on the GitHub runner.
+    runs-on: ${{ matrix.suite == 'sandbox' && 'ubuntu-latest' || 'blacksmith-8vcpu-ubuntu-2404' }}
     timeout-minutes: 10
+    services:
+      postgres:
+        image: ${{ matrix.suite == 'source' && 'postgres:16' || '' }}
+        env:
+          POSTGRES_USER: reef
+          POSTGRES_PASSWORD: reef_test
+          POSTGRES_DB: reef_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U reef -d reef_test"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      REEF_TEST_POSTGRES_URL: ${{ matrix.suite == 'source' && 'postgresql://reef:reef_test@localhost:5432/reef_test' || '' }}
+      REEF_REQUIRE_SANDBOX: ${{ matrix.suite == 'sandbox' && '1' || '0' }}
+      COVERAGE_FILE: .coverage.${{ matrix.suite }}
     strategy:
       fail-fast: false
       matrix:
         # sync with requires-python and classifiers in pyproject.toml
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
+        suite: [source, sandbox]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - run: git submodule update --init third_party/reef-client
+      # bubblewrap so the sandbox executor's live tests run here rather than
+      # skip: the nested tool jail is only ever proven on a host that has it.
+      # The runner's AppArmor confines unprivileged user namespaces, which the
+      # jail's loopback setup needs; lifting it is what makes the jail nest.
+      # The sandbox suite requires the preflight to succeed; local runs can
+      # still skip with its reason when the host cannot provide a nested jail.
+      - run: |
+          sudo apt-get update -q && sudo apt-get install -y -q bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
+      # Cache uv itself as well as packages; only a cold cache needs pip.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
+        with:
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-test-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'third_party/reef-client/pyproject.toml', '.github/workflows/ci.yml') }}
+          # Reuse downloads after workflow/dependency edits; uv still resolves
+          # and installs the requested versions into a fresh environment.
+          restore-keys: uv-${{ runner.os }}-${{ runner.arch }}-test-${{ matrix.python-version }}-
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
       # huggingface_hub is a declared core dependency (pyproject.toml); the
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
-      # OPD teacher-client tests, and ray for the slime bridge suites; keeping
-      # them here avoids expanding Reef's minimal service dependencies.
-      - run: python -m pip install pytest pytest-cov aiohttp pyyaml huggingface_hub tomli-w numpy ray httpx
+      # OPD teacher-client tests, ray for the slime bridge suites, and openai
+      # for the CEO-Bench harness tests; keeping them here avoids expanding
+      # Reef's minimal service dependencies.
+      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which
       # exhausts the runner disk and trips the checkpoint free-space floor.
-      - run: python -m pip install --no-deps --group runtime
+      - run: uv pip install --system --python python --no-deps --group runtime
       # reef-client is a separate distribution (Human-Agent-Society/reef-client);
       # install the submodule pin so coordinated protocol changes are tested
       # before the matching client release reaches PyPI.
-      - run: python -m pip install ./third_party/reef-client
+      - run: uv pip install --system --python python ./third_party/reef-client
+      # Subprocess tests change directory and clear PYTHONPATH. Install Reef
+      # so their selected recipes can import it outside the source checkout.
+      # Dependencies are prepared above; keep the CPU-only stack unchanged.
+      - run: uv pip install --system --python python --no-deps --editable .
       # Exercise the CPU-only Megatron LoRA helpers without making Torch a
       # dependency of the Reef wheel. Production Torch remains owned by the
       # Slime image.
-      - run: python -m pip install torch --index-url https://download.pytorch.org/whl/cpu
-      # Directory-driven selection: run everything under tests/ so a new suite
+      - run: uv pip install --system --python python torch --index-url https://download.pytorch.org/whl/cpu
+      # Both suites collect tests/ and use complementary markers so new tests
       # cannot be silently dropped from CI. Nothing is ignored today — what
       # genuinely needs Megatron carries its own importorskip and reports as
       # skipped; any future exception must be an explicit --ignore here with a
@@ -97,46 +199,86 @@ jobs:
       # is enough. It is the only gate that pins SAO's hard-mask semantics,
       # which share the pg_clipfrac key with PPO's clamp counter.
       # Keep Git-LFS tests independent of host-level Git configuration.
-      # Coverage is measured on 3.12 only. Measuring it installs a
-      # process-wide trace function (threading.settrace), so every
-      # Thread._bootstrap_inner calls sys.settrace before running its target.
-      # CPython <= 3.11 guards sys.settrace with a `static int reentrant`
-      # (Python/ceval.c) that is process-global rather than per-thread: if that
-      # window is open on one thread when another thread bootstraps, the
-      # bootstrapping thread dies with "Cannot install a trace function while
-      # another trace function is being installed" -- before its target runs at
-      # all. That silently killed worker threads in the threaded suites on
-      # 3.10. The guard is gone in 3.12, and 3.12 is already the only leg whose
-      # coverage.xml is uploaded, so the other legs were paying the risk for a
-      # report nothing reads.
-      - name: Run tests
-        if: matrix.python-version != '3.12'
-        run: python -m pytest tests
-        env:
-          GIT_CONFIG_GLOBAL: /dev/null
-          GIT_CONFIG_SYSTEM: /dev/null
+      # Coverage is measured on every leg: Reef requires Python 3.12, whose
+      # sys.settrace no longer has the process-global reentrancy guard that
+      # killed bootstrapping worker threads under coverage on 3.10 and 3.11.
+      # Source tests share eight workers and keep each file together. The two
+      # sandbox tests run serially, avoiding unnecessary worker startup.
       - name: Run tests with coverage
-        if: matrix.python-version == '3.12'
         run: >
           python -m pytest tests
-          --cov=reef --cov-report=term --cov-report=xml
+          -m "${{ matrix.suite == 'sandbox' && 'sandbox' || 'not sandbox' }}"
+          -n ${{ matrix.suite == 'sandbox' && '0' || '8' }} --dist loadfile
+          --cov --cov-report= --cov-fail-under=0
         env:
           GIT_CONFIG_GLOBAL: /dev/null
           GIT_CONFIG_SYSTEM: /dev/null
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         if: matrix.python-version == '3.12'
         with:
+          name: coverage-${{ matrix.suite }}
+          path: .coverage.${{ matrix.suite }}
+          include-hidden-files: true
+          if-no-files-found: error
+
+  # The one required check per suite; Reef supports Python 3.12 only.
+  test:
+    needs: [select-tests, test-suites]
+    if: always() && !github.event.pull_request.draft
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
+    steps:
+      - name: Require every source and sandbox suite to pass
+        env:
+          SUITES_RESULT: ${{ needs.test-suites.result }}
+        run: test "$SUITES_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        if: matrix.python-version == '3.12'
+        with:
+          python-version: "3.12"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-source
+          path: coverage-inputs
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        if: matrix.python-version == '3.12'
+        with:
+          name: coverage-sandbox
+          path: coverage-inputs
+      - name: Combine coverage and enforce the repository floor
+        if: matrix.python-version == '3.12'
+        run: |
+          python -m pip install "coverage==$COVERAGE_VERSION"
+          test -s coverage-inputs/.coverage.source
+          test -s coverage-inputs/.coverage.sandbox
+          python -m coverage combine coverage-inputs/.coverage.source coverage-inputs/.coverage.sandbox
+          python -m coverage report
+          python -m coverage xml
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        if: matrix.python-version == '3.12'
+        with:
           name: coverage-xml
           path: coverage.xml
+          if-no-files-found: error
 
   package:
-    runs-on: ubuntu-latest
+    needs: [select-tests]
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
         # sync with requires-python and classifiers in pyproject.toml
-        python-version: ["3.10", "3.11", "3.12"]
+        python-version: ${{ fromJSON(needs.select-tests.outputs.python-versions || '["3.12"]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -147,14 +289,27 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install build twine
+      # Cache uv itself as well as packages; only a cold cache needs pip.
+      - uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: uv-cache
+        with:
+          path: |
+            ${{ env.UV_CACHE_DIR }}
+            ${{ env.UV_INSTALL_DIR }}
+          key: uv-${{ runner.os }}-${{ runner.arch }}-package-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml', 'third_party/reef-client/pyproject.toml', '.github/workflows/ci.yml') }}
+      - name: Install uv on a cache miss
+        if: steps.uv-cache.outputs.cache-hit != 'true'
+        run: python -m pip install --no-deps --ignore-installed --prefix "$UV_INSTALL_DIR" uv==0.12.13
+      - name: Add uv to PATH
+        run: echo "$UV_INSTALL_DIR/bin" >> "$GITHUB_PATH"
+      - run: uv pip install --system --python python build twine
       # Full build (sdist, then wheel from the sdist) validates the sdist is
       # complete too; twine check validates the metadata. reef-client is a
       # separate distribution installed from the matching submodule pin below.
       - run: python -m build
       - run: python -m twine check dist/*
-      - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install dist/reef_infra-[0-9]*.whl
+      - run: uv pip install --system --python python ./third_party/reef-client
+      - run: uv pip install --system --python python dist/reef_infra-[0-9]*.whl
       - name: Check distribution and dependency boundaries
         working-directory: ${{ runner.temp }}
         run: |
@@ -176,18 +331,24 @@ jobs:
           client = distribution("reef-client")
           assert not (client.requires or ()), client.requires
           requirements = [Requirement(value) for value in reef.requires or ()]
+          # Core is what installs with no extra on this interpreter: a marker
+          # that only names the Python version is still core.
           core = {
               canonicalize_name(requirement.name)
               for requirement in requirements
-              if requirement.marker is None
+              if requirement.marker is None or requirement.marker.evaluate({"extra": ""})
           }
-          assert core == {"aiohttp", "huggingface-hub", "pyyaml", "reef-client", "tomli-w"}, core
+          # reef-eval[harbor] is core: the terminus runner, the task player and the generator play Harbor tasks.
+          expected_core = {
+              "aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "reef-eval", "sqlalchemy", "tomli-w"
+          }
+          assert core == expected_core, core
           slime = {
               canonicalize_name(requirement.name)
               for requirement in requirements
               if requirement.marker is not None
               and requirement.marker.evaluate({"extra": "slime"})
-          }
+          } - core
           assert slime == {
               "e2b",
               "httpx",
@@ -195,9 +356,11 @@ jobs:
               "omegaconf",
               "peft",
               "pillow",
+              "psutil",
               "pylatexenc",
               "qwen-vl-utils",
               "ray",
+              "requests",
               "safetensors",
               "sglang-router",
               "tensorboard",
@@ -215,14 +378,39 @@ jobs:
           source_root = Path(os.environ["GITHUB_WORKSPACE"])
           expected_backend_files = {
               str(path.relative_to(source_root))
-              for path in (
-                  source_root / "reef" / "train" / "slime_backend"
-              ).rglob("*")
+              for directory in ("reef/train/slime_backend", "reef/inference/sglang")
+              for path in (source_root / directory).rglob("*")
               if path.suffix in {".cu", ".md", ".py"}
           }
           expected_backend_files.add("reef/train/__init__.py")
+          expected_backend_files.add("reef/inference/__init__.py")
           installed_files = {str(path) for path in reef.files or ()}
           assert expected_backend_files <= installed_files
+          runtime_roots = {
+              Path(path).parts[2]
+              for path in installed_files
+              if path.startswith("reef/runtime/") and path.endswith(".py")
+          }
+          assert runtime_roots == {
+              "interfaces.py", "scheduler.py", "deployment.py", "publication.py", "recovery.py", "executor"
+          }, runtime_roots
+          assert {
+              "reef/inference/runtime.py", "reef/inference/http.py", "reef/train/runtime.py",
+              "reef/inference/sglang/runtime.py", "reef/train/slime_backend/runtime.py",
+          } <= installed_files
+          assert not any(path.startswith("reef/runtime/sglang/") for path in installed_files)
+          assert not any(path.startswith("reef/train/slime_backend/reef_adapters/sglang/") for path in installed_files)
+          assert {
+              entry.value for entry in reef.entry_points
+              if entry.group == "sglang.srt.plugins" and entry.name == "reef"
+          } == {"reef.inference.sglang.plugin:install_sglang_plugin"}
+          inference = {
+              canonicalize_name(requirement.name)
+              for requirement in requirements
+              if requirement.marker is not None
+              and requirement.marker.evaluate({"extra": "sglang"})
+          } - core
+          assert inference == {"httpx", "psutil", "ray", "requests", "sglang-router"}, inference
           PY
       # Run outside the repo so `import reef` resolves to the installed wheel,
       # not the source tree. Proves the wheel is complete: core modules import,
@@ -275,13 +463,14 @@ jobs:
       # repo so the source tree cannot shadow them. Excluded: tests that
       # import the slime package (the wheel does not bundle it) or Slime's
       # optional dependencies.
-      - run: python -m pip install pytest
+      - run: uv pip install --system --python python pytest pytest-xdist==3.8.0 "psutil>=5.9"
       # Exercise the repository cookbook as an external consumer of the
       # installed Reef wheel. Linking only recipes/ keeps the source reef/
       # package off sys.path, so it cannot shadow the wheel under test.
       - run: ln -s "${{ github.workspace }}/recipes" "${{ runner.temp }}/recipes"
       - run: >
           python -m pytest ${{ github.workspace }}/tests/reef_service
+          -n 4 --dist loadfile
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_bridge.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_hf_autofill.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_sao_bridge.py

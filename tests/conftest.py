@@ -1,11 +1,11 @@
-"""Suite-wide fixtures: two plain loss families and a plain step preparer.
+"""Suite-wide fixtures: two plain loss families and a plain training objective.
 
 Reef bundles no method-neutral objective, but many contracts want the
 simplest possible family to drive the bridge, the runtime and the driver:
 ``sft`` (Slime's stock ``sft_loss``, advantages forbidden) and ``pg``
 (Slime's stock ``policy_loss`` over one advantage per sample). They are
-registered here as *external* families and the matching ``sft`` preparer as
-an external preparer, through the same public extension points a cookbook
+registered here as *external* families and the matching ``sft`` objective as
+an external objective, through the same public extension points a cookbook
 method would use, so every test that names them sees a registry shaped like
 a deployment that brought its own plain objective.
 """
@@ -17,17 +17,17 @@ from argparse import Namespace
 from collections.abc import Mapping
 from typing import Any
 
-from reef.train.algos.base import StepPreparer
 from reef.train.algos.helpers import next_steps
-from reef.train.algos.registry import register_preparer
+from reef.train.algos.objective import TrainingObjective
+from reef.train.algos.registry import register_objective
 from reef.train.algos.signals import StepSignal
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.loss_families import register_loss_family
-from reef.train.types import PolicyBatch, TrainingBatch
+from reef.train.types import TrainingBatch, trajectories
 
 # The source suite exercises the repository cookbook as well as Reef core.
 # Load those packages explicitly: production ``import reef`` deliberately does
-# not, while importing a selected cookbook package registers its preparer and
+# not, while importing a selected cookbook package registers its objective and
 # lazy loss-family reference in this test process.
 for _cookbook_package in (
     "reef.train.cordis_backend",
@@ -66,18 +66,18 @@ class PgAlgorithm(SlimeAlgorithm):
         pass
 
 
-class SftPreparer(StepPreparer):
+class SftObjective(TrainingObjective):
     """Train every sample in the batch, unweighted."""
 
     name = "sft"
+    loss_family = "sft"
 
-    def __call__(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
-        if not isinstance(batch, PolicyBatch):
-            raise TypeError(f"{self.name} requires PolicyBatch, got {type(batch).__name__}")
+    def prepare(self, batch: TrainingBatch, state: Mapping[str, Any]) -> StepSignal:
+        samples = trajectories(batch)
         steps = next_steps(state)
-        return StepSignal("train", self.name, {"steps": steps}, {"samples": len(batch.samples), "steps": steps})
+        return StepSignal("train", {"steps": steps}, {"samples": len(samples), "steps": steps})
 
 
 register_loss_family(SftAlgorithm())
 register_loss_family(PgAlgorithm())
-register_preparer(SftPreparer())
+register_objective(SftObjective())

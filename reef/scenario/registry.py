@@ -14,13 +14,19 @@ from pathlib import Path
 from threading import Lock, RLock
 from typing import Any
 
-from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
+from reef.artifact.repository import (
+    CachedRepositoryBackendFactory,
+    EnumerableRepositoryBackendFactory,
+    RepositoryBackendFactory,
+)
 from reef.core.errors import ReefError, UnknownScenario
+from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker, NullExperimentTracker
 from reef.recipe.base import Recipe
-from reef.runtime.base import TrainingRuntime
 from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
+from reef.storage.model_config import archive_model_config, read_model_config, write_model_config
+from reef.storage.scenario import ScenarioStorage
 
 
 class ScenarioRegistry:
@@ -42,12 +48,16 @@ class ScenarioRegistry:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
+        scenario_storage: ScenarioStorage,
     ) -> None:
+        self._agent_record_dir = None if agent_record_dir is None else Path(agent_record_dir)
+        self._model_configs: dict[str, ModelConfig] = {}
+        self._storage = scenario_storage
         self._scenario_factory = ScenarioFactory(
             recipe,
             backend_factory,
             local_artifact_dir=local_artifact_dir,
-            agent_record_dir=agent_record_dir,
+            scenario_storage=scenario_storage,
             experiment_tracker=(experiment_tracker if experiment_tracker is not None else NullExperimentTracker()),
         )
         self._backend_factory = backend_factory
@@ -57,14 +67,11 @@ class ScenarioRegistry:
         self._lock = Lock()
         self._training_scenario: str | None = None
         self._training_scenarios: list[str] = []
+        # The mode a person selected per scenario; a reload in this process applies it again, a restart does not.
+        self._training_modes: dict[str, str] = {}
         self._preload_errors: dict[str, str] = {}
         self._allow_implicit_creation = allow_implicit_creation
         self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
-
-    def recipe_has_files(self) -> bool:
-        """Whether the served recipe creates a file-serving surface."""
-        # Capability probe only: file serving does not depend on the scenario.
-        return self._recipe.build_surface("").files is not None
 
     @property
     def training_scenario_name(self) -> str | None:
@@ -87,7 +94,7 @@ class ScenarioRegistry:
         local = tuple(
             scenario.name
             for scenario in scenarios
-            if scenario.name not in dispatched and scenario.trainer.training_backend is not None
+            if scenario.name not in dispatched and scenario.trainer.candidate_backend is not None
         )
         return (*dispatched, *local)
 
@@ -178,10 +185,45 @@ class ScenarioRegistry:
                 self._scenario_locks[scenario] = lock
             return lock
 
+    def set_training_mode(self, scenario: str, training_mode: str) -> Scenario:
+        """Select an existing scenario's mode and keep it for the reloads this process runs."""
+        with self.lock_for(scenario):
+            current = self.require(scenario)
+            current.set_training_mode(training_mode)
+            with self._lock:
+                self._training_modes[scenario] = training_mode
+            return current
+
+    def configure_model(
+        self, scenario: str, value: object, *, create: bool = False, release_id: str | None = None
+    ) -> Scenario:
+        with self.lock_for(scenario):
+            exists = self.has(scenario)
+            if not create and not exists:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            # Creating an existing scenario never overwrites its configuration.
+            if not create or not exists:
+                candidate = ModelConfig.from_value(value)
+                self._recipe.with_model_config(candidate)
+                current = self._model_config(scenario)
+                write_model_config(self._agent_record_dir, scenario, value)
+                current.runtime = candidate.runtime
+            return self._resolve(scenario, release_id)
+
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure."""
         with self.lock_for(scenario):
-            recovered = self._scenario_factory.load_or_create(scenario, None)
+            recovered = self._scenario_factory.load_or_create(
+                scenario, None, model_config=self._model_config(scenario)
+            )
+            with self._lock:
+                training_mode = self._training_modes.get(scenario)
+            if training_mode is not None and recovered.trainer.training_mode != training_mode:
+                try:
+                    recovered.set_training_mode(training_mode)
+                except Exception:
+                    recovered.close()
+                    raise
             with self._lock:
                 dropped = self._scenarios.get(scenario)
                 self._scenarios[scenario] = recovered
@@ -192,9 +234,49 @@ class ScenarioRegistry:
                 dropped.close()
             return recovered
 
-    def close_all(self) -> tuple[Scenario, ...]:
+    def remove(self, scenario: str) -> Scenario | None:
+        """Drop every in-memory hold on the scenario; the instance, for the caller to close outside the state lock.
+
+        The training thread's list loses the name first, so a step already
+        in flight finds no scenario to commit to and no durable state to
+        reload; the mode a person selected and any preload error go with it.
+        Call under ``lock_for(scenario)``.
+        """
+        with self._lock:
+            dropped = self._scenarios.pop(scenario, None)
+            self._training_scenarios = [name for name in self._training_scenarios if name != scenario]
+            if self._training_scenario == scenario:
+                self._training_scenario = self._training_scenarios[0] if self._training_scenarios else None
+            self._model_configs.pop(scenario, None)
+            self._training_modes.pop(scenario, None)
+            self._preload_errors.pop(scenario, None)
+        return dropped
+
+    def archive_registration(self, scenario: str) -> tuple[str, ...]:
+        """Move the scenario's durable registration aside and forget its cached backend; what was archived."""
+        if not isinstance(self._backend_factory, CachedRepositoryBackendFactory):
+            raise NotImplementedError("this repository backend cannot archive a scenario")
+        return self._backend_factory.archive_registration(scenario)
+
+    def forget_lock(self, scenario: str) -> None:
+        """Release the per-scenario lock's slot once nothing holds it; a later create makes a fresh one."""
+        with self._lock:
+            self._scenario_locks.pop(scenario, None)
+
+    def archive_store(self, scenario: str) -> tuple[str, ...]:
+        archived = self._storage.archive(scenario)
+        return (*archived, *archive_model_config(self._agent_record_dir, scenario))
+
+    def loaded_scenarios(self) -> tuple[Scenario, ...]:
+        """Return the currently loaded scenario instances as a tuple."""
         with self._lock:
             return tuple(self._scenarios.values())
+
+    def _model_config(self, scenario: str) -> ModelConfig:
+        if scenario not in self._model_configs:
+            value = read_model_config(self._agent_record_dir, scenario)
+            self._model_configs[scenario] = ModelConfig.from_value(value)
+        return self._model_configs[scenario]
 
     def _resolve(
         self,
@@ -206,9 +288,10 @@ class ScenarioRegistry:
         if current is not None:
             self._scenario_factory.validate_existing(current, release_id)
             return current
-        current = self._scenario_factory.load_or_create(scenario, release_id)
-        runtime = current.runtime
-        training_runtime = runtime if isinstance(runtime, TrainingRuntime) else None
+        current = self._scenario_factory.load_or_create(
+            scenario, release_id, model_config=self._model_config(scenario)
+        )
+        training_runtime = current.training_runtime
         with self._lock:
             shared_runtime = training_runtime is not None and training_runtime.concurrent_training_scenarios
             if training_runtime is not None and not shared_runtime and self._training_scenario not in (None, scenario):

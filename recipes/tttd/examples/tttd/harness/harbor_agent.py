@@ -38,11 +38,14 @@ SEARCH_STATE_PATH = Path(__file__).resolve().parents[1] / "work" / TASK / "tttd-
 # The step grid, read from the stack config rather than repeated here: Reef
 # trains only after exactly groups_per_step x rollouts_per_group reports
 # arrive, so a harness that disagreed would fail on the training timeout.
-_STACK = yaml.safe_load((Path(__file__).resolve().parents[1] / "serve.yaml").read_text())
-GROUPS_PER_STEP = _STACK["reef"]["groups_per_step"]
-ROLLOUTS_PER_GROUP = _STACK["reef"]["rollouts_per_group"]
-STEPS = _STACK["training"]["steps"]
-MAX_NEW_TOKENS = _STACK["training"]["max_new_tokens"]
+# TTTD_STACK selects another stack file beside serve.yaml (serve-tinker.yaml runs on Tinker).
+_STACK = yaml.safe_load((Path(__file__).resolve().parents[1] / os.environ.get("TTTD_STACK", "serve.yaml")).read_text())
+GROUPS_PER_STEP = _STACK["recipe"]["config"]["groups-per-step"]
+ROLLOUTS_PER_GROUP = _STACK["recipe"]["config"]["rollouts-per-group"]
+STEPS = _STACK["training"]["config"]["steps"]
+MAX_NEW_TOKENS = _STACK["training"]["config"]["max_new_tokens"]
+# A reduced smoke turns thinking off so a short completion emits a program.
+ENABLE_THINKING = bool(_STACK["training"]["config"].get("enable_thinking", True))
 MAX_WORKERS = 256 if TASK.startswith("circle_packing") else 512  # packing needs the headroom
 
 
@@ -73,7 +76,7 @@ class HarborAgent(BaseAgent):
         temperature = 1.0
         top_p = 1.0
         top_k = -1
-        enable_thinking = True
+        enable_thinking = ENABLE_THINKING
         exploration = 1.0
         invalid_reward = 0.0
 

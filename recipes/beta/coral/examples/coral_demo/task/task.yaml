@@ -1,0 +1,58 @@
+# The CORAL task the Reef test-time-training example runs. This is a real
+# CORAL task config (`coral validate task/` accepts it): CORAL's AgentManager
+# reads it, spawns real agent runtimes in git worktrees over ./seed, starts
+# its LiteLLM gateway from ./litellm_config.yaml (whose only upstream is the
+# Reef service), and grades `coral eval` submissions with ./grader via the
+# grader daemon.
+#
+# run.py loads this file and overrides the run-scoped values (results_dir,
+# stop budget, agent count/runtime/model) from its command line.
+
+task:
+  name: "reef-ttt-demo"
+  description: |
+    Implement `merge_sorted(a, b)` in `solution.py`.
+
+    Contract:
+      - `a` and `b` are lists, each already sorted ascending.
+      - Return one ascending list containing every element of both
+        (duplicates preserved).
+      - The merge must be stable: on ties, elements of `a` come before
+        elements of `b`, and equal elements keep their original order.
+      - Do not mutate the inputs. Do not call `sorted()` / `list.sort()` —
+        write the merge itself.
+
+    Your score is the fraction of the grader's checks your implementation
+    passes (1.0 = all of them).
+  tips: |
+    - Edit solution.py, then submit with `coral eval -m "what you changed"`.
+    - The grader imports solution.py and calls merge_sorted directly;
+      keep the module import-clean (no side effects, no input()).
+    - Edge cases count: empty inputs, duplicates, cross-type-stable ties.
+
+agents:
+  count: 2
+  runtime: opencode
+  model: openai/reef-policy
+  gateway:
+    enabled: true
+    port: 8091
+    config: "./litellm_config.yaml"
+
+grader:
+  entrypoint: "coral_demo_grader.grader:Grader"
+  timeout: 120
+  direction: maximize
+  setup:
+    - "uv pip install -e ./grader"
+  args:
+    program_file: "solution.py"
+
+workspace:
+  results_dir: "./results" # run.py points this into its --work directory
+  repo_path: "./seed"
+
+run:
+  session: local
+  stop:
+    max_real_attempts: 8 # run.py override; the demo is budget-bounded

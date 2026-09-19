@@ -9,6 +9,7 @@ from recipes.tttd.report import TTTDGroupedRolloutReport
 from reef.core.reports import ReportBase
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import config_field
+from reef.train.algos import StepScheduling
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -25,7 +26,12 @@ class TTTDRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(step_preparer="tttd", loss_family="tttd", processor=TTTDProcessor)
+        return WeightTrainingSpec(
+            objective="tttd",
+            processor=TTTDProcessor,
+            # One optimizer step over the whole grid, as --global-batch-size does for Slime.
+            scheduling=StepScheduling(unit="sample", batch_size="actual"),
+        )
 
     def __post_init__(self) -> None:
         super().__post_init__()

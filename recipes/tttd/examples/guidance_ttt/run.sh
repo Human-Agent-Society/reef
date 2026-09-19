@@ -7,6 +7,10 @@
 # that owns the complete Guidance-TTT trajectory.
 set -e
 cd "$(dirname "$0")"
+
+# Limit the locally managed Ray cluster to this training stack's GPU pool.
+# On an external cluster, its node configuration determines GPU visibility.
+export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 mkdir -p work/polyomino_packing
 
 # Download the model on first run (serve.yaml expects it at work/model).
@@ -21,7 +25,7 @@ export NO_PROXY=$REEF_INFERENCE_HOST
 
 # Start the Reef training stack. The Harbor controller waits for the final
 # durable training commit before this script exits and stops the stack.
-PYTHONPATH=../../../.. python3 -m reef serve -c "$PWD/serve.yaml" > work/polyomino_packing/reef.log 2>&1 &
+python3 -m reef serve -c "$PWD/serve.yaml" > work/polyomino_packing/reef.log 2>&1 &
 reef_pid=$!
 cleanup() {
     kill "$reef_pid" 2>/dev/null || true

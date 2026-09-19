@@ -5,29 +5,14 @@ from __future__ import annotations
 import logging
 import math
 from collections.abc import Hashable, Mapping
-from dataclasses import dataclass
+from dataclasses import replace
 from typing import Any
 
-from reef.train.processors.reported import (
-    BatchUnit,
-    Candidate,
-    GroupDecision,
-    ReportContext,
-    ReportDecision,
-    ReportedFeedbackProcessor,
-    SampleAssembly,
-)
-from reef.train.types import GroupedPolicyBatch, PolicySample, ProcessorContext, policy_row_violation
+from reef.core.trajectories import trajectory_reward
+from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
+from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass(frozen=True)
-class _TTTDRow:
-    """One accepted rollout: the assembled sample plus its producing version."""
-
-    sample: PolicySample
-    release_id: str | None
 
 
 class TTTDProcessor(ReportedFeedbackProcessor):
@@ -50,7 +35,7 @@ class TTTDProcessor(ReportedFeedbackProcessor):
     reference behavior.
     """
 
-    output_schema = GroupedPolicyBatch
+    output_schema = TrainingBatch
     exclusive_sources = True
     ordered_groups = True  # steps train in order
 
@@ -66,57 +51,37 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         self._failed_step_versions: dict[int, tuple[str, ...]] = {}
         super().__init__(context.with_config({**config, "batch_size": 1}))
 
-    def judge(self, context: ReportContext) -> ReportDecision:
-        # The recipe-owned contract is parsed by the reported-feedback engine.
-        # Keep the processor independent from the concrete recipe module:
-        # TTTDRecipe.build already guarantees the parsed report's shape.
+    def make_sample(self, context: ReportContext) -> TrajectoryItem:
         parsed: Any = context.parsed_report
         if parsed is None:
-            return ReportDecision.never("TTTDProcessor requires the recipe's report schema")
-        # 2. The one rule the schema cannot check is config-relative:
-        #    whether the announced grid *is* this scenario's configured grid
-        #    (a mismatch is a valid report for some other configuration, not
-        #    a malformed one — but it can never train here).
+            raise ValueError("TTTDProcessor requires the recipe's report schema")
         if parsed.groups_per_step != self.groups_per_step or parsed.rollouts_per_group != self.rollouts_per_group:
-            return ReportDecision.never(
+            raise ValueError(
                 f"report announces a {parsed.groups_per_step}x{parsed.rollouts_per_group} grid; "
                 f"this scenario trains on {self.groups_per_step}x{self.rollouts_per_group}"
             )
-        # 3. Shared gate: NEVER for reports that can never train, WAIT
-        #    until every referenced inference has arrived.
-        if (gate := context.eligibility()) is not None:
-            return gate
-        score = context.score
-        if score is None or context.inferences is None:
-            raise RuntimeError("eligible TTTD report is not fully resolved")
-        # 4. Assemble the sample; assembly and tensor failures are named
-        #    rejections, never a failed training step.
-        try:
-            sample = self._assembly.build(context, score)
-        except (TypeError, ValueError) as error:
-            return ReportDecision.never(f"sample assembly failed: {error}")
-        if sample is None or policy_row_violation(sample.tokens, sample.loss_mask, sample.rollout_log_probs):
-            return ReportDecision.never("policy tensor contract violation")
-        # 5. Address the rollout into its step's grid: the step is the
-        #    group, (group, rollout) is the slot — a retry at an occupied
-        #    slot is terminal, the first durable report wins.
+        sample = self._assembly.build(context, context.require_score())
         inference = context.inferences[0]
         release_id = inference.artifact_ref.release_id if inference.artifact_ref is not None else None
-        return ReportDecision.train(
-            _TTTDRow(sample, release_id),
-            group_key=parsed.step,
-            slot=(parsed.group, parsed.rollout),
+        return sample.with_metadata(
+            tttd={"step": parsed.step, "group": parsed.group, "rollout": parsed.rollout, "release_id": release_id}
         )
 
-    def decide_group(self, key: Hashable, candidates: tuple[Candidate, ...]) -> GroupDecision:
+    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        parsed: Any = context.parsed_report
+        return parsed.step, (parsed.group, parsed.rollout)
+
+    def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
         # 1. The barrier: a step batches only when every one of its
         #    groups_per_step x rollouts_per_group slots is filled.
         expected_count = self.groups_per_step * self.rollouts_per_group
-        if len(candidates) != expected_count:
+        if len(items) != expected_count:
             return GroupDecision.INCOMPLETE
         # 2. A step whose reports span releases is discarded
         #    wholesale — mixed-version rewards are not comparable.
-        versions = {candidate.value.release_id for candidate in candidates if candidate.value.release_id is not None}
+        versions = {
+            item.metadata["tttd"]["release_id"] for item in items if item.metadata["tttd"]["release_id"] is not None
+        }
         if len(versions) <= 1:
             return GroupDecision.READY
         if not isinstance(key, int):
@@ -145,12 +110,16 @@ class TTTDProcessor(ReportedFeedbackProcessor):
             ]
         }
 
-    def make_batch(self, units: tuple[BatchUnit, ...], batch_number: int) -> GroupedPolicyBatch:
-        if len(units) != 1:
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        steps = {item.metadata["tttd"]["step"] for item in items}
+        if len(steps) != 1:
             raise RuntimeError("TTTDProcessor creates exactly one complete step per batch")
-        unit = units[0]
-        # 1. Lay the accepted slots back out as the step's grid.
-        samples = {candidate.slot: candidate.value.sample for candidate in unit.candidates}
+        step = next(iter(steps))
+        batch = TrainingBatch(f"{self.scenario}:tttd:{step}", items)
+        # Lay the accepted rollouts back out as the step's grid.
+        samples = {
+            (item.metadata["tttd"]["group"], item.metadata["tttd"]["rollout"]): item for item in trajectories(batch)
+        }
         all_groups = tuple(
             tuple(samples[(group, rollout)] for rollout in range(self.rollouts_per_group))
             for group in range(self.groups_per_step)
@@ -159,10 +128,12 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         #    group is constant, keep the first for a well-defined
         #    zero-gradient step — both matching the reference implementation.
         non_constant = tuple(
-            group for group in all_groups if any(sample.reward != group[0].reward for sample in group[1:])
+            group
+            for group in all_groups
+            if any(trajectory_reward(sample) != trajectory_reward(group[0]) for sample in group[1:])
         )
         training_groups = non_constant or all_groups[:1]
-        rewards = tuple(sample.reward for group in all_groups for sample in group)
+        rewards = tuple(trajectory_reward(sample) for group in all_groups for sample in group)
         reward_scale = max(1.0, *(abs(reward) for reward in rewards))
         normalized_rewards = tuple(reward / reward_scale for reward in rewards)
         normalized_mean = math.fsum(normalized_rewards) / len(normalized_rewards)
@@ -170,7 +141,7 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         constant_groups = len(all_groups) - len(non_constant)
         self.experiment_logger.log(
             {
-                "step": unit.group_key,
+                "step": step,
                 "grid_groups": len(all_groups),
                 "grid_rollouts": len(rewards),
                 "reward_min": min(rewards),
@@ -188,7 +159,9 @@ class TTTDProcessor(ReportedFeedbackProcessor):
             },
             namespace="tttd",
         )
-        return GroupedPolicyBatch(
-            f"{self.scenario}:tttd:{unit.group_key}",
-            training_groups,
+        return replace(
+            batch,
+            items=tuple(
+                replace(sample, group_id=str(index)) for index, group in enumerate(training_groups) for sample in group
+            ),
         )

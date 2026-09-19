@@ -211,8 +211,12 @@ _examples_synced/
 .worktrees/
 .reef/
 
+# A harness tree the install script wrote; its default destination is ./reef-harness
+reef-harness/
+
 # example run state
 recipes/*/work/
+recipes/*/examples/*/work/
 tutorials/*/work/
 recipes/basic/work/
 

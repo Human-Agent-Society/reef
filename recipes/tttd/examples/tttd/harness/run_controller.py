@@ -7,17 +7,21 @@ import os
 import time
 import urllib.request
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import Any, Protocol
-
+from typing import Any
 
 STATE_FORMAT_VERSION = 1
 
 
 class TTTDRunStateError(RuntimeError):
     """The search archive and Reef's durable training state do not align."""
+
+
+class TTTDTrainingTimeoutError(RuntimeError):
+    """Reef did not commit a TTTD training step before its deadline."""
 
 
 @dataclass(frozen=True)
@@ -53,17 +57,19 @@ class ScenarioTrainingStatus:
     failed_steps: tuple[ScenarioTrainingFailure, ...] = ()
 
 
-class SearchHarness(Protocol):
+class SearchHarness(ABC):
     archive: Any
 
+    @abstractmethod
     def run_step(self, step: int) -> Sequence[Any]: ...
 
 
-class TrainingStatusReader(Protocol):
+class TrainingStatusReader(ABC):
+    @abstractmethod
     def scenario_status(self, scenario: str) -> ScenarioTrainingStatus | None: ...
 
 
-class ReefTrainingStatusClient:
+class ReefTrainingStatusClient(TrainingStatusReader):
     """Read Reef's public training status without coupling the harness to Ray."""
 
     def __init__(
@@ -411,7 +417,7 @@ class TTTDRunController:
                     # weights after checkpoint recovery.
                     return last
             self._sleep(self.poll_interval_s)
-        raise TimeoutError(
+        raise TTTDTrainingTimeoutError(
             f"Reef scenario did not restore step {expected_step} after {self.train_timeout_s:g}s: {last}"
         )
 
@@ -438,4 +444,5 @@ __all__ = [
     "TTTDRunOutcome",
     "TTTDRunStateError",
     "TTTDRunStateStore",
+    "TTTDTrainingTimeoutError",
 ]

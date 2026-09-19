@@ -8,23 +8,52 @@ name: harness-smoke
 
 on:
   pull_request:
-    paths:
-      - "reef/harness/**"
-      - "reef/train/cordis_backend/**"
-      - "tests/smoke/**"
-      - ".github/workflows/harness-smoke.yml"
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   workflow_dispatch:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: "${{ github.workflow }}-${{ github.ref }}"
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
-  real-pi:
+  changes:
+    # Subscribe to every update so removing the last matching file still
+    # cancels an older run. Decide whether smoke tests apply inside the job.
+    if: '!github.event.pull_request.draft'
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      smoke: ${{ steps.paths.outputs.smoke }}
+    steps:
+      - name: Check whether harness smoke tests apply
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = workflow_dispatch ]; then
+            echo "smoke=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          smoke=false
+          while IFS= read -r file; do
+            case "$file" in
+              reef/harness/*|reef/train/cordis_backend/*|tests/smoke/*|.github/workflows/harness-smoke.yml)
+                smoke=true ;;
+            esac
+          done <<< "$files"
+          echo "smoke=$smoke" >> "$GITHUB_OUTPUT"
+
+  real-pi:
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -54,7 +83,9 @@ jobs:
 
   # The same guard for the pinned Codex CLI (tests/smoke/test_real_codex.py).
   real-codex:
-    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -82,7 +113,9 @@ jobs:
 
   # The same guard for the pinned DeepSeek Harness (tests/smoke/test_real_dsh.py).
   real-dsh:
-    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -105,7 +138,9 @@ jobs:
   # The same guard for the pinned Hermes Agent (tests/smoke/test_real_hermes.py):
   # the vendor's channel is a git checkout installed editable into a venv.
   real-hermes:
-    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -132,7 +167,9 @@ jobs:
   # roots. A full episode needs Docker and a model, so it stays the opt-in
   # tests/smoke/test_real_terminus.py.
   real-terminus:
-    runs-on: ubuntu-latest
+    needs: [changes]
+    if: needs.changes.outputs.smoke == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -143,5 +180,5 @@ jobs:
         with:
           python-version: "3.12"
       - run: python -m pip install ./third_party/reef-client
-      - run: python -m pip install -e ".[terminus]" pytest
+      - run: python -m pip install -e . pytest
       - run: python -m pytest tests/reef_service/test_terminus_agent.py -v

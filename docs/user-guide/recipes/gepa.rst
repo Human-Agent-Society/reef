@@ -20,7 +20,7 @@ serves.
 +-------------+--------------------------------------------------------------+
 | Package     | ``recipes/gepa/``                                            |
 +-------------+--------------------------------------------------------------+
-| Processor   | reported feedback, producing a ``TraceBatch``                |
+| Processor   | reported feedback, producing trace items                     |
 +-------------+--------------------------------------------------------------+
 | Needs       | a Reef process, the ``pi`` binary, and a reflection model.   |
 |             | Reef itself needs no GPU.                                    |

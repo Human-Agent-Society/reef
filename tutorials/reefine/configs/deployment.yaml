@@ -1,0 +1,68 @@
+# Run from the repository root:
+# reef serve -c tutorials/reefine/configs/deployment.yaml
+# The built-in Reefine recipe with its state under tutorials/reefine/work/,
+# training_mode manual and the evaluation's selection set to floor. ./run.sh starts it,
+# installs the served tree and runs run.py <demo>.
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8901
+  token: reef-local
+  run-dir: tutorials/reefine/work/deployment/stack
+
+recipe:
+  implementation: reef.recipe.reefine:ReefineRecipe
+  # The recipe uses the upstream runtime's model for evaluation as well as serving.
+
+  config:
+    evolution:
+      adapter: pi
+      # The built-in proposer answers a request with any kind pi renders.
+      propose: reef.recipe.reefine.evolution:propose
+      evaluate: reef.recipe.reefine.evolution:evaluate
+      # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
+      requests: true
+      # The notice at session start offers the update once the head moved.
+      version_check: true
+      # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
+      review_kinds: [code_extension]
+      # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
+      # that the tree still works (the model binding, the tools, the extensions load), not that the requested
+      # change does; the step page's design and review notes and the person judge the change itself.
+      selection: floor
+      # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
+      step_record_dir: tutorials/reefine/work/deployment/steps
+      # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
+      proposals_dir: tutorials/reefine/work/deployment/proposals
+      # No binary: at startup reef installs the descriptor's pinned pi under
+      # ~/.local/share/reef-harness/pi, shared with the client install script.
+      # Set evolution.binary to a path to use an install of your own instead.
+      tasks:
+        - '[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output
+          as a plain word alone on the last line.'
+      seed:
+        - id: answer-style
+          name: skill
+          config:
+            name: answer-style
+            text: '# answer-style
+
+
+              Starter skill. The evolution loop replaces this placeholder with
+
+              concrete guidance learned from failing tasks.
+
+              '
+    batch-size: 1
+    # One step per instruction and no failure driven step between them: the measurement counts a step per request.
+    training-mode: manual
+
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+storage:
+  agent-record-dir: tutorials/reefine/work/deployment/agent-record
+  artifact-repository: tutorials/reefine/work/deployment/artifacts.git
+  artifact-work-dir: tutorials/reefine/work/deployment/artifact-work
+  artifact-cache-dir: tutorials/reefine/work/deployment/artifact-cache

@@ -8,7 +8,14 @@ from reef.artifact.artifact import Artifact, ArtifactRef, LiveWeightArtifactRef
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
 from reef.surface.adapter import adapter_name
-from reef.surface.base import ServingRuntime, Surface, WeightRuntime
+from reef.surface.base import (
+    AdapterWeightRuntime,
+    ArtifactActivator,
+    InferenceHooks,
+    ServingRuntime,
+    Surface,
+    WeightRuntime,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +41,7 @@ def artifact_runtime_load_id(artifact: Artifact | ArtifactRef) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-class WeightLoader:
+class WeightLoader(ArtifactActivator):
     """Restore weight checkpoints and recover the live serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
@@ -45,6 +52,12 @@ class WeightLoader:
 
     def __init__(self, scenario: str | None = None) -> None:
         self._scenario = scenario
+
+    def activate(self, artifact: Artifact, runtime: ServingRuntime | None, *, source: Artifact | None = None) -> str:
+        """Let the runtime bind the final release before traffic reaches it, including at startup."""
+        if isinstance(runtime, WeightRuntime):
+            return runtime.activate_checkpoint(artifact)
+        return artifact.ref.release_id
 
     def recover(
         self,
@@ -69,7 +82,7 @@ class WeightLoader:
         # serving version remains exact.
         if isinstance(runtime, WeightRuntime):
             served = self._served_version(runtime)
-            if served is None and self._scenario is not None and self._per_scenario(runtime):
+            if served is None and self._scenario is not None and isinstance(runtime, AdapterWeightRuntime):
                 # An adapter runtime that holds nothing for this scenario
                 # cannot serve its live head; only the checkpoint is exact.
                 logger.warning(
@@ -92,17 +105,13 @@ class WeightLoader:
         return current
 
     def _served_version(self, runtime: WeightRuntime) -> str | None:
-        if self._scenario is not None and self._per_scenario(runtime):
-            return runtime.serving_adapter_runtime_load_id(self._scenario)  # type: ignore[attr-defined]
+        if self._scenario is not None and isinstance(runtime, AdapterWeightRuntime):
+            return runtime.serving_adapter_runtime_load_id(self._scenario)
         return runtime.serving_runtime_load_id()
-
-    @staticmethod
-    def _per_scenario(runtime: WeightRuntime) -> bool:
-        return callable(getattr(runtime, "serving_adapter_runtime_load_id", None))
 
     def load(self, artifact: Artifact, runtime: ServingRuntime | None) -> str:
         if not isinstance(runtime, WeightRuntime):
-            raise ReefError("weight rollback requires a training runtime")
+            raise ReefError("weight rollback requires an inference runtime")
         if artifact.local_path is None:
             raise ReefError("weight rollback requires a materialized checkpoint")
         runtime_load_id = runtime.restore_checkpoint(artifact)
@@ -111,7 +120,7 @@ class WeightLoader:
         return runtime_load_id
 
 
-class WeightInferenceHooks:
+class WeightInferenceHooks(InferenceHooks):
     """Address weight-backed requests and verify the serving runtime load ID.
 
     ``adapter_name`` names the one adapter a shared-slot LoRA runtime serves.
@@ -243,8 +252,8 @@ def reported_runtime_load_id(response: Mapping[str, Any]) -> str | None:
                 version = meta_info.get("runtime_load_id")
                 if version is not None:
                     return str(version)
-    # Token-native provider facades keep engine provenance in the private
-    # training block so OpenAI and Anthropic client envelopes can stay
+    # Token-native provider facades keep the producing engine version in the
+    # private training block so OpenAI and Anthropic client envelopes can stay
     # provider-compatible. A multi-version response has no single training
     # runtime_load_id; in that case the final exact span is authoritative.
     training = response.get("training")

@@ -106,6 +106,9 @@ class MegatronToHfWeightIterator:
         from slime.utils.misc import chunk_named_params_by_size
 
         renamed = {strip_param_name_prefix(name): value for name, value in megatron_local_weights.items()}
+        # Slime >= f655e13d hands over a globally-named backup; Bridge tasks
+        # look weights up by local vp_stages names. Translate once, up front.
+        renamed = rekey_backup_to_vp_stages(self.args, self.model, renamed)
         with _patched_megatron_model(self.model):
             model_bridge = self._bridge._model_bridge
             original_materialize = model_bridge.materialize_adapter_weights
@@ -189,6 +192,37 @@ class _MegatronNameResolver:
             megatron_name = mapping.megatron_param
         self._cache[hf_name] = megatron_name
         return megatron_name
+
+
+def rekey_backup_to_vp_stages(args, model, backup_weights):
+    """Re-key Slime's actor backup to the ``vp_stages.{vp}.{name}`` convention.
+
+    Slime f655e13d (#2251) made the actor backup use global parameter names
+    unconditionally (``convert_to_global_name=True``); before that, bridge
+    mode snapshotted local names under a ``vp_stages.`` prefix, which is the
+    convention Bridge conversion tasks — and the lookups below — still use.
+
+    Both naming modes enumerate ``model`` and ``named_parameters()`` in the
+    same order, so zipping them yields the exact global-name -> local-name
+    correspondence without guessing at layer-offset or expert-offset math.
+    Weights whose global name is missing from the backup are skipped rather
+    than fabricated; the lookup that needs them will say which one, loudly.
+    """
+    from slime.backends.megatron_utils.misc_utils import strip_param_name_prefix
+    from slime.backends.megatron_utils.update_weight.common import named_params_and_buffers
+
+    local_names = (name for name, _ in named_params_and_buffers(args, model, convert_to_global_name=False))
+    global_names = (
+        strip_param_name_prefix(name) for name, _ in named_params_and_buffers(args, model, convert_to_global_name=True)
+    )
+    rekeyed = {}
+    for local_name, global_name in zip(local_names, global_names, strict=True):
+        if global_name in backup_weights:
+            rekeyed[local_name] = backup_weights[global_name]
+    # Anything already in vp_stages form (an older slime, or a test fixture)
+    # wins over the translation, and non-parameter entries pass through.
+    rekeyed.update({key: value for key, value in backup_weights.items() if key.startswith("vp_stages.")})
+    return rekeyed
 
 
 def _replace_conversion_task_weights(tasks, weights):

@@ -109,10 +109,11 @@ class SessionIndex:
     A harness that stamps ``x-reef-tag-session`` skips all of that: the tag
     names the conversation outright, so turns bind in arrival order within it
     and nothing depends on the client resending its transcript. That matters
-    for agents that keep history locally — Hermes restarts each turn from
-    ``[system, user]``, so no cross-turn request ever extends the previous
-    one and the header-free path binds only within a turn, never across the
-    user reply that carries the method's whole signal.
+    for agents that keep history locally or run each turn as a fresh process
+    — a Hermes one-shot turn starts from ``[system, user]``, so no cross-turn
+    request extends the previous one and the header-free path binds only
+    within a turn, never across the user reply that carries the method's
+    whole signal.
 
     Header-free matching has documented limits: ties between canonically
     identical transcripts go to the most recently active session; a client

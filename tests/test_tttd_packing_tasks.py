@@ -3,16 +3,12 @@ from __future__ import annotations
 import hashlib
 import importlib.util
 import inspect
+import tomllib
 from pathlib import Path
 from types import ModuleType
 
 import numpy as np
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.10 CI
-    import tomli as tomllib
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 TTTD_HARBOR = REPO_ROOT / "recipes" / "tttd" / "examples" / "tttd" / "harbor"

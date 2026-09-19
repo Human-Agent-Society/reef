@@ -23,8 +23,9 @@ import pytest
 
 import reef.dispatcher as dispatcher_module
 from reef.artifact.memory import InMemoryRepositoryBackend
-from reef.dispatcher import _DERIVATION_POLL_SECONDS, _STORAGE_RETRY_SECONDS, _UNDRAINED_WARNING_SECONDS, Dispatcher
+from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
+from reef.storage.sqlite import SQLiteScenarioStorage
 
 pytestmark = pytest.mark.unit
 
@@ -36,6 +37,7 @@ def _dispatcher() -> Dispatcher:
     return Dispatcher(
         Recipe(),
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
+        scenario_storage=SQLiteScenarioStorage(),
     )
 
 
@@ -51,6 +53,9 @@ def _bind(
     processor = SimpleNamespace(derivation_pending=lambda: pending)
     trainer = SimpleNamespace(
         processor=processor,
+        training_mode="auto",
+        fail_pending_instruction=lambda error: False,
+        instruction_failures=dict,
         batch_ready=lambda: batch_ready,
         processor_status=lambda: dict(processor_status or {}),
     )
@@ -58,6 +63,7 @@ def _bind(
         trainer=trainer,
         scenario_step=0,
         runtime=runtime,
+        training_runtime=runtime,
         commit_status={"scenario_step": 0, "last_committed_step": last_committed_step},
     )
     dispatcher._registry = SimpleNamespace(
@@ -85,14 +91,16 @@ def test_pending_derivation_polls_on_a_bounded_interval() -> None:
     # on a quiet workload.
     dispatcher = _dispatcher()
     _bind(dispatcher, pending=True)
-    assert dispatcher._training_wait_timeout() == _DERIVATION_POLL_SECONDS
+    assert dispatcher._training_wait_timeout() == dispatcher.derivation_poll_seconds
 
 
 def test_blocked_storage_keeps_the_tighter_cadence() -> None:
     dispatcher = _dispatcher()
     _bind(dispatcher, pending=True)
     dispatcher._training.storage_status = {"state": "blocked"}
-    assert dispatcher._training_wait_timeout() == min(_STORAGE_RETRY_SECONDS, _DERIVATION_POLL_SECONDS)
+    assert dispatcher._training_wait_timeout() == min(
+        dispatcher.storage_retry_seconds, dispatcher.derivation_poll_seconds
+    )
 
 
 def test_status_exposes_the_last_drain_time_and_ready_state() -> None:
@@ -242,7 +250,7 @@ def test_a_ready_batch_undrained_past_the_bound_warns_once(caplog) -> None:
     # must say so out loud, and exactly once per stall.
     dispatcher = _dispatcher()
     _bind(dispatcher, pending=False, batch_ready=True)
-    dispatcher._training.last_drain = time.time() - _UNDRAINED_WARNING_SECONDS - 1
+    dispatcher._training.last_drain = time.time() - dispatcher.undrained_warning_seconds - 1
     with caplog.at_level(logging.WARNING, logger="reef.dispatcher"):
         for _ in range(2):
             assert dispatcher.build_training_status()["scenarios"]["s"]["batch_ready"] is True
@@ -258,4 +266,34 @@ def test_a_freshly_drained_ready_batch_does_not_warn(caplog) -> None:
     dispatcher._training.last_drain = time.time()
     with caplog.at_level(logging.WARNING, logger="reef.dispatcher"):
         assert dispatcher.build_training_status()["scenarios"]["s"]["batch_ready"] is True
+    assert not caplog.records
+
+
+def test_a_storage_block_logs_its_reasons_once_per_stall(caplog) -> None:
+    dispatcher = _dispatcher()
+    blocked = {"blocked": True, "reasons": ["checkpoint reservation would violate the filesystem free-space floor"]}
+    with caplog.at_level(logging.INFO, logger="reef.dispatcher"):
+        for _ in range(3):
+            dispatcher._set_training_storage_status(dict(blocked))
+    warnings = [r for r in caplog.records if "blocked on checkpoint storage" in r.message]
+    assert len(warnings) == 1
+    assert "free-space floor" in warnings[0].getMessage()
+
+
+def test_a_cleared_storage_block_logs_the_recovery_once(caplog) -> None:
+    dispatcher = _dispatcher()
+    dispatcher._set_training_storage_status({"blocked": True, "reasons": ["x"]})
+    with caplog.at_level(logging.INFO, logger="reef.dispatcher"):
+        for _ in range(2):
+            dispatcher._set_training_storage_status(None)
+    cleared = [r for r in caplog.records if "storage block cleared" in r.message]
+    assert len(cleared) == 1
+
+
+def test_an_unblocked_commit_does_not_log_storage_noise(caplog) -> None:
+    # Every successful step clears the (already clear) status; that must
+    # stay silent.
+    dispatcher = _dispatcher()
+    with caplog.at_level(logging.INFO, logger="reef.dispatcher"):
+        dispatcher._set_training_storage_status(None)
     assert not caplog.records

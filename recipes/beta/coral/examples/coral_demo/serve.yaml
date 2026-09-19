@@ -1,0 +1,87 @@
+# Colocated Qwen3-8B LoRA stack for the CORAL test-time-training example.
+# Every value is literal except the two run.sh computes: CORAL_TTT_STATE_DIR
+# (the absolute root all durable state hangs off) and REEF_INFERENCE_HOST
+# (this machine's IP, which Slime binds the training engines' router to).
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: ${CORAL_TTT_STATE_DIR}/stack
+  ready-timeout: 120
+
+inference:
+  num-gpus: "${training.config.num_gpus}"
+  tensor-parallel-size: "1"
+  model-path: work/model
+  timeout-s: 7200
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+recipe:
+  implementation: recipes.beta.coral.recipe:CoralRecipe
+  config:
+    group-size: 2          # two scored siblings release a training group
+    checkpoint-every-n-versions: 1
+training:
+  backend: slime
+  ready-timeout: 3600
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
+  timeout-s: 7200
+  config:
+    num_gpus: 2
+    steps: 4
+    max_new_tokens: 8192
+    checkpoint_dir: ${CORAL_TTT_STATE_DIR}/checkpoints
+    checkpoint_retention:
+      max_storage_fraction: 0.8
+      min_free_space_fraction: 0.1
+      policy: latest
+
+  options:
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    ref-load: "${inference.model-path}"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    save-interval: "${recipe.config.checkpoint-every-n-versions}"
+    reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
+    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
+    num-rollout: "${training.config.steps}"
+    rollout-batch-size: "2"
+    n-samples-per-prompt: "${recipe.config.group-size}"
+    global-batch-size: "4"
+    actor-num-gpus-per-node: "${training.config.num_gpus}"
+    num-gpus-per-node: "${training.config.num_gpus}"
+    megatron-lora-rank: "32"
+    megatron-lora-alpha: "32"
+    megatron-lora-target-modules:
+      - linear_qkv
+      - linear_proj
+    optimizer: "adam"
+    lr: "4e-5"
+    lr-decay-style: "constant"
+    loss-type: "custom_loss"
+    use-rollout-logprobs: true
+    kl-coef: "0.1"
+    rollout-temperature: "1"
+    rollout-max-response-len: "4096"
+    seq-length: "16384"
+    max-tokens-per-gpu: "16384"
+    log-probs-chunk-size: "512"
+storage:
+  artifact-repository: ${CORAL_TTT_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${CORAL_TTT_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${CORAL_TTT_STATE_DIR}/artifact-cache
+  agent-record-dir: ${CORAL_TTT_STATE_DIR}/agent-record
+
+execution:
+  training: ray
+  rollout: ray
+
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    directory: ${CORAL_TTT_STATE_DIR}/wandb

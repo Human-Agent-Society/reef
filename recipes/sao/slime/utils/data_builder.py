@@ -5,9 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import build_policy_rollout_data, validate_policy_columns
-from reef.train.types import PolicySample
+from reef.train.types import TrajectoryItem
 
 _ROW_SHAPE = (
     "[source_id, tokens, loss_mask, rollout_log_probs, reward, action_mask, "
@@ -15,23 +16,23 @@ _ROW_SHAPE = (
 )
 
 
-def sao_sample_row(sample: PolicySample) -> list[Any]:
+def sao_sample_row(sample: TrajectoryItem) -> list[Any]:
     """Shape one Reef sample into SAO's 8-element wire row.
 
     The first five columns are the shared policy 5-tuple; SAO appends the
-    action mask (for skip-observation GAE) and rollout provenance (producing
-    runtime load ID, creation time) the 5-tuple has no slot for. Outbound
-    mirror of :func:`build_sao_rollout_data`.
+    action mask (for skip-observation GAE), producing runtime load ID, and
+    creation time, which the 5-tuple has no slots for. Outbound mirror of
+    :func:`build_sao_rollout_data`.
     """
     return [
-        sample.source_agent_record_id,
-        list(sample.tokens),
-        list(sample.loss_mask),
-        list(sample.rollout_log_probs),
-        sample.reward,
-        list(sample.action_mask),
-        sample.runtime_load_id,
-        sample.rollout_created_at,
+        source_record_id(sample),
+        list(sample.training.get("tokens", [])),
+        list(sample.training.get("loss_mask", [])),
+        list(sample.training.get("rollout_log_probs", [])),
+        trajectory_reward(sample),
+        list(sample.training.get("action_mask", [])),
+        sample.training.get("runtime_load_id", None),
+        sample.training.get("rollout_created_at", None),
     ]
 
 
@@ -43,8 +44,8 @@ def build_sao_rollout_data(
     """Validate and convert Reef SAO rows into Slime's external rollout payload.
 
     SAO's wire row keeps the policy 5-tuple as its prefix and appends the
-    action mask plus rollout provenance: ``[source_id, tokens, loss_mask,
-    rollout_log_probs, reward, action_mask, producing_runtime_load_id,
+    action mask, producing version, and creation time: ``[source_id, tokens,
+    loss_mask, rollout_log_probs, reward, action_mask, producing_runtime_load_id,
     rollout_created_at]``. The shared policy builder assembles the 5-tuple
     columns; this builder validates the appended columns and attaches them.
     Each SAO sample is one independently scheduled rollout, so there is no

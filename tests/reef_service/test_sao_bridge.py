@@ -14,10 +14,11 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+import ray
+from reef_service.slime_coordinator import build_slime_coordinator
 
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters import bridge
 
 
 def _sao_row(
@@ -65,7 +66,7 @@ def _execute_and_update_weights(actor, payload):
 
 
 @pytest.mark.unit
-def test_sao_parser_converts_rows_and_preserves_provenance() -> None:
+def test_sao_parser_converts_rows_and_preserves_source_fields() -> None:
     converted = to_slime_rollout_data(
         _payload([_sao_row("a"), _sao_row("b", reward=1.0, producing_runtime_load_id="slime-v4")])
     )
@@ -77,7 +78,7 @@ def test_sao_parser_converts_rows_and_preserves_provenance() -> None:
     assert converted["rewards"] == [0.5, 1.0]
     assert converted["response_lengths"] == [3, 3]
     assert converted["rollout_log_probs"] == [[-0.1, -0.2, -0.3], [-0.1, -0.2, -0.3]]
-    # Provenance rides through for policy lag / queue age.
+    # The producing version and timestamp support policy lag / queue age.
     assert converted["producing_runtime_load_ids"] == ["slime-v3", "slime-v4"]
     assert converted["rollout_created_ats"] == [1234.5, 1234.5]
     # No comparison-group barrier: one rollout per id, and no advantages.
@@ -142,7 +143,7 @@ def test_sao_parser_requires_rollout_ids_for_every_sample() -> None:
 
 
 @pytest.mark.unit
-def test_sao_parser_tolerates_missing_provenance() -> None:
+def test_sao_parser_tolerates_missing_source_fields() -> None:
     converted = to_slime_rollout_data(_payload([_sao_row(producing_runtime_load_id=None, rollout_created_at=None)]))
 
     assert converted["producing_runtime_load_ids"] == [None]
@@ -165,7 +166,7 @@ def test_runtime_load_id_sequence_is_none_across_incarnations() -> None:
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_reports_lag_queue_age_and_effective_tokens() -> None:
+def test_sao_rollout_metrics_reports_lag_queue_age_and_effective_tokens() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(
         _payload(
@@ -176,7 +177,7 @@ def test_sao_provenance_metrics_reports_lag_queue_age_and_effective_tokens() -> 
         )
     )
 
-    metrics = sao.provenance_metrics(rollout_data, serving_version="inc:5")
+    metrics = sao.rollout_metrics(rollout_data, serving_version="inc:5")
 
     assert metrics["sao/policy_lag_max"] == 3
     assert metrics["sao/policy_lag_mean"] == 2.0
@@ -185,7 +186,7 @@ def test_sao_provenance_metrics_reports_lag_queue_age_and_effective_tokens() -> 
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_warns_when_dropping_future_producing_steps(caplog) -> None:
+def test_sao_rollout_metrics_warns_when_dropping_future_producing_steps(caplog) -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(
         _payload(
@@ -197,18 +198,18 @@ def test_sao_provenance_metrics_warns_when_dropping_future_producing_steps(caplo
     )
 
     with caplog.at_level("WARNING", logger="recipes.sao.slime"):
-        metrics = sao.provenance_metrics(rollout_data, serving_version="inc:5")
+        metrics = sao.rollout_metrics(rollout_data, serving_version="inc:5")
 
     assert metrics["sao/policy_lag_max"] == 3
     assert any("ahead of serving step 5" in record.message for record in caplog.records)
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_skips_lag_across_incarnation() -> None:
+def test_sao_rollout_metrics_skips_lag_across_incarnation() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = to_slime_rollout_data(_payload([_sao_row("a", producing_runtime_load_id="oldinc:2")]))
 
-    metrics = sao.provenance_metrics(rollout_data, serving_version="newinc:5")
+    metrics = sao.rollout_metrics(rollout_data, serving_version="newinc:5")
 
     assert "sao/policy_lag_max" not in metrics
     assert metrics["sao/effective_token_rate"] == 1.0
@@ -238,12 +239,21 @@ SERVING_VERSION = "inc:5"
 class _FakeRolloutManager:
     def __init__(self, packed):
         self.packed = packed
-        self.prepare_external_train_data = _RemoteMethod(lambda data: "packed-ref")
+        self.prepare_external_train_data = lambda data: "packed-ref"
         self.inference_url = _RemoteMethod(lambda: "http://10.0.0.7:30000")
         self.get_runtime_load_ids = _RemoteMethod(lambda: [SERVING_VERSION])
         self.terminate_updatable_engines = _RemoteMethod(lambda: 1)
         self.pause_generation_for_update = _RemoteMethod(lambda: None)
         self.continue_generation_after_update = _RemoteMethod(lambda: None)
+        self.memory_calls: list[str] = []
+        self.release_tags: list[object] = []
+        self.offload = _RemoteMethod(self._offload)
+        self.onload_weights = _RemoteMethod(lambda: self.memory_calls.append("onload_weights"))
+        self.onload_kv = _RemoteMethod(lambda: self.memory_calls.append("onload_kv"))
+
+    def _offload(self, tags=None) -> None:
+        self.release_tags.append(tags)
+        self.memory_calls.append("offload")
 
 
 class _RecordingGroup:
@@ -272,6 +282,24 @@ class _RecordingGroup:
     def update_weights(self, *, manage_generation: bool = True, force_full: bool = False):
         del force_full, manage_generation
 
+    def register_failure_listener(self, listener):
+        pass
+
+    def initialize_runtime_load_id(self, runtime_load_id):
+        self._actor_handlers[0].version = runtime_load_id
+
+    def next_runtime_load_id(self):
+        return self._actor_handlers[0].version
+
+    def prepare_weight_update(self, runtime_load_id, *, force_full):
+        self.set_runtime_load_id_for_update(runtime_load_id)
+
+    def send_prepared_weights(self, runtime_load_id, *, force_full):
+        self.update_weights(manage_generation=False, force_full=force_full)
+
+    def set_runtime_load_id_for_update(self, runtime_load_id):
+        self.restore_runtime_load_id_for_republication(runtime_load_id)
+
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         pass
 
@@ -292,16 +320,19 @@ def _sao_actor(
     critic_steps_per_actor=2,
     critic_only_steps=0,
     critic_save_root=None,
+    critic_save_interval=1,
 ):
     template = str(tmp_path / "checkpoint-{rollout_id}")
     actor_group = _RecordingGroup(template, worker_metrics=worker_metrics)
     critic_group = _RecordingGroup(template, critic=True)
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         actor_group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         critic_group=critic_group,
         critic_save_root=critic_save_root,
+        critic_save_interval=critic_save_interval,
         critic_steps_per_actor=critic_steps_per_actor,
         critic_only_steps=critic_only_steps,
         loss_family="sao",
@@ -318,7 +349,7 @@ def _sao_actor(
 
 @pytest.fixture
 def _local_ray_get(monkeypatch):
-    monkeypatch.setattr(bridge.ray, "get", lambda value, **kwargs: value)
+    monkeypatch.setattr(ray, "get", lambda value, **kwargs: value)
 
 
 @pytest.mark.unit
@@ -406,6 +437,25 @@ def test_sao_critic_only_warmup_commit_also_saves_the_critic(tmp_path, _local_ra
 
 
 @pytest.mark.unit
+def test_sao_critic_save_interval_skips_the_commits_in_between(tmp_path, _local_ray_get) -> None:
+    # A full critic checkpoint at every commit costs as much as the actor's;
+    # an interval keeps the actor's per-commit publication and saves the
+    # critic on every Nth commit only.
+    actor, actor_group, critic_group, payload = _sao_actor(
+        tmp_path, critic_save_root=str(tmp_path / "megatron-critic"), critic_save_interval=2
+    )
+
+    result = _execute_and_update_weights(actor, payload)
+
+    assert result.outcome == "complete"
+    assert actor_group.saved_model_rollouts == [0]
+    assert critic_group.saved_training_checkpoint_rollouts == []
+
+    with pytest.raises(ValueError, match="critic_save_interval"):
+        _sao_actor(tmp_path / "again", critic_save_root=str(tmp_path / "c"), critic_save_interval=0)
+
+
+@pytest.mark.unit
 def test_sao_without_a_critic_root_keeps_the_actor_only_save(tmp_path, _local_ray_get) -> None:
     # Without a distinct critic root the critic's Megatron save would land in
     # the actor's tree; the bridge must then fall back to actor-only saves.
@@ -426,9 +476,10 @@ def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get
     template = str(tmp_path / "checkpoint-{rollout_id}")
     actor_group = _RecordingGroup(template)
     critic_group = _RecordingGroup(template)
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         actor_group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         critic_group=critic_group,
         loss_family="sao",
@@ -449,6 +500,7 @@ def _install_slime_parser_stubs() -> None:
     ``test_sao_configs._install_slime_parser_stubs``); inside the full Slime
     image the real modules win.
     """
+    import importlib.machinery
     import sys
     import types
 
@@ -467,13 +519,18 @@ def _install_slime_parser_stubs() -> None:
             __import__(name)
         except ImportError:
             module = types.ModuleType(name)
+            # A bare ModuleType has __spec__ set to None, and these stubs
+            # stay in sys.modules after the test that installed them. Later
+            # code that asks the import system about the name then fails:
+            # importing peft reaches accelerate, which looks up wandb this way.
+            module.__spec__ = importlib.machinery.ModuleSpec(name, loader=None)
             for attr, value in attrs.items():
                 setattr(module, attr, value)
             sys.modules[name] = module
 
 
-def _critic_prep_args(**overrides):
-    from types import SimpleNamespace
+def critic_prep_args(**overrides):
+    from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 
     values = {
         "megatron_config_path": None,
@@ -487,6 +544,10 @@ def _critic_prep_args(**overrides):
         "sao_critic_lambda": 1.0,
         "lambd": 1.0,
         "critic_save": None,
+        "critic_init": None,
+        "critic_lr": None,
+        "megatron_lora_rank": 0,
+        "custom_megatron_init_path": None,
         "load": "/ckpt/megatron",
         "save": "/ckpt/megatron",
         "no_load_optim": True,
@@ -496,7 +557,7 @@ def _critic_prep_args(**overrides):
         "disable_param_buffers_cpu_backup": True,
     }
     values.update(overrides)
-    return SimpleNamespace(**values)
+    return SlimeArguments(**values)
 
 
 @pytest.mark.unit
@@ -504,7 +565,7 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 
-    args = _critic_prep_args()
+    args = critic_prep_args()
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
@@ -516,6 +577,107 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
 
 
 @pytest.mark.unit
+def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_has_its_own(tmp_path) -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    critic_save, critic_init = tmp_path / "megatron-critic", tmp_path / "critic-init"
+    critic_init.mkdir()
+    (critic_init / "latest_checkpointed_iteration.txt").write_text("23", encoding="utf-8")
+
+    # No checkpoint of its own yet: the value model trained on an earlier
+    # episode is loaded, weights and optimizer, and saves go to the save root.
+    args = critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init))
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+    assert (critic_args.load, critic_args.save) == (str(critic_init), str(critic_save))
+    assert (critic_args.no_load_optim, critic_args.finetune) == (False, False)
+    # The schedule is this run's: the earlier run's batch size sets a different iteration total.
+    assert critic_args.override_opt_param_scheduler is True
+
+    # Once the critic has saved, its own checkpoint wins over the init.
+    critic_save.mkdir()
+    (critic_save / "latest_checkpointed_iteration.txt").write_text("7", encoding="utf-8")
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_save), critic_init=str(critic_init)))
+    assert critic_args.load == str(critic_save)
+
+    # An init directory without a checkpoint changes nothing.
+    empty = tmp_path / "empty"
+    empty.mkdir()
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(tmp_path / "fresh"), critic_init=str(empty)))
+    assert critic_args.load == "/ckpt/megatron"
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_applies_the_critic_learning_rate() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = critic_prep_args(critic_lr=5e-6, lr=1e-6)
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.lr == 5e-6
+    assert args.lr == 1e-6  # the actor keeps the policy lr
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_inherits_the_policy_lr_when_unset() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = critic_prep_args(lr=1e-6)
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.lr == 1e-6
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_keeps_lora_for_the_critic() -> None:
+    """A LoRA actor's critic trains adapters on the same frozen base.
+
+    The critic is the policy's size; without adapters it would train every
+    parameter and could not sit beside a LoRA actor of the same model.
+    """
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+    from reef.train.slime_backend.reef_adapters.slime_arguments import REEF_MODEL_PROVIDER_PATH
+
+    # The state finalize_reef_slime_args leaves for a LoRA actor: alpha
+    # defaulted, Reef's provider installed, the user's provider chained.
+    args = critic_prep_args(
+        megatron_lora_rank=32,
+        megatron_lora_alpha=32,
+        megatron_lora_dropout=0.0,
+        megatron_lora_target_modules=["linear_qkv", "linear_fc1"],
+        custom_model_provider_path=REEF_MODEL_PROVIDER_PATH,
+        reef_chained_model_provider_path=None,
+    )
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.megatron_lora_rank == 32
+    assert critic_args.megatron_lora_alpha == 32
+    assert critic_args.megatron_lora_target_modules == ["linear_qkv", "linear_fc1"]
+    assert critic_args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
+
+
+@pytest.mark.unit
+def test_prepare_critic_args_without_lora_restores_the_user_provider() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = critic_prep_args(megatron_lora_rank=0, custom_model_provider_path="my.provider:build")
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    assert critic_args.megatron_lora_rank == 0
+    assert critic_args.megatron_lora_alpha is None
+    assert critic_args.custom_model_provider_path == getattr(args, "reef_chained_model_provider_path", None)
+
+
+@pytest.mark.unit
 def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path) -> None:
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
 
@@ -523,7 +685,7 @@ def test_prepare_critic_args_restores_from_the_critic_root_when_present(tmp_path
     critic_root.mkdir()
     (critic_root / "latest_checkpointed_iteration.txt").write_text("7\n", encoding="utf-8")
 
-    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(critic_root)))
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_root)))
 
     assert critic_args.save == str(critic_root)
     assert critic_args.load == str(critic_root)
@@ -538,7 +700,7 @@ def test_prepare_critic_args_first_boot_keeps_the_inherited_load_fallback(tmp_pa
 
     critic_root = tmp_path / "megatron-critic"  # no checkpoint tracker yet
 
-    critic_args = prepare_critic_args(_critic_prep_args(critic_save=str(critic_root)))
+    critic_args = prepare_critic_args(critic_prep_args(critic_save=str(critic_root)))
 
     # Saves go to the critic root from the first commit on, but the first boot
     # still loads from the inherited fallback (actor checkpoint / base model).
@@ -561,7 +723,7 @@ def test_megatron_config_critic_role_pins_lambda(tmp_path) -> None:
         encoding="utf-8",
     )
 
-    args = _critic_prep_args(megatron_config_path=str(config_path))
+    args = critic_prep_args(megatron_config_path=str(config_path))
     configure_megatron_runtime(args)
     critic_args = prepare_critic_args(args)
 
@@ -680,9 +842,10 @@ def test_storage_flags_unknown_assets_in_the_critic_root(tmp_path) -> None:
 def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _RecordingGroup(template)
-    actor = bridge.TrainBridgeActorImpl(
+    actor = build_slime_coordinator(
         group,
         _FakeRolloutManager(["packed"]),
+        batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
         loss_family="sao",
     )

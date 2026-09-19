@@ -14,7 +14,7 @@ import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from reef.train.algos.signals import StepScheduling
+from reef.core.batches import StepScheduling
 
 
 @dataclass(frozen=True, slots=True)

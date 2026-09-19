@@ -4,20 +4,59 @@
 from __future__ import annotations
 
 import ast
+import os
 import sys
 from collections.abc import Iterable
 from dataclasses import dataclass
+from fnmatch import fnmatchcase
 from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[2]
 BASELINE = ROOT / ".github" / "python-design-baseline.txt"
 DESIGN_ROOTS = (ROOT / "reef", ROOT / "recipes", ROOT / "tests")
-TYPE_CHECKING_ROOTS = DESIGN_ROOTS
+REQUIRED_ROOTS = DESIGN_ROOTS
+UNSUPPRESSIBLE = {"PYD001", "PYD005"}
+PROTOCOL_IGNORED_DIRECTORIES = {
+    ".git",
+    ".venv",
+    "venv",
+    "env",
+    "ENV",
+    "__pycache__",
+    "__pypackages__",
+    ".cache",
+    ".uv-cache",
+    ".ci-uv",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".worktrees",
+    "node_modules",
+    "third_party",
+    "build",
+    "_build",
+    "dist",
+    ".next",
+}
+# These are imported benchmark inputs, published output, or byte-exact fixtures,
+# rather than first-party Python source. Keep their ownership boundaries intact.
+PROTOCOL_EXCLUDED_TREES = (
+    "recipes/skillclaw/harbor/environment/workspace",
+    "tests/reef_service/data/harness_goldens",
+)
+PROTOCOL_EXCLUDED_FILES = (
+    "recipes/skillclaw/harbor/tests/grade.py",
+    "recipes/tttd/examples/tttd/harbor/circle_packing_*/environment/score.py",
+    "recipes/tttd/examples/tttd/results/*/best_solution.py",
+    "recipes/meta_harness/results/reef_harness.py",
+)
 
 
 def _is_example(path: Path) -> bool:
-    """The runnable examples (``recipes/<method>/examples/``, ``recipes/basic``) are type-checked only."""
+    """The runnable examples (``recipes/<method>/examples/``, ``recipes/basic``) are checked for mandatory syntax rules only."""
     parts = path.relative_to(ROOT).parts
     return parts[0] == "recipes" and (parts[1] == "basic" or parts[2:3] == ("examples",))
 
@@ -120,7 +159,7 @@ class DesignVisitor(ast.NodeVisitor):
                     owner,
                     subject,
                     node.lineno,
-                    f"constructor stores behavior as Callable ({subject}); use a named Protocol or object interface",
+                    f"constructor stores behavior as Callable ({subject}); use an abstract base class or cohesive object",
                 )
             )
         elif len(callable_arguments) > 1:
@@ -172,7 +211,7 @@ class DesignVisitor(ast.NodeVisitor):
                     owner,
                     subject,
                     node.lineno,
-                    f"long-lived state {subject} is typed as Callable; use a named Protocol or object interface",
+                    f"long-lived state {subject} is typed as Callable; use an abstract base class or cohesive object",
                 )
             )
         self.generic_visit(node)
@@ -200,6 +239,54 @@ def _type_checking_finding(tree: ast.Module, path: str) -> Finding | None:
     )
 
 
+def _protocol_finding(tree: ast.Module, path: str) -> Finding | None:
+    typing_modules = {"typing", "typing_extensions"}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            typing_modules.update(
+                item.asname or item.name for item in node.names if item.name in {"typing", "typing_extensions"}
+            )
+    changed = True
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)):
+                continue
+            if not isinstance(node.value, ast.Name) or node.value.id not in typing_modules:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name) and target.id not in typing_modules:
+                    typing_modules.add(target.id)
+                    changed = True
+    lines = [
+        node.lineno
+        for node in ast.walk(tree)
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module in {"typing", "typing_extensions"}
+            and any(item.name in {"Protocol", "runtime_checkable"} for item in node.names)
+        )
+        or (isinstance(node, ast.Name) and node.id in {"Protocol", "runtime_checkable"})
+        or (
+            isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id in typing_modules
+            and node.attr in {"Protocol", "runtime_checkable"}
+        )
+    ]
+    if not lines:
+        return None
+    return Finding(
+        "PYD005",
+        path,
+        "<module>",
+        "Protocol",
+        min(lines),
+        "Protocol and runtime_checkable are banned; define an ABC and inherit it explicitly",
+    )
+
+
 def inspect_source(source: str, path: str, *, check_callables: bool = True) -> list[Finding]:
     tree = ast.parse(source, filename=path)
     findings: list[Finding] = []
@@ -211,6 +298,9 @@ def inspect_source(source: str, path: str, *, check_callables: bool = True) -> l
     type_checking = _type_checking_finding(tree, path)
     if type_checking is not None:
         findings.append(type_checking)
+    protocol = _protocol_finding(tree, path)
+    if protocol is not None:
+        findings.append(protocol)
     return findings
 
 
@@ -227,6 +317,32 @@ def _python_files(roots: Iterable[Path]) -> Iterable[Path]:
         yield from sorted(root.rglob("*.py"))
 
 
+def _protocol_excluded(path: Path) -> bool:
+    relative = path.relative_to(ROOT).as_posix()
+    return any(relative == tree or relative.startswith(tree + "/") for tree in PROTOCOL_EXCLUDED_TREES) or any(
+        fnmatchcase(relative, pattern) for pattern in PROTOCOL_EXCLUDED_FILES
+    )
+
+
+def _protocol_python_files() -> Iterable[Path]:
+    """Discover all first-party source without entering local dependency trees."""
+    for directory, children, files in os.walk(ROOT):
+        parent = Path(directory)
+        children[:] = sorted(
+            name
+            for name in children
+            if name not in PROTOCOL_IGNORED_DIRECTORIES
+            and not name.startswith(".venv")
+            and not name.endswith(".egg-info")
+            and not (parent / name / "pyvenv.cfg").is_file()
+            and not _protocol_excluded(parent / name)
+        )
+        for name in sorted(files):
+            path = parent / name
+            if path.suffix == ".py" and not _protocol_excluded(path):
+                yield path
+
+
 def _read_baseline() -> set[str]:
     return {
         line.strip()
@@ -241,15 +357,26 @@ def main() -> int:
         for path in _python_files(DESIGN_ROOTS)
         if not _is_example(path)
         for finding in inspect_file(path)
-        if finding.code != "PYD001"
+        if finding.code not in UNSUPPRESSIBLE
     ]
-    type_checking_findings = [
-        finding for path in _python_files(TYPE_CHECKING_ROOTS) for finding in inspect_file(path, check_callables=False)
+    required_findings = [
+        finding
+        for path in _python_files(REQUIRED_ROOTS)
+        for finding in inspect_file(path, check_callables=False)
+        if finding.code != "PYD005"
     ]
-    findings = sorted([*callable_findings, *type_checking_findings])
-    actual = {finding.fingerprint for finding in findings if finding.code != "PYD001"}
+    protocol_findings = [
+        finding
+        for path in _protocol_python_files()
+        for finding in inspect_file(path, check_callables=False)
+        if finding.code in {"PYD000", "PYD005"}
+    ]
+    findings = sorted({*callable_findings, *required_findings, *protocol_findings})
+    actual = {finding.fingerprint for finding in findings if finding.code not in UNSUPPRESSIBLE}
     expected = _read_baseline()
-    unexpected = [finding for finding in findings if finding.code == "PYD001" or finding.fingerprint not in expected]
+    unexpected = [
+        finding for finding in findings if finding.code in UNSUPPRESSIBLE or finding.fingerprint not in expected
+    ]
     stale = sorted(expected - actual)
 
     if unexpected:
@@ -260,9 +387,7 @@ def main() -> int:
         for fingerprint in stale:
             print(f"  {fingerprint}")
     if unexpected or stale:
-        print(
-            "Python design policy failed. Prefer named Protocols and cohesive objects over stored Callable behavior."
-        )
+        print("Python design policy failed. Use explicit ABC inheritance and cohesive objects for behavior.")
         return 1
 
     print(f"Python design policy passed ({len(expected)} documented legacy Callable patterns).")

@@ -12,7 +12,7 @@ Reproduction of [OpenClaw-RL](https://arxiv.org/abs/2603.10165)'s personal-agent
 openclawrl/
   recipe.py        OpenClawRLRecipe: training spec, loss family "openclawrl"
   processor.py     computed feedback: rebuilds sessions from recorded traffic, judges turns
-  preparer.py      builds the policy batch from accepted turns and hindsight hints
+  objective.py     raw reward advantages and backend loss selection
   sessions.py      session reconstruction from the records Reef already keeps
   prm.py           the PRM judge the processor runs on a private worker
   slime/           the training-plane objective and the hint-conditioned teacher

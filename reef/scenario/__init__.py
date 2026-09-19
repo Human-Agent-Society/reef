@@ -1,52 +1,46 @@
 """Scenario state, commit, and recovery contracts.
 
-A scenario is one durable training aggregate. Its lifecycle, and the module
-responsible for each piece:
+A scenario owns one runtime binding, trainer, artifact chain, and store session.
+The modules follow these responsibilities:
 
-- **create** — ``factory`` forks a base artifact and persists a registration
-  snapshot (format in ``snapshot``); ``binding`` freezes the deployment-selected
-  admission, surface, runtime, and inference backend.
-- **train** — ``scenario`` exposes the trainer through lock-guarded methods
-  so every mutating path serializes against commit and rollback.
-- **commit** — ``commit_protocol`` orders one atomic step: commit trainer
-  state, append the record to ``commit_log`` (the durable commit point),
-  replay compaction, move the artifact head; ``checkpoint_strategy`` decides
-  when a step also publishes a durable checkpoint carrying fresh snapshot
-  metadata.
-- **recover** — ``factory`` reads the snapshot, heals and replays the commit
-  log (``ScenarioCommitProtocol.recover_head``), and resumes trainer and
-  record consumption at the committed high-water mark.
-- **rollback** — ``commit_protocol`` republishes an older checkpointed
-  version as a new fenced commit; history is never rewritten.
+- ``scenario`` exposes operations on one instance; ``binding`` freezes its
+  deployment-selected admission, surface, runtime, and inference backend.
+- ``registry`` owns loaded instances, per-scenario locks, model updates, and
+  scenario archival coordination. It caches concrete ``runtime.model_config.ModelConfig``
+  instances and calls ``storage.model_config`` functions for private JSON files.
+  Recipes and the factory receive only the current scenario's configuration.
+- ``factory`` registers the base artifact, validates release selectors,
+  opens storage, reconciles committed state, synchronizes and
+  activates the checkpoint, builds the trainer, and replays retained records.
+  It returns a complete ``Scenario`` and closes owned resources on failure.
+- ``committer`` orders commit, rollback, retries, and artifact publication
+  around store settlement. Trainer state is exposed only after settlement.
+  ``recipe.checkpoint_strategy`` selects steps that publish durable checkpoints.
+- ``releases`` queries releases, artifact content, and committed training metadata.
+  It shares the committer's publication lock. Writers take the operation lock
+  before the publication lock; readers never take the operation lock, so long
+  training preparation does not block serving. ``history`` pages retained
+  records and commits for the dispatcher.
+Persisted values and metadata encoding belong to ``reef.storage.commits``.
+Recovery reads a ``CommitRecord`` (none at initial registration). Storage
+contracts and implementations never import this package.
 
-The scenario aggregate does not retain recipe identity: the deployment's
-recipe configures its runtime binding through the factory, and the aggregate
-never reaches back. Every
-step-advancing commit appends exactly one atomic record, and recovery
-re-derives every other store from the log. Checkpoint cadence is the one
-extension point (subclass ``CheckpointStrategy``); the commit ordering itself
-is not pluggable, and that rigidity is the point.
+The aggregate never reaches back to its recipe; the factory and registry
+compose recipes at construction. Application assembly supplies
+its storage service; the dispatcher owns its lifecycle and each
+scenario owns one opened session. Artifact publication and recovery ordering
+remain in this package.
 """
 
-from reef.scenario.binding import AcceptAnyArtifact, ArtifactValidator, ScenarioBinding
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.scenario.commit_log import CommitLog, CommitRecord
-from reef.scenario.commit_protocol import ScenarioCommitProtocol
+from reef.scenario.binding import ScenarioBinding
+from reef.scenario.committer import ScenarioCommitter
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import ReleaseNotRestorable, Scenario
-from reef.scenario.snapshot import SCENARIO_SNAPSHOT_METADATA_KEY
 
 __all__ = [
-    "SCENARIO_SNAPSHOT_METADATA_KEY",
-    "AcceptAnyArtifact",
-    "ArtifactValidator",
-    "CheckpointStrategy",
-    "CommitLog",
-    "CommitRecord",
-    "EveryNVersions",
     "ReleaseNotRestorable",
     "Scenario",
     "ScenarioBinding",
-    "ScenarioCommitProtocol",
+    "ScenarioCommitter",
     "ScenarioRegistry",
 ]

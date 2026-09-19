@@ -21,7 +21,7 @@ my_example/
     __init__.py           lazily exports HarborAgent
     agent.py              HarborAgent(BaseAgent) — the agent logic
     report.py             optional: post a trainable verifier reward to Reef
-  my_example.yaml         Reef service config (recipe, host, token, services)
+  my_example.yaml         Reef config (recipe, inference, training, HTTP settings)
   run.sh                  starts reef serve, then runs reef-eval with the harness
   pyproject.toml          makes harness/ importable by reef-eval's uvx environment
   README.md               what the example demonstrates and how to run it
@@ -104,31 +104,42 @@ trial result, not in the training scenario's report contract.
 Reef service config. The minimal record-only config (no training stack) is:
 
 ```yaml
+schema-version: 2
 reef:
   host: 127.0.0.1
   port: ${REEF_PORT}
-  recipe: ${REEF_RECIPE}
   token: ${REEF_TOKEN}
-  agent_record_dir: ${REEF_WORK}/agent-record
-  artifact_repository: ${REEF_WORK}/artifacts.git
-  artifact_work_dir: ${REEF_WORK}/artifact-work
-  artifact_cache_dir: ${REEF_WORK}/artifact-cache
-
-services:
-  - name: reef
-    command: ["${REEF_PYTHON}", "-m", "reef.service"]
-    ready: curl -sf http://127.0.0.1:${reef.port}/healthz
+inference:
+  upstream-url: ${REEF_UPSTREAM_URL:?}
+  upstream-model: ${REEF_UPSTREAM_MODEL:?}
+  upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+recipe:
+  implementation: recipe
+storage:
+  agent-record-dir: ${REEF_WORK}/agent-record
+  artifact-repository: ${REEF_WORK}/artifacts.git
+  artifact-work-dir: ${REEF_WORK}/artifact-work
+  artifact-cache-dir: ${REEF_WORK}/artifact-cache
 ```
 
-For a training example (GPU + Ray + Slime/Megatron + SGLang), see
-`tttd/serve.yaml` — it adds `training:` and `services:` blocks for the
-training stack under the same `reef:` section.
+Keep shipped Reef configuration in the versioned public layout. Training
+examples put native training flags in `training.options`, engine flags in
+`inference.options`, and inference GPU capacity/parallelism in `inference.num-gpus`
+and `inference.tensor-parallel-size`; Reef assembles their worker topology. Do not add `service` or `services` to version 2 YAML. HTTP
+settings belong in `reef`. Deploy method-owned services independently and pass
+their endpoints through recipe fields; Reef coordinates only native inference
+and training. See `recipes/openclawrl/examples/openclawrl/docker-compose.yaml`
+for external service startup and GPU isolation. Recipe fields and owned sections go
+under `recipe.config`. Docker Compose and third-party task files retain their
+own schemas. Legacy Reef layouts belong in compatibility tests.
 
 ## `run.sh`
 
 1. Set environment variables (port, token, scenario, work dir); select the
    deployment recipe in YAML.
 2. Start `reef serve -c <yaml>` in the background; wait for `/healthz`.
+   `reef serve` finds the `recipes/` package beside the YAML and puts it on
+   every service's `PYTHONPATH`; the script does not set it.
 3. Run reef-eval with `--with-editable "$PWD"` (installs `harness/`) and
    `--with reef-client` (installs the SDK from PyPI).
 4. reef-eval resolves `--agent harness:HarborAgent` and runs the Harbor task.

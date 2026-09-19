@@ -26,6 +26,7 @@ harness/              agent harness (PUCT search + Reef adapter)
   run_controller.py     training barrier + paired PUCT resume state
   harbor_agent.py       Harbor BaseAgent (imports harbor package)
 serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config
+serve-tinker.yaml     the same method on Tinker's hosted LoRA training, no local GPU
 run.py                one reef-eval episode owning the complete TTT trajectory
 run.sh                starts the reef training stack, then runs run.py
 pyproject.toml        makes the harness importable
@@ -155,6 +156,13 @@ rollouts, one optimizer step, thinking enabled, two GPUs. Nothing has to be
 exported first except `TTTD_TASK` — `run.py`, `harness/harbor_agent.py`, and
 `serve.yaml` each write out the values they use.
 
+Reef starts and stops the shared Ray runtime automatically; no `ray start`
+or fixed Ray port is needed. `run.sh` defaults the local cluster's GPU pool to
+`CUDA_VISIBLE_DEVICES=0,1`; override it at launch to choose different GPUs.
+`training.config.num_gpus` still sets Slime's model topology. To use an existing
+cluster, set `RAY_ADDRESS`; its nodes control GPU visibility and Reef leaves
+it running on exit. The local Slime driver does not reserve model GPUs itself.
+
 We recommend allocating at least 256 GiB of host memory to the reference
 8 × 64 setup. With less memory, reduce evaluator concurrency or request a
 larger allocation to avoid stalls or termination.
@@ -177,8 +185,20 @@ coordinates the harness never sends: `GROUPS_PER_STEP` and
 `ROLLOUTS_PER_GROUP` in `harness/harbor_agent.py`, and `groups_per_step`,
 `rollouts_per_group`, and `--global-batch-size` (their product) in
 `serve.yaml`. A one-step plumbing smoke sets both sides to 2 x 2 and
-`enable_thinking = False`, so a short completion is not spent entirely in the
-reasoning channel before it emits a program.
+`enable_thinking: false` in the stack's `training.config`, so a short completion
+is not spent entirely in the reasoning channel before it emits a program. Two
+rollouts per group are enough to exercise the path but not to train: TTTD's
+leave-one-out entropic advantages degenerate with one rewarded and one
+unrewarded rollout, so a step that should mean something needs several per group.
+
+`serve-tinker.yaml` runs the same method with Tinker training and sampling
+the model remotely (see the [Tinker guide](../../../../docs/user-guide/tinker.rst)):
+no GPU, Ray, or model download on this machine, the paper's LoRA, Adam, KL and
+sampling settings, and the reduced 2 x 2 grid for one step. Point the harness at
+it with `TTTD_STACK=serve-tinker.yaml`, export `TINKER_API_KEY` and
+`TTTD_STATE_DIR`, start `python -m reef serve -c serve-tinker.yaml` and run
+`run.py` as `run.sh` does. Raise `rollouts-per-group` (and `batch-size`, which
+must equal `groups-per-step`) before reading anything into the update.
 
 `work/erdos_min_overlap/` holds this problem's checkpoints, artifacts,
 scenario records, and PUCT state; a second problem needs its own directory so
@@ -346,7 +366,7 @@ packing runs and are not present in their stored W&B history.
 
 The [circle-packing overview](results/formal-8x64-v3-packing/README.md) contains
 the combined W&B history, verified configurations, generated programs,
-milestone summaries, and provenance records.
+milestone summaries, and records of how the results were produced.
 
 ## Attribution and license
 

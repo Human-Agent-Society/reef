@@ -145,9 +145,9 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
     batch = processor.build_batch()
-    versions = {sample.runtime_load_id for sample in batch.samples}
+    versions = {sample.training.get("runtime_load_id", None) for sample in batch.items}
     assert versions == {"v2"}
-    assert len(batch.samples) == 3
+    assert len(batch.items) == 3
 
 
 @pytest.mark.unit

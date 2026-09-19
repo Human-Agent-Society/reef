@@ -40,12 +40,21 @@ _MISSING = object()
 
 
 class ReportValidationError(ReefError):
-    """A report does not satisfy its recipe's declared schema.
+    """A report violates its schema or reference contract.
 
     The message names the offending field and rule, because it travels to
-    two audiences far apart in time: the HTTP 400 body at ingress, and the
-    named terminal-judgment reason counted in processor metrics.
+    the HTTP 400 body at ingress and explicit failures during record replay.
     """
+
+
+def validate_report_payload(payload: Mapping[str, Any]) -> None:
+    """Reject removed eligibility controls and malformed optional scores."""
+    metadata = payload.get("metadata")
+    training = metadata.get("training") if isinstance(metadata, Mapping) else None
+    if isinstance(training, Mapping) and "eligible" in training:
+        raise ReportValidationError("metadata.training.eligible is not supported; reports cannot opt out of training")
+    if payload.get("score") is not None:
+        _checked(payload["score"], float, False, "score")
 
 
 @dataclass(frozen=True)
@@ -71,6 +80,7 @@ class ReportBase:
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> ReportBase:
         """Parse a normalized report payload; raise :class:`ReportValidationError` naming any broken field."""
+        validate_report_payload(payload)
         kwargs: dict[str, Any] = {}
         for spec in cls._wire_specs():
             value = _read(payload, spec.path)

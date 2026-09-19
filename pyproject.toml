@@ -13,10 +13,8 @@ description = "A framework-agnostic runtime for continuously improving agents"
 readme = "README.md"
 license = "Apache-2.0"
 authors = [{ name = "Human-Agent-Society" }]
-requires-python = ">=3.10"
+requires-python = ">=3.12"
 classifiers = [
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
     "Topic :: System :: Distributed Computing",
@@ -25,16 +23,28 @@ classifiers = [
 # `pip install reef-infra` must support the base `recipe` configuration on CPU.
 dependencies = [
     "aiohttp",
+    "alembic>=1.13,<2",
     "huggingface_hub",
     "pyyaml",
     "reef-client>=0.2.0",
+    # Harbor and reef-eval: the terminus runner, the task player and the generator service play Harbor tasks.
+    "reef-eval[harbor]>=0.1.1",
+    "sqlalchemy>=2.0,<3",
     "tomli-w",
 ]
 
 [project.optional-dependencies]
-terminus = [
-    "reef-eval[harbor]>=0.1.1; python_version >= '3.12'",
+# Python-side inference adapters; install native SGLang in its GPU environment.
+sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
+tinker = [
+    "tinker==0.28.1",
+    # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
+    "tinker-cookbook==0.5.7",
+    "jinja2>=3.1.0",
 ]
+postgres = ["psycopg[binary]>=3.1,<4"]
+# The agent proposer's E2B cloud sandbox (evolution.proposer_agent.sandbox: e2b).
+e2b = ["e2b>=2.46"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [
@@ -51,8 +61,10 @@ slime = [
     "omegaconf",
     "peft",
     "pillow",
+    "psutil>=5.9",
     "pylatexenc",
     "qwen_vl_utils",
+    "requests",
     "ray[default]",
     "safetensors",
     "sglang-router>=0.3.2",
@@ -68,7 +80,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    "ruff==0.14.7",
+    "ruff==0.16.7",
 ]
 
 [dependency-groups]
@@ -84,11 +96,11 @@ Homepage = "https://github.com/Human-Agent-Society/reef"
 
 [project.scripts]
 reef = "reef.cli:main"
-reef-native = "reef.harness.native:main"
-reef-terminus = "reef.harness.terminus:main"
+reef-native = "reef.harness.runners.native.__main__:main"
+reef-terminus = "reef.harness.runners.terminus:main"
 
 [project.entry-points."sglang.srt.plugins"]
-reef = "reef.train.slime_backend.reef_adapters.sglang.plugin:install_sglang_plugin"
+reef = "reef.inference.sglang.plugin:install_sglang_plugin"
 
 [tool.setuptools]
 include-package-data = true
@@ -100,17 +112,19 @@ fallback_version = "0.0.0.dev0"
 # declared dependency; the reef wheel must not ship its source.
 # `reef` is the shared machinery. The sibling `recipes` tree is a cookbook,
 # not package code, so neither its methods nor its runnable examples ship.
+# runtime/ intentionally contains only its five modules and executor/ (PEP 420).
 [tool.setuptools.packages.find]
+namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts"]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts"]
 
 [tool.isort]
 profile = "black"  # black-compatible
 line_length = 119  # should match black parameters
 ignore_whitespace = true  # ignore whitespace for compatibility with the initial style
-py_version = 310  # python 3.10 as a target version
+py_version = 312  # sync with requires-python in [project]
 sections = ["FUTURE", "STDLIB", "THIRDPARTY", "FIRSTPARTY", "LOCALFOLDER"]
 default_section = "THIRDPARTY"
 known_first_party = ["reef", "recipes"]
@@ -124,7 +138,7 @@ src_paths = ["reef", "recipes"]
 line_length = 119
 
 [tool.ruff]
-target-version = "py310"  # sync with requires-python in [project]
+target-version = "py312"  # sync with requires-python in [project]
 line-length = 119  # sync with [tool.black] and [tool.isort]
 
 [tool.ruff.lint]
@@ -151,6 +165,9 @@ ignore = [
     "E501",
     # N818: existing public exception names omit an Error suffix; renaming them would break callers
     "N818",
+    # UP046/UP047: PEP 695 type parameter syntax; the codebase declares TypeVars, and mypy reads both forms
+    "UP046",
+    "UP047",
 ]
 # Math notation in the RL objective docstrings: SAO's alpha/gamma, and the
 # true minus sign used alongside other Unicode math (∇, π, Â) in the SAO loss
@@ -170,7 +187,7 @@ allowed-confusables = ["α", "γ", "−"]
 # Reef's training adapters are checked with the rest of the package; the
 # runtime remains a separately installed distribution.
 files = ["reef"]
-python_version = "3.10"  # sync with requires-python in [project]
+python_version = "3.12"  # sync with requires-python in [project]
 ignore_missing_imports = true
 
 # The training runtime and its GPU dependencies do not ship type information
@@ -181,6 +198,8 @@ ignore_missing_imports = true
 
 [tool.coverage.run]
 source = ["reef"]
+# Coverage from the GitHub and Blacksmith checkouts is combined in one gate.
+relative_files = true
 # Reef-authored training control flow counts toward the CPU coverage gate. These
 # four modules execute only inside a live Megatron/CUDA worker; their useful
 # validation is the GPU integration suite, not import-only CPU mocks.
@@ -217,6 +236,7 @@ norecursedirs = [
 ]
 # markers to select tests, use `pytest --markers` to see all available markers, `pytest -m "<marker>"` to select tests
 markers = [
+    "sandbox: requires real nested bubblewrap jails on the GitHub CI runner",
     "unit: marks unit test, i.e. testing a single, well isolated functionality (deselect with '-m \"not unit\"')",
     "integration: marks test checking the elements when integrated into subsystems (deselect with '-m \"not integration\"')",
     "acceptance: marks test checking whether the developed product/model passes the user defined acceptance criteria (deselect with '-m \"not acceptance\"')",

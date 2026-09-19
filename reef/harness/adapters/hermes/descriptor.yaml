@@ -25,6 +25,11 @@ install:
 argv: ["chat", "-Q", "--oneshot", "-q", "{prompt}"]
 env:
   HERMES_HOME: "{root}/hermes"
+# --resume, -c and `hermes sessions list` read state.db. It must already be
+# a database: hermes sets a zero-length file aside and creates a new one.
+client_state:
+  - path: "hermes/state.db"
+    kind: sqlite
 files:
   config:
     primary:

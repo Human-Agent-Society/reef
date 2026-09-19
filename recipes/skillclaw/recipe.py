@@ -25,10 +25,10 @@ from typing import Any
 
 from recipes.skillclaw.harness.catalog import SkillCatalogModule
 from recipes.skillclaw.harness.config import PUBLIC_SKILL_ROOT
+from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.surface import Surface
 from reef.surface.skills import SkillValidator, create_skill_surface
-from reef.train.cordis_backend import CordisRecipe
 
 
 def seed_skill_entries(skills_dir: Path) -> tuple[dict[str, Any], ...]:

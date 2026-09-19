@@ -20,6 +20,7 @@ from reef.core.artifact_ref import ArtifactRef
 class RequestType(str, Enum):
     INFERENCE = "inference"
     REPORT = "report"
+    TRAIN = "train"
 
 
 def parse_references(payload: Mapping[str, Any]) -> tuple[str, ...]:

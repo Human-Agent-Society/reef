@@ -1,7 +1,8 @@
 # The judge's container: the server plus this task's scoring files.
 FROM python:3.12-slim
 
-RUN pip install --no-cache-dir "numpy==1.26.4" scipy
+# The judge runs submissions itself, so it needs every library the agent container offers them.
+RUN pip install --no-cache-dir "numpy==1.26.4" scipy cvxpy
 
 COPY judge_server.py score.py judge_config.json /judge/
 CMD ["python3", "/judge/judge_server.py"]

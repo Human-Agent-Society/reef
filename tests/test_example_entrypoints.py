@@ -7,25 +7,21 @@ import importlib
 import importlib.util
 import runpy
 import sys
+import tomllib
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-
-try:
-    import tomllib
-except ModuleNotFoundError:  # pragma: no cover - compatibility fallback
-    import tomli as tomllib
-
 
 ROOT = Path(__file__).resolve().parents[1]
 # An example lives beside its method under recipes/<method>/examples/; the
 # record-only ``basic`` example has no method package.
 EXAMPLE_DIRS = {
     "basic": ROOT / "recipes" / "basic",
-    "sao": ROOT / "recipes" / "sao" / "examples" / "sao",
+    "sao": ROOT / "recipes" / "sao" / "examples" / "imo_answerbench",
     "tttd": ROOT / "recipes" / "tttd" / "examples" / "tttd",
     "guidance_ttt": ROOT / "recipes" / "tttd" / "examples" / "guidance_ttt",
+    "ceobench": ROOT / "recipes" / "sao" / "examples" / "ceobench",
 }
 REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),

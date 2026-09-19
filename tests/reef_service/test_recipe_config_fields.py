@@ -11,14 +11,14 @@ from dataclasses import KW_ONLY, dataclass
 
 import pytest
 import yaml
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from reef.recipe import RecipeConfigError, config_field
 from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
 from reef.recipe.config_fields import recipe_config_fields, resolve_config_field_values
-from reef.records import RecordStore
-from reef.train.evaluation import DefaultCandidateEvaluationPlugin
-from reef.train.slime_backend.backend import SlimeTrainingBackend
+from reef.storage.sqlite import SQLiteRecordStore
+from reef.train.evaluation import BackendAlwaysSelectPlugin
+from reef.train.runtime_backend import RuntimeCandidateBackend
 
 from ._threshold_processor import ThresholdProcessor
 
@@ -36,14 +36,21 @@ class ConfiguredRecipe(WeightTrainingRecipe):
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
-        return WeightTrainingSpec(step_preparer="sft", loss_family="sft", processor=ThresholdProcessor)
+        return WeightTrainingSpec(objective="sft", processor=ThresholdProcessor)
 
 
 @pytest.mark.unit
 def test_config_fields_declare_the_whole_configuration_surface() -> None:
     config_fields = recipe_config_fields(ConfiguredRecipe)
 
-    assert sorted(config_fields) == ["batch_size", "label", "max_staleness", "strict", "temperature"]
+    assert sorted(config_fields) == [
+        "batch_size",
+        "label",
+        "max_staleness",
+        "strict",
+        "temperature",
+        "training_mode",
+    ]
     assert config_fields["batch_size"].env == "REEF_CONFIGURED_BATCH_SIZE"
     assert config_fields["batch_size"].default == 4
     assert config_fields["max_staleness"].env == "REEF_MAX_STALENESS"
@@ -70,6 +77,7 @@ def test_config_field_casting_is_type_aware_for_every_annotation() -> None:
     assert values == {
         "batch_size": 16,
         "max_staleness": 0,
+        "training_mode": "auto",
         "temperature": 0.25,
         "strict": True,
         "label": "run-a",
@@ -99,9 +107,9 @@ def test_float_config_field_survives_service_config_uncast() -> None:
     assert config["data"]["temperature"] == 0.25
 
     interpolated = ConfiguredRecipe.service_config({"temperature": "0.25"}, model_path="/models/demo")
-    assert interpolated["data"]["temperature"] == 0.25
+    assert interpolated["data"]["temperature"] == "0.25"  # Translation leaves parsing to field resolution.
 
-    recipe = ConfiguredRecipe.from_environment({}, config=interpolated, runtime=StubTrainingRuntime())
+    recipe = ConfiguredRecipe.from_environment({}, config=interpolated, **runtime_bindings(StubTrainingRuntime()))
     assert recipe.temperature == 0.25
     assert isinstance(recipe.temperature, float)
 
@@ -111,7 +119,7 @@ def test_from_environment_resolves_every_config_field_source() -> None:
     recipe = ConfiguredRecipe.from_environment(
         {"REEF_CONFIGURED_TEMPERATURE": "0.5", "REEF_CONFIGURED_STRICT": "1"},
         config={"data": {"batch_size": 2}},
-        runtime=StubTrainingRuntime(),
+        **runtime_bindings(StubTrainingRuntime()),
     )
 
     assert (recipe.batch_size, recipe.temperature, recipe.strict, recipe.label) == (2, 0.5, True, "default")
@@ -144,7 +152,7 @@ def test_data_section_rejects_keys_no_config_field_consumes() -> None:
         ConfiguredRecipe.from_environment(
             {},
             config={"data": {"group_size": 2}},
-            runtime=StubTrainingRuntime(),
+            **runtime_bindings(StubTrainingRuntime()),
         )
 
 
@@ -152,17 +160,18 @@ def test_data_section_rejects_keys_no_config_field_consumes() -> None:
 @pytest.mark.parametrize(
     ("settings", "match"),
     [
-        ({"batch_size": "eight"}, r"reef\.batch_size must be an integer, got 'eight'"),
-        ({"batch_size": 2.5}, r"reef\.batch_size must be an integer, got 2\.5"),
-        ({"temperature": "warm"}, r"reef\.temperature must be a number, got 'warm'"),
-        ({"strict": "maybe"}, r"reef\.strict must be a boolean \(true/false\), got 'maybe'"),
-        ({"label": 3}, r"reef\.label must be a string, got 3"),
-        ({"checkpoint_every_n_versions": "x"}, r"reef\.checkpoint_every_n_versions must be an integer"),
+        ({"batch_size": "eight"}, r"reef\.batch_size must be a valid int"),
+        ({"batch_size": 2.5}, r"reef\.batch_size must be a valid int"),
+        ({"temperature": "warm"}, r"reef\.temperature must be a valid float"),
+        ({"strict": "maybe"}, r"reef\.strict must be a valid bool"),
+        ({"label": 3}, r"reef\.label must be a string"),
+        ({"checkpoint_every_n_versions": "x"}, r"reef\.checkpoint_every_n_versions must be a valid int"),
     ],
 )
 def test_service_config_names_the_setting_and_the_expected_type(settings, match) -> None:
     with pytest.raises(RecipeConfigError, match=match):
-        ConfiguredRecipe.service_config(settings, model_path="/models/demo")
+        config = ConfiguredRecipe.service_config(settings, model_path="/models/demo")
+        resolve_config_field_values(ConfiguredRecipe, config["data"], {})
 
 
 @pytest.mark.unit
@@ -172,9 +181,9 @@ def test_invalid_field_values_surface_as_recipe_config_errors() -> None:
     from recipes.sao import SAORecipe
 
     with pytest.raises(RecipeConfigError, match="invalid SAORecipe configuration: batch_size must be positive"):
-        SAORecipe.from_environment({}, config={"data": {"batch_size": -1}}, runtime=StubTrainingRuntime())
+        SAORecipe.from_environment({}, config={"data": {"batch_size": -1}}, **runtime_bindings(StubTrainingRuntime()))
     with pytest.raises(RecipeConfigError, match="invalid SAORecipe configuration"):
-        SAORecipe.from_environment({"REEF_SAO_BATCH_SIZE": "0"}, config={}, runtime=StubTrainingRuntime())
+        SAORecipe.from_environment({"REEF_SAO_BATCH_SIZE": "0"}, config={}, **runtime_bindings(StubTrainingRuntime()))
 
 
 @pytest.mark.unit
@@ -184,40 +193,42 @@ def test_config_field_annotations_outside_the_supported_scalars_fail_at_declarat
         _: KW_ONLY
         sizes: list = config_field(None)  # noqa: RUF009 - the invalid declaration under test
 
-    with pytest.raises(TypeError, match="must be annotated with one of: int, float, bool, str"):
+    with pytest.raises(TypeError, match="unsupported config field type: sizes"):
         recipe_config_fields(BadRecipe)
 
 
 @pytest.mark.unit
 def test_default_build_uses_declared_processor_and_config_fields() -> None:
-    trainer = ConfiguredRecipe(StubTrainingRuntime(), batch_size=2).build("scenario", RecordStore())
+    trainer = ConfiguredRecipe(**runtime_bindings(StubTrainingRuntime()), batch_size=2).build(
+        "scenario", SQLiteRecordStore()
+    )
 
     assert isinstance(trainer.processor, ThresholdProcessor)
-    assert isinstance(trainer.training_backend, SlimeTrainingBackend)
-    assert isinstance(trainer.candidate_evaluator, DefaultCandidateEvaluationPlugin)
-    assert trainer.candidate_evaluator.evaluator is trainer.training_backend
-    assert trainer.training_backend.step_preparer == "sft"
+    assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
+    assert isinstance(trainer.candidate_evaluator, BackendAlwaysSelectPlugin)
+    assert trainer.candidate_evaluator._candidate_backend is trainer.candidate_backend
+    assert trainer.candidate_backend.objective == "sft"
     assert trainer.processor.context.config["batch_size"] == 2
     assert "max_staleness" not in trainer.processor.context.config
 
 
 @pytest.mark.unit
-def test_default_build_requires_processor_and_step_preparer_declarations() -> None:
-    from reef.records import RecordStore
+def test_default_build_requires_processor_and_objective_declarations() -> None:
+    from reef.storage.sqlite import SQLiteRecordStore
 
     @dataclass(frozen=True)
     class NoProcessorRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(step_preparer="sft", loss_family="sft")
+            return WeightTrainingSpec(objective="sft")
 
     @dataclass(frozen=True)
-    class NoPreparerRecipe(WeightTrainingRecipe):
+    class NoObjectiveRecipe(WeightTrainingRecipe):
         @classmethod
         def training_spec(cls) -> WeightTrainingSpec:
-            return WeightTrainingSpec(step_preparer="", loss_family="sft", processor=ThresholdProcessor)
+            return WeightTrainingSpec(objective="", processor=ThresholdProcessor)
 
     with pytest.raises(TypeError, match=r"declares no processor.*training_spec\(\).*override build"):
-        NoProcessorRecipe(StubTrainingRuntime()).build("scenario", RecordStore())
-    with pytest.raises(TypeError, match=r"declares no step_preparer.*registered preparer name.*'module:callable'"):
-        NoPreparerRecipe(StubTrainingRuntime()).build("scenario", RecordStore())
+        NoProcessorRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())
+    with pytest.raises(TypeError, match=r"declares no objective.*registered objective name.*'module:Objective'"):
+        NoObjectiveRecipe(**runtime_bindings(StubTrainingRuntime())).build("scenario", SQLiteRecordStore())

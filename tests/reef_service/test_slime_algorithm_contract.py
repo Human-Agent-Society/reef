@@ -327,7 +327,7 @@ def test_sao_schedule_supports_warmup_and_validates_configuration() -> None:
 
 
 @pytest.mark.unit
-def test_sao_provenance_metrics_handles_policy_versions_and_clock_skew() -> None:
+def test_sao_rollout_metrics_handles_policy_versions_and_clock_skew() -> None:
     sao = resolve_loss_family("sao")
     rollout_data = {
         "producing_runtime_load_ids": ["inc:3"],
@@ -335,7 +335,7 @@ def test_sao_provenance_metrics_handles_policy_versions_and_clock_skew() -> None
         "response_lengths": [4],
         "loss_masks": [[1, 1, 1, 0]],
     }
-    metrics = sao.provenance_metrics(rollout_data, serving_version="inc:7")
+    metrics = sao.rollout_metrics(rollout_data, serving_version="inc:7")
     assert metrics["sao/policy_lag_max"] == 4
     assert metrics["sao/policy_lag_mean"] == 4.0
     assert metrics["sao/effective_token_rate"] == 3 / 4
@@ -507,7 +507,12 @@ def test_spec_and_settings_class_names_follow_the_package() -> None:
         pkg = _family_package_name(family)
         assert type(spec).__name__ == f"{pkg.capitalize()}Algorithm", family
         package = importlib.import_module(type(spec).__module__)
-        settings_names = [name for name in vars(package) if name.endswith("Settings")]
+        # The family's own settings class; a thin family on the distillation base imports the base's too.
+        settings_names = [
+            name
+            for name, value in vars(package).items()
+            if name.endswith("Settings") and isinstance(value, type) and value.__module__ == package.__name__
+        ]
         assert settings_names in ([], [f"{pkg.capitalize()}Settings"]), family
 
 

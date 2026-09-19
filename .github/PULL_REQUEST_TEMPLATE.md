@@ -33,6 +33,7 @@ remains responsible for every submitted line, claim, and test result.
 - [ ] Tests cover behavior changes, or this pull request does not change behavior.
 - [ ] Public interface changes include contract tests, or no public interface changes are present.
 - [ ] Affected user and developer documentation is updated, or no documentation update is required.
+- [ ] Root README changes update both languages and `README.i18n.yaml`, or do not affect README content.
 - [ ] An accepted RFC is linked, or this change does not require an RFC.
 - [ ] Relevant pre-commit and test checks pass.
 - [ ] Non-trivial AI assistance is disclosed above, or none was used.

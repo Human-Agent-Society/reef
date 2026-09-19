@@ -89,7 +89,7 @@ maintainers correct non-standard or multiple prefixes and keep the remaining
 title concise and outcome-oriented. `[Roadmap]` is reserved for a time-bounded
 coordination index; its linked outcomes retain their actual work type.
 
-Use `type: experiment` for work whose primary deliverable is empirical evidence
+Use `type: experiment` for work whose primary deliverable is experimental results
 and `type: example` for a maintained, runnable user-facing reference. Use
 `type: task` for maintainer-approved internal work. Feature, bug, performance,
 question, RFC, and roadmap forms apply their corresponding existing labels.
@@ -139,7 +139,7 @@ Priority describes maintainer intent rather than intrinsic value:
 - `priority: p3` — useful backlog work without a delivery commitment.
 
 Do not apply a public priority to an undisclosed vulnerability. Use
-`ci: gpu-required` when acceptance needs evidence from a supported accelerator
+`ci: gpu-required` when acceptance needs test results from a supported accelerator
 environment that hosted CI cannot provide. The pull request records the exact
 environment, command, revision, and result.
 
@@ -196,6 +196,39 @@ optional, or suitable for a follow-up. Authors should respond to substantive
 comments and may respectfully challenge a request with technical reasoning.
 
 ### 5. Continuous integration
+
+Draft pull requests run lint, type checks, and static Dockerfile checks. Ready
+pull requests automatically run the Python 3.12 source, sandbox, installed-wheel,
+and combined coverage checks after lint succeeds. Documentation and real-harness
+smoke workflows select their jobs from changed paths, including renamed files.
+No maintainer action is needed for this routine feedback.
+
+Before merging, a contributor with repository write access requests a complete
+Python 3.10/3.11/3.12 run on the final revision:
+
+```bash
+gh run rerun RUN_ID --repo Human-Agent-Society/reef
+```
+
+Use the latest ready `ci` run and **Re-run all jobs**, not a partial rerun. The
+matrix selection job executes again and expands coverage on subsequent attempts.
+Failed-jobs-only reruns may reuse an earlier matrix; they are useful for retrying
+failures but do not replace the full-run request. This uses GitHub's native write
+permission for reruns, with no maintainer-only role check or protected environment.
+Authors without write access can ask any collaborator with that permission.
+
+Keep the existing required `lint`, `test (3.10)`, `test (3.11)`, `test (3.12)`,
+and package checks in the `protect-main` ruleset. Routine runs produce only the
+3.12 checks; the missing 3.10/3.11 checks remain pending and block merging until
+full validation succeeds on the current revision. Skipped suites must not turn
+the test gates green. The `docs-gate` permits a skipped build only for a draft
+or a successfully evaluated change set that does not affect documentation.
+
+New pushes and conversion to draft cancel previous runs. A new ready revision
+starts with the routine matrix; full reruns validate that the PR is still open,
+ready, and at the original head SHA. Main pushes and manual dispatches always
+run the full matrix. Manual dispatches are diagnostic runs; use the original
+PR workflow's full rerun to satisfy merge checks for that PR.
 
 Required checks must pass on the reviewed revision. CI is a gate, not a
 substitute for review. The Merge Oncall may request focused or environment-

@@ -1,4 +1,4 @@
-"""Lazy-student judge sidecar: one stream position, one GSM8K session.
+"""Lazy-student judge service: one stream position, one GSM8K session.
 
 Runs inside the task environment's ``judge`` service (see
 ``docker-compose.yaml``), which pip-installs this package
@@ -19,14 +19,14 @@ and the verifier trusts only its record:
   paper's sessions-to-adaptation reading.
 * ``GET  /health`` — compose healthcheck.
 
-Stdlib only: scripted mode needs no dependencies, so the sidecar (and the
+Stdlib only: scripted mode needs no dependencies, so the student service (and the
 whole stream) runs without any user-LLM GPU. LLM mode replays the persona
 through an OpenAI-compatible endpoint and degrades to the scripted line on
 any failure — a judging outage must not wedge the session.
 
 The scripted reactions are deliberately decisive (clear negative on style
 violations, clear positive on a clean reply) so the PRM judging the next
-state inside reef gets unambiguous evidence.
+state inside reef gets clear feedback on the reply.
 """
 
 from __future__ import annotations
@@ -68,7 +68,7 @@ class StudentSession:
 
     def __init__(self, problem: dict, *, user_llm_url: str = "", user_llm_model: str = "", max_turns: int = 8):
         # Reacting can take a persona-LLM generation; the HTTP response must
-        # not wait for it. An egress proxy between the agent and this sidecar
+        # not wait for it. An egress proxy between the agent and this student service
         # gives up on a response head long before a 32B finishes (harbor's
         # gost defaults to 15s), and the agent then sees an empty reply with
         # no way to tell it from a crash. So /reply returns at once and

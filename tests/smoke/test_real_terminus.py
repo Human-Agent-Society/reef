@@ -20,8 +20,8 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.render import render_composition
-from reef.harness.trajectory import read_terminus_atif
+from reef.harness.episodes.trajectory import read_terminus_atif
+from reef.harness.tree.render import render_composition
 
 MODEL = os.environ.get("REEF_REAL_TERMINUS_MODEL", "")
 TASK = os.environ.get("REEF_REAL_TERMINUS_TASK", "")
@@ -50,7 +50,7 @@ def test_real_terminus_runs_a_task_and_reports_a_verifier_reward(tmp_path: Path,
     monkeypatch.setenv("REEF_TERMINUS_SESSION_DIR", str(sessions))
     monkeypatch.setenv("REEF_TERMINUS_TRIALS_DIR", str(root / "terminus" / "trials"))
 
-    from reef.harness.terminus.runner import run, trial_slug
+    from reef.harness.runners.terminus.runner import run, trial_slug
 
     exit_code = run(TASK)
 

@@ -1,0 +1,212 @@
+# SAO on CEO-Bench, for recipes/sao/examples/ceobench/run.sh.
+#
+# The policy is Qwen3.6-27B trained through Megatron Bridge LoRA: the base
+# weights stay frozen in both the actor and the SAO critic, adapters and the
+# critic's value head train, and the rollout engine serves the adapter. The
+# architecture flags are Slime's reference set for the Qwen3.5 hybrid
+# (scripts/models/qwen3.5-27B.sh; sizes come from the HF config) and the
+# objective settings are the SAO example's, with the learning rates raised
+# for adapters. A rollout is one agent turn of the benchmark's bash agent; a
+# finished week's turns are reported together with the week's credit: its
+# change in company value (cash plus the subscription run-rate over the weeks
+# left) and the discounted changes of the weeks after it, scaled against the
+# weeks before (harness/report.py). batch_size 8 trains about a week of decision turns per step
+# (the SAO example trains one rollout per step; the paper trains 128), and
+# max_staleness admits the turns of a week that earlier steps have aged.
+#
+# Context: a CEO-Bench week is one conversation whose tool outputs accumulate
+# until the agent calls next-week, and the agent reads the benchmark's docs
+# early (40k tokens after four turns). The engine serves the model's window
+# (128k here). The trainer's sequences are capped at 24k tokens: it
+# materializes a sequence's full-vocabulary logits (248k entries) in fp32 on
+# every tensor-parallel rank, about 1 GB per thousand tokens with their
+# softmax and gradient, on top of the two resident bases (47 GB per GPU
+# idle). A 32k-token actor step peaked at 78 GB of the H100's 81 GB; 24k
+# leaves room, and the turns it drops are the doc-reading ones (36k to 41k
+# tokens); the rest sit under 20k. The harness reports only turns that fit
+# (CEOBENCH_TRAIN_MAX_TOKENS in run.sh); longer turns are served and
+# recorded but do not train. See the README for what this ruled out.
+#
+# GPU budget: four actor GPUs (TP4, the critic colocated) and a two-GPU
+# rollout engine (TP2), the devices docker-compose.yaml hands the container.
+# The actor and the critic stay resident (no offload between their steps:
+# two frozen 27B bases at TP4 fit beside one step's activations), the critic
+# checkpoints every eighth commit, and a step trains 8 decision turns (the
+# harness reports only the turns that changed the company, a few per week),
+# so training keeps pace with the game (about a week of play per step). Paths are the
+# container's; run.sh mounts the model directory and the run directory.
+
+schema-version: 2
+reef:
+  ready-timeout: 3600
+  host: 0.0.0.0                        # the task container reaches Reef by LAN address
+  port: 28900
+  token: ${REEF_TOKEN}                 # run.sh mints one per run
+inference:
+  model-path: /root/models/Qwen3.6-27B
+  timeout-s: 7200
+  # A two-GPU tensor-parallel rollout engine beside the four actor GPUs
+  # (training.colocate stays off). Engine flags use SGLang's names.
+  num-gpus: "2"
+  tensor-parallel-size: "2"
+  options:
+    router-port: "23000"
+    context-length: "131072"
+    reasoning-parser: "qwen3"
+    tool-call-parser: "qwen3_coder"
+    # LoRA serving: the adapter is published into the engine (tttd's settings).
+    mem-fraction-static: "0.5"
+    disable-prefill-cuda-graph: true
+    cuda-graph-max-bs-decode: "128"
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
+    tool_call_parser: qwen3_coder
+    # The bash agent pins temperature 1.0 and the completion budget on every
+    # request; these fill in what it leaves unset (the model's generation_config).
+    sampling_defaults:
+      top_p: 0.95
+      top_k: 20
+      max_new_tokens: 16384
+recipe:
+  implementation: recipes.sao.recipe:SAORecipe
+  config:
+    batch-size: 8                      # MUST equal training.config.global_batch_size
+    max-staleness: 64
+    checkpoint-every-n-versions: 20
+training:
+  backend: slime
+  ready-timeout: 900
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
+  # One SAO training RPC covers critic_steps_per_actor value steps plus the
+  # actor step, a checkpoint save, and a weight publish.
+  timeout-s: 14400
+  config:
+    checkpoint_dir: /var/lib/reef/checkpoints
+    checkpoint_retention:
+      max_storage_fraction: 0.80
+      min_free_space_fraction: 0.10
+      policy: latest
+    global_batch_size: 8
+  # SAO objective as slime flags: --use-critic creates the value-model group;
+  # the algorithm spec sets the skip-observation GAE and hard-masked DIS hook
+  # paths. Value-model settings are the paper's (critic lr 5e-6 against the
+  # 1e-6 policy lr) except the critic-only warm-up, two commits here.
+  options:
+    reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
+    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
+    megatron-to-hf-mode: "bridge"
+    hf-checkpoint: "${inference.model-path}"
+    # Both models stay on the GPUs; --use-critic would otherwise offload
+    # whichever is idle. The critic's weights and optimizer checkpoint every
+    # eighth commit instead of every one (a full 27B save each time).
+    no-offload-train: true
+    critic-save-interval: "8"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "100"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "4"
+    num-gpus-per-node: "6"
+    tensor-model-parallel-size: "4"
+    pipeline-model-parallel-size: "1"
+    seq-length: "49152"
+    rollout-max-response-len: "16384"
+    rollout-max-context-len: "131072"
+    # Qwen3.5/3.6 hybrid architecture, as in Slime's scripts/models/qwen3.5-27B.sh.
+    spec:
+      - slime_plugins.models.qwen3_5
+      - get_qwen3_5_spec
+    use-gated-attention: true
+    attention-output-gate: true
+    apply-layernorm-1p: true
+    rotary-percent: "0.25"
+    rotary-base: "10000000"
+    # Megatron Bridge LoRA on the attention and MLP projections; the
+    # critic trains the same adapters plus its value head.
+    megatron-lora-rank: "32"
+    megatron-lora-alpha: "32"
+    megatron-lora-dropout: "0"
+    megatron-lora-target-modules:
+      - linear_qkv
+      - linear_proj
+      - linear_fc1
+      - linear_fc2
+    check-lora-weight-equal: true
+    verify-lora-base-weights: true
+    recompute-granularity: "full"
+    recompute-method: "uniform"
+    recompute-num-layers: "1"
+    log-probs-chunk-size: "1024"
+    ckpt-fully-parallel-save: true
+    sequence-parallel: true
+    use-dynamic-batch-size: true
+    # Micro-batches of one or two turns: with both bases resident, a 48k-token
+    # micro-batch's checkpointed activations and fp32 logits do not fit.
+    max-tokens-per-gpu: "16384"
+    attention-dropout: "0.0"
+    hidden-dropout: "0.0"
+    attention-softmax-in-fp32: true
+    accumulate-allreduce-grads-in-fp32: true
+    attention-backend: "flash"
+    optimizer: "adam"
+    # Adapter learning rates: ten times the paper's full-parameter values,
+    # keeping its 5:1 critic-to-policy ratio.
+    lr: "1e-5"
+    lr-decay-style: "constant"
+    loss-type: "policy_loss"
+    use-rollout-logprobs: true
+    use-critic: true
+    eps-clip: "0.3"
+    eps-clip-high: "5.0"
+    critic-steps-per-actor: "2"
+    critic-lr: "5e-5"
+    # Two commits of critic-only training, not the paper's ten: the value
+    # model starts from --critic-init (an earlier episode's critic, see
+    # run.sh) and ten warm-up commits would spend the growth weeks of a
+    # single-episode run on the critic alone.
+    num-critic-only-steps: "2"
+    # An earlier episode's critic checkpoint, when run.sh has put one there;
+    # an empty directory leaves the critic cold, as before.
+    critic-init: /var/lib/reef/critic-init
+    sao-length-adaptive-lambda: true
+    sao-lambda-alpha: "1.5"
+    gamma: "1.0"
+    lambd: "1.0"
+    entropy-coef: "0.0"
+    n-samples-per-prompt: "1"
+    rollout-temperature: "1.0"
+    padded-vocab-size: "248320"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    normalization: "RMSNorm"
+    group-query-attention: true
+    qk-layernorm: true
+storage:
+  artifact-repository: /var/lib/reef/artifacts.git
+  artifact-work-dir: /var/lib/reef/artifact-work
+  artifact-cache-dir: /var/lib/reef/artifact-cache
+  agent-record-dir: /var/lib/reef/agent-record
+
+execution:
+  training: ray
+  rollout: ray
+
+observability:
+  wandb:
+    enabled: false                     # omitted or false means no tracking
+    project: reef
+    # entity: your-team
+    # group_prefix: sao               # produces group sao/<scenario>
+    # name_prefix: ceobench
+    tags: []
+    mode: online                       # online, offline, or disabled
+    directory: /var/lib/reef/wandb
+    upload_checkpoints: false

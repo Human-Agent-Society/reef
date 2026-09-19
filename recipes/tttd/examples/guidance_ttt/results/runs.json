@@ -47,7 +47,7 @@
         "parent_score": 80.13277726857143,
         "candidate_score": 86.76461186714288
       },
-      "provenance": {
+      "source_info": {
         "result_sha256": "538953f88ed11ee065f50683fe99ba82b307990becda2578a7be08376c886f9a",
         "resume_state_sha256": "8f294d7b5ca9fad5ea0d8f7e060f822551b3183b5f98617746038c1f374c55e1",
         "committed_library_sha256": "58494d7531722642b1befac6f3e75792f93b604f1402acf58fce8ac2e3b291e7",
@@ -121,7 +121,7 @@
         "solution_sha256": "0fa4dc2399a9cb70457e9fb2f8b5a382664807fe78d2f84d06f1539cc3b6e116",
         "results_sha256": "f9ad02cfe7b286ca8ccc746b87220b9a647bce61cc1515de93fe8449c57e0647"
       },
-      "provenance": {
+      "source_info": {
         "result_sha256": "b414ac0df6e323ba6eeca7d6edfd1602f78a8fa14672f6249c1443833bee0c2f",
         "resume_state_sha256": "ad7d3acc00ad91cc7f1814194a4f6a6e3b957508f6dcd007e5886017a6ec84c8",
         "committed_library_sha256": "5bb5970a004708bbc5e2ca69efa25ab43e6054d64132ae6672c2cb9149e881e1",

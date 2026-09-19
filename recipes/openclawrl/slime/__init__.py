@@ -32,8 +32,7 @@ class OpenclawrlSettings:
     subset_mode: str = "student"
 
     def __post_init__(self) -> None:
-        for name in ("w_rl", "w_opd", "adv_diff_clip"):
-            value = getattr(self, name)
+        for name, value in (("w_rl", self.w_rl), ("w_opd", self.w_opd), ("adv_diff_clip", self.adv_diff_clip)):
             if not isinstance(value, Real) or isinstance(value, bool) or not math.isfinite(value):
                 raise ValueError(f"openclawrl {name} must be a finite number")
         if self.hint_selection not in _HINT_SELECTIONS:

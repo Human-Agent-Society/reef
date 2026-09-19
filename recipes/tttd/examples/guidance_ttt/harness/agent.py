@@ -29,6 +29,7 @@ from .prompts import (
     extract_strict_guidance,
     extract_terminal_tag_or_none,
 )
+from .run_controller import SearchHarness
 from .scorer import Scorer, extract_solution_code
 from .search import guidance_chat_request, openai_action
 from .state import LibraryEntry, LibraryNode, LLMRequest, VerificationResult
@@ -109,7 +110,7 @@ def prepare_library(
     return library
 
 
-class ReefGuidanceTTTHarness:
+class ReefGuidanceTTTHarness(SearchHarness):
     """One policy call and, when well formed, one external execution per rollout."""
 
     def __init__(

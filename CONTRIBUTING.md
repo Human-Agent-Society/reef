@@ -27,7 +27,7 @@ Use the structured template that matches the work:
 - **Feature proposal** for a concrete user problem whose scope does not yet
   require a durable architecture decision.
 - **Experiment** for a paper reproduction, benchmark, or empirical question
-  with pinned models, workloads, baselines, metrics, and retained evidence.
+  with pinned models, workloads, baselines, metrics, and saved results.
 - **Example** for a runnable user-facing recipe or reference deployment with a
   documented setup and expected result.
 - **RFC proposal** when the change may affect public interfaces,
@@ -145,6 +145,22 @@ pre-commit run --all-files
 pytest tests/
 ```
 
+### Keep the root READMEs synchronized
+
+`README.md` and `README.zh.md` are one reviewed documentation pair. A change to
+either file must update the other when needed and preserve the same headings,
+lists, tables, link targets, and fenced code. After reviewing both languages,
+record their exact Git blob hashes and verify the pair:
+
+```bash
+python .github/scripts/check_readme_i18n.py --write
+python .github/scripts/check_readme_i18n.py
+```
+
+The record in `README.i18n.yaml` makes any later one-sided edit fail local
+pre-commit checks and CI. The structural check does not judge translation
+quality, so its success does not replace human review of meaning and wording.
+
 The full test suite needs the supported container environment and training
 dependencies. See the [testing guide](https://reefinfra.ai/docs/contributing/testing/) for
 focused commands and dependency details.
@@ -197,7 +213,7 @@ code against these tools.
 - Give each class one clear responsibility and keep its public surface small.
   Construct valid objects rather than relying on callers to set attributes in
   a particular order.
-- Prefer composition and small protocols over deep inheritance hierarchies.
+- Prefer composition and small abstract interfaces over deep inheritance hierarchies.
   Inheritance should represent a genuine substitutable relationship, not just
   reuse implementation.
 - Encapsulate mutable state and expose intent-revealing operations. Do not add
@@ -212,8 +228,17 @@ code against these tools.
   at runtime. Resolve cycles by moving shared contracts to a lower-level module,
   correcting the dependency direction, or using a local runtime import at the
   integration boundary.
+- Do not use `typing.Protocol`, `typing_extensions.Protocol`, or `runtime_checkable`.
+  Define abstract base classes and inherit them explicitly. The Python design
+  check enforces this across all first-party Python files, including `reef/`,
+  `recipes/`, `tests/`, `tutorials/`, `docker/`, `docs/`, `.github/scripts/`, and
+  root files. It excludes third-party code, local dependency/build trees, vendored
+  benchmark inputs, published result programs, and golden fixtures using the paths
+  in [.github/scripts/check_python_design.py](.github/scripts/check_python_design.py).
+  Protocol findings cannot be exempted through the design baseline. The existing
+  `TYPE_CHECKING` and Callable checks keep their `reef/`, `recipes/`, and `tests/` scope.
 - Do not model long-lived behavior as `Callable` constructor arguments,
-  callable-valued fields, or containers of callbacks. Define a named `Protocol`
+  callable-valued fields, or containers of callbacks. Define an abstract base class
   with meaningful methods or a cohesive class so the contract, state, and
   lifecycle are explicit.
 - A single short-lived callback can be appropriate for an algorithm, decorator,
@@ -270,9 +295,9 @@ reliably:
   for established public APIs and mathematical notation are documented in
   `pyproject.toml`.
 - mypy checks type consistency in the `reef` package.
-- The Python design-policy check rejects `TYPE_CHECKING` and new Callable-based
-  object state or callback bundles. Its baseline identifies existing migration
-  debt and cannot grow without an explicit reviewed change.
+- The Python design-policy check rejects `Protocol`, `runtime_checkable`,
+  `TYPE_CHECKING`, and new Callable-based object state or callback bundles. Its baseline identifies existing migration
+  debt for Callable patterns; Protocol and `TYPE_CHECKING` findings cannot be baselined.
 
 Automation cannot determine whether a class is the right abstraction, whether
 an identifier uses the clearest domain term, or whether an interface has one
@@ -303,6 +328,33 @@ Before requesting review:
 Use a draft pull request when the design or implementation is not ready for
 acceptance. Do not mix a functional change with drive-by formatting, generated
 rewrites, or unrelated cleanup.
+
+Draft pull requests run lint, type checks, and static Dockerfile checks only.
+Once ready, each update automatically runs the source, sandbox, and installed-
+wheel suites on Python 3.12, including the combined coverage check. Documentation
+builds and real-harness smoke tests run automatically when their files change.
+Run relevant checks locally and batch each round of review fixes before pushing.
+
+Before merging, run the complete Python 3.10/3.11/3.12 test and package matrices
+on the final revision. Any contributor with repository write access can request
+this by rerunning the entire latest `ci` workflow:
+
+```bash
+gh run rerun RUN_ID --repo Human-Agent-Society/reef
+```
+
+The Actions UI equivalent is **Re-run all jobs**. Rerunning the entire workflow
+recalculates the matrix for full validation; **Re-run failed jobs** may reuse the
+previous matrix and is intended for retrying failures, not expanding coverage.
+No separate maintainer approval is needed. Authors without repository write
+access can ask a collaborator to request the final full run.
+
+Routine runs leave the required Python 3.10/3.11 checks pending. These checks
+must pass on the latest revision before merging; the Python 3.12 routine run
+alone is insufficient. A new push cancels older runs and returns to the routine
+matrix. Full reruns reject closed, draft, or superseded PR revisions. Main-branch
+pushes and manual workflow dispatches run all supported Python versions;
+use the PR's `ci` rerun to satisfy its merge checks.
 
 ## Review and acceptance
 

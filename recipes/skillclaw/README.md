@@ -1,6 +1,8 @@
 # SkillClaw reproduction on harness evolution
 
-This example rebuilds the SkillClaw method from [Evolving Skills for Autonomous Agents](https://arxiv.org/abs/2604.08377) as a method package on the harness evolution mechanism (`harness_evolve`). SkillClaw is the method: by day the agent drains a frozen task list against the current skill pool, by night one decision per observation changes the pool, and every non-skip decision is selected - the next day measures it. Harness evolution is the mechanism: the pool is a composition tree of skill nodes, a night is one composite tree mutation settled under one verdict, and a published tree is a versioned artifact any client pulls. The method supplies two callables (`propose` and `evaluate`) plus a `CandidateSelector`; the mechanism owns render, episodes, ledger, and revert.
+This example implements the SkillClaw method from [Evolving Skills for Autonomous Agents](https://arxiv.org/abs/2604.08377) using Reef's harness evolution engine (`harness_evolve`). Each day, the agent runs a fixed task list with its current skills. Each night, SkillClaw reviews the day's sessions and proposes skill changes. Every proposed change is accepted unless the method chooses to skip it; the next day measures the updated skills.
+
+Reef stores the skill pool as a tree and publishes each night's changes together as a new version that clients can download. The method supplies `propose`, `evaluate`, and a `CandidateSelector`. The engine renders the harness, runs evaluation tasks, records changes, and rolls back rejected changes.
 
 ## Directory layout
 

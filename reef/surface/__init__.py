@@ -8,12 +8,13 @@ every call site, and the bundled surfaces are documented at
 https://reefinfra.ai/docs/developer-guide/surface/.
 
 The package depends only on ``artifact`` and ``core``; it sees runtimes
-structurally through ``ServingRuntime`` and ``WeightRuntime`` and never
+through the ``ServingRuntime`` and ``WeightRuntime`` abstract bases and never
 imports a concrete one.
 """
 
 from reef.surface.adapter import adapter_name, parse_adapter_name
 from reef.surface.base import (
+    AdapterWeightRuntime,
     ArtifactActivator,
     ArtifactLoader,
     FileTree,
@@ -30,6 +31,7 @@ from reef.surface.skills import RequestSkillLayer, SkillLayer, create_skill_surf
 from reef.surface.weights import RuntimeLoadMismatch, WeightInferenceHooks, WeightLoader, create_weight_surface
 
 __all__ = [
+    "AdapterWeightRuntime",
     "ArtifactActivator",
     "ArtifactLoader",
     "FileTree",

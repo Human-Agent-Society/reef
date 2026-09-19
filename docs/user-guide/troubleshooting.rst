@@ -13,6 +13,8 @@ Starting Reef
 
 **reef serve cannot find the config.** A relative ``-c`` path is resolved against the Reef checkout root, not the current directory. Pass an absolute path, or run from the checkout root.
 
+**A setting is not what the config says.** The first lines of the launcher log list every resolved setting with its source (``file``, ``command line``, ``environment``, ``automatic``, ``default``), so a command-line flag or ``REEF_*`` variable that overrode the file shows up there; ``reef serve ... --print-config`` prints the full list, defaults included, without starting anything. A ``schema-version: 2`` file that repeats a key, spells one field two ways, or sets ``null`` on a field that is not optional is refused before startup, naming the field and lines.
+
 **A service never reports ready.** Its ``ready`` probe keeps failing; the stack waits ``ready_timeout`` seconds (3600 by default) before giving up. Read that service's log under ``run_dir``. For a training stack, the usual causes are a model that is still downloading, a ``reef.inference_url`` override that does not match where Slime bound its router (leave it unset; Reef takes the address from the training actor), or GPUs already in use.
 
 **Boot fails naming a config key.** A ``reef.*`` key that the selected recipe has no field for stops the start rather than being ignored. Recipe fields are listed in `Bundled recipes <recipes.rst>`__; ``harness_evolve`` takes none in the flat section and is configured through a preset.
@@ -26,18 +28,33 @@ Requests
 
 **400 missing or empty x-reef-scenario.** Every inference, report, and harness read needs the header.
 
-**404 unknown scenario.** The deployment sets ``allow_implicit_scenario_creation: false`` and the scenario has not been created; ``POST /reef/scenarios`` creates it. With implicit creation on, the same typo silently creates a second scenario instead: check ``GET /reef/scenarios`` when traffic seems to vanish.
+**404 unknown scenario.** The deployment sets ``allow_implicit_scenario_creation: false`` and the scenario has not been created; ``POST /reef/scenarios`` creates it. With implicit creation on, the same typo silently creates a second scenario instead: check ``GET /reef/scenarios`` when traffic seems to vanish. ``POST /reef/train`` answers 404 with either setting and creates nothing.
 
 **409 on an inference request.** Either the ``x-reef-release-id`` header names a version that conflicts with the scenario's binding, or, on a training deployment, the engine answered with a runtime load ID other than the one frozen for the request. The second case is a backend contract violation and should not happen with the bundled stack; ``/reef/status`` shows the current runtime load ID.
 
-**A streaming request is refused on a training scenario.** Streaming through a training deployment requires the token-capturing backend (``inference_backend_factory`` set to the SGLang chat backend, as in the bundled configs); the plain HTTP proxy backend cannot stream there.
+**A streaming request is refused on a training scenario.** Streaming through a training deployment requires the token-capturing backend (``inference_handler_factory`` set to the SGLang chat backend, as in the bundled configs); the plain HTTP proxy backend cannot stream there.
 
 **The provider's error came back as 400.** Provider 4xx responses are relayed with the provider's message; read it, the request body is usually the problem. A provider 5xx becomes 502.
+
+**503 inference retry deadline exceeded (300s).** Buffered inference exhausted
+``inference.retry-timeout-s``. It follows ``inference.timeout-s`` when not set
+separately, and both default to 300 seconds. If one valid generation can take
+longer—for example, a Designer call against a slow local model—raise the
+request timeout:
+
+.. code:: bash
+
+   reef serve ... --inference.timeout-s 1800
+
+If ``inference.retry-timeout-s`` is explicitly configured, make sure it is
+also long enough. ``inference.retry-initial-s`` and
+``inference.retry-max-s`` control only the delay between attempts; increasing
+them does not give one generation more time.
 
 Reports and training
 --------------------
 
-**A report was accepted but nothing trains.** In order of likelihood: the recipe's step trigger is not reached yet (``batch_size`` reports, or a full ``groups_per_step × rollouts_per_group`` grid for ``tttd``); the report carries no finite ``score`` and the recipe requires one; ``metadata.training.eligible`` is ``false``; or the referenced receipts were already consumed by an earlier step, in which case the report is accepted and ignored. ``GET /reef/scenarios/{scenario}/contract`` shows what the recipe consumes; ``/reef/status`` shows whether a batch is ready.
+**A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``batch_size`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready.
 
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
@@ -50,15 +67,17 @@ Reports and training
 Harness evolution
 -----------------
 
-**every task passed: nothing batched, no evolve step runs.** The recipe learns from failures: only reports scoring at or below ``data.max_score`` (``0.0`` in the example) batch. Use a model that fails a task, raise ``max_score``, or add tasks the model gets wrong.
+**reports are accepted but no evolve step runs.** Check the configured training mode and batch size. Successful and failed outcomes both contribute samples; there is no score-window filter. Inspect training errors for missing inputs or incompatible trajectory data.
 
-**no skill mutation won a gate.** A step ran and the candidate did not win. Read the step's episodes in the service log. Both sides scoring nothing means the episodes could not run: the adapter binary is not on ``PATH`` (or ``evolution.binary`` is wrong), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or an episode exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
+**startup fails installing the harness binary.** With ``evolution.binary`` unset, startup installs the descriptor's pinned binary. Install the vendor tool named in the error (``npm`` for pi), fix the reported vendor failure, or set ``evolution.binary`` to an existing executable.
+
+**no skill mutation won a gate.** A step ran and the candidate did not win. Read the step's episodes in the service log. Both sides scoring nothing means the episodes could not run: the adapter binary could not be launched (``evolution.binary``, when set, must point at a real binary), the endpoint rejected ``tool_choice: "auto"`` (vLLM needs ``--enable-auto-tool-choice --tool-call-parser hermes``), or an episode exceeded the 600 second timeout. Both sides scoring the same means the proposal did not change the outcome; ``selection: always`` publishes every applied mutation if that is what you want.
 
 **GET /reef/harness returns 404.** Nothing has been published yet, or the scenario's recipe serves no files. The catalog at ``GET /reef/harness/releases`` lists what exists.
 
 **reef-pi captures no receipts, so report has nothing to send.** The installed ``reef-client`` is older than 0.2.0 and reads a header the service no longer sends. ``pip install -U "reef-client>=0.2.0"``.
 
-**reef-pi exits with no provider baseUrl found.** The wrapper finds Reef through a provider entry in the tree's ``pi-agent/models.json`` (``opencode/opencode.json`` for opencode). The published tree carries no endpoint on purpose; add a provider whose ``baseUrl`` is your Reef URL before running the wrapper.
+**reef-<adapter> exits with no Reef URL in the tree's model binding files.** The wrapper finds Reef through the file the adapter's model binding renders its endpoint into: ``pi-agent/models.json``, ``opencode/opencode.json``, ``claude/settings.json``, ``dsh/profiles/headless/cordis.patch.yml``, ``hermes/config.yaml``, ``native/models.json``. The published tree carries no endpoint on purpose; write the binding with your Reef URL there before running the wrapper. A codex tree (``codex/config.toml``) is rewritten the same way, but codex speaks the Responses dialect and Reef serves no ``/v1/responses`` route yet, so its calls capture nothing until it does.
 
 Docs and links
 --------------

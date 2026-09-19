@@ -85,7 +85,9 @@ def grade(artifact):
                 [
                     sys.executable,
                     "-c",
-                    f"import sys; sys.path.insert(0, '{tmp}'); from solution import run; import json; print(json.dumps(run(seed=42, budget_s=1000)))",
+                    # Programs commonly return numpy arrays; the verifier accepts them, so the runner must too.
+                    f"import sys; sys.path.insert(0, '{tmp}'); from solution import run; import json; "
+                    "print(json.dumps(run(seed=42, budget_s=1000), default=lambda o: o.tolist() if hasattr(o, 'tolist') else float(o)))",
                 ],
                 capture_output=True,
                 text=True,

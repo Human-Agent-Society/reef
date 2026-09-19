@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# The reef training stack (docker-compose.yaml), then the 72-session GSM8K
+# The OpenClawRL deployment (Reef, independent PRM and student model), then the 72-session GSM8K
 # stream through reef-eval. Setup (once): see README. State goes to $RUN_DIR.
 #
 # The stack is left running and a healthy one is reused, so a re-run continues
@@ -26,9 +26,9 @@ docker image inspect "$REEF_IMAGE" >/dev/null 2>&1 \
     || { echo "run.sh: image $REEF_IMAGE not found (build docker/Dockerfile.reef)" >&2; exit 1; }
 mkdir -p "$RUN_DIR"
 
-# The judge sidecar, one image shared by every task, tagged with user_sim/'s
+# The judge service, one image shared by every task, tagged with user_sim/'s
 # content hash. The tasks pin that tag, so a change here without a re-stamp
-# would build a sidecar no task can pull; ./restamp.sh fixes it.
+# would build an image no task can pull; ./restamp.sh fixes it.
 USER_SIM_TAG="$(cat user_sim/{Dockerfile,personas.py,pyproject.toml,student_server.py} | sha256sum | cut -c1-12)"
 grep -q "FROM openclawrl-user-sim:$USER_SIM_TAG" harbor-tasks/gsm8k-s000/environment/Dockerfile.judge \
     || { echo "run.sh: user_sim/ changed; re-stamp the 72 tasks with ./restamp.sh" >&2; exit 1; }
@@ -36,12 +36,12 @@ docker build -q -t "openclawrl-user-sim:$USER_SIM_TAG" user_sim >/dev/null
 [ -f "$RUN_DIR/token" ] || openssl rand -hex 16 > "$RUN_DIR/token"
 REEF_TOKEN="$(cat "$RUN_DIR/token")"
 
-# 1. The reef training stack (docker-compose.yaml holds its configuration)
+# 1. Compose owns Reef, PRM and student-model startup and readiness.
 echo "==> [1/2] the reef stack at $REEF_URL (a cold boot takes ~6 minutes on B200s)"
 # compose reads these from the environment; the subshell keeps the token out of
 # everything that runs after it.
 (
-    export REEF_IMAGE REEF_CONFIG MODEL_DIR RUN_DIR REEF_ROOT HOST_IP REEF_TOKEN
+    export REEF_IMAGE REEF_CONFIG MODEL_DIR RUN_DIR REEF_ROOT REEF_TOKEN
     docker compose up -d --wait
 ) || { echo "run.sh: the stack never became healthy; docker compose logs" >&2; exit 1; }
 

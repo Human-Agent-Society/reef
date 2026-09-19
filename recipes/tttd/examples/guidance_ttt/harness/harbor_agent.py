@@ -53,19 +53,15 @@ STATE_DIR = EXAMPLE_DIR / "work" / "polyomino_packing"  # checkpoints, artifacts
 RUN_DIR = STATE_DIR / "guidance-run"
 
 _STACK = yaml.safe_load((EXAMPLE_DIR / "serve.yaml").read_text())
-GROUPS_PER_STEP = _STACK["reef"]["groups_per_step"]
-ROLLOUTS_PER_GROUP = _STACK["reef"]["rollouts_per_group"]
-STEPS = _STACK["training"]["steps"]
-MAX_TOKENS = _STACK["training"]["max_tokens"]
-SEQ_LENGTH = _STACK["training"]["seq_length"]
-LORA_RANK = _STACK["training"]["lora_rank"]
-TENSOR_PARALLEL_SIZE = _STACK["training"]["tensor_parallel_size"]
+GROUPS_PER_STEP = _STACK["recipe"]["config"]["groups-per-step"]
+ROLLOUTS_PER_GROUP = _STACK["recipe"]["config"]["rollouts-per-group"]
+STEPS = _STACK["training"]["config"]["steps"]
+MAX_TOKENS = _STACK["training"]["config"]["max_tokens"]
+SEQ_LENGTH = _STACK["training"]["config"]["seq_length"]
+LORA_RANK = _STACK["training"]["config"]["lora_rank"]
+TENSOR_PARALLEL_SIZE = _STACK["training"]["config"]["tensor_parallel_size"]
 MAX_WORKERS = 8  # host-side concurrency; the stack has no matching knob
 
-# Reef's Ray train bridge, as serve.yaml names it.
-RAY_ADDRESS = "127.0.0.1:6379"
-RAY_NAMESPACE = "reef"
-RAY_ACTOR_NAME = "reef-train-bridge"
 TRAIN_TIMEOUT_S = 14_400.0
 TRAIN_POLL_S = 2.0
 
@@ -149,6 +145,9 @@ class HarborAgent(BaseAgent):
             guidance_max_tokens=MAX_TOKENS,
             max_workers=MAX_WORKERS,
         )
+        # reef serve publishes the shared runtime's address before starting
+        # the driver. Read that snapshot, not a fixed port or another cluster.
+        runtime = yaml.safe_load((STATE_DIR / "stack" / "slime-driver" / "runtime.yaml").read_text())["reef"]
         controller = GuidanceRunController(
             harness=harness,
             library=library,
@@ -156,9 +155,9 @@ class HarborAgent(BaseAgent):
                 SERVICE_URL,
                 SCENARIO,
                 token=TOKEN,
-                ray_address=RAY_ADDRESS,
-                ray_namespace=RAY_NAMESPACE,
-                ray_actor_name=RAY_ACTOR_NAME,
+                ray_address=runtime["ray_address"],
+                ray_namespace=runtime["ray_namespace"],
+                ray_actor_name=runtime["ray_actor_name"],
                 timeout_s=TRAIN_TIMEOUT_S,
                 poll_interval_s=TRAIN_POLL_S,
             ),

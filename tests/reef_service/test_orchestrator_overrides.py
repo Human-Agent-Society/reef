@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from reef.service.deploy.orchestrator import InvalidOverrideError, _parse_overrides, main
+from reef.service.deploy.cli import InvalidOverrideError, _apply_overrides, _parse_overrides
+from reef.service.deploy.orchestrator import main
 
 
 def test_key_value_pair() -> None:
@@ -17,6 +18,33 @@ def test_key_equals_value() -> None:
 
 def test_dotted_key() -> None:
     assert _parse_overrides(["--training.checkpoint_dir", "/tmp/ckpt"]) == {"training.checkpoint_dir": "/tmp/ckpt"}
+
+
+def test_apply_overrides_rejects_a_path_through_a_scalar() -> None:
+    with pytest.raises(InvalidOverrideError, match=r"reef\.artifact_dir"):
+        _apply_overrides({"reef": {"artifact_dir": "/data/artifacts"}}, {"reef.artifact_dir.foo": "1"})
+
+
+def test_apply_overrides_rejects_a_path_through_a_list() -> None:
+    with pytest.raises(InvalidOverrideError, match=r"reef\.adapters"):
+        _apply_overrides({"reef": {"adapters": ["primary"]}}, {"reef.adapters.foo": "1"})
+
+
+def test_apply_overrides_creates_and_merges_nested_sections() -> None:
+    assert _apply_overrides(
+        {"reef": {}, "training": {"keep": "yes"}},
+        {"training.checkpoint_dir": "/tmp/ckpt", "new_section.enabled": "true"},
+    ) == {
+        "reef": {},
+        "training": {"keep": "yes", "checkpoint_dir": "/tmp/ckpt"},
+        "new_section": {"enabled": True},
+    }
+
+
+def test_apply_overrides_replaces_a_scalar_at_its_own_path() -> None:
+    assert _apply_overrides({"reef": {"artifact_dir": "/data/artifacts"}}, {"artifact_dir": "/other/artifacts"}) == {
+        "reef": {"artifact_dir": "/other/artifacts"}
+    }
 
 
 def test_bare_boolean_override() -> None:
@@ -66,3 +94,33 @@ def test_cli_exits_with_status_2_on_unknown_short_option(capsys: pytest.CaptureF
     with pytest.raises(SystemExit) as excinfo:
         main(["-p"])
     assert excinfo.value.code == 2
+
+
+def test_cli_exits_with_status_2_before_starting_services_for_an_invalid_path(tmp_path, capsys) -> None:
+    config_path = tmp_path / "reef.yaml"
+    config_path.write_text("reef:\n  artifact_dir: /data/artifacts\n")
+
+    with pytest.raises(SystemExit) as excinfo:
+        main(["--config", str(config_path), "--reef.artifact_dir.foo", "1"])
+
+    assert excinfo.value.code == 2
+    assert "reef.artifact_dir" in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_the_install_hint_is_the_one_line_that_installs_the_deployments_harness() -> None:
+    """Printed once the stack is up: the loopback address when the service binds every interface, the adapter the
+    deployment evolves, and the token the config holds; a deployment without a harness gets no line."""
+    from reef.service.deploy.orchestrator import install_hint
+
+    config = {"evolution": {"adapter": "pi"}, "reef": {"host": "0.0.0.0", "port": 8901, "token": "reef-local"}}
+    assert install_hint(config) == (
+        "curl -fsS -H 'Authorization: Bearer reef-local' 'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash"
+    )
+    assert install_hint({"evolution": {"adapter": "opencode"}, "reef": {"tokens": ["a", "b"]}}) == (
+        "curl -fsS -H 'Authorization: Bearer a' 'http://127.0.0.1:8900/reef/harness/install?adapter=opencode' | bash"
+    )
+    assert install_hint({"evolution": {"adapter": "pi"}, "reef": {"host": "127.0.0.1", "port": 8900}}) == (
+        "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash"
+    )
+    assert install_hint({"reef": {"recipe": "recipe"}}) is None

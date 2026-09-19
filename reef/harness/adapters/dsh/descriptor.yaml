@@ -28,6 +28,18 @@ env:
   DSH_HOME: "{root}/dsh"
   DSH_AGENTS_HOME: "{root}/dsh-agents"
   DSH_TELEMETRY_MODE: "DISABLED"
+# What a person saves in the web profile, which reef-dsh would otherwise
+# leave in the temp copy it removes: the API keys (.credentials.yaml, owner
+# only), the providers and default model (settings.yaml), both renamed over
+# the link on every save, and the agent presets. Sessions stay per run: the
+# headless profile refuses a session root the web profile compressed.
+client_state:
+  - path: "dsh/.credentials.yaml"
+    kind: file
+  - path: "dsh/settings.yaml"
+    kind: file
+  - path: "dsh/.agent-presets"
+    kind: directory
 files:
   config:
     primary:

@@ -241,7 +241,7 @@ def night_step(
             entry = _apply(target, registry=registry, decision=decision, current=current, llm=llm, group=name)
             audit.append(entry)
             applied += int(entry.get("applied", False))
-        except Exception as exc:  # noqa: PERF203 - their per group fault isolation
+        except Exception as exc:
             audit.append({"group": name, "error": str(exc)[:300]})
     if no_skill:
         # Their server catches a failed cycle one level up and retries later;

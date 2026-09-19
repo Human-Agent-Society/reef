@@ -46,7 +46,7 @@ def test_contributor_guides_are_linked_from_entry_points_and_site_navigation() -
 def test_component_playbooks_name_the_live_registration_points() -> None:
     playbooks = CONTRIBUTOR_GUIDES[1].read_text(encoding="utf-8")
     recipe_registry = (REPO_ROOT / "reef" / "recipe" / "registry.py").read_text(encoding="utf-8")
-    runtime_registry = (REPO_ROOT / "reef" / "runtime" / "registry.py").read_text(encoding="utf-8")
+    runtime_registry = (REPO_ROOT / "reef" / "runtime" / "deployment.py").read_text(encoding="utf-8")
     route_registry = (REPO_ROOT / "reef" / "service" / "routes" / "__init__.py").read_text(encoding="utf-8")
 
     assert "register_kind" in playbooks and "def register_kind" not in recipe_registry

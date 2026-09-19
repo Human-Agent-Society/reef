@@ -1,7 +1,7 @@
 import pytest
 
-import reef.scenario.checkpoint_strategy as checkpointing
-from reef.scenario.checkpoint_strategy import EveryNVersions
+import reef.recipe.checkpoint_strategy as checkpointing
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.train.types import TrainStepResult
 
 

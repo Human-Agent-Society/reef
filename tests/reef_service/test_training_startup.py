@@ -1,0 +1,428 @@
+"""Weight recipes assemble their driver and bridge connection through the shared config path."""
+
+import json
+import os
+import socket
+import subprocess
+import sys
+from types import SimpleNamespace
+
+import pytest
+import yaml
+
+from reef.cli import main
+from reef.service.deploy import orchestrator
+from reef.service.deploy.config_utils import DeployConfigError, interpolate_config
+from reef.service.deploy.execution import validate_services
+from reef.service.deploy.inference import command_line_config
+from reef.service.deploy.orchestrator import _Stack, resolve_deployment_config
+
+RECIPE = "recipes.sao.recipe:SAORecipe"
+
+
+def training_config():
+    return {
+        "schema-version": 2,
+        "recipe": {"implementation": RECIPE, "config": {"batch-size": 1}},
+        "inference": {"model-path": "/models/demo"},
+        "training": {"options": {"lr": 0.000001, "use-critic": True}},
+    }
+
+
+@pytest.fixture(autouse=True)
+def clean_environment(monkeypatch):
+    for key in list(os.environ):
+        if key.startswith("REEF_") or key in {"RAY_ADDRESS", "SLIME_ARGS_FILE"}:
+            monkeypatch.delenv(key)
+
+
+def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
+    overrides = {
+        "recipe.implementation": RECIPE,
+        "inference.model-path": "/models/demo",
+        "recipe.config.batch-size": "2",
+        "training.options.lr": "0.000002",
+        "training.options.use-critic": "true",
+        "training.ray-namespace": "custom",
+        "training.ray-actor-name": "bridge-custom",
+        "training.ready-timeout": "45",
+    }
+    file_config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
+    cli_config, _ = resolve_deployment_config(command_line_config({}), overrides, tmp_path / "cli", standard=True)
+    for config in (file_config, cli_config):
+        reef = config["reef"]
+        assert reef["batch_size"] == 2
+        assert reef["training_backend_options"] == {
+            "lr": "0.000002",
+            "use-critic": True,
+            "hf-checkpoint": "${reef.model_path}",
+        }
+        assert reef["training_backend"] == "slime"
+        assert config["execution"] == {"training": "ray", "rollout": "ray"}
+        driver, http = validate_services(config, "test")
+        assert driver["command"] == [sys.executable, "-m", "reef.service.training_driver"]
+        assert driver["ready_timeout"] == 45
+        assert interpolate_config(config, driver["env"]["REEF_RAY_NAMESPACE"]) == "custom"
+        assert interpolate_config(config, driver["env"]["REEF_RAY_ACTOR_NAME"]) == "bridge-custom"
+        assert http["depends_on"] == [driver["name"]]
+        assert driver["executor"] == http["executor"] == "uni"
+        assert "inference_url" not in reef
+        assert reef["inference_backend"] == "sglang"
+        assert reef["inference_handler_factory"] is None
+
+
+@pytest.mark.parametrize(
+    "override,match",
+    [
+        ({"inference.model-path": ""}, "must be non-empty"),
+        ({"training.backend": "unknown"}, "unknown training backend"),
+        ({"training.ready-timeout": "0"}, "must be positive"),
+        ({"training.timeout-s": "0"}, "must be positive"),
+        ({"training.options.hf-checkpoint": "different/model"}, "must match inference.model-path"),
+        ({"training.options.ready-file": "/tmp/marker"}, "managed by Reef"),
+        ({"training.options.ready": "/tmp/marker"}, "managed by Reef"),
+        ({"inference.upstream-url": "http://localhost:8000"}, "managed inference"),
+        ({"inference.url": "http://localhost:8000"}, "connection from the bridge"),
+        ({"inference.options.tp-size": "2"}, "managed by Reef"),
+        ({"inference.num-gpus": "3", "inference.tensor-parallel-size": "2"}, "must be divisible"),
+        ({"inference.num-gpus": "0"}, "must be positive"),
+        ({"inference.tensor-parallel-size": "-1"}, "must be positive"),
+        ({"inference.num-gpus": "1.5"}, "valid int"),
+        ({"training.options.rollout_num_gpus": "2"}, "configures inference"),
+        ({"training.options.rollout-num": "2"}, "configures inference"),
+        ({"training.options.sglang-context-length": "1024"}, "configures inference"),
+        ({"training.options.sglang-config": "engines.yaml"}, "configures inference"),
+        ({"training.options.rollout-external": "true"}, "configures inference"),
+        ({"inference.options.config": "engines.yaml"}, "managed by Reef"),
+        ({"inference.options.pp-size": "2"}, "managed by Reef"),
+        ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
+        ({"execution.training.backend": "uni"}, "requires execution.training.backend: ray"),
+        ({"recipe.config.batch-szie": "2"}, "unknown configuration flag"),
+    ],
+)
+def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, monkeypatch, capsys, override, match):
+    path = tmp_path / "serve.yaml"
+    path.write_text(yaml.safe_dump(training_config()))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("invalid training input reached downloads or process startup")
+
+    monkeypatch.setattr(orchestrator, "resolve_model_paths", unexpected)
+    monkeypatch.setattr(orchestrator, "_Stack", unexpected)
+    argv = ["serve", "-c", str(path)]
+    for key, value in override.items():
+        argv.extend([f"--{key}", value])
+    with pytest.raises(SystemExit) as result:
+        main(argv)
+    assert result.value.code == 2
+    assert match in capsys.readouterr().err
+
+
+def test_explicit_services_preserve_custom_training_topology(tmp_path):
+    raw = {"reef": {"recipe": RECIPE, "model_path": "/models/demo", "training_backend": "custom"}}
+    raw["services"] = [{"name": "custom-driver", "command": ["custom"]}]
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    assert config["services"] == raw["services"]
+    assert "execution" not in config
+    assert "inference_handler_factory" not in config["reef"]
+
+
+@pytest.mark.parametrize("checkpoint", ["/models/demo", "${inference.model-path}"])
+def test_native_checkpoint_tracks_the_resolved_model_path(tmp_path, checkpoint):
+    raw = training_config()
+    raw["training"]["options"]["hf-checkpoint"] = checkpoint
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    config["reef"]["model_path"] = "/downloaded/snapshot"
+    assert (
+        interpolate_config(config, config["reef"]["training_backend_options"]["hf-checkpoint"])
+        == "/downloaded/snapshot"
+    )
+
+
+def test_matching_home_relative_model_and_checkpoint_are_accepted(tmp_path):
+    raw = training_config()
+    raw["inference"]["model-path"] = "~/models/demo"
+    raw["training"]["options"]["hf-checkpoint"] = "~/models/demo"
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    assert config["reef"]["training_backend_options"]["hf-checkpoint"] == "${reef.model_path}"
+
+
+def test_cli_only_training_resolves_public_config_references(tmp_path):
+    config, _ = resolve_deployment_config(
+        command_line_config({}),
+        {
+            "recipe.implementation": RECIPE,
+            "inference.model-path": "/models/demo",
+            "training.config.checkpoint_dir": "work/checkpoints",
+            "training.options.hf-checkpoint": "${inference.model-path}",
+            "training.options.save": "${training.config.checkpoint_dir}/megatron",
+        },
+        tmp_path / "cli",
+        standard=True,
+    )
+    options = config["reef"]["training_backend_options"]
+    assert interpolate_config(config, options["hf-checkpoint"]) == "/models/demo"
+    assert interpolate_config(config, options["save"]) == "work/checkpoints/megatron"
+
+
+def test_cli_only_training_downloads_once_and_transports_the_resolved_config(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    downloads, configs, paths = [], [], []
+    from reef.service.deploy import config_utils as config_module
+    from reef.service.deploy import inference
+
+    def download(model):
+        downloads.append(model)
+        return "/downloaded/snapshot"
+
+    class Stack:
+        exit_code = 0
+
+        def __init__(self, config, services, run_dir, ready_timeout_default, config_path, source_root=None):
+            configs.append(config_module.load_config(config_path))
+            paths.append(config_path)
+            assert config_path.stat().st_mode & 0o077 == 0
+
+        def start(self):
+            pass
+
+        def block(self):
+            pass
+
+        def shutdown(self):
+            pass
+
+    monkeypatch.setattr(inference, "resolve_hf_snapshot", download)
+    monkeypatch.setattr(orchestrator, "_Stack", Stack)
+    with pytest.raises(SystemExit) as result:
+        main(
+            [
+                "serve",
+                "--recipe.implementation",
+                RECIPE,
+                "--inference.model-path",
+                "org/model",
+                "--recipe.config.batch-size",
+                "2",
+                "--training.options.use-critic",
+                "true",
+            ]
+        )
+    assert result.value.code == 0
+    assert downloads == ["org/model"]
+    reef = configs[0]["reef"]
+    assert reef["model_path"] == "/downloaded/snapshot"
+    assert reef["batch_size"] == 2
+    assert interpolate_config(configs[0], reef["training_backend_options"]["hf-checkpoint"]) == reef["model_path"]
+    assert not paths[0].exists()
+    assert not (tmp_path / "reef.yaml").exists()
+
+
+@pytest.mark.parametrize("recipe", [RECIPE, "recipes.openclawrl.recipe:OpenClawRLRecipe"])
+def test_training_planning_does_not_import_gpu_packages(tmp_path, recipe):
+    script = """
+import sys
+class NoTrainingImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'torch', 'slime', 'ray', 'sglang', 'megatron'}:
+            raise RuntimeError('unexpected training import: ' + fullname)
+sys.meta_path.insert(0, NoTrainingImports())
+from reef.service.deploy.orchestrator import resolve_deployment_config
+import json
+config, _ = resolve_deployment_config(json.loads(sys.argv[1]), None, sys.argv[2])
+assert config['services'][-1]['name'] == 'reef'
+"""
+    raw = training_config()
+    raw["recipe"]["implementation"] = recipe
+    if "openclawrl" in recipe:
+        raw["recipe"]["config"].update(prm_url="http://external:23001", prm_tokenizer_path="/models/judge")
+    result = subprocess.run(
+        [sys.executable, "-c", script, json.dumps(raw), str(tmp_path / "serve.yaml")],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.parametrize("external_cluster,driver_fails", [(False, False), (True, False), (False, True)])
+def test_generated_services_share_connection_wait_for_bridge_and_clean_up(
+    tmp_path, monkeypatch, external_cluster, driver_fails
+):
+    # Real local workers and readiness probes; only the GPU workloads and Ray lease are stand-ins.
+    released = []
+
+    def acquire(address):
+        assert not external_cluster
+        return SimpleNamespace(address="127.0.0.1:6379", close=lambda: released.append(True))
+
+    monkeypatch.setattr(orchestrator, "acquire_ray_runtime", acquire)
+    with socket.socket() as sock:
+        sock.bind(("127.0.0.1", 0))
+        port = sock.getsockname()[1]
+    raw = training_config()
+    raw["reef"] = {"port": port, "ready-timeout": 15}
+    raw["training"].update({"ray-namespace": "test-namespace", "ray-actor-name": "test-actor"})
+    if external_cluster:
+        raw["training"]["ray-address"] = "127.0.0.1:6380"
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    driver, http = config["services"]
+    driver_script = """
+import json, os, time
+from pathlib import Path
+keys = ['RAY_ADDRESS', 'REEF_RAY_NAMESPACE', 'REEF_RAY_ACTOR_NAME', 'SLIME_ARGS_FILE']
+Path('driver-env.json').write_text(json.dumps({key: os.environ[key] for key in keys}))
+Path(os.environ['REEF_BRIDGE_READY_FILE']).write_text('reef-training-ready')
+time.sleep(120)
+"""
+    http_script = """
+import json, os
+from pathlib import Path
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import yaml
+assert Path('stack/slime-driver/bridge.ready').read_text() == 'reef-training-ready'
+config = yaml.safe_load(Path(os.environ['REEF_CONFIG']).read_text())
+Path('http-config.json').write_text(json.dumps(config))
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+HTTPServer(('127.0.0.1', config['reef']['port']), Handler).serve_forever()
+"""
+    driver["command"] = [sys.executable, "-c", "raise SystemExit(7)" if driver_fails else driver_script]
+    http["command"] = [sys.executable, "-c", http_script]
+    for service in (driver, http):
+        service["cwd"] = str(tmp_path)
+    run_dir = tmp_path / "stack"
+    run_dir.mkdir()
+    stack = _Stack(config, validate_services(config, "test.yaml"), run_dir, 15, tmp_path / "serve.yaml")
+    try:
+        if driver_fails:
+            with pytest.raises(RuntimeError, match=r"slime-driver.*exited"):
+                stack.start()
+            assert not (tmp_path / "http-config.json").exists()
+        else:
+            stack.start()
+            environment = json.loads((tmp_path / "driver-env.json").read_text())
+            child = json.loads((tmp_path / "http-config.json").read_text())["reef"]
+            assert environment["RAY_ADDRESS"] == child["ray_address"]
+            assert environment["REEF_RAY_NAMESPACE"] == child["ray_namespace"] == "test-namespace"
+            assert environment["REEF_RAY_ACTOR_NAME"] == child["ray_actor_name"] == "test-actor"
+            assert environment["SLIME_ARGS_FILE"] == ""
+            assert child["ray_address"] == ("127.0.0.1:6380" if external_cluster else "127.0.0.1:6379")
+    finally:
+        stack.shutdown(grace=1)
+    assert released == ([] if external_cluster else [True])
+    for path in run_dir.glob("*.worker.json"):
+        for pid in json.loads(path.read_text())["pids"].values():
+            with pytest.raises(ProcessLookupError):
+                os.kill(pid, 0)
+
+
+@pytest.mark.parametrize("mode", [{}, {"colocate": True}, {"options": {"megatron-lora-rank": 8}}])
+def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_path, mode):
+    from reef.train.slime_backend.launch import driver_arguments
+
+    raw = training_config()
+    raw["inference"].update(
+        {
+            "num-gpus": 2,
+            "tensor-parallel-size": 1,
+            "options": {"mem_fraction_static": 0.8, "router-port": 30000, "disable-cuda-graph": True},
+        }
+    )
+    raw["training"]["options"].update(mode.get("options", {}))
+    if mode.get("colocate"):
+        raw["training"]["colocate"] = True
+    overrides = {
+        "inference.num-gpus": "4",
+        "inference.tensor-parallel-size": "2",
+        "inference.options.mem-fraction-static": "0.6",
+        "inference.options.disable-cuda-graph": "false",
+    }
+    config, _ = resolve_deployment_config(raw, overrides, tmp_path / "serve.yaml")
+    equivalent = training_config()
+    equivalent["training"]["options"].update(mode.get("options", {}))
+    if mode.get("colocate"):
+        equivalent["training"]["colocate"] = True
+    equivalent["inference"].update(
+        {
+            "num-gpus": 4,
+            "tensor-parallel-size": 2,
+            "options": {"mem-fraction-static": "0.6", "router-port": 30000, "disable-cuda-graph": False},
+        }
+    )
+    file_only, _ = resolve_deployment_config(equivalent, None, tmp_path / "other.yaml")
+    assert driver_arguments(config) == driver_arguments(file_only)
+    argv = driver_arguments(config)
+    assert "--rollout-num-gpus=4" in argv
+    assert "--rollout-num-gpus-per-engine=2" in argv
+    assert "--sglang-mem-fraction-static=0.6" in argv
+    assert "--sglang-router-port=30000" in argv
+    assert "--sglang-disable-cuda-graph" not in argv
+    assert all(not key.startswith(("rollout-num", "sglang-")) for key in config["reef"]["training_backend_options"])
+    assert raw["inference"]["num-gpus"] == 2
+    colocated = {"--colocate", "--offload-rollout", "--offload-train"}
+    assert colocated <= set(argv) if mode.get("colocate") else not colocated & set(argv)
+    assert config["reef"]["colocate"] is bool(mode.get("colocate"))
+    assert "colocate" not in config["reef"]["training_backend_options"]
+
+
+def test_native_placement_flags_are_rejected_in_training_options(tmp_path):
+    raw = training_config()
+    raw["training"]["options"]["colocate"] = True
+    with pytest.raises(
+        DeployConfigError, match=r"training\.options\.colocate places the model; use training\.colocate"
+    ):
+        resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+
+
+def test_inference_capacity_defaults_to_one_tensor_parallel_engine(tmp_path):
+    from reef.train.slime_backend.launch import driver_arguments
+
+    config, _ = resolve_deployment_config(training_config(), {"inference.tensor-parallel-size": "4"}, tmp_path / "c")
+    assert config["reef"]["inference_num_gpus"] == 4
+    assert "--rollout-num-gpus=4" in driver_arguments(config)
+
+
+def test_driver_arguments_expand_the_model_path_reference(tmp_path):
+    # The deploy layer binds hf-checkpoint to ``${reef.model_path}`` so the model
+    # resolves once; the driver must receive the resolved path, not the reference.
+    from reef.train.slime_backend.launch import driver_arguments
+
+    config, _ = resolve_deployment_config(training_config(), None, tmp_path / "serve.yaml")
+
+    assert config["reef"]["training_backend_options"]["hf-checkpoint"] == "${reef.model_path}"
+    argv = driver_arguments(config)
+    assert f"--hf-checkpoint={config['reef']['model_path']}" in argv
+    assert not any("${" in argument for argument in argv)
+
+
+def test_legacy_native_driver_arguments_remain_available():
+    from reef.train.slime_backend.launch import driver_arguments
+
+    config = {
+        "reef": {
+            "training_backend_options": {
+                "rollout-num-gpus": 3,
+                "sglang-context-length": 1024,
+                "rollout-external": True,
+            }
+        }
+    }
+    assert driver_arguments(config) == ["--rollout-num-gpus=3", "--sglang-context-length=1024", "--rollout-external"]
+
+
+def test_managed_driver_cannot_override_resolved_inference_with_direct_flags(tmp_path, monkeypatch):
+    from reef.train.slime_backend import driver as slime_driver
+
+    config, _ = resolve_deployment_config(training_config(), None, tmp_path / "c")
+    monkeypatch.setenv("RAY_ADDRESS", "local")
+    monkeypatch.setenv("REEF_CONFIG", str(tmp_path / "config"))
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("direct managed flags must fail before connecting or parsing Slime")
+
+    monkeypatch.setattr(slime_driver, "_parse_slime_args", unexpected)
+    with pytest.raises(RuntimeError, match="pass options through reef serve"):
+        slime_driver.create_training_plan(config, ["--rollout-num-gpus=999"], loss_family="sao")

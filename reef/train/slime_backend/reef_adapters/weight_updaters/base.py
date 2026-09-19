@@ -18,7 +18,7 @@ from slime.backends.megatron_utils.update_weight.update_weight_from_distributed 
 from slime.utils.distributed_utils import get_gloo_group
 from tqdm import tqdm
 
-from reef.train.slime_backend.reef_adapters.runtime_load_id import RuntimeLoadId, new_runtime_load_id_incarnation
+from reef.runtime.interfaces import RuntimeLoadId, new_runtime_load_id_incarnation
 
 
 class _TransportRuntimeLoadId(RuntimeLoadId):
@@ -74,17 +74,31 @@ class SynchronizedWeightUpdateMixin:
     def exact_runtime_load_id(self) -> RuntimeLoadId:
         return self.runtime_load_id
 
-    def restore_exact_runtime_load_id(self, value: str) -> None:
-        published = RuntimeLoadId.parse(value)
-        if published.sequence < 1:
-            raise ValueError("a published checkpoint runtime load ID must have a positive sequence")
+    def initialize_exact_runtime_load_id(self, value: str) -> None:
+        """Bind a fresh sender to Reef's initial serving identity."""
+        target = RuntimeLoadId.parse(value)
+        if self.runtime_load_id.sequence != 0:
+            raise RuntimeError("initial runtime load ID requires a fresh sender")
+        self.runtime_load_id = target
+
+    def prepare_exact_runtime_load_id(self, value: str) -> None:
+        """Seed the next native transfer with the identity selected by Reef.
+
+        A retry may resend the current identity after an uncertain transfer;
+        advancing may only select its immediate successor. Cold workers can
+        restore any positive sequence from Reef's durable publication intent.
+        """
+        target = RuntimeLoadId.parse(value)
         current = self.runtime_load_id
-        if current.sequence != 0 and current != published:
-            raise RuntimeError(f"cannot republish runtime load ID {published}; updater currently reports {current}")
-        self.runtime_load_id_incarnation = published.incarnation
-        # The mandatory republication advances once and must recreate the
-        # exact durable token tied to the recovered checkpoint.
-        self.weight_update_sequence = published.sequence - 1
+        if target.sequence < 1:
+            raise ValueError("a weight publication runtime load ID must have a positive sequence")
+        if current.sequence != 0 and (
+            target.incarnation != current.incarnation
+            or target.sequence not in {current.sequence, current.sequence + 1}
+        ):
+            raise RuntimeError(f"cannot prepare runtime load ID {target}; updater currently reports {current}")
+        self.runtime_load_id_incarnation = target.incarnation
+        self.weight_update_sequence = target.sequence - 1
 
     def _new_source_phase_prefix(self, kind: str) -> str:
         sequence = self._source_phase_sequences.get(kind, 0)

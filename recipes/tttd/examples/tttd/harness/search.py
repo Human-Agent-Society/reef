@@ -21,6 +21,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
+from .run_controller import SearchHarness
+
 Scorer = Callable[[str], "ScoredSolution"]
 
 
@@ -415,7 +417,7 @@ def build_prompt(instruction: str, parent: Candidate | None) -> Sequence[Mapping
 # ---------------------------------------------------------------------------
 
 
-class _TTTDiscoverHarnessBase:
+class _TTTDiscoverHarnessBase(SearchHarness):
     """Shared search/evaluation mechanics for the plain and Reef harnesses."""
 
     def __init__(

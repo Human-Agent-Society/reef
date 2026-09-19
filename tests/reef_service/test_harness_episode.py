@@ -1,4 +1,4 @@
-"""Guarantees of reef.harness.episode, hermetic: a fake harness binary is
+"""Guarantees of reef.harness.episodes.run, hermetic: a fake harness binary is
 driven through the real descriptor, render, and episode path (CI installs
 neither pi nor opencode)."""
 
@@ -13,9 +13,8 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import EpisodeError, _remove_episode_root, run_episode
-from reef.harness.render import render_composition
-from reef.harness.trajectory import (
+from reef.harness.episodes.run import EpisodeError, _remove_episode_root, run_episode
+from reef.harness.episodes.trajectory import (
     TrajectoryError,
     read_claude_session,
     read_codex_session,
@@ -25,6 +24,7 @@ from reef.harness.trajectory import (
     read_pi_session,
     reader_for,
 )
+from reef.harness.tree.render import render_composition
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -154,7 +154,7 @@ def test_episode_cleanup_failure_is_not_suppressed(tmp_path: Path, monkeypatch) 
     def fail(*_args, **_kwargs):
         raise OSError("locked")
 
-    monkeypatch.setattr("reef.harness.episode.shutil.rmtree", fail)
+    monkeypatch.setattr("reef.harness.episodes.run.shutil.rmtree", fail)
     with pytest.raises(EpisodeError, match=r"cannot remove episode root.*locked"):
         _remove_episode_root(root)
 

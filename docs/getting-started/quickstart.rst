@@ -51,20 +51,23 @@ with no GPU.
    #. **Install.** Follow the laptop path in `Installation
       <installation.rst>`__.
 
-   #. **Serve.** ``external-provider.yaml`` is one process that
-      proxies an OpenAI-compatible provider and records what it serves.
+   #. **Serve.** Connect an OpenAI-compatible provider and record what it
+      serves, without a YAML file or GPU.
 
       .. code:: bash
 
          export REEF_TOKEN=reef-local
          export REEF_UPSTREAM_API_KEY=sk-...
 
-         reef serve -c recipes/basic/external-provider.yaml
+         reef serve \
+           --inference.upstream-url https://api.openai.com \
+           --inference.upstream-model gpt-4o
 
-      The config supplies the provider, the model, and a ``.reef/`` state
-      directory beside the checkout. Only the two secrets stay in the
-      environment: the upstream key and the Reef token. The file is a template
-      to copy, so it does not include a token.
+      Reef listens on ``127.0.0.1:8900`` and writes state under ``.reef/`` in
+      the directory where you run it. The upstream key and Reef token come
+      from the environment. Without ``-c``, no config file is read. To connect
+      another provider, change the URL and model. Existing deployments can
+      still use ``reef serve -c recipes/basic/external-provider.yaml``.
 
       ``reef serve`` runs in the foreground and holds the terminal until
       Ctrl-C. Leave it running and open a second terminal for everything below.
@@ -155,14 +158,15 @@ with no GPU.
       core ``recipe``, which records and trains nothing.
 
 To make the chain advance, bind a recipe that learns. To use a weight recipe,
-copy ``recipes/basic/external-provider.yaml``, set
-``reef.recipe: recipes.sao.recipe:SAORecipe``, and serve the new config.
+start from ``recipes/sao/examples/imo_answerbench/serve.yaml``. It selects
+``recipe.implementation: recipes.sao.recipe:SAORecipe`` and configures the
+training driver and model workers.
 Weight recipes need GPUs (`Evolve your model
 <../user-guide/evolve-your-model.rst>`__).
 
-The one that runs on a laptop is ``harness_evolve``, and it takes a second
+The one that runs on a laptop is ``evolve-your-harness``, and it takes a second
 file: a **preset** naming your ``propose`` and ``evaluate`` callables and the
-tasks to evaluate on. ``tutorials/harness_evolve/run.sh`` wires the whole loop
+tasks to evaluate on. ``tutorials/evolve-your-harness/run.sh`` wires the whole loop
 together. Run it, then read `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ for an explanation of each piece.
 

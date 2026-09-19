@@ -5,6 +5,7 @@ on:
   # required check. The path filter remains on main pushes to avoid needless
   # post-merge builds.
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
   push:
     branches:
       - main
@@ -22,15 +23,46 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 concurrency:
   group: docs-build-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  build:
-    name: docs-gate
+  changes:
+    if: '!github.event.pull_request.draft'
     runs-on: ubuntu-latest
+    timeout-minutes: 2
+    outputs:
+      docs: ${{ steps.paths.outputs.docs }}
+    steps:
+      - name: Check whether documentation needs rebuilding
+        id: paths
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          if [ "$GITHUB_EVENT_NAME" != pull_request ]; then
+            echo "docs=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          files=$(gh api --paginate "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER/files" \
+            --jq '.[] | .filename, (.previous_filename // empty)')
+          docs=false
+          while IFS= read -r file; do
+            case "$file" in
+              *.md|*.rst|docs/*|recipes/basic/local-sglang.yaml|reef/service/deploy/*|reef/service/app.py|.github/workflows/docs-build.yml)
+                docs=true ;;
+            esac
+          done <<< "$files"
+          echo "docs=$docs" >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build documentation
+    needs: [changes]
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
     timeout-minutes: 15
     defaults:
       run:
@@ -62,3 +94,28 @@ jobs:
 
       - name: Build documentation site
         run: npm run build
+
+  gate:
+    name: docs-gate
+    needs: [changes, build]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Require the applicable documentation checks to pass
+        env:
+          IS_DRAFT: ${{ github.event.pull_request.draft == true }}
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          DOCS_CHANGED: ${{ needs.changes.outputs.docs }}
+          BUILD_RESULT: ${{ needs.build.result }}
+        run: |
+          if [ "$IS_DRAFT" = true ]; then
+            exit 0
+          fi
+          test "$CHANGES_RESULT" = success
+          if [ "$DOCS_CHANGED" = true ]; then
+            test "$BUILD_RESULT" = success
+          else
+            test "$DOCS_CHANGED" = false
+            test "$BUILD_RESULT" = skipped
+          fi

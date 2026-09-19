@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import shutil
 import uuid
+from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from pathlib import Path
 from types import MappingProxyType
-from typing import Protocol
 
 # Re-export the pure identity types while keeping ``reef.core`` independent of
 # storage implementations.
@@ -23,6 +23,7 @@ __all__ = [
     "ArtifactRef",
     "ArtifactRepository",
     "ArtifactSourceError",
+    "ArtifactValidator",
     "LiveWeightArtifactRef",
     "decode_artifact_ref",
     "encode_artifact_ref",
@@ -64,10 +65,18 @@ class ArtifactPublicationError(ArtifactError):
     pass
 
 
-class ArtifactRepository(Protocol):
+class ArtifactRepository(ABC):
     """Minimal repository capability needed by an artifact."""
 
+    @abstractmethod
     def materialize(self, ref: ArtifactRef) -> Artifact: ...
+
+
+class ArtifactValidator(ABC):
+    """Artifact admission checks selected for one scenario."""
+
+    @abstractmethod
+    def validate(self, artifact: Artifact) -> None: ...
 
 
 class Artifact:

@@ -1,0 +1,16 @@
+{
+  "run_id": "ef85ced8",
+  "model": "reef",
+  "provider": "openai",
+  "reasoning_effort": "none",
+  "anthropic_fallback_model": null,
+  "seed": 42,
+  "scenario": "default",
+  "total_days": 497,
+  "initial_cash": 1000000.0,
+  "agent_type": "bash_agent",
+  "api_server_port": 34963,
+  "session_id": "2171808c1e50",
+  "label": null,
+  "public_dir_override": null
+}

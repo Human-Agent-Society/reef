@@ -44,9 +44,10 @@ from recipes.openclawrl.turns import (
     validate_teacher_cands,
 )
 from reef.core.records_types import AgentRecord, RequestType
-from reef.train.processors.common import make_policy_sample
+from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.train.processors.common import make_policy_trajectory
 from reef.train.processors.computed import ComputedFeedbackProcessor, JudgingWorker
-from reef.train.types import PolicyBatch, PolicySample, ProcessorContext, policy_row_violation
+from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem, policy_row_violation
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +76,7 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
     retire terminal instead of ever entering a batch.
     """
 
-    output_schema = PolicyBatch
+    output_schema = TrainingBatch
     required_request_types = frozenset({RequestType.INFERENCE, RequestType.REPORT})
 
     def __init__(
@@ -237,17 +238,26 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
             return TurnJudgment(job.receipt)
         return TurnJudgment(job.receipt, score=eval_score if has_rl else 0.0, teacher_cands=tuple(teacher_cands))
 
-    def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> PolicySample | None:
+    def make_sample(self, record: AgentRecord, judgment: TurnJudgment) -> TrajectoryItem | None:
         # 1. A declined judgment never trains. (Narrow on the score itself:
         #    it is what step 2 needs, and a property would not narrow it.)
         if judgment.score is None:
             return None
         # 2. The policy tensors must satisfy the bridge contract, and the
         #    top-K capture must cover every response token.
-        sample = make_policy_sample(record, judgment.score)
-        if policy_row_violation(sample.tokens, sample.loss_mask, sample.rollout_log_probs) is not None:
+        sample = make_policy_trajectory(record, judgment.score)
+        if (
+            policy_row_violation(
+                sample.training.get("tokens", []),
+                sample.training.get("loss_mask", []),
+                sample.training.get("rollout_log_probs", []),
+            )
+            is not None
+        ):
             return None
-        if not sample.topk_indices or len(sample.topk_indices) != len(sample.loss_mask):
+        if not sample.training.get("topk_indices", []) or len(sample.training.get("topk_indices", [])) != len(
+            sample.training.get("loss_mask", [])
+        ):
             return None
         # 3. Every trained sample carries at least one teacher candidate —
         #    upstream constructs one per sample by design (RL-only turns get
@@ -259,13 +269,16 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
         validated = validate_teacher_cands(judgment.teacher_cands, sample)
         if validated is None:
             return None
-        return replace(sample, extras={**sample.extras, "teacher_cands": validated})
+        return sample.with_training(extras={**sample.training.get("extras", {}), "teacher_cands": list(validated)})
 
-    def make_batch(self, samples: tuple[PolicySample, ...], batch_number: int) -> PolicyBatch:
+    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
         self._record_batch(samples, batch_number)
-        return PolicyBatch(f"{self.scenario}:openclawrl:{batch_number}", samples)
+        return TrainingBatch(
+            f"{self.scenario}:openclawrl:{batch_number}",
+            tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
+        )
 
-    def _record_batch(self, samples: tuple[PolicySample, ...], batch_number: int) -> None:
+    def _record_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> None:
         """Append this batch's judged population to the PRM record file.
 
         One line per batch: what the judges returned since the previous one,
@@ -278,7 +291,7 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
             "batch": batch_number,
             "scenario": self.scenario,
             "samples": len(samples),
-            "rewards": dict(sorted(collections.Counter(f"{s.reward:+.0f}" for s in samples).items())),
+            "rewards": dict(sorted(collections.Counter(f"{trajectory_reward(s):+.0f}" for s in samples).items())),
             "judged": dict(sorted(self._judged.items())),
             # Cumulative, unlike the per-batch counters above: these answer
             # "is correlation working" for the run as a whole.

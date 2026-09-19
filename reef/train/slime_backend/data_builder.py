@@ -4,8 +4,8 @@ Each loss family's spec names its payload builder (``build_rollout_data``);
 the shared policy builder below covers every 5-tuple family, and the common
 row and rollout-id checks live here so families cannot drift on the shared
 wire contract. Structural row validity is the same
-:func:`reef.train.types.policy_row_violation` predicate the pairing
-processors apply at ingest time.
+:func:`reef.train.types.policy_row_violation` predicate. Violations raise
+training data errors rather than changing report eligibility.
 """
 
 from __future__ import annotations
@@ -219,7 +219,7 @@ def build_policy_rollout_data(
         "loss_masks": loss_masks,
         "rewards": rewards,
         "response_lengths": [len(loss_mask) for loss_mask in loss_masks],
-        # Reef's ``PolicySample`` carries no truncation flag (the processor
+        # Reef's ``TrajectoryItem`` carries no truncation flag (the processor
         # never captures the engine's finish reason), so every row ships as
         # non-truncated. If a truncation bit is ever added to the sample and
         # its wire row, thread it through here instead of this constant.

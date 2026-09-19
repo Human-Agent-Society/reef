@@ -17,30 +17,28 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
+from reef_service.runtime_stubs import StubTrainingRuntime, candidate_backend, runtime_bindings
 
 from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
+from reef.core.trajectories import source_record_id
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
-from reef.harness.model_binding import ModelBinding
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.recipe.base import Recipe
-from reef.runtime import ActivatedModel, ModelCandidate, PreparedTrainingStep, TrainingRuntime
-from reef.scenario.checkpoint_strategy import CheckpointStrategy, EveryNVersions
-from reef.scenario.commit_log import RECORD_KIND, CommitLog, CommitLogError, CommitRecord
-from reef.scenario.scenario import SCENARIO_SNAPSHOT_METADATA_KEY
+from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
+from reef.storage.commit_log import RECORD_KIND, CommitLog, CommitLogError, CommitLogScenarioStore
+from reef.storage.commits import CommitRecord
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train import PreparedStep, RetentionDecision, Trainer, TrainingBackend, TrainStepResult
-from reef.train.cordis_backend import CordisBackend, ScoreComparisonSelector
+from reef.train import CandidateBackend, PreparedStep, RetentionDecision, Trainer, TrainStepResult
+from reef.train.algos import StepScheduling
+from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation import (
-    DefaultCandidateEvaluationPlugin,
-    EvaluationResult,
-    SelectionDecision,
-    UpdateCandidate,
-)
-from reef.train.slime_backend.backend import SlimeTrainingBackend
+from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 
 from ._policy_recipe import TestPolicyRecipe
 from ._threshold_processor import ThresholdProcessor
@@ -333,7 +331,7 @@ def test_records_reject_corruption_before_the_tail(tmp_path) -> None:
         log.records()
 
 
-class RecordingRuntime(TrainingRuntime):
+class RecordingRuntime(StubTrainingRuntime):
     """Training runtime that records the batches it trained."""
 
     def __init__(
@@ -348,14 +346,16 @@ class RecordingRuntime(TrainingRuntime):
         self._candidate_versions: dict[str, str] = {}
 
     @property
-    def inference_backend(self):
+    def inference_handler(self):
         return None
 
-    def prepare_training_step(self, batch, step_preparer, algorithm_state, scenario_step):
-        del step_preparer
+    def prepare_training_step(
+        self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
+    ):
+        del objective
         payload = {
             "rollout_id": scenario_step,
-            "sources": [sample.source_agent_record_id for sample in batch.samples],
+            "sources": [source_record_id(sample) for sample in batch.items],
         }
         return PreparedTrainingStep(
             action="train",
@@ -422,13 +422,14 @@ def build_training_dispatcher(
 ):
     return Dispatcher(
         TestPolicyRecipe(
-            runtime,
+            **runtime_bindings(runtime),
             batch_size=1,
             checkpoint_strategy=(checkpoint_strategy if checkpoint_strategy is not None else EveryNVersions(1000)),
         ),
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
 
 
@@ -445,7 +446,7 @@ def wait_for_step(dispatcher: Dispatcher, step: int, *, scenario: str = "math") 
     raise AssertionError("async training did not commit")
 
 
-class _SavedArtifactBackend(TrainingBackend):
+class _SavedArtifactBackend(CandidateBackend):
     def __init__(self, artifact_path: Path) -> None:
         self._artifact_path = artifact_path
         self.batch_ids: list[str] = []
@@ -475,7 +476,7 @@ class _SavedArtifactBackend(TrainingBackend):
 
 @dataclass(frozen=True)
 class _SavedArtifactRecipe(Recipe):
-    backend: TrainingBackend
+    backend: CandidateBackend
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
         del experiment_logger
@@ -483,7 +484,7 @@ class _SavedArtifactRecipe(Recipe):
             scenario,
             records,
             processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
-            training_backend=self.backend,
+            candidate_backend=self.backend,
             algorithm_state=algorithm_state,
         )
 
@@ -500,6 +501,7 @@ def _build_saved_artifact_dispatcher(tmp_path, *, agent_record_dir=None):
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
     return dispatcher, backend
 
@@ -617,7 +619,7 @@ class ProtectAllPolicyRecipe(TestPolicyRecipe):
             processor_factory=lambda context: ProtectAllProcessor(
                 context.with_config({"batch_size": self.batch_size, "min_score": self.min_score})
             ),
-            training_backend=SlimeTrainingBackend(self.runtime, "sft"),
+            candidate_backend=candidate_backend(self.training_runtime, "sft", StepScheduling()),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -637,7 +639,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
     recipe = lambda runtime: (  # noqa: E731
         ProtectAllPolicyRecipe(
-            runtime,
+            **runtime_bindings(runtime),
             batch_size=1,
             checkpoint_strategy=EveryNVersions(1000),
         )
@@ -649,6 +651,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
             backend_factory,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_record_dir,
+            scenario_storage=SQLiteScenarioStorage(agent_record_dir),
         )
 
     first_runtime = RecordingRuntime()
@@ -657,7 +660,7 @@ def test_recovery_resumes_record_progress_without_retraining(tmp_path) -> None:
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
     assert first_runtime.trained_batches == [["i1"]]
-    # Nothing was compacted: the consumed pair is still physically present.
+    # Nothing was compacted: the consumed pair is still visible to training reads.
     assert first.get_or_create_scenario("math").records.get("math", "i1") is not None
 
     second_runtime = RecordingRuntime()
@@ -713,7 +716,7 @@ def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None
 
 
 @pytest.mark.unit
-def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path) -> None:
+def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path, monkeypatch) -> None:
     """Crash window: commit record appended, compaction never applied.
 
     Recovery must re-apply the recorded deletions; otherwise the rows would be
@@ -727,18 +730,16 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path) -> None:
     first = build_training_dispatcher(first_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     scenario = first.get_or_create_scenario("math")
 
-    from reef.train.trainer import Trainer
-
-    original_apply_compaction = Trainer.apply_compaction
+    original_compact = scenario.records.compact
     crash = {"armed": True}
 
-    def exploding_compaction(self, compacted_ids) -> None:
+    def exploding_compaction(*args, **kwargs) -> None:
         if crash["armed"]:
             crash["armed"] = False
             raise RuntimeError("simulated crash between record append and compaction")
-        original_apply_compaction(self, compacted_ids)
+        original_compact(*args, **kwargs)
 
-    scenario.trainer.apply_compaction = exploding_compaction.__get__(scenario.trainer, Trainer)
+    monkeypatch.setattr(scenario.records, "compact", exploding_compaction)
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
@@ -763,7 +764,7 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path) -> None:
 def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     """Crash window: checkpoint published to the release chain, record never appended.
 
-    The checkpoint head is then ahead of the log. Its snapshot metadata carries
+    The checkpoint head is then ahead of the log. Its metadata metadata carries
     the same record fields, so recovery adopts it and heals the log.
     """
     initial = tmp_path / "initial"
@@ -800,7 +801,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert recovered.scenario_step == 1
     assert recovered.trainer.state == {"steps": 1}
     # The healed log carries the adopted checkpoint record, with the record
-    # high-water mark taken from the checkpoint's snapshot metadata.
+    # high-water mark taken from the checkpoint's metadata metadata.
     records = CommitLog(path).records()
     assert len(records) == 1
     adopted = records[0]
@@ -819,7 +820,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_checkpoint_snapshot_metadata_doubles_as_a_commit_record(tmp_path) -> None:
+def test_checkpoint_metadata_restores_a_commit_record(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
     runtime = RecordingRuntime()
@@ -836,10 +837,10 @@ def test_checkpoint_snapshot_metadata_doubles_as_a_commit_record(tmp_path) -> No
     wait_for_step(dispatcher, 1)
 
     backend = dispatcher.get_or_create_scenario("math").repository.backend
-    snapshot = backend.metadata()[SCENARIO_SNAPSHOT_METADATA_KEY]
-    assert snapshot["scenario_step"] == 1
-    assert snapshot["algorithm_state"] == {"steps": 1}
-    assert snapshot["record_progress"] == {
+    metadata = backend.metadata()["scenario_commit_record"]
+    assert metadata["scenario_step"] == 1
+    assert metadata["algorithm_state"] == {"steps": 1}
+    assert metadata["record_progress"] == {
         "high_water_sequence": 2,
         "high_water_offset": 2,
         "compacted_ids": ["i1", "r1"],
@@ -907,7 +908,9 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
 
-    assert first.get_or_create_scenario("math").commit_log is None
+    store = first.get_or_create_scenario("math").store
+    assert not store.durable
+    assert [record.step for record in store.history()] == [1]
     committed = first.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert committed["step"] == 1
     assert committed["metrics"]["selected"] is True
@@ -918,6 +921,7 @@ def test_no_commit_log_without_an_agent_record_dir(tmp_path) -> None:
     second = build_training_dispatcher(RecordingRuntime(), tmp_path, backend_factory)
     recovered = second.get_or_create_scenario("math")
     assert recovered.scenario_step == 0
+    assert recovered.store.history() == ()
     assert second.build_training_status()["scenarios"]["math"]["last_committed_step"] is None
     assert not isinstance(recovered.repository.require_current_artifact(), LiveWeightArtifactRef)
 
@@ -949,7 +953,7 @@ def test_checkpoint_status_metrics_survive_without_a_commit_log(tmp_path) -> Non
     recovered = second.get_or_create_scenario("math")
 
     assert recovered.scenario_step == 1
-    assert recovered.commit_log is None
+    assert not recovered.store.durable
     recovered_status = second.build_training_status()["scenarios"]["math"]["last_committed_step"]
     assert recovered_status["step"] == 1
     assert recovered_status["metrics"] == committed["metrics"]
@@ -973,7 +977,6 @@ class _HarnessEvolveTestRecipe(Recipe):
     evaluate: object
     tasks: tuple[str, ...]
     batch_size: int = 1
-    max_score: float = 0.0
     _: KW_ONLY
     name: str = "harness_evolve"
 
@@ -983,24 +986,20 @@ class _HarnessEvolveTestRecipe(Recipe):
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None) -> Trainer:
         from reef.train.cordis_backend.processor import CordisProcessor
 
-        training_backend = CordisBackend(
+        candidate_backend = CordisBackend(
             descriptor=get_adapter("pi"),
             propose=resolve_proposer(self.propose),
             score_episode=resolve_episode_scorer(self.evaluate),
             tasks=self.tasks,
+            binary="fake-pi",
             models=ModelBinding(base_url="http://localhost:8000", model="qwen3-8b"),
         )
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: CordisProcessor(
-                context.with_config({"batch_size": self.batch_size, "max_score": self.max_score})
-            ),
-            training_backend=training_backend,
-            candidate_evaluator=DefaultCandidateEvaluationPlugin(
-                training_backend,
-                ScoreComparisonSelector(),
-            ),
+            processor_factory=lambda context: CordisProcessor(context.with_config({"batch_size": self.batch_size})),
+            candidate_backend=candidate_backend,
+            candidate_evaluator=ScoreComparisonPlugin(candidate_backend),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )
@@ -1016,12 +1015,13 @@ def build_harness_evolve_dispatcher(
     tasks=("task one",),
     agent_record_dir=None,
 ):
-    recipe = _HarnessEvolveTestRecipe(propose=propose, evaluate=evaluate, tasks=tasks, runtime=runtime)
+    recipe = _HarnessEvolveTestRecipe(propose=propose, evaluate=evaluate, tasks=tasks, **runtime_bindings(runtime))
     return Dispatcher(
         recipe,
         backend_factory,
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=agent_record_dir,
+        scenario_storage=SQLiteScenarioStorage(agent_record_dir),
     )
 
 
@@ -1056,7 +1056,7 @@ def test_harness_growth_does_not_block_acceptance_or_other_scenarios(tmp_path) -
 
     def blocking_proposer(nodes, samples, model):
         del nodes
-        if samples[0].source_agent_record_id != "a-i1":
+        if source_record_id(samples[0]) != "a-i1":
             return
         started.set()
         assert release.wait(1)
@@ -1178,17 +1178,18 @@ def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, mon
     assert result is not None
     pending = scenario.trainer.pending_batch
     assert pending is not None
-    protocol = scenario._commit_protocol
+    committer = scenario._committer
 
     if failure_point == "commit_log":
-        target = scenario.commit_log
+        assert isinstance(scenario.store, CommitLogScenarioStore)
+        target = scenario.store.commit_log
         method_name = "append"
         assert target is not None
     elif failure_point == "activation":
-        target = protocol
+        target = committer
         method_name = "_activate"
     else:
-        target = protocol._artifacts
+        target = committer._artifacts
         method_name = failure_point
     original = getattr(target, method_name)
     calls_before_failure = 2 if failure_point == "activation" else 1
@@ -1217,13 +1218,12 @@ def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, mon
     assert scenario.trainer.state == {"steps": 1}
     assert scenario.trainer.pending_batch is None
     assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i2"]
-    if scenario.commit_log is not None:
-        assert len(scenario.commit_log.records()) == 1
+    assert len(scenario.store.history()) == 1
     dispatcher.close()
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["commit_applied", "apply_compaction"])
+@pytest.mark.parametrize("failure_point", ["commit_applied", "compaction_applied"])
 def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     tmp_path,
     monkeypatch,
@@ -1259,8 +1259,8 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     assert scenario.scenario_step == 0
     assert scenario.trainer.state == {"steps": 0}
     assert scenario.trainer.pending_batch is pending
-    assert scenario.commit_log is not None
-    [record] = scenario.commit_log.records()
+    assert scenario.store.durable
+    [record] = scenario.store.history()
     published_release = record.artifact_ref.release_id
     with pytest.raises(RuntimeError, match="does not match the pending step"):
         scenario.commit(replace(result, state={"steps": 999}))
@@ -1270,7 +1270,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == {"steps": 1}
     assert scenario.trainer.pending_batch is None
-    assert len(scenario.commit_log.records()) == 1
+    assert len(scenario.store.history()) == 1
     assert scenario.repository.require_current_artifact().release_id == published_release
     assert backend.batch_ids == [pending.batch_id]
     dispatcher.close()
@@ -1301,10 +1301,11 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
     assert pending is not None
 
     if failure_point == "advance":
-        target = scenario._commit_protocol._artifacts
+        target = scenario._committer._artifacts
         method_name = "advance"
     else:
-        target = scenario.commit_log
+        assert isinstance(scenario.store, CommitLogScenarioStore)
+        target = scenario.store.commit_log
         method_name = "append"
         assert target is not None
     original = getattr(target, method_name)
@@ -1327,22 +1328,22 @@ def test_live_commit_failure_keeps_one_retryable_batch_and_one_record(tmp_path, 
     assert scenario.scenario_step == 0
     assert scenario.trainer.state == {}
     assert scenario.trainer.pending_batch is pending
-    assert scenario.commit_log is not None
-    assert len(scenario.commit_log.records()) == 1
+    assert scenario.store.durable
+    assert len(scenario.store.history()) == 1
 
     scenario.commit(result)
 
     assert scenario.scenario_step == 1
     assert scenario.trainer.state == {"steps": 1}
     assert scenario.trainer.pending_batch is None
-    assert scenario.commit_log.training_run_position() == (0, 1)
-    assert len(scenario.commit_log.records()) == 1
+    assert scenario.store.training_run_position() == (0, 1)
+    assert len(scenario.store.history()) == 1
     assert runtime.trained_batches == [["i1"]]
     dispatcher.close()
 
 
 @pytest.mark.unit
-def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp_path) -> None:
+def test_durable_local_backend_recovers_after_post_commit_notification_failure(tmp_path) -> None:
     initial = tmp_path / "initial"
     (initial / "skills").mkdir(parents=True)
     (initial / "skills" / "SKILL.md").write_text("skill v0", encoding="utf-8")
@@ -1372,7 +1373,7 @@ def test_durable_local_backend_recovers_after_post_commit_compaction_failure(tmp
         assert allow_reload.wait(1)
         return reload_scenario(scenario)
 
-    original.trainer.apply_compaction = fail_compaction.__get__(original.trainer, Trainer)
+    original.trainer.compaction_applied = fail_compaction.__get__(original.trainer, Trainer)
     dispatcher._registry.reload = blocking_reload
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))

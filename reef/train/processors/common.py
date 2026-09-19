@@ -1,9 +1,10 @@
 """Shared readers and sample builders both engines use.
 
-The report readers (``report_score``, ``report_is_trainable``) answer what a
-report carries; the sample builders turn one inference record — or an ordered
-multi-call episode — into a ``PolicySample`` with the tensors the training
-bridge requires.
+The report reader ``report_score`` reads the reported reward;
+``recorded_request`` and ``recorded_response`` read the messages, tools and
+answer text of a recorded inference; the sample builders turn one inference
+record — or an ordered multi-call episode — into a ``TrajectoryItem`` with the
+tensors the training bridge requires.
 """
 
 from __future__ import annotations
@@ -14,14 +15,8 @@ from typing import Any
 
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.records_types import AgentRecord
-from reef.train.types import PolicySample
-
-
-def report_is_trainable(report: AgentRecord) -> bool:
-    """Honor an optional framework-neutral report eligibility marker."""
-    metadata = report.payload.get("metadata", {})
-    training = metadata.get("training") if isinstance(metadata, Mapping) else None
-    return not isinstance(training, Mapping) or training.get("eligible", True) is not False
+from reef.core.trajectories import make_trajectory
+from reef.train.types import TrajectoryItem
 
 
 def sample_assembly_config_fields(config: Mapping[str, Any]) -> tuple[bool, int, int]:
@@ -54,6 +49,51 @@ def report_score(report: AgentRecord) -> float | None:
     if not isinstance(score, (int, float)) or isinstance(score, bool):
         return None
     return float(score)
+
+
+def recorded_request(payload: Mapping[str, Any]) -> tuple[list[Any], list[Any] | None]:
+    """The messages and tools of a recorded inference request.
+
+    The rollout backend retains its provider-neutral copy under
+    ``response.training``; a record without it carries the request body.
+    """
+    response = payload.get("response")
+    training = response.get("training") if isinstance(response, Mapping) else None
+    if isinstance(training, Mapping) and isinstance(training.get("request_messages"), list):
+        messages = list(training["request_messages"])
+        tools = training.get("request_tools", payload.get("tools"))
+    else:
+        messages = list(payload.get("messages") or [])
+        tools = payload.get("tools")
+    return messages, list(tools) if isinstance(tools, list) and tools else None
+
+
+def recorded_response(payload: Mapping[str, Any]) -> str:
+    """The text of a recorded inference's response: the final assistant message, or empty when it has none."""
+    response = payload.get("response")
+    if not isinstance(response, Mapping):
+        return ""
+    training = response.get("training")
+    message = training.get("response_message") if isinstance(training, Mapping) else None
+    if isinstance(message, Mapping):
+        return flatten_content(message.get("content"))
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        message = choices[0].get("message")
+        if isinstance(message, Mapping):
+            return flatten_content(message.get("content"))
+        return flatten_content(choices[0].get("text"))
+    return ""
+
+
+def flatten_content(content: Any) -> str:
+    """The plain text of an OpenAI-style message content field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [item.get("text", "") for item in content if isinstance(item, Mapping) and item.get("type") == "text"]
+        return " ".join(parts) if parts else ""
+    return str(content) if content is not None else ""
 
 
 def _common_prefix_length(left: list[int], right: list[int]) -> int:
@@ -112,18 +152,18 @@ def _realign_latest_response(
         token_log_probs[realign_start:] = [0.0] * len(prompt_tail)
 
 
-def make_policy_sample(
+def make_policy_trajectory(
     item: AgentRecord,
     reward: float,
-) -> PolicySample:
+) -> TrajectoryItem:
     """Convert inference data and its evaluated reward into a sample.
 
     ``response.training`` attached by an inference backend is authoritative
     for policy tensors. A top-level ``runtime_load_id`` stamped after response
-    validation is authoritative for provenance; if both locations provide a
-    version, they must agree. Top-level tensors remain supported for harnesses
-    that already ship exact policy data. Missing tensors stay empty and are
-    rejected by policy processors; Reef never reconstructs sampled ids from
+    validation identifies the producing model version; if both locations
+    provide a version, they must agree. Top-level tensors remain supported
+    for harnesses that already ship exact policy data. Missing tensors stay empty and are
+    rejected at the training boundary; Reef never reconstructs sampled ids from
     decoded text.
     """
     payload = item.payload
@@ -168,16 +208,17 @@ def make_policy_sample(
         )
     topk_indices = field("topk_indices") or ()
     topk_log_probs = field("topk_log_probs") or ()
-    return PolicySample(
-        source_agent_record_id=item.agent_record_id,
-        tokens=tuple(int(token) for token in tokens),
-        loss_mask=tuple(int(value) for value in loss_mask),
-        rollout_log_probs=tuple(float(value) for value in rollout_log_probs),
-        reward=reward,
+    return make_trajectory((item,), reward).with_training(
+        tokens=[int(token) for token in tokens],
+        loss_mask=[int(value) for value in loss_mask],
+        rollout_log_probs=[float(value) for value in rollout_log_probs],
         runtime_load_id=runtime_load_id,
-        runtime_load_spans=runtime_load_spans,
-        topk_indices=tuple(tuple(int(v) for v in row) for row in topk_indices),
-        topk_log_probs=tuple(tuple(float(v) for v in row) for row in topk_log_probs),
+        runtime_load_spans=[
+            {"start": span.start, "end": span.end, "runtime_load_id": span.runtime_load_id}
+            for span in runtime_load_spans
+        ],
+        topk_indices=[[int(v) for v in row] for row in topk_indices],
+        topk_log_probs=[[float(v) for v in row] for row in topk_log_probs],
     )
 
 
@@ -187,20 +228,20 @@ def _policy_version_spans(value: Any, response_length: int) -> tuple[RuntimeLoad
     return parse_runtime_load_spans(value, response_length=response_length)
 
 
-def make_multi_turn_policy_sample(
+def make_multi_turn_policy_trajectory(
     items: Sequence[AgentRecord],
     reward: float,
     *,
     source_agent_record_id: str,
     realign_threshold: int = 1024,
     scaffold_tolerance: int = 0,
-) -> PolicySample | None:
+) -> TrajectoryItem | None:
     """Assemble one linear, terminally selected episode into one sample.
 
     This follows slime's trajectory builder: exact prompt extension appends
     masked context, while short drift confined to the latest response is
     realigned as masked context. A genuine fork returns ``None`` rather than
-    reconstructing policy evidence from decoded text.
+    reconstructing training tokens and log probabilities from decoded text.
 
     ``scaffold_tolerance`` lets the drift reach a bounded number of tokens
     *before* the latest response span. Thinking chat templates need it: the
@@ -209,17 +250,18 @@ def make_multi_turn_policy_sample(
     diverges a couple of tokens ahead of the previous response. That span is
     always masked prompt context (the previous turn's trained tokens start at
     the response boundary), so the realignment replaces only masked scaffold,
-    never policy evidence. Default 0 keeps the strict boundary.
+    never tokens or log probabilities used for training. Default 0 keeps the
+    strict boundary.
     """
     if not items or not math.isfinite(reward) or realign_threshold < 0 or scaffold_tolerance < 0:
         return None
 
-    turns = [make_policy_sample(item, reward) for item in items]
-    versions = {turn.runtime_load_id for turn in turns}
+    turns = [make_policy_trajectory(item, reward) for item in items]
+    versions = {turn.training.get("runtime_load_id", None) for turn in turns}
     if len(versions) != 1 or None in versions or "" in versions:
         return None
 
-    has_log_probs = [bool(turn.rollout_log_probs) for turn in turns]
+    has_log_probs = [bool(turn.training.get("rollout_log_probs", [])) for turn in turns]
     if any(has_log_probs) and not all(has_log_probs):
         return None
     retain_log_probs = all(has_log_probs)
@@ -231,18 +273,21 @@ def make_multi_turn_policy_sample(
     latest_response_start: int | None = None
 
     for turn_index, turn in enumerate(turns):
-        response_length = len(turn.loss_mask)
+        response_length = len(turn.training.get("loss_mask", []))
         if (
             response_length == 0
-            or len(turn.tokens) <= response_length
-            or any(value not in (0, 1) for value in turn.loss_mask)
-            or (turn.rollout_log_probs and len(turn.rollout_log_probs) != response_length)
-            or any(not math.isfinite(value) for value in turn.rollout_log_probs)
+            or len(turn.training.get("tokens", [])) <= response_length
+            or any(value not in (0, 1) for value in turn.training.get("loss_mask", []))
+            or (
+                turn.training.get("rollout_log_probs", [])
+                and len(turn.training.get("rollout_log_probs", [])) != response_length
+            )
+            or any(not math.isfinite(value) for value in turn.training.get("rollout_log_probs", []))
         ):
             return None
 
-        prompt = list(turn.tokens[:-response_length])
-        output = list(turn.tokens[-response_length:])
+        prompt = list(turn.training.get("tokens", [])[:-response_length])
+        output = list(turn.training.get("tokens", [])[-response_length:])
 
         if turn_index == 0:
             tokens.extend(prompt)
@@ -274,19 +319,21 @@ def make_multi_turn_policy_sample(
 
         latest_response_start = len(tokens)
         tokens.extend(output)
-        token_mask.extend(turn.loss_mask)
+        token_mask.extend(turn.training.get("loss_mask", []))
         if retain_log_probs:
-            token_log_probs.extend(turn.rollout_log_probs)
+            token_log_probs.extend(turn.training.get("rollout_log_probs", []))
 
     loss_mask = token_mask[leading_prompt_length:]
     if not loss_mask or sum(loss_mask) == 0:
         return None
-    return PolicySample(
-        source_agent_record_id=source_agent_record_id,
-        tokens=tuple(tokens),
-        loss_mask=tuple(loss_mask),
-        rollout_log_probs=tuple(token_log_probs[leading_prompt_length:]) if retain_log_probs else (),
-        reward=float(reward),
-        runtime_load_id=versions.pop(),
-        turn_count=len(turns),
+    return (
+        make_trajectory(items, reward)
+        .with_metadata(source_agent_record_id=source_agent_record_id)
+        .with_training(
+            tokens=tokens,
+            loss_mask=loss_mask,
+            rollout_log_probs=token_log_probs[leading_prompt_length:] if retain_log_probs else [],
+            runtime_load_id=versions.pop(),
+            turn_count=len(turns),
+        )
     )

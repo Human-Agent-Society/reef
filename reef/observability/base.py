@@ -74,6 +74,11 @@ class ExperimentTracker:
     durable update transaction.
     """
 
+    @property
+    def operational_metrics_enabled(self) -> bool:
+        """Whether the dispatcher should periodically sample operational metrics."""
+        return False
+
     def bind_scenario(
         self,
         *,

@@ -18,8 +18,8 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episode import run_episode
-from reef.harness.render import render_composition
+from reef.harness.episodes.run import run_episode
+from reef.harness.tree.render import render_composition
 
 REAL_PI = os.environ.get("REEF_REAL_PI_BINARY", "")
 

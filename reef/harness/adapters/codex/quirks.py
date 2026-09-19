@@ -18,7 +18,7 @@ from typing import Any
 import tomli_w
 import yaml
 
-from reef.harness.render import RenderError
+from reef.harness.tree.render import RenderError
 
 _CONFIG = "codex/config.toml"
 _EXTENSIONS = "codex/extensions/"

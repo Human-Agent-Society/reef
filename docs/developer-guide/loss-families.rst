@@ -1,21 +1,24 @@
 Loss families
 =============
 
-A loss family is the tensor objective a weight-training recipe runs in the Slime
-backend. The step preparer decides what the signal is (advantages, which
-family); the loss family decides how the backend turns that into a loss.
+A method's ``TrainingObjective`` owns signal preparation and declares its
+``loss_family``. A loss family implements the model-dependent computation for
+one backend. Preparation runs on the full batch; tensor loss hooks run after
+the backend's forward passes.
 
-They live in two places, and the names are easy to confuse:
+- ``recipes/<name>/objective.py`` holds the backend-neutral objective.
+  ``reef/train/algos/`` defines its shared contract and registry.
+- ``reef/train/slime_backend/`` holds Slime integration machinery; each
+  method's Slime implementation lives in ``recipes/<name>/slime/``. Its spec
+  is torch-free driver code and its ``objective.py`` contains worker hooks.
+- Methods can also supply a Tinker loss implementation. TTTD shares one
+  preparation method between its Slime and Tinker implementations.
 
-- ``reef/train/algos/`` holds step preparers. Backend-neutral, no torch.
-- ``reef/train/slime_backend/`` holds the machinery (``algorithm.py``,
-  ``loss_families.py``, ``data_builder.py``); every family lives in its
-  method package, ``recipes/<name>/slime/``. The spec is torch-free driver
-  code; the objective is worker-side torch code.
-
-A recipe names its family through ``WeightTrainingSpec.loss_family``. The
-preparer's ``StepSignal.loss_family`` must carry the same string; the bridge
-rejects a payload whose ``loss`` differs from the family it booted with.
+A recipe binds ``WeightTrainingSpec(objective=..., processor=..., scheduling=...)``.
+``WeightTrainingSpec.loss_family`` derives the family from that objective;
+``StepSignal`` carries advantages, metrics and proposed state, and the recipe's
+``StepScheduling`` says how the runtime cuts the batch into optimizer steps.
+The bridge still rejects a payload whose ``loss`` differs from its boot family.
 
 Layout
 ------
@@ -86,7 +89,7 @@ rest has defaults. The overrides, in the order the pipeline reaches them:
 - ``prepare_rollout``: driver-side work before a step.
 - ``bind``: a per-run instance carrying state such as a critic schedule.
 - ``train``: critic and actor orchestration; the default is one actor step.
-- ``provenance_metrics``: telemetry after the step.
+- ``rollout_metrics``: rollout version and timing metrics after the step.
 
 Two loss lanes
 --------------
@@ -142,3 +145,44 @@ Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher).
+
+The distillation base
+---------------------
+
+The recipes that distil a teacher on the student's own samples (SDFT, SDPO,
+on-policy distillation) compute the same per-token divergence and differ in
+who the teacher is and which divergence is minimized. Both are settings of
+one implementation in the backend, ``reef/train/slime_backend/distill/``,
+and each such recipe's family is a thin subclass of it:
+
+- ``DistillAlgorithm`` is the driver-side base: the six-column wire row
+  (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
+  by the student's response ids verbatim), the ``--<name>-*`` flags under
+  the family's own prefix (``teacher``, ``divergence``, ``top-k``,
+  ``teacher-update-rate``, ``teacher-checkpoint``,
+  ``importance-sampling-cap``, ``skip-response-tokens``, ``jsd-beta``) and
+  the settings they stamp on ``args`` under ``distill_*`` names, which the
+  worker hooks read whatever the prefix was. A family names itself, sets
+  its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
+  forwards ``<name>_loss`` and ``<name>_actor_pre_train`` to
+  ``distill.objective``.
+- The teacher is ``self`` (the student's own weights reading the privileged
+  prefix: the current weights at update rate 1, a slow-moving copy below it,
+  a frozen snapshot at 0) or ``separate`` (another checkpoint that fits the
+  actor's model, loaded beside the actor's weights). The pre-train hook
+  switches the teacher's weights in through the actor's backups, runs one
+  forward-only pass over the batch's teacher sequences, and switches the
+  actor back.
+- The divergence is the forward KL, the reverse KL or the generalized JSD,
+  over the teacher's whole distribution (``top-k`` 0: one row of this rank's
+  vocab shard per response position, kept in float16 on the host) or over
+  the teacher's top-K ids renormalized, the reverse KL then estimated at the
+  sampled token. The kernels reduce across the vocab shards of tensor
+  parallel themselves and write the gradients out where autograd over one
+  shard would drop the coupling through the global log-sum-exp;
+  ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python
+  reference and to the dense gradients across four ranks.
+
+The base registers no family and imports nothing from ``reef_adapters``;
+``recipes/openclawrl/slime/`` imports its packing schedule and its sharded
+gathers from it.

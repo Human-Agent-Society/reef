@@ -7,7 +7,7 @@ into Slime's per-sample rollout keys:
 * ``topk_indices`` / ``topk_log_probs`` — the student's generation-time
   top-K vocab ids and log-probs per response token (``ell_old`` on S^q),
   captured by the serving backend at sampling time.
-* ``teacher_cands`` (carried in ``sample.extras``) — per candidate (accepted hints, shortest-first, up to
+* ``teacher_cands`` (carried in ``sample.training["extras"]``) — per candidate (accepted hints, shortest-first, up to
   the recipe's ``prm_max_hint_candidates``; or the un-enhanced anchor
   upstream ships for every RL-only turn), the candidate TOKEN SEQUENCE
   (upstream's ``teacher_tokens_candidates``: hint-enhanced prompt ids plus
@@ -25,22 +25,24 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any
 
+from reef.core.batches import TrajectoryItem
+from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 
 _ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, topk_indices, topk_log_probs, teacher_cands]"
 
 
-def openclawrl_sample_row(sample: Any) -> list[Any]:
+def openclawrl_sample_row(sample: TrajectoryItem) -> list[Any]:
     """Shape one Reef sample into this family's 8-column wire row."""
     return [
-        sample.source_agent_record_id,
-        list(sample.tokens),
-        list(sample.loss_mask),
-        list(sample.rollout_log_probs),
-        sample.reward,
-        [list(row) for row in sample.topk_indices],
-        [list(row) for row in sample.topk_log_probs],
-        [dict(cand) for cand in sample.extras.get("teacher_cands", ())],
+        source_record_id(sample),
+        list(sample.training.get("tokens", [])),
+        list(sample.training.get("loss_mask", [])),
+        list(sample.training.get("rollout_log_probs", [])),
+        trajectory_reward(sample),
+        [list(row) for row in sample.training.get("topk_indices", [])],
+        [list(row) for row in sample.training.get("topk_log_probs", [])],
+        [dict(cand) for cand in sample.training.get("extras", {}).get("teacher_cands", ())],
     ]
 
 

@@ -3,8 +3,10 @@ from __future__ import annotations
 import pytest
 
 from reef.core import AgentRecord, RequestType
+from reef.core.artifact_ref import parse_runtime_load_spans
+from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.service.request_service import client_inference_response
-from reef.train.processors.common import make_multi_turn_policy_sample, make_policy_sample
+from reef.train.processors.common import make_multi_turn_policy_trajectory, make_policy_trajectory
 
 
 def _inference(payload) -> AgentRecord:
@@ -51,14 +53,14 @@ def test_policy_sample_uses_engine_native_response_training() -> None:
         }
     )
 
-    sample = make_policy_sample(item, 1.0)
+    sample = make_policy_trajectory(item, 1.0)
 
-    assert sample.tokens == (10, 11, 20)
-    assert sample.loss_mask == (1,)
-    assert sample.rollout_log_probs == (-0.25,)
-    assert sample.runtime_load_id == "wv-1"
-    assert sample.turn_count == 1
-    assert sample.is_multi_turn is False
+    assert tuple(sample.training.get("tokens", [])) == (10, 11, 20)
+    assert tuple(sample.training.get("loss_mask", [])) == (1,)
+    assert tuple(sample.training.get("rollout_log_probs", [])) == (-0.25,)
+    assert sample.training.get("runtime_load_id", None) == "wv-1"
+    assert sample.training.get("turn_count", 1) == 1
+    assert (sample.training.get("turn_count", 1) > 1) is False
 
 
 @pytest.mark.unit
@@ -82,10 +84,13 @@ def test_policy_sample_preserves_mixed_token_runtime_load_ids() -> None:
         }
     )
 
-    sample = make_policy_sample(item, 1.0)
+    sample = make_policy_trajectory(item, 1.0)
 
-    assert sample.runtime_load_id is None
-    assert [(span.start, span.end, span.runtime_load_id) for span in sample.runtime_load_spans] == [
+    assert sample.training.get("runtime_load_id", None) is None
+    assert [
+        (span.start, span.end, span.runtime_load_id)
+        for span in parse_runtime_load_spans(sample.training.get("runtime_load_spans", []))
+    ] == [
         (0, 1, "engine:6"),
         (1, 3, "engine:7"),
     ]
@@ -108,7 +113,7 @@ def test_policy_sample_rejects_conflicting_validated_and_training_runtime_load_i
     )
 
     with pytest.raises(ValueError, match="disagrees with the validated record"):
-        make_policy_sample(item, 1.0)
+        make_policy_trajectory(item, 1.0)
 
 
 @pytest.mark.unit
@@ -127,11 +132,11 @@ def test_policy_sample_does_not_reconstruct_ids_from_chat_logprobs() -> None:
         }
     )
 
-    sample = make_policy_sample(item, 1.0)
+    sample = make_policy_trajectory(item, 1.0)
 
-    assert sample.tokens == ()
-    assert sample.loss_mask == ()
-    assert sample.rollout_log_probs == ()
+    assert tuple(sample.training.get("tokens", [])) == ()
+    assert tuple(sample.training.get("loss_mask", [])) == ()
+    assert tuple(sample.training.get("rollout_log_probs", [])) == ()
 
 
 @pytest.mark.unit
@@ -145,12 +150,12 @@ def test_policy_sample_accepts_exact_harness_tensors() -> None:
         }
     )
 
-    sample = make_policy_sample(item, 0.5)
+    sample = make_policy_trajectory(item, 0.5)
 
-    assert sample.tokens == (1, 2, 3)
-    assert sample.loss_mask == (1,)
-    assert sample.rollout_log_probs == (-0.5,)
-    assert sample.runtime_load_id == "harness-v1"
+    assert tuple(sample.training.get("tokens", [])) == (1, 2, 3)
+    assert tuple(sample.training.get("loss_mask", [])) == (1,)
+    assert tuple(sample.training.get("rollout_log_probs", [])) == (-0.5,)
+    assert sample.training.get("runtime_load_id", None) == "harness-v1"
 
 
 @pytest.mark.unit
@@ -172,7 +177,7 @@ def test_client_response_hides_private_training_tensors() -> None:
 
 @pytest.mark.unit
 def test_multi_turn_policy_sample_assembles_clean_linear_history() -> None:
-    sample = make_multi_turn_policy_sample(
+    sample = make_multi_turn_policy_trajectory(
         [
             _turn("i1", [10, 11, 20, 21], [1, 1], [-0.1, -0.2]),
             _turn("i2", [10, 11, 20, 21, 30, 40], [1], [-0.3]),
@@ -183,19 +188,19 @@ def test_multi_turn_policy_sample_assembles_clean_linear_history() -> None:
     )
 
     assert sample is not None
-    assert sample.source_agent_record_id == "report-1"
-    assert sample.tokens == (10, 11, 20, 21, 30, 40, 31, 50, 51)
-    assert sample.loss_mask == (1, 1, 0, 1, 0, 1, 1)
-    assert sample.rollout_log_probs == (-0.1, -0.2, 0.0, -0.3, 0.0, -0.4, -0.5)
-    assert sample.reward == 0.75
-    assert sample.runtime_load_id == "wv-1"
-    assert sample.turn_count == 3
-    assert sample.is_multi_turn is True
+    assert source_record_id(sample) == "report-1"
+    assert tuple(sample.training.get("tokens", [])) == (10, 11, 20, 21, 30, 40, 31, 50, 51)
+    assert tuple(sample.training.get("loss_mask", [])) == (1, 1, 0, 1, 0, 1, 1)
+    assert tuple(sample.training.get("rollout_log_probs", [])) == (-0.1, -0.2, 0.0, -0.3, 0.0, -0.4, -0.5)
+    assert trajectory_reward(sample) == 0.75
+    assert sample.training.get("runtime_load_id", None) == "wv-1"
+    assert sample.training.get("turn_count", 1) == 3
+    assert (sample.training.get("turn_count", 1) > 1) is True
 
 
 @pytest.mark.unit
 def test_multi_turn_policy_sample_realigns_latest_response_drift() -> None:
-    sample = make_multi_turn_policy_sample(
+    sample = make_multi_turn_policy_trajectory(
         [
             _turn("i1", [1, 2, 3], [1], [-0.3]),
             _turn("i2", [1, 2, 30, 4], [1], [-0.4]),
@@ -205,14 +210,14 @@ def test_multi_turn_policy_sample_realigns_latest_response_drift() -> None:
     )
 
     assert sample is not None
-    assert sample.tokens == (1, 2, 30, 4)
-    assert sample.loss_mask == (0, 1)
-    assert sample.rollout_log_probs == (0.0, -0.4)
+    assert tuple(sample.training.get("tokens", [])) == (1, 2, 30, 4)
+    assert tuple(sample.training.get("loss_mask", [])) == (0, 1)
+    assert tuple(sample.training.get("rollout_log_probs", [])) == (0.0, -0.4)
 
 
 @pytest.mark.unit
 def test_multi_turn_policy_sample_bounds_replaced_tokens_not_new_output() -> None:
-    sample = make_multi_turn_policy_sample(
+    sample = make_multi_turn_policy_trajectory(
         [
             _turn("i1", [1, 2, 3], [1], [-0.3]),
             _turn("i2", [1, 2, 30, 4, 5, 6], [1, 1, 1], [-0.4, -0.5, -0.6]),
@@ -223,13 +228,13 @@ def test_multi_turn_policy_sample_bounds_replaced_tokens_not_new_output() -> Non
     )
 
     assert sample is not None
-    assert sample.loss_mask == (0, 1, 1, 1)
-    assert sample.rollout_log_probs == (0.0, -0.4, -0.5, -0.6)
+    assert tuple(sample.training.get("loss_mask", [])) == (0, 1, 1, 1)
+    assert tuple(sample.training.get("rollout_log_probs", [])) == (0.0, -0.4, -0.5, -0.6)
 
 
 @pytest.mark.unit
 def test_multi_turn_policy_sample_rejects_replacement_over_threshold() -> None:
-    sample = make_multi_turn_policy_sample(
+    sample = make_multi_turn_policy_trajectory(
         [
             _turn("i1", [1, 2, 3, 4, 5], [1, 1, 1], [-0.1, -0.2, -0.3]),
             _turn("i2", [1, 2, 30, 40, 50, 6], [1], [-0.4]),
@@ -258,7 +263,7 @@ def test_multi_turn_policy_sample_rejects_replacement_over_threshold() -> None:
 )
 def test_multi_turn_policy_sample_rejects_forks_and_mixed_weights(turns) -> None:
     assert (
-        make_multi_turn_policy_sample(
+        make_multi_turn_policy_trajectory(
             turns,
             1.0,
             source_agent_record_id="report-1",
@@ -281,21 +286,21 @@ def test_multi_turn_scaffold_tolerance_realls_masked_scaffold_only() -> None:
         _turn("i2", [1, 2, 3, 4, 5, 6], [1], [-0.3]),
     ]
 
-    strict = make_multi_turn_policy_sample(turns, 1.0, source_agent_record_id="r1")
+    strict = make_multi_turn_policy_trajectory(turns, 1.0, source_agent_record_id="r1")
     assert strict is None
 
-    tolerant = make_multi_turn_policy_sample(turns, 1.0, source_agent_record_id="r1", scaffold_tolerance=2)
+    tolerant = make_multi_turn_policy_trajectory(turns, 1.0, source_agent_record_id="r1", scaffold_tolerance=2)
     assert tolerant is not None
-    assert tolerant.tokens == (1, 2, 3, 4, 5, 6)
+    assert tuple(tolerant.training.get("tokens", [])) == (1, 2, 3, 4, 5, 6)
     # the loss mask starts after the leading prompt (3 tokens); everything
     # before the final response is masked context
-    assert tolerant.loss_mask == (0, 0, 1)
-    assert tolerant.rollout_log_probs == (0.0, 0.0, -0.3)
-    assert tolerant.turn_count == 2
+    assert tuple(tolerant.training.get("loss_mask", [])) == (0, 0, 1)
+    assert tuple(tolerant.training.get("rollout_log_probs", [])) == (0.0, 0.0, -0.3)
+    assert tolerant.training.get("turn_count", 1) == 2
 
     # a genuine fork deeper than the tolerance still returns None
     forked = [
         _turn("i1", [1, 2, 3, 7, 8], [1, 1], [-0.1, -0.2]),
         _turn("i2", [9, 9, 9, 9, 9, 6], [1], [-0.3]),
     ]
-    assert make_multi_turn_policy_sample(forked, 1.0, source_agent_record_id="r1", scaffold_tolerance=2) is None
+    assert make_multi_turn_policy_trajectory(forked, 1.0, source_agent_record_id="r1", scaffold_tolerance=2) is None

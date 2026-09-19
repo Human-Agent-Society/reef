@@ -12,9 +12,10 @@ from typing import Any
 
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.records import RecordStore
-from reef.runtime.base import InferenceRuntime, TrainingRuntime
-from reef.train.slime_backend.backend import SlimeTrainingBackend
+from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.storage.records import RecordStore
+from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import RuntimeCandidateBackend
 from reef.train.trainer import Trainer
 
 from ._threshold_processor import ThresholdProcessor
@@ -36,11 +37,12 @@ class TestPolicyRecipe(WeightTrainingRecipe):
         *,
         config: Mapping[str, Any] | None = None,
         runtime: InferenceRuntime | None = None,
+        training_runtime: TrainingRuntime | None = None,
     ) -> TestPolicyRecipe:
         del environ, config
-        if not isinstance(runtime, TrainingRuntime):
+        if not isinstance(training_runtime, TrainingRuntime):
             raise TypeError("TestPolicyRecipe requires a TrainingRuntime")
-        return cls(runtime)
+        return cls(training_runtime, runtime=runtime)
 
     def build(
         self,
@@ -63,7 +65,9 @@ class TestPolicyRecipe(WeightTrainingRecipe):
                     }
                 )
             ),
-            training_backend=SlimeTrainingBackend(self.runtime, "sft", scenario=scenario),
+            candidate_backend=RuntimeCandidateBackend(
+                self.training_runtime, "sft", StepScheduling(), inference_runtime=self.runtime, scenario=scenario
+            ),
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,
         )

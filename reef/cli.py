@@ -1,10 +1,12 @@
 """reef CLI: entry point for reef.
 
 Usage:
+  reef serve --inference.upstream-url URL --inference.upstream-model MODEL  # connect a provider
   reef serve -c path/to/stack.yaml             # start a configured stack
+  reef connect                               # link an existing runtime to the console
 
-`reef serve` reads a config's `services` list and starts every declared
-process in dependency order, including the internal Reef HTTP service.
+`reef serve` starts local inference or a provider deployment without YAML, or reads
+a config's `services` list and starts its processes in dependency order.
 Run `reef serve --help` for config options.
 
 Deployment stacks use the `services` layout documented in the configuration
@@ -16,21 +18,24 @@ from __future__ import annotations
 
 import sys
 
-_COMMANDS = {"serve"}
+_COMMANDS = {"serve", "connect"}
 
 
 def _help_text():
     return """\
 usage: reef <command> [options]
 
-  serve  Start a stack from a config
+  serve  Start inference, connect a provider, or run a configured stack
+  connect  Connect an existing Reef runtime to the API platform
 
-  -c CONFIG   Config file (default: reef.yaml or $REEF_CONFIG)
+  -c CONFIG   Optional config file; omitted means configuration-free startup
   --version   Print the installed reef version
 
 Examples:
+  reef serve --inference.upstream-url http://localhost:8000 --inference.upstream-model my-model
   reef serve -c path/to/local-sglang.yaml
   reef serve -c path/to/external-provider.yaml
+  reef connect
 """
 
 
@@ -46,7 +51,7 @@ def main(argv=None):
         sys.exit(0)
 
     if argv[0] in ("-V", "--version"):
-        from reef import __version__
+        from reef.core.version import __version__
 
         print(f"reef {__version__}")
         sys.exit(0)
@@ -59,7 +64,13 @@ def main(argv=None):
         print(_help_text(), file=sys.stderr)
         sys.exit(2)
 
-    from reef.service.deploy import DeployConfigError
+    if cmd == "connect":
+        from reef.service.connector import main as _connect_main
+
+        _connect_main(rest)
+        return
+
+    from reef.service.deploy import DeployConfigError, DeployStartupError
     from reef.service.deploy import main as _serve_main
 
     try:
@@ -68,6 +79,9 @@ def main(argv=None):
         # Deploy config errors are typed library errors; the CLI owns the exit.
         print(f"[reef] ERROR: {exc}", file=sys.stderr)
         sys.exit(2)
+    except DeployStartupError as exc:
+        print(f"[reef] ERROR: {exc}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

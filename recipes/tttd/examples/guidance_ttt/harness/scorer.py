@@ -19,9 +19,10 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any
 from uuid import uuid4
 
 from .state import VerificationResult
@@ -45,9 +46,10 @@ class JudgeResult:
     artifacts: dict[str, Any] = field(default_factory=dict)
 
 
-class Scorer(Protocol):
+class Scorer(ABC):
     """Score one extracted candidate program."""
 
+    @abstractmethod
     def __call__(self, code: str) -> VerificationResult: ...
 
 
@@ -64,7 +66,7 @@ def extract_solution_code(text: str, language: str = "cpp") -> str | None:
     return None
 
 
-class JudgeScorer:
+class JudgeScorer(Scorer):
     """Submit one candidate to the judge and wait for its verdict."""
 
     def __init__(

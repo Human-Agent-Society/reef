@@ -6,11 +6,12 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from reef.artifact.artifact import Artifact
+from reef.surface.base import FileTree
 
 REPOSITORY_FILES = frozenset({"reef-artifact.json", ".gitattributes"})
 
 
-class TextFileTree:
+class TextFileTree(FileTree):
     """Read every UTF-8 text file in an artifact, byte-faithfully."""
 
     def read_files(self, artifact: Artifact) -> Mapping[str, str] | None:
