@@ -25,7 +25,10 @@ GENERATOR_SERVICE = "generator"
 DEFAULT_PORT = 8910
 DEFAULT_CONCURRENCY = 2
 DEFAULT_DESIGNER_TIMEOUT_S = 1800.0
+DEFAULT_DESIGNER_POLL_S = 5.0
+DEFAULT_DESIGNER_WAIT_S = 1800.0
 DEFAULT_READY_TIMEOUT = 60
+DESIGNER_PROMPT_SOURCES = ("fixed", "harness")
 
 
 @dataclass(frozen=True)
@@ -59,12 +62,30 @@ class GeneratorSettings:
     designer_model: str | None = config_option(
         None, help="The served model the designer asks for; the deployment's by default."
     )
+    designer_scenario: str | None = config_option(
+        None, help="The scenario the designer's calls and reports go to; the proposal's own scenario by default."
+    )
     designer_timeout_s: float = config_option(
         DEFAULT_DESIGNER_TIMEOUT_S, help="Seconds one designer call may take; inference.timeout-s must allow it too."
     )
     designer_options: Mapping[str, Any] | None = dataclasses.field(
         default=None,
         metadata=config_metadata('Extra fields of the designer\'s chat request, e.g. {"reasoning_effort": "none"}.'),
+    )
+    designer_prompt: str = config_option(
+        "fixed",
+        help="Where the Designer's prompt comes from: fixed, or harness for the tree designer-url serves under designer-scenario.",
+    )
+    designer_poll_s: float = config_option(
+        DEFAULT_DESIGNER_POLL_S,
+        help="Seconds between two looks at the Designer's version while a generation waits for it to change.",
+    )
+    designer_wait_s: float = config_option(
+        DEFAULT_DESIGNER_WAIT_S,
+        help=(
+            "Seconds a generation's first proposal waits for the Designer's deployment to serve a new release or "
+            "runtime load id after the previous generation's reports; on timeout it proceeds with a warning."
+        ),
     )
     ready_timeout: int = config_option(
         DEFAULT_READY_TIMEOUT, help="Seconds reef serve waits for the generator to answer."
@@ -79,8 +100,21 @@ class GeneratorSettings:
             raise ValueError("generator.concurrency must be at least 1")
         if self.designer_timeout_s <= 0:
             raise ValueError("generator.designer-timeout-s must be positive")
+        if self.designer_poll_s <= 0:
+            raise ValueError("generator.designer-poll-s must be positive")
+        if self.designer_wait_s <= 0:
+            raise ValueError("generator.designer-wait-s must be positive")
         if self.ready_timeout <= 0:
             raise ValueError("generator.ready-timeout must be positive")
+        if self.designer_scenario is not None and not self.designer_scenario.strip():
+            raise ValueError("generator.designer-scenario must name a scenario when set")
+        if self.designer_prompt not in DESIGNER_PROMPT_SOURCES:
+            raise ValueError(f"generator.designer-prompt must be one of {DESIGNER_PROMPT_SOURCES}")
+        if self.designer_prompt == "harness" and not (self.designer_scenario or "").strip():
+            raise ValueError(
+                "generator.designer-prompt: harness needs generator.designer-scenario, the scenario whose harness "
+                "release is the Designer's prompt"
+            )
         if self.agent is not None and not (self.agent.get("name") or self.agent.get("import_path")):
             raise ValueError("generator.agent must carry a Harbor agent name or an import_path")
 

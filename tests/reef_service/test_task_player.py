@@ -18,6 +18,7 @@ from reef.harness.client.tasks import (
     DEFAULT_AGENT,
     EpisodeRow,
     TaskLab,
+    TaskPlay,
     TaskPlayer,
     TaskPlayError,
     bound_agent,
@@ -232,6 +233,49 @@ def test_a_scored_episode_is_reported_against_its_receipts(reef: StandInReef, tm
         "rewards": {"reward": 1.0},
         "trial_uri": "trials/t1",
     }
+
+
+def test_a_held_episode_is_reported_after_the_fact_with_extra_metadata(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    held = player(reef, tmp_path, StandInLab({"reward": 1.0}), labels={"arm": "plain"}, is_reporting=False).play(
+        task_path
+    )
+    assert not held.is_reported and held.receipts == ("rec-1", "rec-2") and held.labels == {"arm": "plain"}
+    assert reef.reports == []
+
+    later = player(reef, tmp_path, StandInLab({"reward": 1.0}))
+    record_ids = later.report_play(held, score=0.5, metadata={"generation": 4, "task": "not this one"})
+    assert record_ids == ("rep-1",)
+    body = reef.reports[0]["body"]
+    assert body["score"] == 0.5 and body["references"] == ["rec-1", "rec-2"]
+    assert body["feedback"] == "verifier reward 0.5 on t1" and body["metadata"]["generation"] == 4
+    assert body["metadata"]["task"] == task_identity(task_path), "extra keys never replace the task"
+    assert body["metadata"]["episode"] == {
+        "id": held.episode_id,
+        "agent": "terminus-2",
+        "labels": {"arm": "plain"},
+        "rewards": {"reward": 1.0},
+        "trial_uri": "trials/t1",
+    }, "the episode block comes from the play, not from the player that reports it"
+
+    per_receipt = player(reef, tmp_path, StandInLab({"reward": 1.0}), per_receipt=True)
+    assert per_receipt.report_play(held, score=0.5) == ("rep-2", "rep-3")
+    assert [report["body"]["references"] for report in reef.reports[1:]] == [["rec-1"], ["rec-2"]]
+
+    unplayed = TaskPlay(task_path, "t1", "e", 1.0, {"reward": 1.0}, "", (), 0, (), None)
+    assert unplayed.labels == {}
+    with pytest.raises(TaskPlayError, match="holds no receipt"):
+        later.report_play(unplayed, score=1.0)
+    assert len(reef.reports) == 3
+
+
+def test_a_played_episode_carries_the_players_labels(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    played = player(reef, tmp_path, StandInLab({"reward": 1.0}), labels={"Arm": "hint", "generation": "2"}).play(
+        task_path
+    )
+    assert played.labels == {"arm": "hint", "generation": "2"} and played.is_reported
+    assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == played.labels
 
 
 def test_an_unscored_episode_is_kept_but_not_reported(reef: StandInReef, tmp_path: Path) -> None:

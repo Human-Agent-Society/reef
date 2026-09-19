@@ -151,7 +151,7 @@ class ProposalRecord:
 
 @dataclass(frozen=True)
 class TaskMeasure:
-    """A written task after both arms played: the rewards, the regret and the band."""
+    """A written task after both arms played: the rewards, the regret and the band; the plays themselves when held."""
 
     name: str
     skill: str | None
@@ -160,6 +160,8 @@ class TaskMeasure:
     plain_rewards: tuple[float, ...]
     hint_rewards: tuple[float, ...]
     record: PlayRecord
+    plain_plays: tuple[TaskPlay, ...] = ()
+    hint_plays: tuple[TaskPlay, ...] = ()
 
     @property
     def regret(self) -> float:
@@ -171,6 +173,19 @@ class TaskMeasure:
 
 
 @dataclass(frozen=True)
+class GenerationSummary:
+    """One generation as a whole: its tasks measured and refused and their mean regret, for the next generation's reports."""
+
+    generation: int
+    mean_regret: float | None
+    measured: int
+    refused: int
+
+    def document(self) -> dict[str, object]:
+        return asdict(self)
+
+
+@dataclass(frozen=True)
 class GenerationRecord:
     """What one generation produced, as its report file keeps it."""
 
@@ -179,10 +194,26 @@ class GenerationRecord:
     measures: tuple[TaskMeasure, ...]
     manifest_path: Path | None
     error: str = ""
+    # How many held plays were reported once the generation landed; None when every play reported as it ended.
+    held_plays_reported: int | None = None
 
     @property
     def experience(self) -> tuple[PlayRecord, ...]:
         return tuple(measure.record for measure in self.measures)
+
+    @property
+    def summary(self) -> GenerationSummary:
+        return GenerationSummary(
+            generation=self.generation,
+            mean_regret=statistics.fmean(measure.regret for measure in self.measures) if self.measures else None,
+            measured=len(self.measures),
+            refused=sum(1 for proposal in self.proposals if proposal.refusal),
+        )
+
+
+def generation_label(generation: int) -> str:
+    """The generation's name in file names, receipts and the round its held plays report under."""
+    return f"{REPORT_PREFIX}{generation:05d}"
 
 
 def skill_tag(skill: str | None) -> dict[str, str]:
@@ -208,7 +239,7 @@ def rewards_of(plays: Sequence[TaskPlay]) -> tuple[float, ...]:
 
 
 def report_path_for(state_dir: Path, generation: int) -> Path:
-    return Path(state_dir) / f"{REPORT_PREFIX}{generation:05d}.json"
+    return Path(state_dir) / f"{generation_label(generation)}.json"
 
 
 def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
@@ -219,6 +250,7 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
         "generation": record.generation,
         "manifest": str(record.manifest_path) if record.manifest_path is not None else None,
         "error": record.error,
+        "held_plays_reported": record.held_plays_reported,
         "proposals": [asdict(proposal) for proposal in record.proposals],
         "tasks": [
             {
@@ -228,6 +260,7 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
                 "digest": measure.digest,
                 "plain_rewards": list(measure.plain_rewards),
                 "hint_rewards": list(measure.hint_rewards),
+                "held_plays": {"plain": len(measure.plain_plays), "hint": len(measure.hint_plays)},
                 "regret": measure.regret,
                 "outcome": measure.outcome,
             }
@@ -240,19 +273,47 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
     return path
 
 
-def load_experience(report_path: Path) -> tuple[PlayRecord, ...]:
-    """The play records a generation report holds, for the next generation's prompts."""
+def read_generation_report(report_path: Path) -> dict[str, object]:
+    """The document a generation report holds."""
     try:
         document = json.loads(Path(report_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise GenerationError(f"{report_path} is not a generation report: {exc}") from exc
-    records = document.get("experience") if isinstance(document, dict) else None
+    if not isinstance(document, dict):
+        raise GenerationError(f"{report_path} is not a generation report: it holds no object")
+    return document
+
+
+def load_experience(report_path: Path) -> tuple[PlayRecord, ...]:
+    """The play records a generation report holds, for the next generation's prompts."""
+    records = read_generation_report(report_path).get("experience")
     if not isinstance(records, list):
         raise GenerationError(f"{report_path} holds no experience")
     try:
         return tuple(PlayRecord(**record) for record in records)
     except (TypeError, ValueError) as exc:
         raise GenerationError(f"{report_path} holds a record the Designer cannot take: {exc}") from exc
+
+
+def load_generation_summary(report_path: Path) -> GenerationSummary:
+    """What a generation report says of the generation as a whole, for the reports of the next one."""
+    document = read_generation_report(report_path)
+    generation, tasks, proposals = document.get("generation"), document.get("tasks"), document.get("proposals")
+    if isinstance(generation, bool) or not isinstance(generation, int):
+        raise GenerationError(f"{report_path} holds no generation number")
+    if not isinstance(tasks, list) or not isinstance(proposals, list):
+        raise GenerationError(f"{report_path} holds no tasks and proposals")
+    try:
+        regrets = [float(task["regret"]) for task in tasks]
+        refused = sum(1 for proposal in proposals if proposal["refusal"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise GenerationError(f"{report_path} holds a task or a proposal without its fields: {exc}") from exc
+    return GenerationSummary(
+        generation=generation,
+        mean_regret=statistics.fmean(regrets) if regrets else None,
+        measured=len(regrets),
+        refused=refused,
+    )
 
 
 def recorded_generations(state_dir: Path) -> tuple[int, ...]:

@@ -1,24 +1,51 @@
-"""The task designer's prompt, the parse of its reply, and the call through Reef."""
+"""The task designer's prompt, the parse of its reply, the call through Reef, and the prompt a harness release serves."""
 
 from __future__ import annotations
 
 import json
+import logging
 import re
+from collections.abc import Mapping, Sequence
 
 import pytest
+from reef_client.client import ReefClient, ReefClientError
 from reef_service.test_task_player import StandInReef
 
 from reef.record2dataset import (
     DesignerError,
+    DesignerPrompt,
     DesignerReplyError,
     DesignerRequest,
+    HarnessPrompt,
     ReefDesigner,
     designer_messages,
     designer_prompt,
     parse_harbor_reply,
 )
+from reef.record2dataset.designer import HARBOR_RULES_TEXT, SYSTEM_PROMPT, TREE_PATH
 
 pytestmark = pytest.mark.unit
+
+
+class StandInHarness(ReefClient):
+    """A Reef client whose ``GET /reef/harness`` answers a scripted manifest, or refuses with a status."""
+
+    def __init__(self, manifest: Mapping[str, object] | None, *, status: int = 404) -> None:
+        super().__init__("http://127.0.0.1:1", token="t")
+        self.manifest = manifest
+        self.status = status
+        self.pulls: list[dict[str, str]] = []
+
+    def get(self, path: str, *, extra_headers: Mapping[str, str] | None = None) -> dict[str, object]:
+        self.pulls.append({"path": path, **dict(extra_headers or {})})
+        if self.manifest is None:
+            raise ReefClientError(self.status, "no files")
+        return dict(self.manifest)
+
+
+def served_tree(entries: Sequence[Mapping[str, object]], release_id: str = "r1") -> dict[str, object]:
+    return {"release_id": release_id, "files": {TREE_PATH: json.dumps(list(entries))}}
+
 
 HARBOR_DOCUMENT = {
     "instruction": (
@@ -186,6 +213,13 @@ def test_the_reef_designer_posts_its_request_options_with_the_tags_and_keeps_the
             designer_messages(request()), scenario="spade", model="m", tags={"role": "designer", "generation": "2"}
         )
         report_id = designer.report(answer.record_id, scenario="spade", score=0.5, metadata={"generation": 2})
+        designer.report(
+            answer.record_id,
+            scenario="spade",
+            score=-0.5,
+            metadata={"generation": 2},
+            feedback={"task": "harbor-00002-000", "round": {"generation": 2, "previous": None}},
+        )
     finally:
         reef.close()
     assert answer.text == "ls" and answer.record_id == "rec-1"
@@ -197,6 +231,11 @@ def test_the_reef_designer_posts_its_request_options_with_the_tags_and_keeps_the
     report = reef.reports[0]["body"]
     assert report_id == "rep-1" and report["references"] == ["rec-1"] and report["score"] == 0.5
     assert report["metadata"] == {"generation": 2, "role": "designer"}, "the role tells a processor the report apart"
+    assert report["feedback"] == "task designer score"
+    assert reef.reports[1]["body"]["feedback"] == {
+        "task": "harbor-00002-000",
+        "round": {"generation": 2, "previous": None},
+    }
 
 
 def test_a_refused_designer_call_is_a_designer_error() -> None:
@@ -209,3 +248,93 @@ def test_a_refused_designer_call_is_a_designer_error() -> None:
         reef.close()
     with pytest.raises(DesignerError, match="timeout_s"):
         ReefDesigner(reef_url="http://127.0.0.1:1", timeout_s=0)
+
+
+# --------------------------------------------------------------------------------- the prompt as a harness
+
+
+def test_the_designer_prompt_is_two_harness_entries_that_round_trip() -> None:
+    prompt = DesignerPrompt()
+    entries = prompt.entries()
+    assert [entry["id"] for entry in entries] == ["designer-system", "designer-rules"]
+    assert all(entry["name"] == "skill" and entry["config"]["name"] == entry["id"] for entry in entries)
+    assert entries[0]["config"]["text"] == SYSTEM_PROMPT and entries[1]["config"]["text"] == HARBOR_RULES_TEXT
+    assert DesignerPrompt(system="s", rules="r").with_entries(entries) == prompt
+    evolved = prompt.with_entries(
+        [
+            {
+                "id": "designer-rules",
+                "name": "skill",
+                "config": {"name": "designer-rules", "text": "RULES:\n- {turn_limit} commands, no {braces} lost"},
+            },
+            {"id": "reef-version-check", "name": "version_check", "config": {}},
+        ]
+    )
+    assert evolved.system == SYSTEM_PROMPT, "an entry the tree does not carry keeps its text"
+    assert evolved.rules == "RULES:\n- {turn_limit} commands, no {braces} lost"
+    with pytest.raises(ValueError, match="designer-system must carry non-empty text"):
+        prompt.with_entries([{"id": "designer-system", "name": "skill", "config": {"name": "designer-system"}}])
+    with pytest.raises(ValueError, match="must be an object"):
+        prompt.with_entries(["designer-system"])  # type: ignore[list-item]
+    for fields in ({"system": " "}, {"rules": ""}):
+        with pytest.raises(ValueError, match="must be non-empty text"):
+            DesignerPrompt(**fields)
+
+
+def test_an_evolved_prompt_reaches_the_messages_and_keeps_its_own_braces() -> None:
+    prompt = DesignerPrompt(
+        system="You write shell tasks.", rules="RULES:\n- at most {turn_limit} commands; keep {this}."
+    )
+    messages = designer_messages(request(turn_limit=5), prompt)
+    assert messages[0]["content"] == "You write shell tasks."
+    assert "- at most 5 commands; keep {this}." in messages[1]["content"]
+    assert designer_prompt(request(turn_limit=5), prompt) == messages[1]["content"]
+    assert designer_prompt(request()) == designer_prompt(request(), DesignerPrompt())
+
+
+def test_a_harness_prompt_pulls_the_served_tree_once_per_generation(caplog: pytest.LogCaptureFixture) -> None:
+    client = StandInHarness(served_tree(DesignerPrompt(system="Evolved system.").entries()))
+    prompts = HarnessPrompt(client, "designer")
+    with caplog.at_level(logging.INFO, logger="reef.record2dataset.designer"):
+        first = prompts.prompt(1)
+    assert first.system == "Evolved system." and first.rules == HARBOR_RULES_TEXT
+    assert prompts.prompt(1) is first and len(client.pulls) == 1, "the generation's prompt is pulled once"
+    assert client.pulls[0] == {"path": "/reef/harness", "x-reef-scenario": "designer"}
+    assert "generation 1 asks the Designer with harness release r1 of scenario 'designer'" in caplog.text
+    client.manifest = served_tree(DesignerPrompt(rules="RULES:\n- {turn_limit} commands.").entries(), "r2")
+    second = prompts.prompt(2)
+    assert second.rules == "RULES:\n- {turn_limit} commands." and second.system == SYSTEM_PROMPT
+    assert len(client.pulls) == 2 and prompts.prompt(2) is second
+    with pytest.raises(DesignerError, match="needs the scenario"):
+        HarnessPrompt(client, "")
+
+
+def test_a_scenario_without_files_keeps_the_fixed_prompt_and_a_refusal_is_an_error(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    fixed = DesignerPrompt(system="Fixed.")
+    with caplog.at_level(logging.WARNING, logger="reef.record2dataset.designer"):
+        assert HarnessPrompt(StandInHarness(None), "designer", fixed).prompt(0) is fixed
+    assert (
+        "scenario 'designer' serves no harness tree yet; generation 0 asks the Designer with the fixed" in caplog.text
+    )
+    with pytest.raises(DesignerError, match=r"refused \(401\): no files"):
+        HarnessPrompt(StandInHarness(None, status=401), "designer").prompt(0)
+    with pytest.raises(DesignerError, match="did not reach Reef"):
+        HarnessPrompt(ReefClient("http://127.0.0.1:9", timeout_s=1.0), "designer").prompt(0)
+
+
+@pytest.mark.parametrize(
+    ("files", "message"),
+    [
+        ({}, "carries no native/tree.json"),
+        ({TREE_PATH: "{not json"}, "is not JSON"),
+        ({TREE_PATH: "{}"}, "must hold a list of entries"),
+        ({TREE_PATH: json.dumps([{"id": "designer-rules", "config": {"text": ""}}])}, "must carry non-empty text"),
+    ],
+)
+def test_a_served_tree_the_prompt_cannot_read_is_a_designer_error(files: dict[str, str], message: str) -> None:
+    prompts = HarnessPrompt(StandInHarness({"release_id": "r1", "files": files}), "designer")
+    with pytest.raises(DesignerError, match=message):
+        prompts.prompt(3)
+    assert prompts.cached is None and prompts.generation is None, "a failed pull caches nothing"

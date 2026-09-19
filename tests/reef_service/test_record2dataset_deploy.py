@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.record2dataset import DesignerTurn, FixedPrompt, HarnessPrompt, ReefDesigner
 from reef.record2dataset import __main__ as generator_main
 from reef.runtime.executor.config import ExecutorSettings, role_executor_settings, select_executor
 from reef.service.deploy.config_utils import DeployConfigError
@@ -117,3 +118,81 @@ def test_the_service_carries_the_designer_model_when_the_section_names_one_not_o
     settings = service_config_from_mapping(resolved)
     built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
     assert built.designer_model is None and built.default_model == "m"
+
+
+def test_the_service_pulls_the_designers_prompt_from_the_harness_release_the_section_names(tmp_path: Path) -> None:
+    deployment = {
+        "schema-version": 2,
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
+        "generator": {
+            "tasks-root": str(tmp_path / "tasks"),
+            "designer-url": "http://127.0.0.1:8901",
+            "designer-token": "d",
+            "designer-scenario": "designer",
+            "designer-prompt": "harness",
+        },
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert isinstance(built.prompts, HarnessPrompt) and built.prompts.scenario == "designer"
+    assert isinstance(built.designer, ReefDesigner) and built.prompts.client is built.designer.client
+    assert built.prompts.client.service_url == "http://127.0.0.1:8901" and built.prompts.client.token == "d"
+    assert isinstance(built.turn, DesignerTurn) and built.turn.client is built.designer.client
+    assert built.turn.is_harness_prompt and (built.turn.poll_s, built.turn.wait_s) == (5.0, 1800.0)
+    del deployment["generator"]["designer-prompt"]
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert isinstance(built.prompts, FixedPrompt), "fixed by default"
+    assert (
+        isinstance(built.turn, DesignerTurn) and not built.turn.is_harness_prompt
+    ), "the runtime load id is the version"
+    with pytest.raises(ValueError, match=r"harness needs generator\.designer-scenario"):
+        generator_settings({"tasks-root": "/tmp/t", "designer-prompt": "harness"})
+    with pytest.raises(ValueError, match=r"designer-prompt must be one of \('fixed', 'harness'\)"):
+        generator_settings({"tasks-root": "/tmp/t", "designer-prompt": "evolved"})
+
+
+def test_the_designer_wait_keys_set_the_turns_poll_and_limit_and_a_zero_is_refused(tmp_path: Path) -> None:
+    deployment = {
+        "schema-version": 2,
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
+        "generator": {"tasks-root": str(tmp_path / "tasks"), "designer-poll-s": 1, "designer-wait-s": 30},
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    generator = generator_settings(settings.generator_settings)
+    assert (generator.designer_poll_s, generator.designer_wait_s) == (1.0, 30.0)
+    built = generator_main.generator_service(settings, generator)
+    assert built.turn is not None and (built.turn.poll_s, built.turn.wait_s) == (1.0, 30.0)
+    assert (
+        built.turn.client is built.designer.client and built.turn.client.service_url == "http://127.0.0.1:8900"
+    ), "without designer-url the stack's own service answers for the Designer's version"
+    for key in ("designer-poll-s", "designer-wait-s"):
+        with pytest.raises(ValueError, match=f"generator.{key} must be positive"):
+            generator_settings({"tasks-root": "/tmp/t", key: 0})
+
+
+def test_the_service_carries_the_designer_scenario_when_the_section_names_one_not_otherwise(tmp_path: Path) -> None:
+    deployment = {
+        "schema-version": 2,
+        "reef": {"host": "127.0.0.1", "port": 8900},
+        "inference": {"upstream-url": "http://localhost:8000", "upstream-model": "m"},
+        "generator": {
+            "tasks-root": str(tmp_path / "tasks"),
+            "designer-url": "http://127.0.0.1:8901",
+            "designer-scenario": "designer",
+        },
+    }
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_scenario == "designer"
+    del deployment["generator"]["designer-scenario"]
+    resolved, _ = resolve_deployment_config(deployment, None, tmp_path / "serve.yaml")
+    settings = service_config_from_mapping(resolved)
+    built = generator_main.generator_service(settings, generator_settings(settings.generator_settings))
+    assert built.designer_scenario is None, "without the key the proposal's own scenario is the Designer's"

@@ -10,35 +10,44 @@ import stat
 import sys
 import threading
 import time
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Mapping, Sequence
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 from aiohttp.test_utils import TestServer
-from reef_client.client import ReefClientError
+from reef_client.client import ReefClient, ReefClientError
+from reef_service.test_record2dataset_designer import StandInHarness, served_tree
 
-from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
-from reef.harness.client.tasks import TaskPlay
+from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest, write_harbor_task
+from reef.harness.client.tasks import TaskPlay, TaskPlayer
 from reef.record2dataset import (
     Designer,
     DesignerAnswer,
     DesignerError,
+    DesignerPrompt,
     DesignerRequest,
+    DesignerTurn,
     DuplicateTask,
+    FixedPrompt,
     GeneratorError,
     GeneratorService,
     HarborChecks,
     HarborRuns,
+    HarnessPrompt,
     HttpGenerator,
     JobRunner,
     OracleResult,
     OracleUnavailable,
     ReadinessProbe,
+    ReefTaskPlays,
     TaskChecks,
     TaskNameConflict,
     TaskPlays,
     readiness_probes,
 )
+from reef.record2dataset.designer import TREE_PATH
 from reef.record2dataset.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
 from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
 from reef.service.deploy.generator import generator_settings
@@ -78,10 +87,18 @@ class StandInDesigner(Designer):
         text = self.scripted.pop(0) if self.scripted else reply_for(8471 + len(self.calls))
         return DesignerAnswer(text=text, record_id=f"designer-{len(self.calls)}")
 
-    def report(self, record_id, *, scenario, score, metadata) -> str:
+    def report(self, record_id, *, scenario, score, metadata, feedback=None) -> str:
         if self.report_failure is not None:
             raise self.report_failure
-        self.reports.append({"record_id": record_id, "scenario": scenario, "score": score, "metadata": dict(metadata)})
+        self.reports.append(
+            {
+                "record_id": record_id,
+                "scenario": scenario,
+                "score": score,
+                "metadata": dict(metadata),
+                "feedback": feedback,
+            }
+        )
         return f"report-{len(self.reports)}"
 
 
@@ -107,6 +124,7 @@ class StandInPlays(TaskPlays):
     def __init__(self, reward: float = 0.5) -> None:
         self.reward = reward
         self.calls: list[dict[str, object]] = []
+        self.reports: list[dict[str, object]] = []
 
     def play(self, task_path, *, scenario, model, arm, plays, is_reporting, extra_instruction_paths, tags):
         self.calls.append(
@@ -131,11 +149,129 @@ class StandInPlays(TaskPlays):
                 "",
                 ("rec",),
                 0,
-                ("rep",),
+                ("rep",) if is_reporting else (),
                 None,
+                {**tags, "arm": arm},
             )
             for n in range(plays)
         )
+
+    def report(self, plays, *, scenario, model, score_of, metadata):
+        self.reports.append(
+            {
+                "plays": tuple(plays),
+                "scenario": scenario,
+                "model": model,
+                "scores": dict(score_of),
+                "metadata": dict(metadata),
+            }
+        )
+        return tuple(
+            (
+                replace(play, report_agent_record_ids=(f"rep-{play.episode_id}",))
+                if play.episode_id in score_of and play.receipts
+                else play
+            )
+            for play in plays
+        )
+
+
+class StandInReef:
+    """A Reef service that keeps every report it gets; one that references ``rec-refused`` is refused."""
+
+    def __init__(self) -> None:
+        self.reports: list[dict[str, object]] = []
+        service = self
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_POST(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                headers = {name.lower(): value for name, value in self.headers.items()}
+                service.reports.append({"headers": headers, "body": body})
+                if self.path != "/reef/report":
+                    self.answer(404, {"error": self.path})
+                elif "rec-refused" in body.get("references", []):
+                    self.answer(400, {"error": "references must identify an existing inference"})
+                else:
+                    self.answer(200, {"agent_record_id": f"rep-{len(service.reports)}"})
+
+            def answer(self, status: int, document: dict[str, object]) -> None:
+                payload = json.dumps(document).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            def log_message(self, format: str, *args: object) -> None:
+                return None
+
+        self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+
+    @property
+    def url(self) -> str:
+        return f"http://127.0.0.1:{self.server.server_address[1]}"
+
+    def close(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+
+
+class CountingPlays(ReefTaskPlays):
+    """The real task plays, keeping the labels of every player it builds."""
+
+    def __init__(self, *, reef_url: str, work_dir: Path, token: str | None) -> None:
+        super().__init__(reef_url=reef_url, work_dir=work_dir, token=token)
+        self.built: list[dict[str, str]] = []
+
+    def player(
+        self,
+        *,
+        scenario: str,
+        model: str,
+        labels: Mapping[str, str],
+        extra_instruction_paths: Sequence[Path],
+        is_reporting: bool,
+    ) -> TaskPlayer:
+        self.built.append(dict(labels))
+        return super().player(
+            scenario=scenario,
+            model=model,
+            labels=labels,
+            extra_instruction_paths=extra_instruction_paths,
+            is_reporting=is_reporting,
+        )
+
+
+class StandInDesignerService(ReefClient):
+    """A Reef client whose harness and status answers follow a script, one entry per call; the last entry repeats."""
+
+    def __init__(
+        self,
+        *,
+        releases: Sequence[str | ReefClientError | None] = (),
+        load_ids: Sequence[str | tuple[str, int] | ReefClientError | None] = (),
+    ) -> None:
+        super().__init__("http://127.0.0.1:1", token="t")
+        self.releases = list(releases)
+        self.load_ids = list(load_ids)
+        self.calls: list[dict[str, str]] = []
+
+    def get(self, path: str, *, extra_headers: Mapping[str, str] | None = None) -> dict[str, object]:
+        self.calls.append({"path": path, **dict(extra_headers or {})})
+        script = self.releases if path == "/reef/harness" else self.load_ids
+        entry = script.pop(0) if len(script) > 1 else script[0]
+        if isinstance(entry, ReefClientError):
+            raise entry
+        if path != "/reef/harness":
+            if isinstance(entry, tuple):
+                return {"scenarios": {"designer": {"current_runtime_load_id": entry[0], "scenario_step": entry[1]}}}
+            return {"scenarios": {"designer": {"current_runtime_load_id": entry}}}
+        if entry is None:
+            raise ReefClientError(404, "no files")
+        return served_tree(DesignerPrompt(system=f"System of {entry}.").entries(), entry)
 
 
 class StandInProbe(ReadinessProbe):
@@ -160,6 +296,9 @@ def service(tmp_path: Path, **parts: object) -> tuple[GeneratorService, StandInD
         plays=plays,  # type: ignore[arg-type]
         default_model=parts.get("default_model", "served"),  # type: ignore[arg-type]
         designer_model=parts.get("designer_model"),  # type: ignore[arg-type]
+        designer_scenario=parts.get("designer_scenario"),  # type: ignore[arg-type]
+        prompts=parts.get("prompts"),  # type: ignore[arg-type]
+        turn=parts.get("turn"),  # type: ignore[arg-type]
         probes=parts.get("probes"),  # type: ignore[arg-type]
         jobs=parts.get("jobs"),  # type: ignore[arg-type]
     )
@@ -251,6 +390,223 @@ def test_a_service_with_a_designer_model_asks_the_designer_for_it_whatever_the_b
 
     run_with(built, body_without)
     assert designer.calls[0]["model"] == "m"
+
+
+def test_a_service_with_a_designer_scenario_sends_the_designers_calls_and_reports_there(tmp_path: Path) -> None:
+    built, designer, _, plays = service(tmp_path, designer_scenario="designer")
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        await generator.play(
+            written.path,
+            scenario="spade",
+            arm="plain",
+            plays=1,
+            is_reporting=True,
+            extra_instruction_files=(),
+            tags={},
+        )
+        await generator.report_proposal(proposed.record_id, scenario="spade", score=0.5, metadata={})
+        # The deployment owns the Designer's scenario, so a proposal needs none of its own.
+        await generator.job_result(await generator.call("POST", "/proposals", body={"request": {"target": "x"}}))
+        return None
+
+    run_with(built, body)
+    assert [call["scenario"] for call in designer.calls] == ["designer", "designer"]
+    assert designer.reports[0]["scenario"] == "designer"
+    assert plays.calls[0]["scenario"] == "spade", "the Designer's scenario is the Designer's alone"
+    built, designer, _, _ = service(tmp_path / "without")
+
+    async def body_without(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        await generator.report_proposal(proposed.record_id, scenario="spade", score=0.5, metadata={})
+        return None
+
+    run_with(built, body_without)
+    assert designer.calls[0]["scenario"] == "spade" and designer.reports[0]["scenario"] == "spade"
+
+
+def test_the_service_asks_the_designer_with_the_prompt_its_generation_gets(tmp_path: Path) -> None:
+    evolved = DesignerPrompt(system="Evolved system.", rules="RULES:\n- {turn_limit} commands, keep {state}.")
+    client = StandInHarness(served_tree(evolved.entries()))
+    built, designer, _, _ = service(tmp_path, prompts=HarnessPrompt(client, "designer"))
+
+    async def body(generator: HttpGenerator) -> object:
+        for index in range(2):
+            await generator.propose(request(), scenario="spade", generation=4, index=index, tags={})
+        return None
+
+    run_with(built, body)
+    assert [call["messages"][0]["content"] for call in designer.calls] == ["Evolved system."] * 2
+    assert "- 12 commands, keep {state}." in designer.calls[0]["messages"][1]["content"]
+    assert client.pulls == [{"path": "/reef/harness", "x-reef-scenario": "designer"}], "one pull per generation"
+    assert isinstance(service(tmp_path / "fixed")[0].prompts, FixedPrompt), "the fixed prompt unless a source is given"
+
+
+def test_a_generation_waits_for_the_release_the_last_generations_reports_produced_before_it_pulls_the_prompt(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    # r1 answers generation 0's look and pull, the read its first report makes, and generation 1's first two polls;
+    # r2 the third poll and the pull after it.
+    client = StandInDesignerService(releases=["r1", "r1", "r1", "r1", "r1", "r2"])
+    turn = DesignerTurn(client, is_harness_prompt=True, poll_s=0.001, wait_s=5.0)
+    built, designer, _, _ = service(
+        tmp_path, designer_scenario="designer", prompts=HarnessPrompt(client, "designer"), turn=turn
+    )
+
+    async def body(generator: HttpGenerator) -> object:
+        first = await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+        await generator.propose(request(), scenario="spade", generation=0, index=1, tags={})
+        await generator.report_proposal(first.record_id, scenario="spade", score=0.5, metadata={})
+        await generator.report_proposal("never-proposed", scenario="spade", score=0.5, metadata={})
+        for index in range(2):
+            await generator.propose(request(), scenario="spade", generation=1, index=index, tags={})
+        return None
+
+    with caplog.at_level(logging.INFO, logger="reef.record2dataset.designer"):
+        run_with(built, body)
+    systems = [call["messages"][0]["content"] for call in designer.calls]
+    assert (
+        systems == ["System of r1."] * 2 + ["System of r2."] * 2
+    ), "generation 1 asks with the release its wait ended on"
+    assert (
+        client.calls == [{"path": "/reef/harness", "x-reef-scenario": "designer"}] * 7
+    ), "generation 0: one look, one pull, one read at its first report; generation 1: three polls, then the pull"
+    assert turn.generation == 1 and turn.version == "r2"
+    assert turn.report_counts == {0: 1}, "a report for a record the service never proposed counts for no generation"
+    messages = [record.getMessage() for record in caplog.records]
+    assert "generation 0 asks the Designer at version r1" in messages
+    assert (
+        "generation 1 waits at Designer version r1 for the deployment to take generation 0 in (1 reported)" in messages
+    )
+    assert any(message.startswith("generation 1 asks the Designer at version r2 after") for message in messages)
+    assert service(tmp_path / "without")[0].turn is None, "no turn unless the deployment gives one"
+
+
+def test_a_release_that_appeared_before_the_reports_went_out_does_not_end_the_wait(tmp_path: Path) -> None:
+    # Generation 0 looks and pulls before the scenario exists (404, the fixed prompt); its first call creates the
+    # scenario and the creation release c1; its first report reads c1; generation 1 must wait for t1, the rewrite.
+    client = StandInDesignerService(releases=[None, None, "c1", "c1", "t1"])
+    turn = DesignerTurn(client, is_harness_prompt=True, poll_s=0.001, wait_s=5.0)
+    built, designer, _, _ = service(
+        tmp_path, designer_scenario="designer", prompts=HarnessPrompt(client, "designer"), turn=turn
+    )
+
+    async def body(generator: HttpGenerator) -> object:
+        first = await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+        await generator.report_proposal(first.record_id, scenario="spade", score=-1.0, metadata={})
+        await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        return None
+
+    run_with(built, body)
+    systems = [call["messages"][0]["content"] for call in designer.calls]
+    assert systems[0] != "System of c1." and systems[1] == "System of t1.", "generation 1 asks with the rewrite"
+    assert turn.reported_versions == {0: "c1"} and turn.version == "t1"
+
+
+def test_a_generation_waits_for_the_designers_runtime_load_id_to_change(caplog: pytest.LogCaptureFixture) -> None:
+    client = StandInDesignerService(load_ids=["load-1", "load-1", ReefClientError(503, "busy"), "load-2"])
+    turn = DesignerTurn(client, poll_s=0.001, wait_s=5.0)
+    turn.begin(0, "designer")
+    turn.begin(0, "designer")
+    assert turn.version == "load-1" and client.calls == [{"path": "/reef/status"}], "one look per generation"
+    turn.proposed(0, "designer-1")
+    turn.reported("designer-1", "designer")
+    turn.reported("designer-1", "designer")
+    with caplog.at_level(logging.INFO, logger="reef.record2dataset.designer"):
+        turn.begin(1, "designer")
+    assert turn.generation == 1 and turn.version == "load-2" and len(client.calls) == 4
+    messages = [record.getMessage() for record in caplog.records]
+    assert messages[0] == (
+        "generation 1 waits at Designer version load-1 for the deployment to take generation 0 in (2 reported)"
+    )
+    assert messages[1] == "the Designer's version could not be read (503): busy; the wait goes on"
+    assert messages[2].startswith("generation 1 asks the Designer at version load-2 after") and len(messages) == 3
+
+
+def test_a_weight_designers_skipped_step_moves_its_version() -> None:
+    client = StandInDesignerService(load_ids=[("load-1", 1), ("load-1", 1), ("load-1", 1), ("load-1", 2)])
+    turn = DesignerTurn(client, poll_s=0.001, wait_s=5.0)
+    turn.begin(0, "designer")
+    turn.proposed(0, "designer-1")
+    turn.reported("designer-1", "designer")
+    turn.begin(1, "designer")
+    assert turn.version == "load-1@2" and turn.reported_versions == {0: "load-1@1"} and len(client.calls) == 4
+
+
+def test_a_fixed_designer_is_looked_at_once_per_generation_and_never_waited_on(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    for client, is_harness_prompt in (
+        (StandInDesignerService(load_ids=[None]), False),
+        (StandInDesignerService(releases=[None]), True),
+        (StandInDesignerService(load_ids=[ReefClientError(500, "down")]), False),
+    ):
+        turn = DesignerTurn(client, is_harness_prompt=is_harness_prompt, poll_s=0.001, wait_s=5.0)
+        with caplog.at_level(logging.WARNING, logger="reef.record2dataset.designer"):
+            turn.begin(0, "designer")
+        turn.proposed(0, "designer-1")
+        turn.reported("designer-1", "designer")
+        started = time.monotonic()
+        turn.begin(1, "designer")
+        assert turn.version is None and len(client.calls) == 3 and time.monotonic() - started < 1.0
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert warnings == [
+        "the Designer's version could not be read (500): down; generation 0 proceeds without one",
+        "the Designer's version could not be read (500): down; generation 0's reports are timed at its start version",
+        "the Designer's version could not be read (500): down; generation 1 proceeds without one",
+    ]
+
+
+def test_a_designer_that_never_moves_is_waited_on_up_to_the_limit_and_the_generation_proceeds(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    client = StandInDesignerService(load_ids=["load-1"])
+    turn = DesignerTurn(client, poll_s=0.002, wait_s=0.02)
+    turn.begin(0, "designer")
+    turn.proposed(0, "designer-1")
+    turn.reported("designer-1", "designer")
+    with caplog.at_level(logging.WARNING, logger="reef.record2dataset.designer"):
+        started = time.monotonic()
+        turn.begin(1, "designer")
+    elapsed = time.monotonic() - started
+    assert turn.generation == 1 and turn.version == "load-1" and 0.02 <= elapsed < 1.0
+    assert len(client.calls) >= 3, "the wait polled more than once before it ran out"
+    warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+    assert len(warnings) == 1 and warnings[0].endswith("; generation 1 proceeds")
+    assert warnings[0].startswith("the Designer's deployment did not move past version load-1 within")
+
+
+def test_a_generation_after_one_that_sent_no_report_does_not_wait(caplog: pytest.LogCaptureFixture) -> None:
+    client = StandInDesignerService(load_ids=["load-1"])
+    turn = DesignerTurn(client, poll_s=0.001, wait_s=5.0)
+    turn.begin(0, "designer")
+    turn.proposed(0, "designer-1")
+    with caplog.at_level(logging.INFO, logger="reef.record2dataset.designer"):
+        turn.begin(1, "designer")
+    assert turn.version == "load-1" and len(client.calls) == 2
+    assert [record.getMessage() for record in caplog.records] == ["generation 1 asks the Designer at version load-1"]
+    with pytest.raises(DesignerError, match="poll_s must be a positive number"):
+        DesignerTurn(client, poll_s=0)
+    with pytest.raises(DesignerError, match="wait_s must be a positive number"):
+        DesignerTurn(client, wait_s=-1.0)
+
+
+def test_a_served_tree_the_prompt_cannot_read_fails_the_proposal_naming_it(tmp_path: Path) -> None:
+    client = StandInHarness({"release_id": "r1", "files": {TREE_PATH: "{not json"}})
+    built, designer, _, _ = service(tmp_path, prompts=HarnessPrompt(client, "designer"))
+
+    async def body(generator: HttpGenerator) -> object:
+        with pytest.raises(
+            GeneratorError, match=r"DesignerError: native/tree\.json of scenario 'designer' is not JSON"
+        ):
+            await generator.propose(request(), scenario="spade", generation=0, index=0, tags={})
+        return None
+
+    run_with(built, body)
+    assert designer.calls == [], "no call with a prompt nobody chose"
 
 
 def test_a_task_is_written_once_and_a_duplicate_or_a_conflict_is_refused(tmp_path: Path) -> None:
@@ -439,6 +795,127 @@ def test_a_play_runs_the_arm_with_its_files_and_comes_back_as_episodes(tmp_path:
     assert call["extra"] == [tmp_path / "tasks" / "harbor-00001-000-inspection" / "solution" / "hint.txt"]
 
 
+def test_held_plays_are_reported_through_the_service_with_their_scores(tmp_path: Path) -> None:
+    built, _, _, plays = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        proposed = await generator.propose(request(), scenario="spade", generation=1, index=0, tags={})
+        assert proposed.task is not None
+        written = await generator.write_task(proposed.task)
+        held = await generator.play(
+            written.path,
+            scenario="spade",
+            arm="plain",
+            plays=2,
+            is_reporting=False,
+            extra_instruction_files=(),
+            tags={"generation": "1"},
+        )
+        assert [play.is_reported for play in held] == [False, False]
+        assert held[0].labels == {"generation": "1", "arm": "plain"}, "the labels travel back with the play"
+        reported = await generator.report_plays(
+            held,
+            scenario="spade",
+            score_of={held[0].episode_id: 1.0},
+            metadata={"round": "generation-00001", "round_plays": 1},
+            model="m",
+        )
+        assert [play.report_agent_record_ids for play in reported] == [("rep-e0",), ()]
+        assert reported[0].labels == held[0].labels and reported[0].receipts == ("rec",)
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*scores must map"):
+            await generator.call(
+                "POST", "/plays/report", body={"scenario": "spade", "plays": [], "scores": {"e": "1"}}
+            )
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*labels"):
+            await generator.call(
+                "POST",
+                "/plays/report",
+                body={"scenario": "spade", "plays": [{**play_document(held[0]), "labels": {"arm": 1}}]},
+            )
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*plays must be a list"):
+            await generator.call("POST", "/plays/report", body={"scenario": "spade", "plays": {}})
+        return None
+
+    run_with(built, body)
+    call = plays.reports[0]
+    assert call["scenario"] == "spade" and call["model"] == "m" and call["scores"] == {"e0": 1.0}
+    assert call["metadata"] == {"round": "generation-00001", "round_plays": 1}
+    assert [play.episode_id for play in call["plays"]] == ["e0", "e1"]
+    assert call["plays"][0].receipts == ("rec",) and call["plays"][0].labels == {"generation": "1", "arm": "plain"}
+
+
+def test_reef_task_plays_report_held_plays_with_one_player_per_label_set(tmp_path: Path) -> None:
+    task_path = write_harbor_task(
+        HarborTask(
+            name="t-held",
+            instruction="List the files in the working directory and write their count to /app/count.txt.",
+            tests={"test.sh": "#!/bin/sh\nmkdir -p /logs/verifier\necho 1 > /logs/verifier/reward.txt\n"},
+            environment={"Dockerfile": "FROM python:3.12-slim\nWORKDIR /app\n"},
+        ),
+        tmp_path / "tasks",
+    )
+
+    def held(episode_id: str, labels: dict[str, str], receipts: tuple[str, ...] = ("rec-1",)) -> TaskPlay:
+        return TaskPlay(task_path, "t-held", episode_id, 1.0, {"reward": 1.0}, "", receipts, 0, (), "trials/x", labels)
+
+    plain = {"arm": "plain", "generation": "1"}
+    hint = {"arm": "hint", "generation": "1"}
+    reef = StandInReef()
+    try:
+        plays = CountingPlays(reef_url=reef.url, work_dir=tmp_path / "play", token="tok")
+        built, _, _, _ = service(tmp_path, plays=plays)
+
+        async def body(generator: HttpGenerator) -> object:
+            return await generator.report_plays(
+                [
+                    held("e1", plain),
+                    held("e2", plain, ("rec-2", "rec-3")),
+                    held("e3", hint),
+                    held("e4", {"arm": "plain"}),
+                    held("e5", plain, ()),
+                    held("e6", plain, ("rec-refused",)),
+                    held("e7", plain),
+                ],
+                scenario="spade",
+                score_of={"e1": 1.0, "e2": 0.0, "e3": 0.5, "e4": 1.0, "e5": 1.0, "e6": 1.0},
+                metadata={"round": "generation-00001", "round_plays": 2, "task": "never this"},
+            )
+
+        reported = run_with(built, body)
+    finally:
+        reef.close()
+    assert isinstance(reported, tuple)
+    assert [play.report_agent_record_ids for play in reported] == [
+        ("rep-1",),
+        ("rep-2",),
+        ("rep-3",),
+        ("rep-4",),
+        (),
+        (),
+        (),
+    ]
+    assert reported[4].error == "" and reported[6].error == "", "no receipt or no score: unreported, no failure"
+    assert reported[5].error.startswith("the report for t-held was refused (400)")
+    assert plays.built == [plain, hint, {"arm": "plain"}], "one player per distinct label set"
+    bodies = [report["body"] for report in reef.reports]
+    assert [body["score"] for body in bodies] == [1.0, 0.0, 0.5, 1.0, 1.0]
+    assert [body["references"] for body in bodies] == [
+        ["rec-1"],
+        ["rec-2", "rec-3"],
+        ["rec-1"],
+        ["rec-1"],
+        ["rec-refused"],
+    ]
+    assert [body["metadata"]["episode"]["labels"] for body in bodies] == [plain, plain, hint, {"arm": "plain"}, plain]
+    first = bodies[0]
+    assert first["metadata"]["round"] == "generation-00001" and first["metadata"]["round_plays"] == 2
+    assert first["metadata"]["task"]["name"] == "t-held", "extra metadata never replaces the task"
+    assert first["metadata"]["episode"]["id"] == "e1" and first["metadata"]["episode"]["trial_uri"] == "trials/x"
+    assert first["feedback"] == "verifier reward 1.0 on t-held"
+    headers = reef.reports[0]["headers"]
+    assert headers["x-reef-scenario"] == "spade" and headers["authorization"] == "Bearer tok"
+
+
 def test_a_manifest_splits_the_named_tasks_under_the_root(tmp_path: Path) -> None:
     built, _, _, _ = service(tmp_path)
 
@@ -463,11 +940,36 @@ def test_a_proposal_report_reaches_the_designer(tmp_path: Path) -> None:
     built, designer, _, _ = service(tmp_path)
 
     async def body(generator: HttpGenerator) -> object:
-        return await generator.report_proposal("designer-9", scenario="spade", score=0.25, metadata={"regret": 0.25})
+        first = await generator.report_proposal("designer-9", scenario="spade", score=0.25, metadata={"regret": 0.25})
+        await generator.report_proposal(
+            "designer-9",
+            scenario="spade",
+            score=-1.0,
+            metadata={"refusal": "no json"},
+            feedback={"task": None, "round": {"generation": 2, "previous": None}},
+        )
+        with pytest.raises(GeneratorError, match=r"refused \(400\).*feedback must be a string or an object"):
+            await generator.call(
+                "POST", "/proposals/designer-9/report", body={"scenario": "spade", "score": 0.0, "feedback": 3}
+            )
+        return first
 
     assert run_with(built, body) == "report-1"
     assert designer.reports == [
-        {"record_id": "designer-9", "scenario": "spade", "score": 0.25, "metadata": {"regret": 0.25}}
+        {
+            "record_id": "designer-9",
+            "scenario": "spade",
+            "score": 0.25,
+            "metadata": {"regret": 0.25},
+            "feedback": None,
+        },
+        {
+            "record_id": "designer-9",
+            "scenario": "spade",
+            "score": -1.0,
+            "metadata": {"refusal": "no json"},
+            "feedback": {"task": None, "round": {"generation": 2, "previous": None}},
+        },
     ]
 
 
@@ -594,6 +1096,12 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
     assert play_from_document(play_document(play)) == play
     with pytest.raises(ValueError, match="failed_calls"):
         play_from_document({**play_document(play), "failed_calls": "2"})
+    labelled = TaskPlay(tmp_path / "t", "t", "e2", 1.0, {"reward": 1.0}, "", ("r1",), 0, (), None, {"arm": "plain"})
+    assert play_document(labelled)["labels"] == {"arm": "plain"}
+    assert play_from_document(play_document(labelled)) == labelled
+    assert play_from_document(play_document(play)).labels == {}
+    with pytest.raises(ValueError, match="labels must map names to text"):
+        play_from_document({**play_document(play), "labels": {"arm": 1}})
 
 
 def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:
@@ -607,6 +1115,7 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
         ({"tasks-root": "/tmp/t", "agent": {"kwargs": {}}}, "Harbor agent name"),
         ({"tasks-root": "/tmp/t", "port": 0}, "port must be"),
         ({"tasks-root": "/tmp/t", "tasks_root": "/tmp/u"}, "twice"),
+        ({"tasks-root": "/tmp/t", "designer-scenario": " "}, "designer-scenario must name a scenario"),
     ):
         with pytest.raises(ValueError, match=message):
             generator_settings(section)

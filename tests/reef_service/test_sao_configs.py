@@ -382,7 +382,9 @@ def test_user_facing_example_deployments_are_discovered() -> None:
     assert paths == {
         "recipes/basic/external-provider.yaml",
         "recipes/beta/coral/examples/coral_demo/serve.yaml",
+        "recipes/beta/spade/examples/designer-harness/serve.yaml",
         "recipes/beta/spade/examples/tinker/serve.yaml",
+        "recipes/beta/spade/examples/designer-tinker/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",

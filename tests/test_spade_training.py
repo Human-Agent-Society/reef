@@ -1,4 +1,4 @@
-"""The SPADE processor: episodes grouped by task and batched, the Designer's generations run through a generator."""
+"""SPADE training data: the Reasoning Agent's episodes grouped by task, the Designer's reports by generation, and the generations run through a generator."""
 
 from __future__ import annotations
 
@@ -7,13 +7,15 @@ import json
 import shutil
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime
 
-from recipes.beta.spade import SpadeObjective, SpadeProcessor, SpadeRecipe
-from recipes.beta.spade.processor import GenerationJob, reported_task_name
+from recipes.beta.spade import SpadeDesignerProcessor, SpadeDesignerRecipe, SpadeObjective, SpadeProcessor, SpadeRecipe
+from recipes.beta.spade.designer_processor import generation_label, reported_generation
+from recipes.beta.spade.processor import REFUSAL_SCORE, GenerationJob, reported_task_name
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import (
@@ -71,6 +73,7 @@ def report(
     *,
     arm: str | None = "plain",
     role: str | None = None,
+    **extra: object,
 ) -> AgentRecord:
     payload: dict[str, object] = {"score": score, "feedback": f"verifier reward {score}", "references": [reference]}
     metadata: dict[str, object] = {}
@@ -80,6 +83,7 @@ def report(
         metadata["episode"] = {"id": record_id, "labels": {"arm": arm}}
     if role is not None:
         metadata["role"] = role
+    metadata.update(extra)
     if metadata:
         payload["metadata"] = metadata
     return AgentRecord.create(
@@ -156,6 +160,45 @@ def test_decide_group_waits_for_rollouts_per_task_episodes() -> None:
     assert p.decide_group("t", one * 3) is GroupDecision.READY
 
 
+def test_a_rounds_plays_are_one_batch_ordered_by_task_whatever_tasks_per_step_says() -> None:
+    p = processor(tasks_per_step=4, rollouts_per_task=3)
+    played(p, "harbor-00003-000", 9, 1.0, arm="hint", generation=3)
+    assert not p.ready()
+    assert "rec-harbor-00003-000-9" in p.retention_decision().releasable_agent_record_ids, "the hint arm is released"
+    plays = [
+        ("harbor-00003-001", 1.0),
+        ("harbor-00003-000", 0.0),
+        ("harbor-00003-001", 0.0),
+        ("harbor-00003-000", 1.0),
+    ]
+    stamp = {"generation": 3, "round": "generation-00003", "round_plays": len(plays)}
+    for index, (task, score) in enumerate(plays):
+        played(p, task, index, score, **stamp)
+        assert p.ready() == (index == len(plays) - 1), "a round is ready at its size, not at rollouts_per_task"
+    batch = p.build_batch()
+    assert [sample.group_id for sample in batch.items] == ["harbor-00003-000"] * 2 + ["harbor-00003-001"] * 2
+    assert [sample.metadata["reward"] for sample in batch.items] == [0.0, 1.0, 1.0, 0.0]
+    assert all(sample.metadata["round"] == "generation-00003" for sample in batch.items)
+    assert all(sample.metadata["round_plays"] == 4 for sample in batch.items)
+    assert resolve_objective("spade").prepare(batch, {}).advantages == (-1.0, 1.0, 1.0, -1.0)
+    p.acknowledge(batch.batch_id)
+    assert not p.ready()
+    played(p, "harbor-00003-002", 0, 1.0)
+    played(p, "harbor-00003-002", 1, 0.0)
+    played(p, "harbor-00003-002", 2, 0.0)
+    assert not p.ready(), "a report without a round groups by task, as before"
+
+
+@pytest.mark.parametrize("round_plays", [0, -2, "4", 2.0, True, None])
+def test_a_round_report_without_its_size_is_refused(round_plays: object) -> None:
+    p = processor()
+    stamp: dict[str, object] = {"round": "generation-00003"}
+    if round_plays is not None:
+        stamp["round_plays"] = round_plays
+    with pytest.raises(ValueError, match="round_plays"):
+        played(p, "harbor-00003-000", 0, 1.0, **stamp)
+
+
 @pytest.mark.parametrize(
     ("config", "message"),
     [
@@ -219,6 +262,7 @@ def test_the_recipe_binds_the_processor_the_objective_and_its_schedule() -> None
     config = recipe.processor_config()
     assert config["tasks_per_step"] == 4 and config["rollouts_per_task"] == 4 and config["scaffold_tolerance"] == 8
     assert config["generations"] == 0 and config["generator_url"] == "" and config["skills"] == ()
+    assert config["report_plays_after_generation"] is False, "each play reports as it ends unless asked otherwise"
     with pytest.raises(ValueError, match="scaffold_tolerance"):
         SpadeRecipe(training_runtime=training_runtime, runtime=runtime, scaffold_tolerance=-1)
     with pytest.raises(ValueError, match="generator_url"):
@@ -243,6 +287,153 @@ def test_the_assembly_spans_an_episodes_turns_and_realigns_the_think_scaffold() 
     assembly = processor()._assembly
     assert assembly.accept_multi_turn and assembly.scaffold_tolerance == 8
     assert processor(scaffold_tolerance=2)._assembly.scaffold_tolerance == 2
+
+
+# ------------------------------------------------------------------------------------------- the Designer's half
+
+
+def designer_report(record_id: str, reference: str, score: float, **metadata: object) -> AgentRecord:
+    payload: dict[str, object] = {
+        "score": score,
+        "feedback": {"task": None, "round": {"generation": 0, "previous": None}},
+        "references": [reference],
+    }
+    if metadata:
+        payload["metadata"] = dict(metadata)
+    return AgentRecord.create(
+        scenario="spade", request_type=RequestType.REPORT, payload=payload, agent_record_id=record_id
+    )
+
+
+def designer_processor(**config: object) -> SpadeDesignerProcessor:
+    return SpadeDesignerProcessor(ProcessorContext("spade", dict(config)))
+
+
+def proposed(
+    processor: SpadeDesignerProcessor, generation: int, index: int, score: float, proposals: int, **extra: object
+) -> None:
+    processor.ingest(inference(f"designer-{generation}-{index}"))
+    processor.ingest(
+        designer_report(
+            f"regret-{generation}-{index}",
+            f"designer-{generation}-{index}",
+            score,
+            generation=generation,
+            proposals=proposals,
+            **extra,
+        )
+    )
+
+
+def test_reported_generation_reads_the_generations_report_metadata() -> None:
+    assert reported_generation(designer_report("r", "i", 0.5, generation=3, proposals=8)) == (3, 8)
+    assert generation_label(3) == "generation-00003" and generation_label(3, "repair") == "generation-00003-repair"
+
+
+def test_a_generations_proposals_form_a_group_and_a_refusal_is_a_member() -> None:
+    p = designer_processor()
+    proposed(p, 0, 0, 0.5, 3, designer_version={"kind": "runtime", "id": "load-7"}, opponent={"model": "m"})
+    proposed(p, 0, 1, REFUSAL_SCORE, 3, refusal="reply refused: no json block")
+    assert not p.ready(), "two of three proposals are not a generation"
+    assert p.status() == {"ready_groups": 0, "groups": {"0": 2}}
+    proposed(p, 0, 2, -0.25, 3)
+    assert p.ready() and p.status() == {"ready_groups": 1, "groups": {"0": 3}}
+    batch = p.build_batch()
+    assert batch.batch_id == "spade:spade-designer:1"
+    groups = trajectory_groups(batch)
+    assert [[sample.group_id for sample in group] for group in groups] == [["generation-00000"] * 3]
+    first = groups[0][0]
+    assert first.metadata["generation"] == 0 and first.metadata["proposals"] == 3
+    assert first.metadata["designer_version"] == {"kind": "runtime", "id": "load-7"}
+    assert first.metadata["opponent"] == {"model": "m"} and "refusal" not in first.metadata
+    assert first.metadata["feedback"] == {"task": None, "round": {"generation": 0, "previous": None}}
+    assert [sample.metadata["reward"] for sample in groups[0]] == [0.5, -1.0, -0.25]
+    assert first.metadata["references"] == ["designer-0-0"], "one chat call, one reference, no multi turn assembly"
+    p.acknowledge(batch.batch_id)
+    assert p.status() == {"ready_groups": 0, "groups": {}} and not p.ready()
+
+
+def test_designer_proposals_compare_within_one_generation_and_one_skill() -> None:
+    p = designer_processor()
+    proposed(p, 2, 0, 0.5, 3, skill="inspection")
+    proposed(p, 2, 1, 0.0, 3, skill="repair")
+    assert p.status() == {"ready_groups": 0, "groups": {"2": 2}}, "a generation is one unit, ready at proposals"
+    proposed(p, 2, 2, 1.0, 3, skill="repair")
+    batch = p.build_batch()
+    groups = trajectory_groups(batch)
+    assert [[sample.group_id for sample in group] for group in groups] == [
+        ["generation-00002-inspection"],
+        ["generation-00002-repair", "generation-00002-repair"],
+    ]
+    signal = resolve_objective("spade").prepare(batch, {})
+    assert signal.action == "train" and signal.advantages == (0.0, -1.0, 1.0)
+    assert signal.metrics["constant_groups"] == 1, "a skill with one proposal has no relative regret"
+
+
+def test_generations_per_step_batches_that_many_complete_generations() -> None:
+    p = designer_processor(generations_per_step=2)
+    for index, score in enumerate((1.0, 0.0)):
+        proposed(p, 4, index, score, 2)
+    assert not p.ready(), "one complete generation is not a batch of two"
+    proposed(p, 5, 0, 0.5, 2)
+    assert not p.ready()
+    proposed(p, 5, 1, 0.5, 2)
+    assert p.ready()
+    groups = trajectory_groups(p.build_batch())
+    assert [[sample.group_id for sample in group] for group in groups] == [
+        ["generation-00004"] * 2,
+        ["generation-00005"] * 2,
+    ]
+
+
+@pytest.mark.parametrize(
+    ("metadata", "key"),
+    [
+        ({"proposals": 2}, "generation"),
+        ({"generation": 1}, "proposals"),
+        ({"generation": 1, "proposals": 0}, "proposals"),
+        ({"generation": True, "proposals": 2}, "generation"),
+    ],
+)
+def test_a_designer_report_without_its_generation_or_size_is_refused(metadata: dict[str, object], key: str) -> None:
+    p = designer_processor()
+    p.ingest(inference("designer-x"))
+    with pytest.raises(ValueError, match=rf"requires metadata\.{key}"):
+        p.ingest(designer_report("regret-x", "designer-x", 0.5, **metadata))
+    p.ingest(inference("designer-y"))
+    with pytest.raises(ValueError, match=r"requires metadata\.generation and metadata\.proposals"):
+        p.ingest(designer_report("regret-y", "designer-y", 0.5))
+
+
+def test_a_generations_per_step_that_cannot_train_is_refused() -> None:
+    with pytest.raises(ValueError, match="generations_per_step must be positive"):
+        designer_processor(generations_per_step=0)
+
+
+def test_the_objective_centers_regret_within_one_generation() -> None:
+    p = designer_processor()
+    for index, score in enumerate((0.5, 0.5, -0.5, -0.5)):
+        proposed(p, 7, index, score, 4)
+    signal = resolve_objective("spade").prepare(p.build_batch(), {})
+    assert signal.action == "train" and signal.advantages == (1.0, 1.0, -1.0, -1.0)
+    assert signal.metrics["constant_groups"] == 0
+
+
+def test_the_designer_recipe_binds_its_processor_the_shared_objective_and_its_schedule() -> None:
+    spec = SpadeDesignerRecipe.training_spec()
+    assert spec.processor is SpadeDesignerProcessor and spec.objective == "spade"
+    assert spec.loss_family == "importance_sampling"
+    assert spec.scheduling.unit == "sample" and spec.scheduling.batch_size == "actual"
+    assert SpadeDesignerRecipe.report_type.fget(SpadeDesignerRecipe) is ScoredRolloutReport  # type: ignore[union-attr]
+    runtime = InferenceProxyRuntime(model_path="Qwen/Qwen3-8B", base_url="http://127.0.0.1:8001")
+    training_runtime = StubTrainingRuntime()
+    recipe = SpadeDesignerRecipe(training_runtime=training_runtime, runtime=runtime)
+    assert recipe.name == "spade_designer" and recipe.processor_config() == {"generations_per_step": 1}
+    assert SpadeDesignerRecipe(
+        training_runtime=training_runtime, runtime=runtime, generations_per_step=3
+    ).processor_config() == {"generations_per_step": 3}
+    with pytest.raises(ValueError, match="generations_per_step"):
+        SpadeDesignerRecipe(training_runtime=training_runtime, runtime=runtime, generations_per_step=0)
 
 
 # ----------------------------------------------------------------------------------------- the generation half
@@ -313,8 +504,11 @@ class StandInGenerator(Generator):
         self.checks: list[Path] = []
         self.plays: list[dict[str, object]] = []
         self.reports: list[dict[str, object]] = []
+        self.play_reports: list[dict[str, object]] = []
         self.deleted: list[str] = []
         self.manifests: list[dict[str, object]] = []
+        # The order of the play and report calls, which says whether a play was held.
+        self.sequence: list[str] = []
         self.episodes = 0
 
     async def propose(
@@ -339,8 +533,16 @@ class StandInGenerator(Generator):
         port = 8471 if self.same_port else 8471 + len(self.proposals)
         return ProposedTask(record_id=record_id, task=task_for(name, record_id, port, skill=request.skill), refusal="")
 
-    async def report_proposal(self, record_id, *, scenario, score, metadata) -> str:
-        self.reports.append({"record_id": record_id, "scenario": scenario, "score": score, "metadata": dict(metadata)})
+    async def report_proposal(self, record_id, *, scenario, score, metadata, feedback=None) -> str:
+        self.reports.append(
+            {
+                "record_id": record_id,
+                "scenario": scenario,
+                "score": score,
+                "metadata": dict(metadata),
+                "feedback": feedback,
+            }
+        )
         return f"report-{len(self.reports)}"
 
     async def write_task(self, task: HarborTask) -> WrittenTask:
@@ -376,6 +578,7 @@ class StandInGenerator(Generator):
         return OracleResult(is_solvable=False, reason="the oracle scored 0", oracle_reward=0.0)
 
     async def play(self, task_path, *, scenario, arm, plays, is_reporting, extra_instruction_files, tags, model=None):
+        self.sequence.append("play")
         self.plays.append(
             {
                 "task": task_path.name,
@@ -403,9 +606,30 @@ class StandInGenerator(Generator):
                     failed_calls=0,
                     report_agent_record_ids=(f"rep-{self.episodes}",) if is_reporting and not self.play_error else (),
                     trial_uri=None,
+                    labels={**tags, "arm": arm},
                 )
             )
         return tuple(rows)
+
+    async def report_plays(self, plays, *, scenario, score_of, metadata, model=None):
+        self.sequence.append("report_plays")
+        self.play_reports.append(
+            {
+                "plays": tuple(plays),
+                "scenario": scenario,
+                "scores": dict(score_of),
+                "metadata": dict(metadata),
+                "model": model,
+            }
+        )
+        return tuple(
+            (
+                replace(play, report_agent_record_ids=(f"rep-{play.episode_id}",))
+                if play.episode_id in score_of and play.receipts
+                else play
+            )
+            for play in plays
+        )
 
     async def write_manifest(self, *, generation, names: Sequence[str], eval_fraction, seed) -> Path:
         self.manifests.append(
@@ -555,7 +779,16 @@ def test_the_first_look_for_a_batch_runs_generation_zero_end_to_end(tmp_path: Pa
     assert [r["score"] for r in generator.reports] == [0.5, 0.5, 0.5]
     metadata = generator.reports[0]["metadata"]
     assert metadata["task"]["name"] == names[0] and metadata["outcome"] == "frontier" and metadata["regret"] == 0.5
-    assert metadata["skill"] == "inspection" and metadata["generation"] == 0
+    assert metadata["skill"] == "inspection" and metadata["generation"] == 0 and metadata["proposals"] == 3
+    assert generator.reports[0]["feedback"] == {
+        "task": names[0],
+        "refusal": "",
+        "outcome": "frontier",
+        "regret": 0.5,
+        "return_without_hint": 0.25,
+        "return_with_hint": 0.75,
+        "round": {"generation": 0, "previous": None},
+    }
 
     assert generator.manifests == [{"generation": 0, "names": names, "eval_fraction": 0.3, "seed": 7}]
     manifest = read_split_manifest(tmp_path / "tasks" / "manifest-00000.json")
@@ -569,6 +802,76 @@ def test_the_first_look_for_a_batch_runs_generation_zero_end_to_end(tmp_path: Pa
         "report-2",
         "report-3",
     ]
+
+
+def test_without_the_option_every_play_reports_as_it_ends(tmp_path: Path) -> None:
+    p, generator = generating(tmp_path, skills=())
+    assert not looked(p)
+    assert all(call["is_reporting"] for call in generator.plays) and generator.play_reports == []
+    assert generator.sequence == ["play"] * 6
+    document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
+    assert document["held_plays_reported"] is None
+    assert [task["held_plays"] for task in document["tasks"]] == [{"plain": 0, "hint": 0}] * 3
+
+
+def posted(p: SpadeProcessor, play: TaskPlay, metadata: Mapping[str, object]) -> None:
+    """The report the task player posts for a held play, ingested after its receipt."""
+    p.ingest(inference(play.receipts[0]))
+    payload: dict[str, object] = {
+        "score": play.reward,
+        "feedback": f"verifier reward {play.reward} on {play.name}",
+        "references": list(play.receipts),
+        "metadata": {
+            **metadata,
+            "task": {"name": play.name, "path": str(play.task_path), "digest": "ab" * 32},
+            "episode": {"id": play.episode_id, "labels": dict(play.labels)},
+        },
+    }
+    p.ingest(
+        AgentRecord.create(
+            scenario="spade",
+            request_type=RequestType.REPORT,
+            payload=payload,
+            agent_record_id=f"rep-{play.episode_id}",
+        )
+    )
+
+
+def test_held_plays_report_as_one_round_once_the_generation_lands_and_train_as_one_batch(tmp_path: Path) -> None:
+    p, generator = generating(tmp_path, skills=(), report_plays_after_generation=True)
+    assert not looked(p)
+    assert generator.sequence == ["play"] * 6 + ["report_plays"] * 2, "nothing is reported until the loop ends"
+    assert not any(call["is_reporting"] for call in generator.plays)
+    names = ["harbor-00000-000", "harbor-00000-001", "harbor-00000-002"]
+    plain, hint = generator.play_reports
+    assert plain["scenario"] == "spade" and plain["model"] == "Qwen/Qwen3-8B"
+    assert plain["metadata"] == {"arm": "plain", "generation": 0, "round": "generation-00000", "round_plays": 6}
+    assert [play.name for play in plain["plays"]] == [name for name in names for _ in range(2)]
+    assert all(play.labels == {"generation": "0", "arm": "plain"} for play in plain["plays"])
+    assert plain["scores"] == {play.episode_id: 0.25 for play in plain["plays"]}, "the verifier's reward is the score"
+    assert hint["metadata"] == {"arm": "hint", "generation": 0}
+    assert [play.name for play in hint["plays"]] == names
+    assert hint["scores"] == {play.episode_id: 0.75 for play in hint["plays"]}
+    assert [r["score"] for r in generator.reports] == [0.5, 0.5, 0.5], "the Designer's regret is measured as before"
+    document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
+    assert document["held_plays_reported"] == 9
+    assert [task["held_plays"] for task in document["tasks"]] == [{"plain": 2, "hint": 1}] * 3
+
+    for play in hint["plays"]:
+        posted(p, play, hint["metadata"])
+    assert not p.ready()
+    released = p.retention_decision().releasable_agent_record_ids
+    assert {play.receipts[0] for play in hint["plays"]} <= released, "the hint reports are released"
+    for count, play in enumerate(plain["plays"], 1):
+        posted(p, play, plain["metadata"])
+        assert p.ready() == (count == 6), "two complete tasks are no batch of two: the round is one unit"
+    batch = p.build_batch()
+    assert [item.group_id for item in batch.items] == [name for name in names for _ in range(2)]
+    assert all(item.metadata["round"] == "generation-00000" for item in batch.items)
+    p.acknowledge(batch.batch_id)
+    assert not looked(p)
+    assert p.status()["generation"]["completed"] == 2, "the round was the one batch generation 1 waited for"
+    assert len(generator.play_reports) == 4
 
 
 def test_the_next_generation_waits_for_batches_per_generation_and_carries_the_experience(tmp_path: Path) -> None:
@@ -591,6 +894,10 @@ def test_the_next_generation_waits_for_batches_per_generation_and_carries_the_ex
     text = generator.proposals[3]["request"].experience_text
     assert "harbor-00000-000: without hint +0.25, with hint +0.75" in text and "Within reach" in text
     assert generator.proposals[3]["tags"] == {"role": "designer", "generation": "1"}
+    assert generator.reports[3]["feedback"]["round"] == {
+        "generation": 1,
+        "previous": {"generation": 0, "mean_regret": 0.5, "measured": 3, "refused": 0},
+    }
     assert sorted(entry.name for entry in (tmp_path / "state").iterdir()) == [
         "generation-00000.json",
         "generation-00001.json",
@@ -628,20 +935,46 @@ def test_a_restarted_processor_carries_on_from_the_reports_on_disk(tmp_path: Pat
     assert not looked(again)
     assert generator.proposals[0]["generation"] == 1
     assert "harbor-00000-000-inspection" in generator.proposals[0]["request"].experience_text
+    assert generator.reports[0]["feedback"]["round"]["previous"] == {
+        "generation": 0,
+        "mean_regret": 0.5,
+        "measured": 3,
+        "refused": 0,
+    }, "the last generation's summary is read back from its report on disk"
     assert again.status()["generation"]["completed"] == 2
     assert not looked(again), "the cap is reached"
     assert len(generator.proposals) == 3
 
 
-def test_refused_proposals_are_reported_as_zero_and_never_stay_under_the_root(tmp_path: Path) -> None:
+def test_refused_proposals_are_reported_at_the_refusal_floor_and_never_stay_under_the_root(tmp_path: Path) -> None:
     generator = StandInGenerator(tmp_path / "tasks", refusals={0: "reply refused: no json"}, same_port=True)
-    p, _ = generating(tmp_path, generator, skills=(), count=3)
+    p, _ = generating(tmp_path, generator, skills=(), count=3, tasks_per_step=1)
     assert not looked(p)
     document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
     refusals = [proposal["refusal"] for proposal in document["proposals"]]
     assert refusals == ["reply refused: no json", "", "refused: duplicate of a task already under the root"]
-    assert [r["score"] for r in generator.reports] == [0.0, 0.5, 0.0]
+    assert [r["score"] for r in generator.reports] == [REFUSAL_SCORE, 0.5, REFUSAL_SCORE] and REFUSAL_SCORE == -1.0
     assert generator.reports[0]["metadata"]["refusal"] == "reply refused: no json"
+    assert generator.reports[0]["metadata"]["proposals"] == 3 and "task" not in generator.reports[0]["metadata"]
+    assert generator.reports[0]["feedback"] == {
+        "task": None,
+        "refusal": "reply refused: no json",
+        "outcome": None,
+        "regret": None,
+        "return_without_hint": None,
+        "return_with_hint": None,
+        "round": {"generation": 0, "previous": None},
+    }
+    played(p, "harbor-00000-001", 0, 1.0)
+    played(p, "harbor-00000-001", 1, 0.0)
+    p.acknowledge(p.build_batch().batch_id)
+    assert not looked(p), "a batch trained, so generation 1 runs and its reports carry generation 0's summary"
+    assert generator.reports[3]["feedback"]["round"]["previous"] == {
+        "generation": 0,
+        "mean_regret": 0.5,
+        "measured": 1,
+        "refused": 2,
+    }
     assert [task["name"] for task in document["tasks"]] == ["harbor-00000-001"]
     assert sorted(e.name for e in (tmp_path / "tasks").iterdir() if e.name != ".staging") == [
         "harbor-00000-001",
@@ -668,7 +1001,7 @@ def test_a_rerun_generation_replaces_the_tasks_its_earlier_attempt_wrote(tmp_pat
     document = json.loads((tmp_path / "again" / "state" / "generation-00000.json").read_text())
     assert document["proposals"][0]["refusal"].startswith("refused: a different task holds the name harbor-00000-000")
     assert [task["name"] for task in document["tasks"]] == ["harbor-00000-001", "harbor-00000-002"]
-    assert [r["score"] for r in generator.reports] == [0.0, 0.5, 0.5] and document["error"] == ""
+    assert [r["score"] for r in generator.reports] == [REFUSAL_SCORE, 0.5, 0.5] and document["error"] == ""
 
 
 def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path: Path) -> None:
@@ -676,7 +1009,7 @@ def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path:
     p, generator = generating(tmp_path, refusing, count=1, generations=1)
     assert not looked(p)
     assert generator.deleted == ["harbor-00000-000-inspection"] and generator.plays == []
-    assert generator.reports[0]["score"] == 0.0
+    assert generator.reports[0]["score"] == REFUSAL_SCORE
     assert generator.reports[0]["metadata"]["refusal"] == "oracle check refused: the oracle scored 0"
     assert generator.manifests == []
 
@@ -688,6 +1021,18 @@ def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path:
     ], "the hint arm is not played for a task that cannot run"
     assert unplayable.deleted == ["harbor-00000-000-inspection"]
     assert unplayable.reports[0]["metadata"]["refusal"].startswith("the Reasoning Agent could not play the task")
+
+
+def test_a_task_whose_hint_hurt_is_reported_with_its_negative_regret_above_a_refusal(tmp_path: Path) -> None:
+    hurting = StandInGenerator(tmp_path / "tasks", plain=0.75, hint=0.25)
+    p, generator = generating(tmp_path, hurting, count=1, generations=1, skills=())
+    assert not looked(p)
+    report = generator.reports[0]
+    assert report["score"] == -0.5 and report["metadata"]["regret"] == -0.5, "the regret is reported as measured"
+    assert report["feedback"]["regret"] == -0.5 and report["feedback"]["outcome"] == "frontier"
+    assert report["score"] > REFUSAL_SCORE, "a refusal stays below a task whose hint hurt"
+    document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
+    assert document["tasks"][0]["regret"] == -0.5
 
 
 def test_a_dropped_batch_does_not_count_toward_the_next_generation(tmp_path: Path) -> None:
@@ -787,3 +1132,76 @@ def test_the_real_worker_runs_a_generation_off_the_trainers_thread(tmp_path: Pat
         assert p.operational_metrics()["generations_completed"] == 1
     finally:
         p.close()
+
+
+def turn(record_id: str, tokens: list[int], loss_mask: list[int]) -> AgentRecord:
+    payload = {
+        "messages": [{"role": "user", "content": "ls"}],
+        "response": {"choices": [{"message": {"role": "assistant", "content": "ok"}}]},
+        "training": {
+            "tokens": tokens,
+            "loss_mask": loss_mask,
+            "rollout_log_probs": [-0.1] * sum(loss_mask),
+            "runtime_load_id": "r1",
+        },
+    }
+    return AgentRecord.create(
+        scenario="spade", request_type=RequestType.INFERENCE, payload=payload, agent_record_id=record_id
+    )
+
+
+def forked_episode(processor: SpadeProcessor, task: str, tag: str, **metadata: object) -> None:
+    """Two turns whose second prompt does not extend the first: no sample can be built from them."""
+    processor.ingest(turn(f"{tag}-a", [1, 2, 3], [0, 1, 1]))
+    processor.ingest(turn(f"{tag}-b", [9, 9, 9, 4], [0, 0, 0, 1]))
+    payload: dict[str, object] = {
+        "score": 1.0,
+        "feedback": "verifier reward 1.0",
+        "references": [f"{tag}-a", f"{tag}-b"],
+        "metadata": {"task": {"name": task, "path": f"/tasks/{task}", "digest": "ab" * 32}, **metadata},
+    }
+    processor.ingest(
+        AgentRecord.create(
+            scenario="spade", request_type=RequestType.REPORT, payload=payload, agent_record_id=f"{tag}-rep"
+        )
+    )
+
+
+def test_an_episode_that_cannot_be_assembled_is_given_up_and_still_counts_toward_its_task_group() -> None:
+    p = processor(tasks_per_step=1, rollouts_per_task=2)
+    played(p, "harbor-00000-000", 0, 1.0)
+    forked_episode(p, "harbor-00000-000", "fork")
+    assert p.status()["unassembled_episodes"] == 1
+    assert p.ready(), "one sample plus one given up episode complete a group of two"
+    batch = p.build_batch()
+    assert [sample.group_id for sample in batch.items] == ["harbor-00000-000"]
+    releasable = p.retention_decision().releasable_agent_record_ids
+    assert {"fork-a", "fork-b", "fork-rep"} <= releasable, "the given up episode and its report are released"
+
+
+def test_a_given_up_episode_counts_toward_its_round_unit() -> None:
+    p = processor(tasks_per_step=4, rollouts_per_task=3)
+    p.ingest(inference("rec-0"))
+    p.ingest(report("rep-0", "rec-0", "harbor-00003-000", 1.0, round="generation-00003", round_plays=2))
+    assert not p.ready()
+    forked_episode(p, "harbor-00003-001", "fork", round="generation-00003", round_plays=2)
+    assert p.ready(), "the round's two plays arrived, one of them given up"
+    assert [sample.group_id for sample in p.build_batch().items] == ["harbor-00003-000"]
+
+
+def test_the_designer_processor_keeps_the_engines_default_and_retries_an_unassembled_report() -> None:
+    p = designer_processor()
+    p.ingest(turn("d-a", [1, 2, 3], [0, 1, 1]))
+    p.ingest(turn("d-b", [9, 9, 9, 4], [0, 0, 0, 1]))
+    payload: dict[str, object] = {
+        "score": 0.5,
+        "feedback": "SPADE Designer regret",
+        "references": ["d-a", "d-b"],
+        "metadata": {"generation": 1, "proposals": 1},
+    }
+    report_record = AgentRecord.create(
+        scenario="spade", request_type=RequestType.REPORT, payload=payload, agent_record_id="d-rep"
+    )
+    with pytest.raises(ValueError, match="cannot assemble"):
+        p.ingest(report_record)
+    assert "d-rep" in p.retention_decision().protected_agent_record_ids, "retained for the next drain"
