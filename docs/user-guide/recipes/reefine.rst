@@ -128,6 +128,11 @@ documentation on the network, and two tools of its own:
   every image, speech, embedding or decision call it made with the
   provider's error when one failed, and the end of its stderr.
 
+While it runs, the request page's Activity lists each tool the agent calls,
+each check and trial with its result, and each image or speech call with the
+provider's status, so a long run shows what it is doing; opening the
+``/reef-harness`` spinner in pi lists the latest few.
+
 When the agent stops, its files are read back into the step's mutations,
 ``requires`` items and design, and the review runs as for the text
 proposer. The agent's session log lands in the step record as

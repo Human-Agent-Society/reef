@@ -48,11 +48,12 @@ class StepProposal:
 
 
 class ProposerCalls(ABC):
-    """The step's model-call budget and record, for traffic a proposer makes outside ``models``.
+    """The step's model-call budget, record and live activity, for traffic a proposer makes outside ``models``.
 
     An agent proposer's own process reaches its model through a gateway, not
     through the bindings; the gateway spends from and records into the same
-    per-step budget and ``proposer.json`` the bindings do.
+    per-step budget and ``proposer.json`` the bindings do, and notes what the
+    agent does as it does it, for the request page to show while the step runs.
     """
 
     @abstractmethod
@@ -62,6 +63,11 @@ class ProposerCalls(ABC):
     @abstractmethod
     def record(self, entry: Mapping[str, Any]) -> None:
         """Append one call to the step's proposer record."""
+
+    @abstractmethod
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """Add one line to the step's live activity: ``kind`` is what acted (``model``, ``agent``, ``check``,
+        ``trial``, ``provider``, ``proposer``), ``text`` what it did, ``failed`` when that went wrong."""
 
 
 @dataclass(frozen=True)

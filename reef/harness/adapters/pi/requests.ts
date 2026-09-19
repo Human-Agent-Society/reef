@@ -53,6 +53,8 @@ const REQUESTS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // at the cap.
 const WATCH_INTERVAL_MS = 5000;
 const WATCH_CAP_MS = 30 * 60 * 1000;
+// How many of the proposer's latest moves the opened spinner lists; the request page has them all.
+const ACTIVITY_LINES = 4;
 // Every request to reef gives up after this: a hung connection must not stall a command or the watch's ticks.
 const FETCH_TIMEOUT_MS = 10000;
 // The custom message type the report is appended to the session as; pi renders plain text content itself.
@@ -673,6 +675,11 @@ export default function requests(pi) {
   // looking in costs no request and never blocks the session.
   const watchLines = () => {
     const lines = [`  asked: ${watch.ask}`, `  request: ${watch.recordId.slice(0, 8)}`];
+    // The proposer's latest moves, newest first; the page lists the rest.
+    for (const line of watch.activity.slice(-ACTIVITY_LINES).reverse()) {
+      if (!line || typeof line.text !== "string") continue;
+      lines.push(`  ${line.failed ? "x" : "-"} ${String(line.kind || "")}: ${clip(line.text, 100)}`);
+    }
     if (watch.episodes !== null) lines.push(`  evaluation episodes: ${watch.episodes}`);
     if (watch.stepRecord) lines.push(`  step record: ${watch.stepRecord}`);
     lines.push(`  full detail: ${requestPageLink(watch.recordId)}`);
@@ -711,6 +718,7 @@ export default function requests(pi) {
       ask,
       episodes: null,
       stepRecord: null,
+      activity: [],
       frame: 0,
       expanded: false,
     };
@@ -762,6 +770,8 @@ export default function requests(pi) {
         mine.state = String(progress.state || mine.state);
         mine.episodes = typeof progress.episodes_total === "number" ? progress.episodes_total : null;
         mine.stepRecord = typeof progress.step_record === "string" ? progress.step_record : null;
+        // What the proposer has done so far, oldest first; an older service sends none.
+        mine.activity = Array.isArray(progress.activity) ? progress.activity : [];
         // The step's own clock beats the watch's: a reconnecting session counts from when the step began.
         if (typeof progress.started_at === "number") mine.startedAt = progress.started_at * 1000;
       }

@@ -14,8 +14,10 @@ import logging
 import math
 import tarfile
 import tempfile
+import threading
 import time
 import weakref
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from io import BytesIO
@@ -348,16 +350,23 @@ def _admit_promoted(
     return promoted
 
 
-class _StepCalls(ProposerCalls):
-    """One step's model-call budget and record, shared by the budgeted bindings and an agent's gateway.
+#: The most activity lines a step keeps; the oldest go first.
+MAX_ACTIVITY = 300
 
-    A cap of 0 is no budget; the record is the list the step writes to ``proposer.json``.
+
+class _StepCalls(ProposerCalls):
+    """One step's model-call budget, record and live activity, shared by the budgeted bindings and an agent's gateway.
+
+    A cap of 0 is no budget; the record is the list the step writes to ``proposer.json``; the activity is what the
+    request page shows while the step runs, read from another thread through :meth:`activity`.
     """
 
     def __init__(self, cap: int, record: list[dict[str, Any]]) -> None:
         self._cap = cap
         self._spent = 0
         self._record = record
+        self._activity: deque[dict[str, Any]] = deque(maxlen=MAX_ACTIVITY)
+        self._lock = threading.Lock()
 
     def spend(self) -> None:
         if self._cap and self._spent >= self._cap:
@@ -366,6 +375,17 @@ class _StepCalls(ProposerCalls):
 
     def record(self, entry: Mapping[str, Any]) -> None:
         self._record.append(dict(entry))
+
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        line: dict[str, Any] = {"at": time.time(), "kind": kind, "text": " ".join(text.split())[:300]}
+        if failed:
+            line["failed"] = True
+        with self._lock:
+            self._activity.append(line)
+
+    def activity(self) -> tuple[dict[str, Any], ...]:
+        with self._lock:
+            return tuple(dict(line) for line in self._activity)
 
 
 class _BudgetedBinding(ModelBinding):
@@ -398,6 +418,7 @@ class _BudgetedBinding(ModelBinding):
 
     def chat(self, messages: Sequence[Mapping[str, Any]], *, timeout_s: float | None = None, **params: Any) -> str:
         self._calls.spend()
+        self._calls.note("model", f"asking {self.model}")
         kwargs: dict[str, Any] = dict(params)
         if timeout_s is not None:
             kwargs["timeout_s"] = timeout_s
@@ -426,10 +447,26 @@ class _BudgetedBinding(ModelBinding):
             if usage is not None:
                 entry["usage"] = usage
             self._calls.record(entry)
+            self._note_answer(entry)
+
+    def _note_answer(self, entry: Mapping[str, Any]) -> None:
+        """One activity line for a finished call: how long it took and its tokens, or its error."""
+        seconds = entry.get("seconds", 0)
+        if "error" in entry:
+            self._calls.note("model", f"{self.model} failed after {seconds:g} s: {entry['error']}", failed=True)
+            return
+        usage = entry.get("usage")
+        tokens = (
+            f", {int(usage.get('input_tokens', 0) or 0):,} → {int(usage.get('output_tokens', 0) or 0):,} tokens"
+            if isinstance(usage, Mapping)
+            else ""
+        )
+        self._calls.note("model", f"{self.model} answered in {seconds:g} s{tokens}")
 
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """A method's raw request goes through the same budget and record as ``chat``: ``body`` in, ``response`` out."""
         self._calls.spend()
+        self._calls.note("model", f"asking {self.model}")
         kwargs: dict[str, Any] = {} if timeout_s is None else {"timeout_s": timeout_s}
         entry: dict[str, Any] = {"model": self.model, "body": _bounded(body), "params": _bounded(kwargs)}
         started = time.monotonic()
@@ -439,6 +476,7 @@ class _BudgetedBinding(ModelBinding):
             entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
             entry["seconds"] = round(time.monotonic() - started, 3)
             self._calls.record(entry)
+            self._note_answer(entry)
             raise
         entry["response"] = _bounded(response)
         entry["seconds"] = round(time.monotonic() - started, 3)
@@ -446,6 +484,7 @@ class _BudgetedBinding(ModelBinding):
         if usage is not None:
             entry["usage"] = usage
         self._calls.record(entry)
+        self._note_answer(entry)
         return response
 
 
@@ -753,6 +792,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # Written by the training thread, read by the service's request page from another: each write is one
         # assignment of a frozen value, which is all the synchronization a reader that tolerates a stale phase needs.
         self._step_progress: StepProgress | None = None
+        # The running step's calls, whose activity the progress reports; replaced by the next step's.
+        self._step_calls: _StepCalls | None = None
         if self._step_record_dir is not None:
             try:
                 self._step_record_dir.mkdir(parents=True, exist_ok=True)
@@ -891,8 +932,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     @property
     def step_progress(self) -> StepProgress | None:
-        """The running step's phase and start, ``None`` between steps (see ``StepProgress``)."""
-        return self._step_progress
+        """The running step's phase, start and activity so far, ``None`` between steps (see ``StepProgress``)."""
+        progress, calls = self._step_progress, self._step_calls
+        if progress is None or calls is None:
+            return progress
+        return replace(progress, activity=calls.activity())
 
     def prepare_step(
         self,
@@ -1021,6 +1065,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         if step_dir is not None:
             metrics["step_record"] = str(step_dir)
         # From here the step is under way for the request page; the proposer runs next.
+        self._step_calls = None
         self._step_progress = StepProgress(
             request_id=None if batch.request is None else batch.request.id,
             phase="proposing",
@@ -1082,11 +1127,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                 return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": str(error)})
         else:
             calls = _StepCalls(self._max_model_calls_per_step, record)
+            self._step_calls = calls
             models = _budgeted_bindings(self._models, calls)
             extra: dict[str, Any] = {}
             if self._propose.runs_agent:
                 # No agent executor configured: the proposer gets None and answers without an agent.
                 extra["agent_host"] = self._agent_host(step_dir, calls)
+                if extra["agent_host"] is None and batch.request is not None:
+                    calls.note("proposer", "the agent proposer is off on this host; the text proposer answers")
             if self._propose_accepts_manifest:
                 extra["manifest"] = manifest
             if self._propose_accepts_rejected:

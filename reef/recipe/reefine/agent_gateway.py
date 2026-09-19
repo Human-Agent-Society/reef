@@ -205,6 +205,18 @@ class AgentGateway:
         if usage is not None:
             entry["usage"] = usage
         self._calls.record(entry)
+        # What the agent decided this turn, for the request page: each tool it called, else what it said.
+        if status >= 400:
+            self._calls.note(
+                "agent", f"the served model answered {status}: {entry['reply'] or text[:200]}", failed=True
+            )
+            return
+        called = reply_tool_calls(text)
+        for name, arguments in called:
+            self._calls.note("agent", tool_summary(name, arguments))
+        said = entry["reply"].strip()
+        if said and not called:
+            self._calls.note("agent", said.splitlines()[0])
 
     def relay_models(self, client: BaseHTTPRequestHandler, modality: str) -> None:
         """The provider's models of one output modality, so the agent picks a real one without holding the key."""
@@ -239,8 +251,11 @@ class AgentGateway:
             call["error"] = body.decode("utf-8", errors="replace")[:MAX_ERROR_CHARS]
         with self._lock:
             self._provider_calls.append(call)
+        seconds = round(time.monotonic() - started, 3)
         # The step record keeps what was asked of the provider and how it answered, never the media itself.
-        self._calls.record({"source": "agent", **call, "seconds": round(time.monotonic() - started, 3)})
+        self._calls.record({"source": "agent", **call, "seconds": seconds})
+        outcome = f"{status}" if status < 400 else f"{status}: {call['error'][:160]}"
+        self._calls.note("provider", f"{route} {call['model']} → {outcome} ({seconds:g} s)", failed=status >= 400)
 
 
 def relay_models_request(client: BaseHTTPRequestHandler, url: str, api_key: str) -> None:
@@ -363,6 +378,70 @@ def reply_text(text: str) -> str:
     return "".join(parts)[:20_000]
 
 
+def reply_tool_calls(text: str) -> list[tuple[str, str]]:
+    """The tools a model reply called, whole or streamed, in the chat, Anthropic or Responses dialect: each
+    ``(name, arguments as JSON text)``, in order."""
+    calls: dict[tuple[str, Any], list[str]] = {}
+    for event in reply_events(text):
+        # Chat Completions: tool_calls on the message, or their pieces on each delta, keyed by index.
+        for choice in event.get("choices") or ():
+            if not isinstance(choice, dict):
+                continue
+            holder = choice.get("delta") or choice.get("message") or {}
+            for position, call in enumerate(holder.get("tool_calls") or ()):
+                if not isinstance(call, dict):
+                    continue
+                function = call.get("function") or {}
+                slot = calls.setdefault(("chat", call.get("index", position)), ["", ""])
+                slot[0] += function.get("name") or ""
+                arguments = function.get("arguments")
+                slot[1] += arguments if isinstance(arguments, str) else json.dumps(arguments or {})
+        # Anthropic: tool_use blocks whole, or started and filled by input_json_delta.
+        block = event.get("content_block")
+        if event.get("type") == "content_block_start" and isinstance(block, dict) and block.get("type") == "tool_use":
+            calls[("anthropic", event.get("index"))] = [str(block.get("name") or ""), ""]
+        delta = event.get("delta")
+        if isinstance(delta, dict) and delta.get("type") == "input_json_delta":
+            started = calls.get(("anthropic", event.get("index")))
+            if started is not None:
+                started[1] += str(delta.get("partial_json") or "")
+        for position, part in enumerate(event.get("content") or ()):
+            if isinstance(part, dict) and part.get("type") == "tool_use":
+                calls[("anthropic-whole", position)] = [
+                    str(part.get("name") or ""),
+                    json.dumps(part.get("input") or {}),
+                ]
+        # Responses: a finished function_call item carries its whole arguments.
+        items = [event.get("item")] if event.get("type") == "response.output_item.done" else []
+        items += list(event.get("output") or ()) if event.get("object") == "response" else []
+        for item in items:
+            if isinstance(item, dict) and item.get("type") == "function_call":
+                key = ("responses", item.get("call_id") or item.get("id") or len(calls))
+                calls[key] = [str(item.get("name") or ""), str(item.get("arguments") or "")]
+    return [(name, arguments) for name, arguments in calls.values() if name]
+
+
+#: The argument that says what a tool call did, in the order a summary looks for it.
+SUMMARY_ARGUMENTS = ("path", "file_path", "command", "task", "url", "pattern", "query")
+
+
+def tool_summary(name: str, arguments: str) -> str:
+    """One line for a tool call: its name and the argument that says what it did (a path, a command, a task)."""
+    try:
+        parsed = json.loads(arguments) if arguments.strip() else {}
+    except json.JSONDecodeError:
+        parsed = arguments
+    detail = ""
+    if isinstance(parsed, dict):
+        named = [parsed[key] for key in SUMMARY_ARGUMENTS if isinstance(parsed.get(key), str)]
+        strings = named or [value for value in parsed.values() if isinstance(value, str)]
+        detail = strings[0] if strings else ""
+    elif isinstance(parsed, str):
+        detail = parsed
+    detail = " ".join(detail.split())
+    return f"{name} {detail[:160]}".strip()
+
+
 def sse_usage(text: str) -> dict[str, int] | None:
     """Input and output tokens a reply reported, whole or streamed; ``None`` when it reported none."""
     input_tokens = output_tokens = 0
@@ -380,4 +459,12 @@ def sse_usage(text: str) -> dict[str, int] | None:
     return {"input_tokens": input_tokens, "output_tokens": output_tokens} if seen else None
 
 
-__all__ = ["MODEL_PATHS", "AgentGateway", "WorkspaceTools", "reply_text", "sse_usage"]
+__all__ = [
+    "MODEL_PATHS",
+    "AgentGateway",
+    "WorkspaceTools",
+    "reply_text",
+    "reply_tool_calls",
+    "sse_usage",
+    "tool_summary",
+]

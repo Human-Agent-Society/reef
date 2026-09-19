@@ -1212,7 +1212,15 @@ def test_the_look_in_key_opens_the_spinner_in_place_and_closes_it_again(tmp_path
         _install_root(tmp_path),
         {
             **WAITING,
-            f"GET {PROGRESS_PATH}": _running("proposing", step_record="/work/steps/1"),
+            f"GET {PROGRESS_PATH}": _running(
+                "proposing",
+                step_record="/work/steps/1",
+                activity=[
+                    {"at": 1.0, "kind": "model", "text": "asking glm"},
+                    {"at": 2.0, "kind": "agent", "text": "write harness/extensions/away.ts"},
+                    {"at": 3.0, "kind": "trial", "text": "trial 1 exited 1 in 40 s", "failed": True},
+                ],
+            ),
             f"GET {RECORD_PATH}": {"status": 200, "body": {}},
         },
         REEF_HARNESS_WATCH_MS="10",
@@ -1228,6 +1236,13 @@ def test_the_look_in_key_opens_the_spinner_in_place_and_closes_it_again(tmp_path
     body = "\n".join(panel[1:])
     assert "asked: text me when you are blocked" in body and "request: q-1" in body
     assert "step record: /work/steps/1" in body
+    # The proposer's latest moves, newest first, a failed one marked.
+    moves = [line.strip() for line in panel[1:] if line.strip()[:2] in ("- ", "x ")]
+    assert moves == [
+        "x trial: trial 1 exited 1 in 40 s",
+        "- agent: write harness/extensions/away.ts",
+        "- model: asking glm",
+    ]
     # The page link is the full detail, and the person is told the step keeps running without them.
     assert f"full detail: {REQUEST_PAGE}" in body
     assert "the step runs in the background; your input stays yours" in body

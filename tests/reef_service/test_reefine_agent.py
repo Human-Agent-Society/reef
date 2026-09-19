@@ -20,7 +20,7 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine.agent import AgentProposer, workspace_mutations, write_workspace
-from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
+from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
@@ -42,6 +42,8 @@ class Upstream:
     def __init__(self) -> None:
         self.requests: list[dict] = []
         self.gets: list[tuple[str, str | None]] = []
+        #: The served model's next whole answer, in place of the review.
+        self.answer: dict | None = None
         upstream = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -62,7 +64,9 @@ class Upstream:
                     text = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
                     self.reply(200, text.encode(), "text/event-stream")
                     return
-                reply = {"choices": [{"message": {"role": "assistant", "content": json.dumps(REVIEW)}}]}
+                reply = upstream.answer or {
+                    "choices": [{"message": {"role": "assistant", "content": json.dumps(REVIEW)}}]
+                }
                 reply["usage"] = {"prompt_tokens": 7, "completion_tokens": 3}
                 self.reply(200, json.dumps(reply).encode(), "application/json")
 
@@ -286,6 +290,20 @@ def test_the_agent_writes_the_change_tries_it_and_hands_it_back_reviewed(tmp_pat
     assert speech and speech[0]["body"]["model"] == "not/real"
     assert any(entry.get("path") == "/v1/audio/speech" and entry.get("status") == 400 for entry in record)
     assert (host.step_dir / "agent-session.jsonl").read_text().count('"done"') == 1
+    # The live activity tells the run as it went: the agent's start, its check and trial, the refused speech call,
+    # its end, and the review's model call.
+    activity = host.calls.activity()
+    kinds = [line["kind"] for line in activity]
+    assert kinds[0] == "proposer" and "the coding agent started" in activity[0]["text"]
+    assert any(line["kind"] == "check" and line["text"].startswith("admission passed") for line in activity)
+    assert any(line["text"].startswith("trial 1 running the changed harness: Say hello out loud") for line in activity)
+    speech = [line for line in activity if line["kind"] == "provider"]
+    assert speech and speech[0]["failed"] and speech[0]["text"].startswith("/v1/audio/speech not/real → 400")
+    assert any(
+        line["kind"] == "trial" and line["text"].startswith("trial 1 exited") and line["failed"] for line in activity
+    )
+    assert any(line["kind"] == "proposer" and "exited 0" in line["text"] for line in activity)
+    assert kinds[-2:] == ["model", "model"] and activity[-1]["text"].startswith("served-model answered in")
 
 
 @pytest.mark.unit
@@ -380,3 +398,72 @@ def test_the_agent_is_told_what_its_deployments_provider_serves() -> None:
     rules = agent_rules(compatible)
     assert "openai-compatible (https://gateway.example)" in rules and "`/v1/decisions`" not in rules
     assert "$REEF_PROPOSER_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules
+
+
+@pytest.mark.unit
+def test_a_replys_tool_calls_read_the_same_in_every_dialect() -> None:
+    chat_stream = "\n".join(
+        "data: " + json.dumps(event)
+        for event in (
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"name": "write", "arguments": ""}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"path": "a.ts",'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": ' "content": "x"}'}}]}}]},
+            {"choices": [{"delta": {"tool_calls": [{"index": 1, "function": {"name": "bash", "arguments": "{}"}}]}}]},
+        )
+    )
+    assert reply_tool_calls(chat_stream + "\ndata: [DONE]") == [
+        ("write", '{"path": "a.ts", "content": "x"}'),
+        ("bash", "{}"),
+    ]
+    whole = {"choices": [{"message": {"tool_calls": [{"function": {"name": "read", "arguments": '{"path": "b"}'}}]}}]}
+    assert reply_tool_calls(json.dumps(whole)) == [("read", '{"path": "b"}')]
+    anthropic = "\n".join(
+        "data: " + json.dumps(event)
+        for event in (
+            {"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "name": "bash"}},
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": '{"comm'},
+            },
+            {
+                "type": "content_block_delta",
+                "index": 1,
+                "delta": {"type": "input_json_delta", "partial_json": 'and": "ls"}'},
+            },
+        )
+    )
+    assert reply_tool_calls(anthropic) == [("bash", '{"command": "ls"}')]
+    done = {
+        "type": "response.output_item.done",
+        "item": {"type": "function_call", "call_id": "c1", "name": "harness_trial", "arguments": '{"task": "speak"}'},
+    }
+    assert reply_tool_calls("data: " + json.dumps(done)) == [("harness_trial", '{"task": "speak"}')]
+    assert reply_tool_calls('{"choices": [{"message": {"content": "just text"}}]}') == []
+
+    assert tool_summary("write", '{"content": "long", "path": "harness/extensions/speak.ts"}') == (
+        "write harness/extensions/speak.ts"
+    )
+    assert tool_summary("bash", '{"command": "curl -s\\n  https://x"}') == "bash curl -s https://x"
+    assert tool_summary("harness_check", "{}") == "harness_check"
+    assert tool_summary("odd", "not json") == "odd not json"
+
+
+@pytest.mark.unit
+def test_the_gateway_notes_each_tool_the_agent_calls_and_what_it_says(upstream) -> None:
+    calls = _StepCalls(0, [])
+    gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), calls, NoTools(), None)
+    gateway.start()
+    try:
+        upstream.answer = {
+            "choices": [{"message": {"tool_calls": [{"function": {"name": "edit", "arguments": '{"path": "x.md"}'}}]}}]
+        }
+        post(f"{gateway.base_url}/v1/chat/completions", {"messages": []})
+        upstream.answer = {"choices": [{"message": {"content": "Done: the extension speaks.\nMore detail."}}]}
+        post(f"{gateway.base_url}/v1/chat/completions", {"messages": []})
+    finally:
+        gateway.stop()
+    assert [(line["kind"], line["text"]) for line in calls.activity()] == [
+        ("agent", "edit x.md"),
+        ("agent", "Done: the extension speaks."),
+    ]

@@ -22,7 +22,13 @@ from reef_service.test_harness_proposals import _dispatcher, _recipe
 from reef.core import AgentRecord, RequestType
 from reef.service.app import create_app
 from reef.service.release_page import build_release_page
-from reef.service.request_page import REFRESH_SECONDS, STATE_WORDS, build_request_page, settled_step
+from reef.service.request_page import (
+    MAX_ACTIVITY_SHOWN,
+    REFRESH_SECONDS,
+    STATE_WORDS,
+    build_request_page,
+    settled_step,
+)
 from reef.train.cordis_backend import Mutation, StepProgress
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
@@ -297,6 +303,42 @@ def _propose_holding(entered: Event, release: Event):
     return propose
 
 
+def test_a_running_request_lists_the_proposers_activity_newest_first() -> None:
+    activity = (
+        {"at": 1_000.0, "kind": "proposer", "text": "the coding agent started on the request"},
+        {"at": 1_065.0, "kind": "agent", "text": "write harness/extensions/speak.ts"},
+        {"at": 1_130.0, "kind": "provider", "text": "/v1/audio/speech not/real -> 400: <no model>", "failed": True},
+    )
+    proposing = StepProgress(RECORD_ID, "proposing", started_at=1_000.0, step_record=None, activity=activity)
+    page = build_request_page(_record(), [CREATION], progress=proposing, now=1_200.0)
+    assert _sections(page) == ["Request", "Progress", "Activity"]
+    listed = _section(page, "Activity")
+    lines = re.findall(
+        r"<li( class=\"failed\")?><span class=\"at\">([^<]+)</span><span class=\"kind\">(\w+)</span>", listed
+    )
+    assert lines == [(' class="failed"', "+2:10", "provider"), ("", "+1:05", "agent"), ("", "+0:00", "proposer")]
+    # The newest line says how long ago it happened: a long wait shows as that. Text is escaped.
+    assert '&lt;no model&gt; <span class="age">&middot; 70 s ago</span>' in listed
+    assert "earlier line" not in listed
+
+    many = tuple({"at": 1_000.0 + i, "kind": "model", "text": f"call {i}"} for i in range(MAX_ACTIVITY_SHOWN + 5))
+    listed = _section(
+        build_request_page(_record(), [CREATION], progress=replace(proposing, activity=many), now=1_200.0), "Activity"
+    )
+    assert (
+        listed.count("<li") == MAX_ACTIVITY_SHOWN
+        and f"call {MAX_ACTIVITY_SHOWN + 4}" in listed
+        and "call 4<" not in listed
+    )
+    assert "5 earlier lines not shown" in listed
+
+    quiet = build_request_page(_record(), [CREATION], progress=replace(proposing, activity=()), now=1_200.0)
+    assert "Nothing yet: the proposer has not called a model." in _section(quiet, "Activity")
+    # Another request's step lists nothing here.
+    other = build_request_page(_record(), [CREATION], progress=replace(proposing, request_id="another"), now=1_200.0)
+    assert _sections(other) == ["Request", "Progress"]
+
+
 def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_browser_link(tmp_path: Path) -> None:
     entered, release = Event(), Event()
     recipe = replace(_recipe(tmp_path, _propose_holding(entered, release)), training_mode="manual")
@@ -336,6 +378,7 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             assert progress["state"] == "proposing" and progress["settled"] is False and progress["step"] is None
             assert progress["request_id"] == record_id
             assert progress["meaning"] == STATE_WORDS["proposing"]
+            assert progress["activity"] == []  # the holding proposer has called no model
             # A JSON route reads the headers alone: the page's query token is refused here.
             assert (await client.get(progress_route, params=QUERY)).status == 401
             assert (await client.get("/reef/harness/requests/nope/progress", headers=headers)).status == 404

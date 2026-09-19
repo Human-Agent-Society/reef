@@ -319,6 +319,10 @@ class AgentRun(WorkspaceTools):
         }
         if refusal is not None:
             result["refusal"] = refusal
+            self.host.calls.note("check", f"admission refused the workspace: {refusal}", failed=True)
+        else:
+            changed = ", ".join(f"{m.op} {m.id}" for m in mutations) or "no change"
+            self.host.calls.note("check", f"admission passed: {changed}")
         if problems:
             result["unread"] = problems
         return result
@@ -328,8 +332,10 @@ class AgentRun(WorkspaceTools):
             raise RuntimeError("the agent gateway is not running")
         mutations, admitted, problems, refusal = self.admitted()
         if admitted is None:
+            self.host.calls.note("trial", f"not run, admission refused the workspace: {refusal}", failed=True)
             return {"ran": False, "refusal": refusal, "unread": problems}
         self.trials += 1
+        self.host.calls.note("trial", f"trial {self.trials} running the changed harness: {task}")
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in admitted if not entry.get("disabled"))
         binding = ModelBinding(base_url=self.gateway.base_url, model=self.served.model, api=self.served.api)
         files = rendered_files(nodes, binding, self.host)
@@ -347,23 +353,29 @@ class AgentRun(WorkspaceTools):
                 timeout=self.host.trial_timeout_s,
             )
         except EpisodeTimeout:
-            return {
-                "ran": True,
-                "timed_out": f"the trial ran past its {self.host.trial_timeout_s:g} s limit",
-                "provider_calls": self.gateway.provider_calls_since(before),
-            }
+            limit = f"the trial ran past its {self.host.trial_timeout_s:g} s limit"
+            self.host.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
+            return {"ran": True, "timed_out": limit, "provider_calls": self.gateway.provider_calls_since(before)}
         except EpisodeLaunchError as error:
+            self.host.calls.note("trial", f"trial {self.trials} could not start: {error}", failed=True)
             return {"ran": False, "error": str(error)}
         finally:
             shutil.rmtree(root, ignore_errors=True)
         final = evolution.final_assistant_text(trajectory) or ""
+        made = self.gateway.provider_calls_since(before)
+        refused = [call for call in made if int(call.get("status") or 0) >= 400]
+        summary = f"trial {self.trials} exited {outcome.exit_code} in {time.monotonic() - started:.0f} s"
+        if made:
+            summary += f", {len(made)} multimodal call{'s' if len(made) != 1 else ''}"
+            summary += f" ({len(refused)} refused)" if refused else " (all answered)"
+        self.host.calls.note("trial", summary, failed=outcome.exit_code != 0 or bool(refused))
         return {
             "ran": True,
             "seconds": round(time.monotonic() - started, 1),
             "exit_code": outcome.exit_code,
             "final_text": final[:MAX_TRIAL_TEXT],
             "tool_calls": tool_calls(trajectory),
-            "provider_calls": self.gateway.provider_calls_since(before),
+            "provider_calls": made,
             "stderr_tail": outcome.stderr[-MAX_STDERR_CHARS:],
             "changed_entries": [m.id for m in mutations],
         }
@@ -437,6 +449,7 @@ def answer_with_agent(
                 failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
             )
             env = {"REEF_PROPOSER_URL": gateway.base_url, **trial_env(gateway.base_url)}
+            host.calls.note("proposer", f"the coding agent started on the request (at most {host.timeout_s:g} s)")
             outcome, _ = launch_pi(
                 host,
                 run.executor(),
@@ -452,12 +465,19 @@ def answer_with_agent(
         except EpisodeTimeout:
             agent["timed_out"] = True
         except EpisodeLaunchError as error:
+            host.calls.note("proposer", f"the coding agent could not start: {error}", failed=True)
             return StepProposal((), {"failure": f"the agent could not start: {error}"})
         finally:
             gateway.stop()
             agent["seconds"] = round(time.monotonic() - started, 1)
             agent["trials"] = run.trials
             keep_session(root / host.descriptor.trajectory_path, host.step_dir)
+        ended = "ran past its limit" if agent.get("timed_out") else f"exited {agent.get('exit_code')}"
+        host.calls.note(
+            "proposer",
+            f"the coding agent {ended} after {agent['seconds']:g} s and {run.trials} trials; reading its workspace",
+            failed=bool(agent.get("timed_out")) or agent.get("exit_code", 0) != 0,
+        )
         return read_answer(workspace, request, models, nodes, entries, agent)
     finally:
         shutil.rmtree(root, ignore_errors=True)
