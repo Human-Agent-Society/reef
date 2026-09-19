@@ -8,7 +8,9 @@ failure closes the trainer and opened storage session owned by this attempt.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from reef.artifact.artifact import (
     Artifact,
@@ -25,6 +27,7 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
+from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ComponentEntry, ReleaseComponents
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker
@@ -33,14 +36,11 @@ from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
-from reef.surface.base import ArtifactActivator
-from reef.train.trainer import Trainer
+from reef.surface.base import Surface
+from reef.train.trainer import ComponentTrainer
 
 
-def _consumed_by_committed_steps(
-    store: ScenarioStore,
-    head_record: CommitRecord | None,
-) -> frozenset[str]:
+def _consumed_by_committed_steps(records: tuple[CommitRecord, ...]) -> frozenset[str]:
     """The rows every committed step's batch consumed.
 
     Rehydration must skip these rows: retention may keep a consumed row stored
@@ -48,15 +48,50 @@ def _consumed_by_committed_steps(
     it twice. Consumption is permanent, so the union over the whole log is the
     exclusion set.
     """
+    consumed: set[str] = set()
+    for record in records:
+        consumed |= record.consumed_ids
+    return frozenset(consumed)
+
+
+@dataclass(frozen=True)
+class _RecoveredTrainerState:
+    """What one component's trainer recovers from its own commits: state, cursor, and consumed rows."""
+
+    algorithm_state: Mapping[str, Any] | None
+    high_water: tuple[int, int] | None
+    consumed_ids: frozenset[str]
+
+
+def _recovered_trainer_states(
+    store: ScenarioStore, head_record: CommitRecord | None, surface: Surface
+) -> dict[str, _RecoveredTrainerState]:
+    """What each component's trainer recovers from its own commits.
+
+    The only trainer of a one-component (or record-only) scenario also owns
+    every commit that named no trainer: the records made before commits
+    carried a component, and rollbacks, which carry its state.
+    """
     records = store.history()
     if not records and head_record is not None:
         # No durable log: the head adopted from checkpoint metadata is the
         # only committed step there is.
         records = (head_record,)
-    consumed: set[str] = set()
-    for record in records:
-        consumed |= record.consumed_ids
-    return frozenset(consumed)
+    components = surface.names or (RECORDS_COMPONENT,)
+    states: dict[str, _RecoveredTrainerState] = {}
+    for component in components:
+        own = tuple(
+            record
+            for record in records
+            if record.component == component or (len(components) == 1 and record.component is None)
+        )
+        last = own[-1] if own else None
+        states[component] = _RecoveredTrainerState(
+            algorithm_state=None if last is None else last.algorithm_state,
+            high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
+            consumed_ids=_consumed_by_committed_steps(own),
+        )
+    return states
 
 
 class ScenarioFactory:
@@ -98,17 +133,29 @@ class ScenarioFactory:
             )
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
+        recipe = self._recipe.with_model_config(model_config)
+        surface = recipe.build_surface(scenario)
         if registration is None:
             selected = backend.resolve_release(release_id)
-            backend.fork(
-                selected.release_id,
-                metadata={
-                    SCENARIO_METADATA_KEY: scenario_metadata_for(
-                        name=scenario,
-                        base_artifact=selected,
-                    )
-                },
-            )
+            registration_metadata: dict[str, object] = {
+                SCENARIO_METADATA_KEY: scenario_metadata_for(
+                    name=scenario,
+                    base_artifact=selected,
+                )
+            }
+            if surface.names:
+                # Name the base release's components: a flat release is its one
+                # component, a composed base already keeps one directory per
+                # component, and every later step carries the unchanged ones forward.
+                registration_metadata[COMPONENTS_METADATA_KEY] = ReleaseComponents(
+                    {
+                        name: ComponentEntry(
+                            selected.content_id if surface.single else f"{selected.content_id}:{name}"
+                        )
+                        for name in surface.names
+                    }
+                ).to_dict()
+            backend.fork(selected.release_id, metadata=registration_metadata)
 
             # fork() is the atomic registration point. Another caller may have
             # won it, so always rebuild from the durable registration instead of
@@ -121,7 +168,9 @@ class ScenarioFactory:
             # for this attempt, even if another creator won registration.
             release_id = selected.release_id
 
-        return self._recover(scenario, backend, registration, release_id=release_id, model_config=model_config)
+        return self._recover(
+            scenario, backend, registration, release_id=release_id, model_config=model_config, surface=surface
+        )
 
     def validate_existing(
         self,
@@ -143,6 +192,7 @@ class ScenarioFactory:
         *,
         release_id: str | None,
         model_config: ModelConfig,
+        surface: Surface,
     ) -> Scenario:
         if not isinstance(registration, Mapping):
             raise ValueError(f"invalid scenario metadata for {name!r}")
@@ -161,24 +211,20 @@ class ScenarioFactory:
             release_id,
         )
         recipe = self._recipe.with_model_config(model_config)
-        surface = recipe.build_surface(name)
         runtime = recipe.runtime
         store = self._storage.open(name)
         scenario: Scenario | None = None
-        trainer: Trainer | None = None
+        trainers: tuple[ComponentTrainer, ...] = ()
         try:
             head_record = store.recover(checkpoint=checkpoint)
             committed_artifact: ArtifactRef | None
             if head_record is None:
                 scenario_step = 0
-                algorithm_state = None
                 committed_artifact = None
-                high_water = None
             else:
                 scenario_step = head_record.step
-                algorithm_state = head_record.algorithm_state
                 committed_artifact = head_record.artifact_ref
-                high_water = (head_record.high_water_sequence, head_record.high_water_offset)
+            recovered_states = _recovered_trainer_states(store, head_record, surface)
 
             # Publication stages durable bytes before the commit record is durable, while
             # the backend's head is only a post-commit mirror. A crash between the
@@ -192,11 +238,7 @@ class ScenarioFactory:
                 if checkpoints:
                     checkpoint_head = checkpoints[-1].artifact_ref
 
-            current_artifact = (
-                checkpoint_head
-                if surface.loader is None
-                else surface.loader.recover(committed_artifact, checkpoint_head, runtime)
-            )
+            current_artifact = surface.recover(committed_artifact, checkpoint_head, runtime)
 
             repository = Repository(
                 backend,
@@ -206,12 +248,10 @@ class ScenarioFactory:
                 local_dir=self._local_artifact_dir,
             )
             repository.synchronize_checkpoint()
-            if isinstance(surface.loader, ArtifactActivator) and not isinstance(
-                current_artifact, LiveWeightArtifactRef
-            ):
+            if not isinstance(current_artifact, LiveWeightArtifactRef):
                 # Traffic must not reach a recovered scenario before its committed
                 # head is servable; a failed activation leaves the scenario unloaded.
-                surface.loader.activate(Artifact(current_artifact, repository), runtime)
+                surface.activate(Artifact(current_artifact, repository), runtime)
 
             experiment_logger = self._experiment_tracker.bind_scenario(
                 scenario=name,
@@ -222,14 +262,20 @@ class ScenarioFactory:
                     default=0,
                 ),
             )
-            trainer = recipe.build(
+            trainers = recipe.build_trainers(
                 name,
                 store.records,
-                algorithm_state=algorithm_state,
+                surface=surface,
+                algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
             )
-            if trainer.training_mode != recipe.training_mode:
+            if any(bound.trainer.training_mode != recipe.training_mode for bound in trainers):
                 raise ValueError("recipe.build must pass its training_mode to Trainer.build")
+            if len(trainers) > 1 and not store.durable:
+                raise ReefError(
+                    f"scenario {name!r} runs a trainer per component: each recovers from its own commits, "
+                    "which needs durable commit storage"
+                )
             scenario = Scenario(
                 name=name,
                 model_config=model_config,
@@ -238,22 +284,30 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_runtime=recipe.training_runtime,
                     inference_handler=recipe.inference_handler,
-                    artifact_validator=recipe.build_artifact_validator(),
-                    report_type=trainer.report_type,
+                    report_type=trainers[0].trainer.report_type,
                 ),
                 repository=repository,
                 checkpoint_strategy=recipe.checkpoint_strategy,
-                trainer=trainer,
+                trainers=trainers,
                 scenario_step=scenario_step,
                 store=store,
                 recovered_head_record=head_record,
             )
-            # Replay retained, unconsumed rows behind the watermark before resuming
-            # the cursor. Retention may keep already-consumed rows for audit.
-            if high_water is not None:
-                consumed = _consumed_by_committed_steps(store, head_record)
-                scenario.reingest(up_to_sequence=high_water[0], consumed_ids=consumed)
-                scenario.restore_record_progress(after_sequence=high_water[0], offset=high_water[1])
+            # Replay retained, unconsumed rows behind each trainer's watermark
+            # before resuming its cursor. Retention may keep already-consumed
+            # rows for audit.
+            for bound in trainers:
+                recovered = recovered_states.get(bound.component)
+                if recovered is None or recovered.high_water is None:
+                    continue
+                scenario.reingest(
+                    up_to_sequence=recovered.high_water[0],
+                    consumed_ids=recovered.consumed_ids,
+                    component=bound.component,
+                )
+                scenario.restore_record_progress(
+                    after_sequence=recovered.high_water[0], offset=recovered.high_water[1], component=bound.component
+                )
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
             scenario.publish_shipped_content()
@@ -263,8 +317,8 @@ class ScenarioFactory:
                 scenario.close()
             else:
                 try:
-                    if trainer is not None:
-                        trainer.close()
+                    for bound in trainers:
+                        bound.trainer.close()
                 finally:
                     store.close()
             raise

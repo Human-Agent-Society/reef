@@ -341,3 +341,43 @@ def test_archiving_a_scenario_renames_its_ref_and_drops_its_work_clone(tmp_path:
     fresh = factory("doomed")
     assert fresh.metadata() is None
     assert fresh.fork().parent_release_id == run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base")
+
+
+@pytest.mark.integration
+def test_bootstrap_snapshot_goes_under_its_component_beside_the_seed_files(
+    tmp_path: Path,
+    fake_git_lfs: None,
+) -> None:
+    remote = tmp_path / "artifacts.git"
+    run_git("init", "--bare", str(remote))
+    snapshot = tmp_path / "models--org--model" / "snapshots" / "upstream-sha"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_text("weights")
+
+    backend = GitLFSRepositoryBackend.factory(
+        remote,
+        "org/model@main",
+        work_dir=tmp_path / "work",
+        cache_dir=tmp_path / "cache",
+        snapshot_download=lambda **kwargs: str(snapshot),
+        bootstrap_files={"harness/AGENTS.md": "seed rules\n"},
+        bootstrap_subdirectory="weights",
+    )("agent")
+
+    base = backend.materialize(backend.resolve_release())
+    assert base.local_path is not None
+    assert (base.local_path / "weights" / "config.json").read_text() == "{}"
+    assert (base.local_path / "weights" / "model.safetensors").read_text() == "weights"
+    assert (base.local_path / "harness" / "AGENTS.md").read_text() == "seed rules\n"
+    assert not (base.local_path / "config.json").exists()
+    manifest = json.loads(run_git("--git-dir", str(remote), "show", f"{base.ref.release_id}:reef-artifact.json"))
+    assert manifest["source"]["component"] == "weights"
+    with pytest.raises(ValueError, match="directory name"):
+        GitLFSRepositoryBackend.factory(
+            remote,
+            "org/model@main",
+            work_dir=tmp_path / "w2",
+            cache_dir=tmp_path / "c2",
+            bootstrap_subdirectory="../x",
+        )("agent")

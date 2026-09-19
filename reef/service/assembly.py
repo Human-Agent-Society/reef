@@ -212,6 +212,7 @@ def build_dispatcher(
             work_dir=Path(settings.artifact_work_dir),
             cache_dir=Path(settings.artifact_cache_dir),
             bootstrap_files=recipe.base_artifact_files(),
+            bootstrap_subdirectory=recipe.bootstrap_artifact_component(),
         )
         if not isinstance(settings.training_settings, Mapping):
             raise ValueError("training must be an object")

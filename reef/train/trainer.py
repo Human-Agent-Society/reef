@@ -46,10 +46,26 @@ class _PendingStep:
     prepared_commit: PreparedCommit | None = None
     # Set once the processor has the batch back and the step consumed these ids on its own, so no acknowledgement.
     consumed_ids: frozenset[str] | None = None
+    #: The release served when the batch was reserved: what the step was prepared against.
+    base_release_id: str | None = None
 
     @property
     def batch_id(self) -> str:
         return self.batch.batch_id
+
+
+@dataclass(frozen=True)
+class ComponentTrainer:
+    """One trainer and the release component it evolves."""
+
+    component: str
+    trainer: Trainer
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.component, str) or not self.component:
+            raise ValueError("component must be a non-empty string")
+        if not isinstance(self.trainer, Trainer):
+            raise TypeError("trainer must be a Trainer")
 
 
 class Trainer:
@@ -226,6 +242,12 @@ class Trainer:
         return self._data_offset
 
     @property
+    def pending_base_release_id(self) -> str | None:
+        """The release the reserved batch was prepared against, if a batch is reserved."""
+        with self._lock:
+            return None if self._pending is None else self._pending.base_release_id
+
+    @property
     def pending_batch(self) -> TrainingBatch | None:
         with self._lock:
             return None if self._pending is None else self._pending.batch
@@ -274,13 +296,14 @@ class Trainer:
                 if self._processor.ready():
                     return
 
-    def run_once(self, scenario_step: int = 0) -> TrainStepResult | None:
+    def run_once(self, scenario_step: int = 0, *, base_release_id: str | None = None) -> TrainStepResult | None:
         """Consume available data and, with a candidate backend, prepare one step.
 
         Returns ``None`` when this trainer has no candidate backend (it
         only advances record consumption, because a non-training scenario still
         has to drain and compact its store) or when the processor is not yet
-        ready to produce a batch.
+        ready to produce a batch. ``base_release_id`` names the release served
+        now; a batch reserved by this call is prepared against it.
         """
         if self._candidate_backend is not None and self._candidate_backend.dispatched:
             raise RuntimeError("dispatched candidate backends must reserve a batch before execution")
@@ -292,13 +315,15 @@ class Trainer:
                 result = self._pending.result
                 if result is not None:
                     return result
+                if self._pending.base_release_id is None:
+                    self._pending.base_release_id = base_release_id
                 batch = self._pending.batch
             else:
                 self._consume_data()
                 if not self._processor.ready():
                     return None
                 batch = self._build_validated_batch()
-                self._pending = _PendingStep(batch=batch, result=None)
+                self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
         # Local candidate generation and evaluation can take minutes. Keep the
         # batch reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
@@ -363,20 +388,35 @@ class Trainer:
             raise ValueError("candidate evaluator must retain the evaluation result supplied by Reef")
         return decision
 
-    def reserve_training_batch(self) -> TrainingBatch | None:
-        """Reserve one batch for a dispatched backend."""
+    def reserve_training_batch(self, *, base_release_id: str | None = None) -> TrainingBatch | None:
+        """Reserve one batch for a dispatched backend, prepared against the release served now."""
         backend = self._candidate_backend
         if backend is None or not backend.dispatched:
             raise RuntimeError("trainer has no dispatched candidate backend")
         with self._lock:
             if self._pending is not None:
+                if self._pending.base_release_id is None:
+                    self._pending.base_release_id = base_release_id
                 return self._pending.batch
             self._consume_data()
             if not self._processor.ready():
                 return None
             batch = self._build_validated_batch()
-            self._pending = _PendingStep(batch=batch, result=None)
+            self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
             return batch
+
+    def retry_pending(self) -> None:
+        """Keep the reserved batch but forget its result, so the next step prepares it again.
+
+        The scenario calls this when a result was prepared against a release
+        that another component's commit has since replaced: the batch is still
+        the right data, and the backend must evaluate it against the release
+        served now.
+        """
+        with self._lock:
+            if self._pending is None:
+                return
+            self._pending = _PendingStep(batch=self._pending.batch, result=None)
 
     def execute_reserved_step(self, scenario_step: int) -> StepExecution:
         """Run the dispatched backend for the currently reserved batch."""
@@ -397,14 +437,23 @@ class Trainer:
                 self._pending.result = execution.result
         return execution
 
-    def prepare_commit(self, result: TrainStepResult | None) -> PreparedCommit:
+    def releasable_agent_record_ids(self) -> frozenset[str]:
+        """The rows this trainer's processor no longer needs and does not protect."""
+        with self._lock:
+            retention = self._processor.retention_decision()
+            return frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
+
+    def prepare_commit(
+        self, result: TrainStepResult | None, *, compactable: frozenset[str] | None = None
+    ) -> PreparedCommit:
         """Prepare the pending result without exposing its state as committed.
 
         Acknowledging a processor mutates its in-memory batch bookkeeping, so
         the prepared value is cached and reused after a publication retry. The
         trainer's algorithm state and pending reservation remain unchanged
         until :meth:`commit` is called after the scenario's artifact and commit
-        record settle.
+        record settle. ``compactable`` limits the rows this commit may retire
+        to those every other trainer of the scenario has released too.
         """
         with self._lock:
             if self._pending is None:
@@ -428,6 +477,8 @@ class Trainer:
                 consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
+            if compactable is not None:
+                compacted = compacted & compactable
             metrics = dict(result.metrics)
             request = self._pending.batch.request
             if request is not None:
@@ -441,6 +492,7 @@ class Trainer:
                 consumed_ids=consumed,
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
+                base_release_id=self._pending.base_release_id,
             )
             self._pending.prepared_commit = prepared
             return prepared
@@ -488,7 +540,9 @@ class Trainer:
             self._pending.result = annotated
             return annotated
 
-    def reject_pending(self, metrics: Mapping[str, Any] | None = None) -> None:
+    def reject_pending(
+        self, metrics: Mapping[str, Any] | None = None, *, compactable: frozenset[str] | None = None
+    ) -> None:
         with self._lock:
             if self._pending is None:
                 return
@@ -497,6 +551,8 @@ class Trainer:
             self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
+            if compactable is not None:
+                compacted = compacted & compactable
             self._records.compact(
                 self.scenario,
                 compacted,

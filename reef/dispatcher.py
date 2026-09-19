@@ -37,7 +37,7 @@ from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import Scenario
+from reef.scenario.scenario import Scenario, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.train.types import TrainStepResult
@@ -89,7 +89,8 @@ class _TrainingState:
     last_drain: float | None = None
     undrained_warned: bool = False
     thread: Thread | None = None
-    local_workers: dict[str, _LocalBackendWorkerState] = field(default_factory=dict)
+    #: One worker thread per (scenario, component) with a local candidate backend.
+    local_workers: dict[tuple[str, str | None], _LocalBackendWorkerState] = field(default_factory=dict)
 
 
 @dataclass
@@ -232,8 +233,10 @@ class Dispatcher:
     def _wake_training(self, current: Scenario) -> None:
         if current.training_runtime is not None:
             self._training.ready.set()
-        elif current.trainer.candidate_backend is not None:
-            self._start_local_backend_worker(current.name)
+        for bound in current.component_trainers:
+            backend = bound.trainer.candidate_backend
+            if backend is not None and not backend.dispatched:
+                self._start_local_backend_worker(current.name, bound.component)
 
     def list_scenarios(self) -> tuple[dict[str, Any], ...]:
         return self._registry.list()
@@ -265,9 +268,10 @@ class Dispatcher:
             with self._training.lock:
                 self._training.failure_counts.pop(scenario, None)
             if dropped is not None:
-                backend = dropped.trainer.candidate_backend
-                if backend is not None:
-                    backend.retire_scenario(scenario)
+                for bound in dropped.component_trainers:
+                    backend = bound.trainer.candidate_backend
+                    if backend is not None:
+                        backend.retire_scenario(scenario)
                 dropped.close()
             archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
         self._registry.forget_lock(scenario)
@@ -395,7 +399,7 @@ class Dispatcher:
                     return existing
                 if current.trainer.training_mode == "auto":
                     raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
-                if current.trainer.candidate_backend is None:
+                if all(bound.trainer.candidate_backend is None for bound in current.component_trainers):
                     raise ValueError("explicit training requests require a training backend")
                 request = TrainingRequest.from_dict(item.payload)
                 if item.references:
@@ -445,34 +449,41 @@ class Dispatcher:
         current.operations.increment("ingest/accepted_total")
         if current.training_runtime is not None:
             self._training.ready.set()
-            return stored
-        if current.trainer.candidate_backend is not None:
-            self._start_local_backend_worker(current.name)
-            return stored
-        result = current.prepare_training_step()
-        if result is not None:
-            # scenario.commit is the single commit point: it commits the
-            # trainer, appends the durable commit record, applies record
-            # compaction, and moves the serving head — in that order, so a
-            # crash in any gap is recovered by replaying the scenario's
-            # commit log instead of silently losing the batch.
-            self._commit_result(current.name, result)
+        # Every component's trainer sees the record: a dispatched backend wakes
+        # the training thread, a local backend its own worker, and a trainer
+        # without a backend consumes inline.
+        for bound in current.component_trainers:
+            backend = bound.trainer.candidate_backend
+            if backend is not None:
+                if not backend.dispatched:
+                    self._start_local_backend_worker(current.name, bound.component)
+                continue
+            if current.training_runtime is not None:
+                continue
+            result = current.prepare_training_step(bound.component)
+            if result is not None:
+                # scenario.commit is the single commit point: it commits the
+                # trainer, appends the durable commit record, applies record
+                # compaction, and moves the serving head — in that order, so a
+                # crash in any gap is recovered by replaying the scenario's
+                # commit log instead of silently losing the batch.
+                self._commit_result(current.name, result, bound.component)
         return stored
 
     # -- Commit & publication --------------------------------------------
 
-    def _commit_result(self, scenario: str, result: TrainStepResult) -> None:
+    def _commit_result(self, scenario: str, result: TrainStepResult, component: str | None = None) -> None:
         current = self._registry.get(scenario)
-        context = self._experiment_context(current)
+        context = self._experiment_context(current, component)
         tracked_result = result
         try:
             correlation = dict(self._experiment_tracker.correlation_metrics(context))
             if correlation:
-                tracked_result = current.trainer.add_commit_metrics(result, correlation)
+                tracked_result = current.trainer_for(component).add_commit_metrics(result, correlation)
         except Exception:
             logger.exception("experiment tracker failed to prepare correlation metadata")
 
-        value = current.commit(tracked_result)
+        value = current.commit(tracked_result, component=component)
         self._publication.record(scenario, value)
         try:
             self._experiment_tracker.record(
@@ -490,8 +501,8 @@ class Dispatcher:
         except Exception:
             logger.exception("experiment tracker failed to record committed training step")
 
-    def _experiment_context(self, current: Scenario) -> TrainingExperimentContext:
-        backend = current.trainer.candidate_backend
+    def _experiment_context(self, current: Scenario, component: str | None = None) -> TrainingExperimentContext:
+        backend = current.trainer_for(component).candidate_backend
         try:
             backend_config = None if backend is None else dict(backend.experiment_config())
         except Exception:
@@ -569,50 +580,56 @@ class Dispatcher:
             self._training.thread.start()
         self._training.ready.set()
 
-    def _start_local_backend_worker(self, scenario: str) -> None:
+    def _start_local_backend_worker(self, scenario: str, component: str | None = None) -> None:
         if self._lifecycle.closed.is_set():
             return
+        key = (scenario, component)
         with self._training.lock:
-            worker = self._training.local_workers.get(scenario)
+            worker = self._training.local_workers.get(key)
             if worker is None:
                 ready = Event()
                 thread = Thread(
                     target=self._run_local_backend_worker,
-                    args=(scenario, ready),
-                    name=f"reef-local-backend-{scenario}",
+                    args=(scenario, component, ready),
+                    name=(
+                        f"reef-local-backend-{scenario}"
+                        if component is None
+                        else f"reef-local-backend-{scenario}/{component}"
+                    ),
                     daemon=True,
                 )
                 worker = _LocalBackendWorkerState(ready=ready, thread=thread)
-                self._training.local_workers[scenario] = worker
+                self._training.local_workers[key] = worker
                 thread.start()
         worker.ready.set()
 
     def _stop_local_backend_worker(self, scenario: str) -> None:
-        """Let the scenario's worker thread run out: it re-checks its registration after every wake."""
+        """Let the scenario's worker threads run out: each re-checks its registration after every wake."""
         with self._training.lock:
-            worker = self._training.local_workers.pop(scenario, None)
-        if worker is not None:
+            keys = [key for key in self._training.local_workers if key[0] == scenario]
+            workers = [self._training.local_workers.pop(key) for key in keys]
+        for worker in workers:
             worker.ready.set()
 
-    def _local_backend_worker_registered(self, scenario: str) -> bool:
+    def _local_backend_worker_registered(self, scenario: str, component: str | None) -> bool:
         with self._training.lock:
-            return scenario in self._training.local_workers
+            return (scenario, component) in self._training.local_workers
 
-    def _run_local_backend_worker(self, scenario: str, ready: Event) -> None:
+    def _run_local_backend_worker(self, scenario: str, component: str | None, ready: Event) -> None:
         try:
             while True:
                 ready.wait()
                 ready.clear()
-                if self._lifecycle.closed.is_set() or not self._local_backend_worker_registered(scenario):
+                if self._lifecycle.closed.is_set() or not self._local_backend_worker_registered(scenario, component):
                     return
-                self._drain_local_backend(scenario)
+                self._drain_local_backend(scenario, component)
         except Exception as exc:
             logger.exception("local backend worker stopped unexpectedly for scenario %r", scenario)
             self._record_training_error(scenario, self._error_text(exc))
 
-    def _drain_local_backend(self, scenario: str) -> None:
+    def _drain_local_backend(self, scenario: str, component: str | None) -> None:
         try:
-            while self._process_local_backend_step(scenario):
+            while self._process_local_backend_step(scenario, component):
                 pass
         except Exception as exc:
             logger.exception("local backend failed to commit for scenario %r", scenario)
@@ -625,23 +642,26 @@ class Dispatcher:
             if self._registry.get_optional(scenario) is current:
                 self._reload_with_instruction_failures(scenario, current)
 
-    def _recover_failed_step(self, scenario: str, current: Scenario, cause: Exception) -> None:
+    def _recover_failed_step(
+        self, scenario: str, current: Scenario, cause: Exception, component: str | None = None
+    ) -> None:
         """Mark the failed instruction, then reload; a logless scenario keeps the batch and skips it on its next wake."""
-        self._fail_instruction(current, cause)
+        self._fail_instruction(current, cause, component)
         self._reload_durable_local_scenario(scenario, current)
 
-    def _fail_instruction(self, current: Scenario, cause: Exception) -> None:
+    def _fail_instruction(self, current: Scenario, cause: Exception, component: str | None = None) -> None:
         """A failed instruction step consumes the instruction with a skip row on the next step; wake for it."""
-        if current.trainer.fail_pending_instruction(self._error_text(cause)):
+        if current.trainer_for(component).fail_pending_instruction(self._error_text(cause)):
             # Wake the worker so failed instructions settle even when no new records arrive.
             self._wake_training(current)
 
     def _reload_with_instruction_failures(self, scenario: str, current: Scenario) -> Scenario:
         """Rebuild from durable state; the failed instructions still queued keep their skip rows coming."""
-        failures = current.trainer.instruction_failures()
+        failures = {bound.component: bound.trainer.instruction_failures() for bound in current.component_trainers}
         recovered = self._registry.reload(scenario)
-        if failures:
-            recovered.trainer.set_instruction_failures(failures)
+        for component, failed in failures.items():
+            if failed:
+                recovered.trainer_for(component).set_instruction_failures(failed)
         return recovered
 
     def _reload_after_training_failure(self, scenario: str, cause: Exception) -> None:
@@ -652,20 +672,20 @@ class Dispatcher:
                 return
             self._registry.reload(scenario)
             return
-        self._fail_instruction(current, cause)
+        self._fail_instruction(current, cause, current.dispatched_component)
         self._reload_with_instruction_failures(scenario, current)
 
-    def _process_local_backend_step(self, scenario: str) -> bool:
+    def _process_local_backend_step(self, scenario: str, component: str | None = None) -> bool:
         current = self._registry.get_optional(scenario)
         if current is None:
             raise RuntimeContractError(f"local backend scenario {scenario!r} is not loaded")
-        if current.trainer.candidate_backend is None:
+        if current.trainer_for(component).candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
         try:
-            result = current.prepare_training_step()
+            result = current.prepare_training_step(component)
         except Exception as exc:
-            self._recover_failed_step(scenario, current, exc)
+            self._recover_failed_step(scenario, current, exc, component)
             raise
         if result is None:
             return False
@@ -676,7 +696,14 @@ class Dispatcher:
             if self._registry.get_optional(scenario) is not current:
                 raise RuntimeContractError(f"local backend scenario {scenario!r} changed before commit")
             try:
-                self._commit_result(scenario, result)
+                self._commit_result(scenario, result, component)
+            except StaleTrainingResultError as stale:
+                # Another component's commit replaced the release this result
+                # was prepared against. Keep the batch and prepare it again
+                # against the release served now; the loop comes straight back.
+                logger.info("scenario %r component %r: %s; preparing the batch again", scenario, component, stale)
+                current.retry_pending(component)
+                return True
             except Exception:
                 # A record may already have crossed the fsync commit point.
                 # Reload before rollback or acceptance can observe the stale
@@ -714,7 +741,9 @@ class Dispatcher:
         timeout: float | None = self.storage_retry_seconds if self._training.storage_status is not None else None
         for name in self._training_scenario_names():
             current = self._registry.get_optional(name)
-            if current is not None and current.trainer.processor.derivation_pending():
+            if current is not None and any(
+                bound.trainer.processor.derivation_pending() for bound in current.component_trainers
+            ):
                 timeout = (
                     self.derivation_poll_seconds if timeout is None else min(timeout, self.derivation_poll_seconds)
                 )
@@ -782,7 +811,8 @@ class Dispatcher:
         # A crash may leave remote serving updated but paused after Reef's
         # commit, or checkpointed before the weight update. Recover that
         # pending step before deciding whether another batch is available.
-        backend = current.trainer.candidate_backend
+        component = current.dispatched_component
+        backend = current.trainer_for(component).candidate_backend
         if backend is None or not backend.dispatched:
             raise RuntimeContractError(f"training scenario {current.name!r} has no dispatched training backend")
         backend.recover_pending_step(
@@ -790,9 +820,9 @@ class Dispatcher:
             committed_training_job_id=current.committed_training_job_id,
             committed_training_without_job_id=current.committed_training_without_job_id,
         )
-        if (batch := current.reserve_training_batch()) is None:
+        if (batch := current.reserve_training_batch(component)) is None:
             return False
-        execution = current.execute_reserved_training_step()
+        execution = current.execute_reserved_training_step(component)
         if execution.outcome == "retry":
             if execution.storage is None:
                 raise RuntimeContractError("retry execution must carry storage status")
@@ -805,12 +835,14 @@ class Dispatcher:
                 batch.batch_id,
                 current.name,
             )
-            current.reject_pending(execution.metrics)
+            current.reject_pending(execution.metrics, component=component)
             return True
         result = execution.result
         if execution.outcome != "commit" or result is None:
             raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
-        self._commit_result(current.name, result)
+        # A stale base on a dispatched result propagates: the existing failure
+        # path reloads the scenario and the backend recovers the pending job.
+        self._commit_result(current.name, result, component)
         if result.training_job_id is not None:
             backend.acknowledge_commit(current.scenario_step, result.training_job_id)
         return True
@@ -944,6 +976,27 @@ class Dispatcher:
             and current.training_runtime.concurrent_training_scenarios
         ):
             block["adapter_runtime_load_id"] = runtime.serving_adapter_runtime_load_id(scenario_name)
+        if len(current.component_trainers) > 1:
+            # Each component's trainer commits on its own; report each one beside the scenario-wide step.
+            components: dict[str, Any] = {}
+            for bound in current.component_trainers:
+                last = current.last_commit_for(bound.component)
+                components[str(bound.component)] = {
+                    "batch_ready": bound.trainer.batch_ready(),
+                    "training_mode": bound.trainer.training_mode,
+                    "processor": dict(bound.trainer.processor_status()),
+                    "last_committed_step": (
+                        None
+                        if last is None
+                        else {
+                            "step": last.step,
+                            "recorded_at": last.recorded_at,
+                            "base_release_id": last.base_release_id,
+                            "metrics": None if last.metrics is None else dict(last.metrics),
+                        }
+                    ),
+                }
+            block["components"] = components
         return block
 
     def _training_errors(self) -> list[str]:

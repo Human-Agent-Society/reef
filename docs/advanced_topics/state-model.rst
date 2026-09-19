@@ -61,6 +61,19 @@ incarnation keeps tokens unique across training-group restarts. The release
 record is durable; the bytes are not, so a restart restores the last checkpoint.
 The step counter, algorithm state, and record progress do survive.
 
+A release binds one or more named components. Every shipped recipe declares
+one, so its releases are flat: the artifact is the component and its
+``content_id`` is the component's. A recipe that declares several components
+(``weights`` and ``harness``, say) serves releases that keep one directory
+per component and carry a component manifest in their metadata. Each step
+publishes one component and the committer carries the others forward from
+the previous checkpoint, so the release still binds the whole combination:
+its ``content_id`` derives from the component content ids, a rollback
+restores every component together, and only a component whose content the
+engine does not already serve is loaded or activated. Such a scenario must
+checkpoint every step, because a live weight release names an engine load and
+nothing else.
+
 Durable releases are Git-backed, one ref per scenario, with LFS patterns for
 weight files and a ``reef-artifact.json`` manifest in every release. Heads move
 only by compare-and-swap: ``advance_current`` requires the expected head,
@@ -117,6 +130,21 @@ durable store, the order is:
    * - Pending checkpoint
      - Publish durable bytes, commit the store, apply trainer state;
        leave serving and checkpoint heads in place.
+
+Every trainer is bound to a release component (``records`` when the recipe
+serves none), and every commit record names the ``component`` that made it
+and the ``base_release_id`` its batch was reserved against. A scenario whose
+recipe builds one trainer per component runs those trainers as independent
+workers; the harness worker and the weights worker never wait for each
+other's preparation. They meet only at this commit boundary: the scenario
+lock serializes their commits, and a result whose base another trainer's
+commit has replaced is refused (``StaleTrainingResultError``) instead of being
+attached to a combination it was never evaluated with. A lone trainer is
+never refused: only its own retried attempt can have moved the head. The worker keeps its batch and prepares it again
+against the release served now. Rows every trainer consumes are retired only
+once every trainer has released them, and on restart each trainer recovers
+its state and read cursor from its own commits, which needs durable commit
+storage.
 
 Without a durable store, live and local saved releases advance the serving
 head before settling the in-memory commit. A conflicting head therefore

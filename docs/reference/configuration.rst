@@ -741,6 +741,33 @@ service can assemble their Ray training runtime; their fields are flat
 preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
 
+A composite recipe serves and evolves several release components in one
+scenario, one recipe per component. Its ``components`` object carries one
+recipe config per component name; each inherits the deployment's ``model``
+unless it names its own, and every component shares the deployment's
+runtime and training runtime. The repository base keeps one directory per
+component: the recipes' seeds are written there, a bootstrap model snapshot
+goes under the weight-training component's directory, and a component whose
+recipe seeds nothing starts empty. Each component's trainer runs as its own
+worker and commits into the same release chain, so every step checkpoints
+and the components share one ``training_mode``:
+
+.. code:: yaml
+
+   implementation: reef.recipe.composite:CompositeRecipe
+   model:
+     path: qwen3-8b
+   components:
+     harness:
+       implementation: reef.recipe.cordis:CordisRecipe
+       evolution:
+         adapter: pi
+         propose: methods.mine:propose
+         evaluate: methods.mine:evaluate
+         tasks: ["..."]
+     config:
+       implementation: my_pkg.config:ConfigRecipe
+
 A preset's ``runtime.type: executor_training`` selects an executor-backed
 training coordinator. Its ``executor`` mapping accepts ``backend`` (default
 ``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend

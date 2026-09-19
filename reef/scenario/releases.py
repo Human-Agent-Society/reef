@@ -69,6 +69,8 @@ class ScenarioReleases:
                     high_water_offset=record.high_water_offset,
                     metrics=record.metrics,
                     pending=record.pending,
+                    component=record.component,
+                    base_release_id=record.base_release_id,
                 )
                 for record in records
             )
@@ -197,6 +199,8 @@ class ScenarioReleases:
         high_water_offset: int = 0,
         metrics: Mapping[str, Any] | None = None,
         pending: bool = False,
+        component: str | None = None,
+        base_release_id: str | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
             "release_id": artifact_ref.release_id,
@@ -220,4 +224,8 @@ class ScenarioReleases:
             row["runtime_load_id"] = artifact_ref.runtime_load_id
         if metrics is not None:
             row["metrics"] = dict(metrics)
+        if component is not None:
+            row["component"] = component
+        if base_release_id is not None:
+            row["base_release_id"] = base_release_id
         return row

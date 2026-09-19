@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
+from reef.core.components import RECORDS_COMPONENT
 from reef.core.reports import ReportBase
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
@@ -23,13 +24,13 @@ from reef.recipe.config_fields import config_field, parse_int, recipe_config_fie
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
+from reef.surface.base import Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
-from reef.train.trainer import Trainer
+from reef.train.trainer import ComponentTrainer, Trainer
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -147,6 +148,43 @@ class Recipe:
             training_mode=self.training_mode,
         )
 
+    def build_trainers(
+        self,
+        scenario: str,
+        records: RecordStore,
+        *,
+        surface: Surface,
+        algorithm_states: Mapping[str, Mapping[str, Any] | None],
+        experiment_logger: ExperimentLogger | None = None,
+    ) -> tuple[ComponentTrainer, ...]:
+        """Build every trainer of the named scenario, each bound to the component it evolves.
+
+        The default builds the one trainer :meth:`build` returns and binds it
+        to the surface's only component (``records`` when the surface serves
+        none). A recipe whose surface declares several components overrides
+        this to return one trainer per component; the scenario runs them as
+        independent workers that meet at the commit boundary, and
+        ``algorithm_states`` carries each one's recovered state under its
+        component name.
+        """
+        if len(surface.names) > 1:
+            raise RecipeConfigError(
+                f"{type(self).__name__} serves components {list(surface.names)}: override build_trainers "
+                "to bind one trainer per component"
+            )
+        component = surface.names[0] if surface.names else RECORDS_COMPONENT
+        return (
+            ComponentTrainer(
+                component,
+                self.build(
+                    scenario,
+                    records,
+                    algorithm_state=algorithm_states.get(component),
+                    experiment_logger=experiment_logger,
+                ),
+            ),
+        )
+
     @property
     def inference_handler(self) -> InferenceHandler | None:
         """The inference backend composed by this recipe's runtime, if any.
@@ -164,13 +202,20 @@ class Recipe:
     def build_surface(self, scenario: str) -> Surface:
         """Build the serving surface for the named scenario.
 
-        Most recipes ignore ``scenario``; recipes whose serving state is
-        scenario-specific (an adapter on a shared engine) route by it.
+        The surface names the release's components and binds each one's
+        capabilities, including the admission check run before that component
+        is published or restored. Most recipes ignore ``scenario``; recipes
+        whose serving state is scenario-specific (an adapter on a shared
+        engine) route by it.
         """
         return Surface()
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
         """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
+        return None
+
+    def bootstrap_artifact_component(self) -> str | None:
+        """The release component a bootstrap model snapshot belongs to; ``None`` places it at the release root."""
         return None
 
     def serving_status(self) -> Mapping[str, Any] | None:
@@ -180,10 +225,6 @@ class Recipe:
         state to report.
         """
         return None
-
-    def build_artifact_validator(self) -> ArtifactValidator:
-        """Build the artifact admission policy for one scenario."""
-        return AcceptAnyArtifact()
 
 
 @dataclass(frozen=True)

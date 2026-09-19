@@ -10,6 +10,7 @@ from types import MappingProxyType
 # Re-export the pure identity types while keeping ``reef.core`` independent of
 # storage implementations.
 from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef, decode_artifact_ref, encode_artifact_ref
+from reef.core.components import ReleaseComponents, release_components
 from reef.core.errors import ReefError
 
 __all__ = [
@@ -119,6 +120,37 @@ class Artifact:
     @property
     def metadata(self) -> Mapping[str, object]:
         return MappingProxyType(self._metadata)
+
+    @property
+    def components(self) -> ReleaseComponents | None:
+        """The release's component manifest; ``None`` for a release published without one."""
+        return release_components(self._metadata)
+
+    def component(self, name: str) -> Artifact:
+        """The named component of this release, materialized.
+
+        A release without a manifest, or with one component, is that component
+        itself. A multi-component release keeps each component in a directory
+        named after it; the view carries the component's own content id and
+        metadata under the release's identity.
+        """
+        materialized = self.materialize()
+        manifest = materialized.components
+        if manifest is None:
+            return materialized
+        if name not in manifest.entries:
+            raise ArtifactNotFound(f"release {self.ref.release_id!r} binds no component {name!r}")
+        if manifest.single:
+            return materialized
+        if materialized.local_path is None:
+            raise ArtifactMaterializationError(f"release {self.ref.release_id!r} has no local component directories")
+        entry = manifest.entries[name]
+        return Artifact(
+            ArtifactRef(entry.content_id, self.ref.release_id, self.ref.parent_release_id),
+            None,
+            local_path=materialized.local_path / manifest.relative_path(name),
+            metadata=entry.metadata,
+        )
 
     @classmethod
     def local(

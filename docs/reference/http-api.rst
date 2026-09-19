@@ -517,8 +517,9 @@ Harness artifacts
 | Route                          | Response                                                      |
 +================================+===============================================================+
 | ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files,          |
-|                                | evaluation, requires}``, plus an ``x-reef-release-id``        |
-|                                | response header                                               |
+|                                | evaluation, requires}``, plus ``components`` (each component  |
+|                                | name to its content id) when the release binds several, and   |
+|                                | an ``x-reef-release-id`` response header                      |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
 |                                | carrying the evaluation metrics of the publishing step        |
@@ -908,6 +909,14 @@ an update is being trained or published.
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
 failures. ``batch_ready`` says whether the processor has a batch waiting.
+A scenario whose recipe runs one trainer per release component adds a
+``components`` object: for each component, its own ``batch_ready``,
+``training_mode``, ``processor`` status, and ``last_committed_step`` (with
+the ``base_release_id`` that step was prepared against); the scenario-wide
+fields describe the first trainer. Every new training row from
+``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
+trainer that made it, and ``base_release_id``, the release its batch was
+reserved against; rows written before Reef named components carry neither.
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed

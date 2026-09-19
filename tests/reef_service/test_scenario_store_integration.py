@@ -272,7 +272,7 @@ def test_failed_reload_closes_new_trainer_and_session(tmp_path: Path, monkeypatc
         with monkeypatch.context() as patch:
             patch.setattr(Trainer, "close", track_close)
             if failure_point == "binding":
-                patch.setattr(Recipe, "build_artifact_validator", fail_restore)
+                patch.setattr(Recipe, "inference_handler", property(fail_restore))
             else:
                 patch.setattr(Trainer, "restore_record_progress", fail_restore)
             with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):

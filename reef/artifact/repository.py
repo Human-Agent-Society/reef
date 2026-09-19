@@ -19,6 +19,7 @@ from reef.artifact.artifact import (
     ArtifactRef,
     ArtifactRepository,
 )
+from reef.artifact.composite import compose_release
 
 
 class RepositoryBackend(ArtifactRepository):
@@ -320,6 +321,29 @@ class Repository(ArtifactRepository):
             self,
             local_path=destination,
             metadata=artifact.metadata,
+        )
+        self._local_artifacts[staged.ref.release_id] = staged
+        return staged
+
+    def stage_composed(
+        self,
+        step: int,
+        components: Mapping[str, Artifact],
+        *,
+        parent: ArtifactRef,
+    ) -> Artifact:
+        """Compose several components straight into a staged local release; one copy, not two."""
+        destination = self.local_root / self._process_id / uuid.uuid4().hex
+        composed = compose_release(components, directory=destination)
+        staged = Artifact(
+            ArtifactRef(
+                content_id=composed.ref.content_id,
+                release_id=f"{LOCAL_RELEASE_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",
+                parent_release_id=parent.release_id,
+            ),
+            self,
+            local_path=destination,
+            metadata=composed.metadata,
         )
         self._local_artifacts[staged.ref.release_id] = staged
         return staged

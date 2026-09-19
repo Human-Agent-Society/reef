@@ -61,6 +61,9 @@ def _bind(
     )
     scenario = SimpleNamespace(
         trainer=trainer,
+        component_trainers=(SimpleNamespace(component=None, trainer=trainer),),
+        trainer_for=lambda component: trainer,
+        dispatched_component=None,
         scenario_step=0,
         runtime=runtime,
         training_runtime=runtime,

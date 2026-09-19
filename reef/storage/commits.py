@@ -91,10 +91,23 @@ class CommitRecord:
     rollback_target_release_id: str | None = None
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
+    #: The release component whose trainer committed this step; ``None`` for a
+    #: flat scenario and for rollback or promote commits.
+    component: str | None = None
+    #: The release the committed batch was reserved against.
+    base_release_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 1:
             raise CommitLogError("commit record step must be a positive integer")
+        if self.component is not None and (not isinstance(self.component, str) or not self.component):
+            raise CommitLogError("commit record component must be a non-empty string or null")
+        if self.base_release_id is not None and (
+            not isinstance(self.base_release_id, str) or not self.base_release_id
+        ):
+            raise CommitLogError("commit record base_release_id must be a non-empty string or null")
+        if self.operation != "training" and self.component is not None:
+            raise CommitLogError("only training commits may carry component")
         for name, value in (
             ("high_water_sequence", self.high_water_sequence),
             ("high_water_offset", self.high_water_offset),
@@ -158,6 +171,10 @@ class CommitRecord:
             value["metrics"] = deepcopy(self.metrics)
         if self.training_job_id is not None:
             value["training_job_id"] = self.training_job_id
+        if self.component is not None:
+            value["component"] = self.component
+        if self.base_release_id is not None:
+            value["base_release_id"] = self.base_release_id
         return value
 
     @classmethod
@@ -214,6 +231,8 @@ class CommitRecord:
             rollback_target_release_id=rollback_target_release_id,
             metrics=value.get("metrics"),
             training_job_id=value.get("training_job_id"),
+            component=value.get("component"),
+            base_release_id=value.get("base_release_id"),
         )
 
     def __eq__(self, other: object) -> bool:
