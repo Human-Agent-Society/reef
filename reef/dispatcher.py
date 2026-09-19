@@ -193,6 +193,11 @@ class Dispatcher:
     def published(self) -> Mapping[str, Any]:
         return self._publication.snapshot()
 
+    @property
+    def recipe(self) -> Recipe:
+        """The deployment's recipe, before any scenario's own model settings."""
+        return self._recipe
+
     # -- Scenario API (delegates to registry) ----------------------------
 
     def has_scenario(self, scenario: str) -> bool:

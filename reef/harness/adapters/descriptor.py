@@ -96,6 +96,10 @@ class ConfigTarget:
     defaults: Mapping[str, Any] = field(default_factory=dict)
 
 
+#: The ``{api_key}`` an installed binding carries when the client has no Reef token (a Reef without auth): a
+#: harness such as pi refuses an empty key, and the ``reef-<adapter>`` wrapper reads this one back as no token.
+NO_TOKEN_API_KEY = "reef-no-token"
+
 #: Vendor install kinds the install-script generator can render: an npm
 #: package at a version, or a git checkout at a ref installed editable into
 #: a venv (the channel of a Python agent that publishes no wheel).

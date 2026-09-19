@@ -22,6 +22,9 @@ Exactness replaces the retired SGLang-prefill approximation: the gather is a
 TP-aware full-vocab log-softmax at the requested ids — no top-N window, no
 synthetic floor — computed from logits divided by ``rollout_temperature``,
 the same scale ``get_log_probs_and_entropy`` puts ``ell_cur``/``ell_old`` on.
+The packing schedule and the sharded gathers are the Slime backend's
+distillation base (``reef.train.slime_backend.distill``), shared with the
+distilling recipes.
 
 The forward itself is slime's own ``forward_only`` (the compute_log_prob
 path, byte-identical model execution). S^q rows reach the callback through a
@@ -41,79 +44,15 @@ from megatron.core import mpu
 from slime.backends.megatron_utils.data import DataIterator
 from slime.backends.megatron_utils.model import forward_only
 
+from reef.train.slime_backend.distill.objective import gather_log_probs_at_ids, native_topk_ids
+from reef.train.slime_backend.distill.teacher import pack_forward_schedule
+
 logger = logging.getLogger(__name__)
 
 #: Per-pass S^q registry: id(teacher token tensor) -> [R, K] long tensor.
 _SQ_BY_TOKENS: dict[int, torch.Tensor] = {}
 #: Strong references keeping the registry's keys alive for the pass.
 _TOKENS_ALIVE: list[torch.Tensor] = []
-
-
-def pack_forward_schedule(lengths: list[int], budget: int) -> list[list[int]]:
-    """Greedy contiguous packing of sample indices under a token budget.
-
-    Mirrors dynamic batching's invariant (per-microbatch token sum stays
-    under ``max_tokens_per_gpu``); order is preserved and ``forward_only``
-    unpermutes by these indices afterwards. A single sample over budget gets
-    its own microbatch — the model's sequence capacity, not this schedule,
-    is the real limit, and the caller guards it.
-    """
-    schedule: list[list[int]] = []
-    current: list[int] = []
-    used = 0
-    for index, length in enumerate(lengths):
-        if current and used + length > budget:
-            schedule.append(current)
-            current, used = [], 0
-        current.append(index)
-        used += length
-    if current:
-        schedule.append(current)
-    return schedule
-
-
-def _gather_lp_at_ids(rows: torch.Tensor, ids: torch.Tensor, tp_group, tp_world: int, tp_rank: int) -> torch.Tensor:
-    """Exact log-probs at global vocab ``ids`` from TP-sharded logit ``rows``.
-
-    ``rows``: [R, V_local] tempered logits; ``ids``: [R, K] global ids.
-    log p(v) = raw(v) - lse(full vocab), both reconstructed across TP.
-    """
-    v_local = rows.size(-1)
-    shard_lo = tp_rank * v_local
-    in_shard = (ids >= shard_lo) & (ids < shard_lo + v_local)
-    local_ids = (ids - shard_lo).clamp(min=0, max=v_local - 1)
-    raw = torch.gather(rows, dim=-1, index=local_ids)
-    raw = torch.where(in_shard, raw, torch.zeros_like(raw))
-    if tp_world > 1:
-        dist.all_reduce(raw, op=dist.ReduceOp.SUM, group=tp_group)
-
-    row_max = rows.max(dim=-1, keepdim=True).values
-    if tp_world > 1:
-        dist.all_reduce(row_max, op=dist.ReduceOp.MAX, group=tp_group)
-    sum_exp = (rows - row_max).exp().sum(dim=-1, keepdim=True)
-    if tp_world > 1:
-        dist.all_reduce(sum_exp, op=dist.ReduceOp.SUM, group=tp_group)
-    lse = row_max + sum_exp.clamp_min(1e-30).log()
-    return raw - lse
-
-
-def _native_topk_ids(rows: torch.Tensor, k: int, tp_group, tp_world: int, tp_rank: int) -> torch.Tensor:
-    """The teacher's own global top-``k`` vocab ids per row, TP-aware."""
-    v_local = rows.size(-1)
-    shard_lo = tp_rank * v_local
-    local_vals, local_idx = torch.topk(rows, k=min(k, v_local), dim=-1)
-    local_ids = local_idx + shard_lo
-    if tp_world > 1:
-        vals_all = [torch.empty_like(local_vals) for _ in range(tp_world)]
-        ids_all = [torch.empty_like(local_ids) for _ in range(tp_world)]
-        dist.all_gather(vals_all, local_vals.contiguous(), group=tp_group)
-        dist.all_gather(ids_all, local_ids.contiguous(), group=tp_group)
-        vals = torch.cat(vals_all, dim=-1)
-        ids = torch.cat(ids_all, dim=-1)
-    else:
-        vals, ids = local_vals, local_ids
-    _, best = torch.topk(vals, k=k, dim=-1)
-    return torch.gather(ids, dim=-1, index=best)
 
 
 def gather_teacher_rows(
@@ -157,8 +96,8 @@ def gather_teacher_rows(
         ):
             rows = scaled_local_logits[offset + total_length - response_length - 1 : offset + total_length - 1]
             sq = _SQ_BY_TOKENS[id(tokens)].to(device=rows.device, dtype=torch.long)
-            teacher_log_probs.append(_gather_lp_at_ids(rows, sq, tp_group, tp_world, tp_rank).cpu())
-            teacher_topk_token_ids.append(_native_topk_ids(rows, sq.size(-1), tp_group, tp_world, tp_rank).cpu())
+            teacher_log_probs.append(gather_log_probs_at_ids(rows, sq, tp_group, tp_world, tp_rank).cpu())
+            teacher_topk_token_ids.append(native_topk_ids(rows, sq.size(-1), tp_group, tp_world, tp_rank).cpu())
             offset += total_length
     return torch.empty((0,), device=logits.device), {
         "lp_at_sq": teacher_log_probs,

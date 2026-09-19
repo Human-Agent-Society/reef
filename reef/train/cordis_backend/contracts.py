@@ -40,6 +40,9 @@ class StepProgress:
     the moment the step claims its directory until a candidate exists, then
     ``evaluating`` while the episodes run; ``episodes_total`` is the evaluation's
     episode count once ``evaluate`` has laid the episodes out, else ``None``.
+    ``activity`` is what the proposer has done so far, oldest first, each
+    ``{at, kind, text}`` with ``failed`` on a line that went wrong: the model
+    calls, and an agent's tool calls, checks and trials as they happen.
     """
 
     request_id: str | None
@@ -47,6 +50,7 @@ class StepProgress:
     started_at: float
     step_record: str | None
     episodes_total: int | None = None
+    activity: tuple[Mapping[str, Any], ...] = ()
 
 
 class StepProgressReader(ABC):

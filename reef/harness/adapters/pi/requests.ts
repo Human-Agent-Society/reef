@@ -28,8 +28,9 @@
 // lazily from pi's own loader, so plain node loads the file without it. Evaluation
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
 // evaluation never sees the commands or the tools.
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "node:fs";
+import { release } from "node:os";
+import { delimiter, join } from "node:path";
 
 // The release file the install script and harness_pull write at the tree root.
 const RELEASE_FILE = ".reef-harness-release";
@@ -53,6 +54,40 @@ const REQUESTS_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 // at the cap.
 const WATCH_INTERVAL_MS = 5000;
 const WATCH_CAP_MS = 30 * 60 * 1000;
+// How many of the proposer's latest moves the opened spinner lists; the request page has them all.
+const ACTIVITY_LINES = 4;
+// The commands a request reports as on this machine's PATH or not, so the proposer builds for this machine rather
+// than for the sandbox it tries the change in; the same list as reef.core.training_request.CLIENT_COMMANDS.
+const CLIENT_COMMANDS = [
+  "afplay",
+  "say",
+  "osascript",
+  "open",
+  "pbcopy",
+  "terminal-notifier",
+  "xdg-open",
+  "notify-send",
+  "paplay",
+  "pw-play",
+  "aplay",
+  "wl-copy",
+  "xclip",
+  "powershell.exe",
+  "wslview",
+  "ffplay",
+  "ffmpeg",
+  "mpv",
+  "mpg123",
+  "sox",
+  "espeak",
+  "curl",
+  "git",
+  "gh",
+  "python3",
+  "node",
+  "brew",
+  "apt-get",
+];
 // Every request to reef gives up after this: a hung connection must not stall a command or the watch's ticks.
 const FETCH_TIMEOUT_MS = 10000;
 // The custom message type the report is appended to the session as; pi renders plain text content itself.
@@ -365,12 +400,33 @@ export default function requests(pi) {
     `no ${RELEASE_FILE} release file at ${destDir}: this tree did not come through reef's install channel, ` +
     "so a request cannot name the release it runs; nothing was sent";
 
+  // This machine as a request reports it: the platform, and which of CLIENT_COMMANDS are on the PATH, read from the
+  // PATH's directories without running anything.
+  const clientReport = () => {
+    const dirs = (process.env.PATH || "").split(delimiter).filter(Boolean);
+    const onPath = (name) =>
+      dirs.some((dir) => {
+        try {
+          accessSync(join(dir, name), constants.X_OK);
+          return true;
+        } catch {
+          return false;
+        }
+      });
+    return {
+      platform: process.platform,
+      arch: process.arch,
+      release: release(),
+      commands: Object.fromEntries(CLIENT_COMMANDS.map((name) => [name, onPath(name)])),
+    };
+  };
+
   // POST the request with this session and the installed release; the answer names the record the step's
   // catalog row carries. Throws with the message the notice shows.
   const fileRequest = async (text, ctx) => {
     const releaseId = installedRelease();
     if (!releaseId) throw new Error(noReleaseText());
-    const body = { text, session: ctx.sessionManager.getSessionId(), release_id: releaseId };
+    const body = { text, session: ctx.sessionManager.getSessionId(), release_id: releaseId, client: clientReport() };
     let response;
     try {
       // Not under the turn's abort signal: an Esc after the body went out would report a filed request as unreachable.
@@ -673,6 +729,11 @@ export default function requests(pi) {
   // looking in costs no request and never blocks the session.
   const watchLines = () => {
     const lines = [`  asked: ${watch.ask}`, `  request: ${watch.recordId.slice(0, 8)}`];
+    // The proposer's latest moves, newest first; the page lists the rest.
+    for (const line of watch.activity.slice(-ACTIVITY_LINES).reverse()) {
+      if (!line || typeof line.text !== "string") continue;
+      lines.push(`  ${line.failed ? "x" : "-"} ${String(line.kind || "")}: ${clip(line.text, 100)}`);
+    }
     if (watch.episodes !== null) lines.push(`  evaluation episodes: ${watch.episodes}`);
     if (watch.stepRecord) lines.push(`  step record: ${watch.stepRecord}`);
     lines.push(`  full detail: ${requestPageLink(watch.recordId)}`);
@@ -711,6 +772,7 @@ export default function requests(pi) {
       ask,
       episodes: null,
       stepRecord: null,
+      activity: [],
       frame: 0,
       expanded: false,
     };
@@ -762,6 +824,8 @@ export default function requests(pi) {
         mine.state = String(progress.state || mine.state);
         mine.episodes = typeof progress.episodes_total === "number" ? progress.episodes_total : null;
         mine.stepRecord = typeof progress.step_record === "string" ? progress.step_record : null;
+        // What the proposer has done so far, oldest first; an older service sends none.
+        mine.activity = Array.isArray(progress.activity) ? progress.activity : [];
         // The step's own clock beats the watch's: a reconnecting session counts from when the step began.
         if (typeof progress.started_at === "number") mine.startedAt = progress.started_at * 1000;
       }

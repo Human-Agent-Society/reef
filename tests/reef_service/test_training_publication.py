@@ -114,13 +114,18 @@ def test_pending_transfer_target_remains_compatible_with_opaque_version_ids(publ
     assert markers.read_marker(path)["target_runtime_load_id"] == "version-7"
 
 
-@pytest.mark.parametrize("failure,status", [("pause", "CHECKPOINT"), ("transfer", "UPDATING_WEIGHTS")])
-def test_failed_publication_retries_at_the_durable_stage(publication, failure, status):
+@pytest.mark.parametrize("failure", ["pause", "transfer"])
+def test_failed_publication_retries_by_rebuilding_the_engines_it_retired(publication, failure):
+    """Every failure aborts, which retires the engines, so every retry must rebuild them.
+
+    A failed pause barrier has changed no weights, but replaying CHECKPOINT
+    would pause handles the abort already retired.
+    """
     coordinator, publisher, path = publication
     publisher.fail = failure
     with pytest.raises(RuntimeError, match=f"failed {failure}"):
         coordinator.publish("job-1")
-    assert markers.read_marker(path)["status"] == status
+    assert markers.read_marker(path)["status"] == "UPDATING_WEIGHTS"
     assert publisher.events[-1][0] == "abort"
     assert coordinator.phase == "weight_sync_failed"
     publisher.fail = None
@@ -128,10 +133,19 @@ def test_failed_publication_retries_at_the_durable_stage(publication, failure, s
     # A new coordinator has no process-local transaction state to rely on.
     recovered = TrainingPublication(FileTrainingJobStore(path), publisher)
     recovered.publish("job-1")
-    names = [name for name, _ in publisher.events]
-    assert names == (["recover", "pause", "full-transfer"] if status == "UPDATING_WEIGHTS" else ["pause", "transfer"])
+    assert [name for name, _ in publisher.events] == ["recover", "pause", "full-transfer"]
     assert publisher.paused
     assert recovered.phase == "awaiting_commit"
+
+
+def test_failed_startup_barrier_marks_a_checkpoint_for_rebuild(publication):
+    coordinator, publisher, path = publication
+    marker = markers.read_marker(path)
+    publisher.fail = "pause"
+    with pytest.raises(RuntimeError, match="failed pause"):
+        coordinator.prepare_recovery(marker)
+    assert publisher.events[-1][0] == "abort"
+    assert markers.read_marker(path)["status"] == "UPDATING_WEIGHTS"
 
 
 def test_resume_failure_retries_without_republishing(publication):
