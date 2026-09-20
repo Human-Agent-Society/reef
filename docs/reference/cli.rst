@@ -178,6 +178,12 @@ The directory is mode 0700 and credential files are mode 0600 on POSIX systems.
 ``--state-dir PATH`` selects an explicit directory. Preserve it to keep the
 same identity; do not share or copy it between running machines.
 
+Connected runtime cards in the console support deletion after confirmation.
+The connector sends ``DELETE /reef/scenarios/{scenario}`` to Reef, which
+removes that scenario and archives its own saved state. Other scenarios and
+the connection remain available. Update and restart older connectors before
+using this action; they reject the new ``delete_scenario`` command.
+
 The connector reconnects after network failures. It does not install an OS
 startup service; use ``--foreground`` with your process supervisor for restart
 after a machine reboot. It reports heartbeats every three seconds and scenario
