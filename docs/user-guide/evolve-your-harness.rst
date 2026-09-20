@@ -486,9 +486,9 @@ the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor``
 (the interpreter and its imports, the service and its token, the binary,
 the tools on PATH, the installed release against the served head) and exits
 0 when they all hold; it also lists every release that waits for your
-review, in the words ``reef-pi harness --wait`` prints. ``reef-pi --help``
+review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
-``harness``, ``page``, ``doctor``, ``setup``, ``update``; anything else
+``evolve``, ``page``, ``doctor``, ``setup``, ``update``; anything else
 runs pi) before pi's help. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
@@ -504,7 +504,9 @@ no mode switch there; a scenario in ``auto`` takes asks after a switch to
      -H "Content-Type: application/json" \
      -d '{"training_mode": "hybrid"}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
-   reef-pi harness "run the tests before you report a fix as done"
+   reef-pi evolve "run the tests before you report a fix as done"
+
+``reef-pi harness`` remains a compatibility alias for ``reef-pi evolve``.
 
 The wrapper submits to ``POST /reef/train`` with the installed release id
 from the release metadata file and the oldest pending session's id, or a fresh session id
@@ -657,13 +659,16 @@ install. A session that starts on a tree with an unmet item prints the
 list once and runs anyway. No check runs at install, and none at session
 start without your yes.
 
-See what a version is with ``/versions`` in a ``reef-pi`` session: one
-line per catalog row, oldest first, with the version (``v0``, ``v1``, ...: the
+See what a version is with ``/versions`` in a ``reef-pi`` session: an
+aligned table, oldest first, with the version (``v0``, ``v1``, ...: the
 row's step), the first eight characters of the release id, the result (``selected``, ``rejected``, ``skipped``,
 ``pending``, ``promoted at vN`` once a later promote serves a pending
 release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
-``recovery``), ``current`` on the served head and the request text the step
-answered. ``/versions <version>`` prints the link to that step's page,
+``recovery``), and a separate status column marking ``installed`` on the
+version this tree runs and ``current`` on the served head. Each request
+summary appears below its row, with line breaks collapsed to spaces. The
+footer explains the status markers and lists the details and install commands.
+``/versions <version>`` prints the link to that step's page,
 ``GET /reef/harness/releases/<step>/page`` with the scenario and the token
 as query parameters so a browser opens it as is, one self contained HTML
 page that reads like the request page, light or dark with the system and

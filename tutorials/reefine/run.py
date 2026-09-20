@@ -2,7 +2,7 @@
 
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
-    ask     - ``reef-pi harness "<request>"``: the wrapper posts the request
+    ask     - ``reef-pi evolve "<request>"``: the wrapper posts the request
               to ``POST /reef/train`` as a training instruction, and the
               deployment, in ``training_mode: manual``, runs one evolve step
               for it at once
@@ -303,8 +303,8 @@ def ask(text):
     a fresh one), and the deployment's manual mode runs one step for it. A
     refusal (admission's screens, a mode that takes no instructions) is a
     stop, with the wrapper's line saying why."""
-    say(f"ask: reef-pi harness {text!r}")
-    done = reef_pi(["harness", text])
+    say(f"ask: reef-pi evolve {text!r}")
+    done = reef_pi(["evolve", text])
     match = re.search(r"training request (\S+) accepted", done.stdout)
     if match is None:
         raise SystemExit("the request was not accepted; the wrapper's lines above say why")
@@ -414,7 +414,7 @@ def _take_show_spool(started_ns, run_dir):
     """The spool entry the show session wrote at exit, moved into the run directory; its turns.
 
     The wrapper spools every session's receipts for ``report`` to claim, and
-    ``harness`` records the oldest spooled session as the session the request
+    ``evolve`` records the oldest spooled session as the session the request
     came from; the show session is shown, never reported, so its entry leaves the spool
     for the run directory, where it is the record this driver reads."""
     if not CAPTURES.is_dir():
@@ -553,7 +553,7 @@ def demo(mode):
     else:
         say(f"the head did not move: release {installed_before} stays installed")
         installed = installed_before
-    # From the harness call to the end of the install, or to the result when nothing new installed.
+    # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)
     shown = show(mode, run_dir)
     result.update(
