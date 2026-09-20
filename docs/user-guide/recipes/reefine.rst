@@ -40,7 +40,7 @@ How it works
    you must provide. When an open point would change what gets built, it
    asks you up to three questions, each with concrete options, then files
    your original words with the answers as clarifications (``--direct`` as
-   the first word files at once). From the shell, ``reef-pi harness
+   the first word files at once). From the shell, ``reef-pi evolve
    "<text>"`` posts the same instruction to ``POST /reef/train``; add
    ``--wait`` to stay until the step settles. Either ask prints the
    request's page link (``GET /reef/harness/requests/<id>/page``), which
@@ -65,7 +65,7 @@ How it works
    candidate on the health task: it publishes when the tree still works,
    and the step's page carries the design and the review either way.
 3. Result. The session that asked reports it in the chat when the step
-   settles, and ``reef-pi harness ... --wait`` prints the same line:
+   settles, and ``reef-pi evolve ... --wait`` prints the same line:
    published as a release, ready but waiting for your review because it
    changes an extension, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.

@@ -18,8 +18,8 @@ When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."
      (one trajectory sample), or one report per receipt with ``--per-receipt``.
   3. Clears the persisted receipts.
 
-When invoked with ``harness`` (e.g. ``reef-pi harness "text me when you are blocked"``,
-``reef-pi harness "..." --wait [--timeout SECONDS]``):
+When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocked"``,
+``reef-pi evolve "..." --wait [--timeout SECONDS]``; ``harness`` remains a compatibility alias):
 
   Sends an explicit manual training instruction to ``POST /reef/train`` with
   the installed release and the oldest pending session's id (or a fresh id
@@ -1020,7 +1020,7 @@ def _failure_of(row: Mapping[str, Any]) -> str:
 def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str) -> str:
     """One line for a settled step: its result and the next action, quoting the request's first 60 characters.
 
-    The extension's watch says the same in the session; ``harness --wait``
+    The extension's watch says the same in the session; ``evolve --wait``
     and ``doctor`` say it here. ``page`` is the step's page link, which the
     pending line names as the review."""
     row = rows[step]
@@ -1229,7 +1229,7 @@ def harness(
     release hands over its next step and a failed step's status stands."""
     text = text.strip()
     if not text:
-        sys.exit(f"reef-{adapter} harness: the request is empty")
+        sys.exit(f"reef-{adapter} evolve: the request is empty")
     release = _installed_release(compose_dir)
     if release is None:
         sys.exit(
@@ -1759,7 +1759,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     Every check exists somewhere already (an install warning, a run time
     warning, a route error); this is the one place that runs them all and
     says which failed. A release awaiting a review gets a line of its own,
-    the one ``harness --wait`` prints, since a person who runs this is
+    the one ``evolve --wait`` prints, since a person who runs this is
     usually asking what happened to their request."""
     rows: list[tuple[bool, str, str]] = []
     catalog: list[Mapping[str, Any]] | None = None
@@ -1856,7 +1856,7 @@ def _usage(adapter: str) -> str:
         [
             f"{prog}: run {adapter} through reef's capture proxy, or one of",
             f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
-            f'  {prog} harness "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
+            f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
             f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
             f"  {prog} doctor                                                     check what the install needs",
             f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
@@ -1896,8 +1896,8 @@ def main() -> None:
         )
         ns = parser.parse_args(args[1:])
         report(scenario, adapter, ns.score, ns.feedback, per_receipt=ns.per_receipt)
-    elif args and args[0] == "harness":
-        parser = argparse.ArgumentParser(prog=f"reef-{adapter} harness")
+    elif args and args[0] in ("evolve", "harness"):
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} evolve")
         parser.add_argument("request", nargs="*", help="what the harness should do, in plain words")
         parser.add_argument("--wait", action="store_true", help="stay until the step settles and print its result")
         parser.add_argument(
