@@ -29,14 +29,14 @@ from pathlib import Path
 import skills
 
 TASK = json.loads((Path(__file__).with_name("task.json")).read_text())["task"]
-EPOCHS = int(os.environ.get("SKILLS_EPOCHS", "2"))
-PROMPTS_PER_STEP = int(os.environ.get("SKILLS_PROMPTS_PER_STEP", "32"))  # MUST equal serve.yaml's batch size
-SEED = int(os.environ.get("SKILLS_SEED", "42"))
-MAX_TOKENS = int(os.environ.get("SKILLS_MAX_TOKENS", "2048"))
-EVAL_EVERY = int(os.environ.get("SKILLS_EVAL_EVERY", "10"))
+EPOCHS = int(os.environ.get("SDFT_EPOCHS", "2"))
+PROMPTS_PER_STEP = int(os.environ.get("SDFT_PROMPTS_PER_STEP", "32"))  # MUST equal serve.yaml's batch size
+SEED = int(os.environ.get("SDFT_SEED", "42"))
+MAX_TOKENS = int(os.environ.get("SDFT_MAX_TOKENS", "2048"))
+EVAL_EVERY = int(os.environ.get("SDFT_EVAL_EVERY", "10"))
 #: A ceiling on the steps to run (0 runs the whole schedule); a smoke run sets a few.
-STEPS = int(os.environ.get("SKILLS_STEPS", "0"))
-TRAIN_TIMEOUT_S = float(os.environ.get("SKILLS_TRAIN_TIMEOUT_S", "3600"))
+STEPS = int(os.environ.get("SDFT_STEPS", "0"))
+TRAIN_TIMEOUT_S = float(os.environ.get("SDFT_TRAIN_TIMEOUT_S", "3600"))
 JUDGE_URL = os.environ["JUDGE_URL"].rstrip("/")
 
 

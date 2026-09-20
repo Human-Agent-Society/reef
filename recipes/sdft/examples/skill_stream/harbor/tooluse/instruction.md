@@ -9,7 +9,7 @@ demonstration is the dataset's golden response.
 The harness runs `python /opt/skills/stage.py` in this container. The runner samples each step's prompts through the
 Reef service at `$REEF_SERVICE_URL`, reports every demonstration against the
 sample's receipt, and waits for the step's training release. Every
-`SKILLS_EVAL_EVERY` steps, and after the last, it submits the step number to
+`SDFT_EVAL_EVERY` steps, and after the last, it submits the step number to
 the judge at `$JUDGE_URL`, which scores the served model on the test splits
 of both skills (Tool Use: regex match of the API call; Science Q&A: exact
 match of the answer letter) and records the scores.

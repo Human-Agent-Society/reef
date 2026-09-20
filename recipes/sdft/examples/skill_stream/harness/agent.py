@@ -4,7 +4,7 @@ The agent makes no model calls of its own. ``stage.py`` in the task's image
 samples, reports and waits for training against the Reef service on the
 host, and asks the task's judge to score the served model on both skills.
 This class runs it, hands it the stage settings from the host environment
-(every ``SKILLS_*`` variable), and keeps its output in the trial's agent log.
+(every ``SDFT_*`` variable), and keeps its output in the trial's agent log.
 Harbor runs the verifier afterwards, which asks the judge for the final
 result; reef-eval stores that and the judge's per-submission scores.
 """
@@ -22,7 +22,7 @@ STAGE_COMMAND = (
     "bash -c 'set -o pipefail; mkdir -p /logs/agent; python3 /opt/skills/stage.py 2>&1 | tee -a /logs/agent/stage.log'"
 )
 #: Host environment forwarded into the stage: the runner's settings (epochs, prompts per step, ...).
-FORWARDED_PREFIX = "SKILLS_"
+FORWARDED_PREFIX = "SDFT_"
 #: A stage is up to 252 steps, each a checkpoint save; the ceiling matches the task's agent timeout.
 DEFAULT_STAGE_TIMEOUT_S = 172_800.0
 
@@ -34,7 +34,7 @@ class HarborAgent(BaseAgent):
         super().__init__(*args, **kwargs)
         environ = os.environ
         self.stage_environment = {key: value for key, value in environ.items() if key.startswith(FORWARDED_PREFIX)}
-        self.timeout_s = float(environ.get("SKILLS_STAGE_TIMEOUT_S", "") or DEFAULT_STAGE_TIMEOUT_S)
+        self.timeout_s = float(environ.get("SDFT_STAGE_TIMEOUT_S", "") or DEFAULT_STAGE_TIMEOUT_S)
 
     @staticmethod
     def name() -> str:

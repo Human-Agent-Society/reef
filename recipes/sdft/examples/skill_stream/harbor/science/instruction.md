@@ -9,7 +9,7 @@ four-option chemistry question, and the demonstration is GPT-4o's response.
 The harness runs `python /opt/skills/stage.py` in this container. The runner
 samples each step's prompts through the Reef service at `$REEF_SERVICE_URL`,
 reports every demonstration against the sample's receipt, and waits for the
-step's training release. Every `SKILLS_EVAL_EVERY` steps, and after the last,
+step's training release. Every `SDFT_EVAL_EVERY` steps, and after the last,
 it submits the step number to the judge at `$JUDGE_URL`, which scores the
 served model on the test splits of both skills (Science Q&A: exact match of
 the answer letter; Tool Use: regex match of the API call) and records the

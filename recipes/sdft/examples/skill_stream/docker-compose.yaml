@@ -34,8 +34,8 @@ services:
       - ${REEF_ROOT}:/workspace/Reef
     environment:
       REEF_TOKEN: ${REEF_TOKEN}
-      SKILLS_MODEL_PATH: ${SKILLS_MODEL_PATH}
-      SKILLS_LR_DECAY_ITERS: ${SKILLS_LR_DECAY_ITERS}
+      SDFT_MODEL_PATH: ${SDFT_MODEL_PATH}
+      SDFT_LR_DECAY_ITERS: ${SDFT_LR_DECAY_ITERS}
       PYTHONPATH: /workspace/Reef:/root/Megatron-LM
       PYTORCH_CUDA_ALLOC_CONF: expandable_segments:True
       WANDB_API_KEY: ${WANDB_API_KEY:-}

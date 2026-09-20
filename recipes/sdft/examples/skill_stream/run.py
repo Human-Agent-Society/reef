@@ -7,8 +7,8 @@ implementation chains its single-task runs; the stack's recipe is the
 ``sdft`` recipe (``serve.yaml``) and its learning-rate schedule spans
 exactly the stage's steps. The stack takes four GPUs (the actor with the
 rollout engines colocated) and one host port, and the stream names it, so
-a second stream on other GPUs and another port (``SKILLS_GPUS``,
-``SKILLS_PORT``) runs beside it: a smoke beside the full run.
+a second stream on other GPUs and another port (``CUDA_VISIBLE_DEVICES``,
+``REEF_PORT``) runs beside it: a smoke beside the full run.
 
 For each stage:
 
@@ -22,12 +22,12 @@ For each stage:
               land in the Lab store tagged ``stream``, ``arm``, ``position``
     stop    — ``docker compose down``; the stage's HF export seeds the next
 
-``plot.py`` draws the figure from the store, the SFT control beside it. Rows already recorded are
-skipped, so a crashed stream resumes; a new ``--stream`` name starts over.
+Rows already recorded are skipped, so a crashed stream resumes; a new
+``--stream`` name starts over.
 
     uv run --no-project --python 3.12 --with "reef-eval[harbor]" --with reef-client \\
         --with-editable . run.py
-    SKILLS_STEPS=2 ... run.py --stream smoke      # two steps per stage
+    SDFT_STEPS=2 ... run.py --stream smoke      # two steps per stage
 """
 
 from __future__ import annotations
@@ -47,7 +47,7 @@ HARBOR = HERE / "harbor"
 STAGES = ("tooluse", "science")
 #: The reference's training splits: the stage's step count follows from them.
 TRAINING_PROMPTS = {"tooluse": 4046, "science": 2674}
-#: The rows' ``arm`` tag; ``plot.py`` draws the SFT control's rows beside it under ``sft``.
+#: The rows' ``arm`` tag in the Lab store.
 ARM = "sdft"
 #: The stack's GPUs (four comma-separated ids) and the host port its Reef publishes.
 DEFAULT_GPUS = "0,1,2,3"
@@ -66,9 +66,9 @@ RUN_DIR = Path(os.environ.get("RUN_DIR", HERE / "work")).resolve()
 
 def stage_steps(task: str) -> int:
     """Optimizer steps the stage runs: the runner's schedule over the split, capped like the runner."""
-    epochs = int(os.environ.get("SKILLS_EPOCHS", "2"))
-    prompts_per_step = int(os.environ.get("SKILLS_PROMPTS_PER_STEP", "32"))
-    cap = int(os.environ.get("SKILLS_STEPS", "0"))
+    epochs = int(os.environ.get("SDFT_EPOCHS", "2"))
+    prompts_per_step = int(os.environ.get("SDFT_PROMPTS_PER_STEP", "32"))
+    cap = int(os.environ.get("SDFT_STEPS", "0"))
     steps = epochs * TRAINING_PROMPTS[task] // prompts_per_step
     return min(steps, cap) if cap else steps
 
@@ -83,12 +83,12 @@ def latest_export(stage_dir: Path) -> Path:
 
 def stack_environment(stream: str) -> dict[str, str]:
     """What the stack and the tasks read from the environment: the stack's name, its GPUs and its host port."""
-    gpus = os.environ.get("SKILLS_GPUS", DEFAULT_GPUS).split(",")
+    gpus = os.environ.get("CUDA_VISIBLE_DEVICES", DEFAULT_GPUS).split(",")
     if len(gpus) != 4:
-        raise ValueError(f"SKILLS_GPUS must name four GPUs, got {gpus}")
+        raise ValueError(f"CUDA_VISIBLE_DEVICES must name four GPUs, got {gpus}")
     return {
         "STACK": stream,
-        "REEF_HOST_PORT": os.environ.get("SKILLS_PORT", str(DEFAULT_PORT)),
+        "REEF_HOST_PORT": os.environ.get("REEF_PORT", str(DEFAULT_PORT)),
         **{f"REEF_GPU_{index}": gpu.strip() for index, gpu in enumerate(gpus)},
     }
 
@@ -109,8 +109,8 @@ def start_stack(stream: str, model_path: str, steps: int, stage_dir: Path) -> No
     """
     stage_dir.mkdir(parents=True, exist_ok=True)
     environment = {
-        "SKILLS_MODEL_PATH": model_path,
-        "SKILLS_LR_DECAY_ITERS": str(max(steps, LR_WARMUP_STEPS + 1)),
+        "SDFT_MODEL_PATH": model_path,
+        "SDFT_LR_DECAY_ITERS": str(max(steps, LR_WARMUP_STEPS + 1)),
         "RUN_DIR": str(stage_dir),
         "EXPERIMENT_DIR": str(RUN_DIR),
     }
@@ -135,7 +135,7 @@ async def run_stream(stream: str, seed: int) -> None:
         tags = {"stream": stream, "arm": ARM, "position": position, "seed": seed}
         # The scenario names the stage; the task's compose file hands it to both containers.
         os.environ["REEF_SCENARIO"] = f"{stream}-{ARM}-{task}"
-        os.environ["SKILLS_SEED"] = str(seed)
+        os.environ["SDFT_SEED"] = str(seed)
         key = f"{stream}@{position:03d}:{ARM}:{task}:seed{seed}"
         row = lab.store.get(key)
         if row is None:
@@ -158,7 +158,9 @@ async def run_stream(stream: str, seed: int) -> None:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--stream", default="figure3", help="the stream's name in the Lab store (a new name reruns)")
+    parser.add_argument(
+        "--stream", default="skill-stream", help="the stream's name in the Lab store (a new name reruns)"
+    )
     parser.add_argument("--seed", type=int, default=42, help="the training order's seed")
     arguments = parser.parse_args()
     for variable in ("REEF_TOKEN", "REEF_IMAGE", "MODEL_DIR", "REEF_ROOT"):

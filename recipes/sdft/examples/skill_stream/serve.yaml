@@ -10,8 +10,8 @@
 # decay, clipping at 1. The KL is the forward one, the reference's default
 # and what the paper's results used (that issue's run switched to reverse).
 #
-# run.py sets SKILLS_MODEL_PATH (the stage's starting weights) and
-# SKILLS_LR_DECAY_ITERS (its step count) per stage; docker-compose.yaml hands
+# run.py sets SDFT_MODEL_PATH (the stage's starting weights) and
+# SDFT_LR_DECAY_ITERS (its step count) per stage; docker-compose.yaml hands
 # them to the container. GPU budget: four GPUs, the actor (tensor parallel
 # 4) colocated with four rollout engines. The teacher pass is a forward of
 # the actor with the teacher copy swapped in from the host. Paths are the
@@ -25,7 +25,7 @@ reef:
   run-dir: /var/lib/reef/run             # the stage's own logs and runtime config, beside its state
   token: ${REEF_TOKEN}                 # run.sh mints one per run directory
 inference:
-  model-path: ${SKILLS_MODEL_PATH}
+  model-path: ${SDFT_MODEL_PATH}
   timeout-s: 1800
   # Four single-GPU engines colocated with the four actor ranks
   # (training.colocate): the actor offloads to the host while the engines
@@ -49,7 +49,7 @@ inference:
 recipe:
   implementation: recipes.sdft.recipe:SDFTRecipe
   config:
-    batch-size: 32                     # MUST equal training.config.global_batch_size and the stage's SKILLS_PROMPTS_PER_STEP
+    batch-size: 32                     # MUST equal training.config.global_batch_size and the stage's SDFT_PROMPTS_PER_STEP
     max-staleness: 0                   # on-policy: the stage waits for each step's release before sampling again
     tokenizer-path: /root/models/Qwen2.5-7B-Instruct  # every stage's export shares the base tokenizer; recipe.config takes no ${} references
     max-teacher-tokens: 8192           # the trainer's seq-length; a longer teacher sequence is skipped and counted
@@ -120,7 +120,7 @@ training:
     lr: "1e-5"
     lr-decay-style: "cosine"
     lr-warmup-iters: "10"
-    lr-decay-iters: "${SKILLS_LR_DECAY_ITERS}"
+    lr-decay-iters: "${SDFT_LR_DECAY_ITERS}"
     weight-decay: "0.0"
     clip-grad: "1.0"
     # The sdft loss family: the backend's distillation loss over the
@@ -133,10 +133,12 @@ training:
     sdft-divergence: "forward"
     sdft-importance-sampling-cap: "2.0"
     sdft-skip-response-tokens: "3"
-    # The reference's ref_model_mixup_alpha for these runs: the teacher is a
-    # copy of the stage's initial weights that moves 2% toward the policy
-    # after every step.
-    sdft-teacher-update-rate: "0.02"
+    # The teacher is a frozen copy of the stage's initial weights. A teacher
+    # that follows the policy (the reference's ref_model_mixup_alpha, 0.02 in
+    # these runs) drifts with it: in both runs that used it Tool Use collapsed
+    # after step 170 (66% to 23% by step 252) while the loss stayed small and
+    # the responses grew longer.
+    sdft-teacher-update-rate: "0"
     n-samples-per-prompt: "1"
     rollout-temperature: "1.0"
 storage:

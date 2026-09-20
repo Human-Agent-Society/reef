@@ -4,7 +4,7 @@
 # Setup (once): see README. State goes to $RUN_DIR.
 #
 #   ./run.sh                     Tool Use, then Science Q&A
-#   SKILLS_STEPS=2 ./run.sh --stream smoke
+#   SDFT_STEPS=2 ./run.sh --stream smoke
 set -euo pipefail
 cd "$(dirname "$0")"
 export REEF_ROOT="$(cd ../../../.. && pwd)"

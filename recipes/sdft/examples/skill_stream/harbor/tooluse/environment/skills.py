@@ -30,7 +30,7 @@ MODEL = "reef"  # the model name the requests carry; Reef's SGLang serves it
 #: The reference's evaluation windows (``eval_tooluse.py``, ``eval_science.py``), greedy.
 EVAL_MAX_TOKENS = {"tooluse": 1024, "science": 2048}
 #: The reference checkout the container images clone at its pin.
-DATA_DIR = Path(os.environ.get("SKILLS_DATA_DIR", "/opt/self-distillation/data"))
+DATA_DIR = Path(os.environ.get("SDFT_DATA_DIR", "/opt/self-distillation/data"))
 
 SERVICE_URL = os.environ.get("REEF_SERVICE_URL", "http://host.docker.internal:28902")
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")
