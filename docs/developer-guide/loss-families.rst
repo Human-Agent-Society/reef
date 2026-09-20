@@ -55,6 +55,8 @@ objective; the driver checks it at start and refuses a mismatch.
 +----------------+-----------------------------+----------------------------+
 | ``openclawrl`` | ``custom_loss``             | not required               |
 +----------------+-----------------------------+----------------------------+
+| ``sdft``       | ``custom_loss``             | ``--use-rollout-logprobs`` |
++----------------+-----------------------------+----------------------------+
 
 The spec
 --------
@@ -95,7 +97,7 @@ Two loss lanes
 --------------
 
 ``loss_type = "custom_loss"`` replaces Slime's loss with the
-``custom_loss_function_path`` hook (``tttd``, ``openclawrl``).
+``custom_loss_function_path`` hook (``tttd``, ``openclawrl``, ``sdft``).
 ``uses_pg_loss_primitive = True`` keeps Slime's ``policy_loss`` and swaps only
 the per-token primitive through ``custom_pg_loss_function_path`` (``sao``); the
 adapter layer points Slime's CISPO callsite at it.
@@ -144,7 +146,8 @@ A family that ships more than the five policy columns declares them on the spec.
 Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
-frozen Megatron teacher).
+frozen Megatron teacher), ``recipes/sdft/slime/`` (a thin family on the
+distillation base below).
 
 The distillation base
 ---------------------

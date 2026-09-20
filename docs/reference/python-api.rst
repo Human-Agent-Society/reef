@@ -138,6 +138,7 @@ for every scenario in a deployment.
    ├── WeightTrainingRecipe     training objective, loss family, separate runtimes
    │   ├── SAORecipe                                        recipes.sao.recipe
    │   ├── TTTDRecipe                                       recipes.tttd.recipe
+   │   ├── SDFTRecipe                                       recipes.sdft.recipe
    │   └── OpenClawRLRecipe                                 recipes.openclawrl.recipe
    └── CordisRecipe             harness tree + episodes  reef.recipe.cordis
        └── SkillClawRecipe                                recipes.skillclaw.recipe
