@@ -232,7 +232,7 @@ curl -fsS -H "Content-Type: application/json" \
 curl -fsS -H "x-reef-scenario: my-harness" \
   'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
-reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
+reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
 Inside a `reef-pi` session, `/evolve <text>` files the same ask. The served

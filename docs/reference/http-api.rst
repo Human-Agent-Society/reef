@@ -774,7 +774,7 @@ Request page
 ``GET /reef/harness/requests/{record_id}/page`` answers one self contained
 HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
 harness request, ``record_id`` being the ``agent_record_id`` that
-``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/evolve``
+``POST /reef/train`` answered; ``reef-pi evolve`` and pi's ``/evolve``
 print the link. Until the step settles the page reloads itself every five
 seconds. A four-stage progress strip and a status badge summarize the
 request. The responsive layout places Request beside Progress on desktop

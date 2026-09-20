@@ -486,9 +486,9 @@ the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor``
 (the interpreter and its imports, the service and its token, the binary,
 the tools on PATH, the installed release against the served head) and exits
 0 when they all hold; it also lists every release that waits for your
-review, in the words ``reef-pi harness --wait`` prints. ``reef-pi --help``
+review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
-``harness``, ``page``, ``doctor``, ``setup``, ``update``; anything else
+``evolve``, ``page``, ``doctor``, ``setup``, ``update``; anything else
 runs pi) before pi's help. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
@@ -504,7 +504,9 @@ no mode switch there; a scenario in ``auto`` takes asks after a switch to
      -H "Content-Type: application/json" \
      -d '{"training_mode": "hybrid"}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
-   reef-pi harness "run the tests before you report a fix as done"
+   reef-pi evolve "run the tests before you report a fix as done"
+
+``reef-pi harness`` remains a compatibility alias for ``reef-pi evolve``.
 
 The wrapper submits to ``POST /reef/train`` with the installed release id
 from the release metadata file and the oldest pending session's id, or a fresh session id
