@@ -1341,21 +1341,22 @@ def _main_env(tmp_path: Path, scenario: str = "ask-scenario") -> dict[str, str]:
 
 
 @pytest.mark.unit
-def test_main_dispatches_harness_with_the_words_joined_and_exits_with_its_status(tmp_path) -> None:
+@pytest.mark.parametrize("command", ["evolve", "harness"])
+def test_main_dispatches_evolve_with_the_words_joined_and_exits_with_its_status(tmp_path: Path, command: str) -> None:
     asked: list[tuple] = []
     with (
         patch.dict(os.environ, _main_env(tmp_path)),
         patch("reef.harness.client.wrapper.harness", lambda *args, **kwargs: asked.append((args, kwargs)) or 2),
     ):
         with (
-            patch("sys.argv", ["reef-pi", "harness", "text", "me", "when", "you", "are", "blocked"]),
+            patch("sys.argv", ["reef-pi", command, "text", "me", "when", "you", "are", "blocked"]),
             pytest.raises(SystemExit) as exited,
         ):
             main()
         assert exited.value.code == 2
         # The flags read the same after the request as before it.
         with (
-            patch("sys.argv", ["reef-pi", "harness", "text me", "--wait", "--timeout", "30"]),
+            patch("sys.argv", ["reef-pi", command, "text me", "--wait", "--timeout", "30"]),
             pytest.raises(SystemExit),
         ):
             main()
@@ -1665,7 +1666,7 @@ def test_main_prints_its_own_usage_for_help_then_runs_the_agent(tmp_path, capsys
     assert out.count("reef-pi: run pi through reef's capture proxy, or one of") == 3
     for line in (
         "reef-pi report --score S",
-        'reef-pi harness "<what it should do>" [--wait] [--timeout SECONDS]',
+        'reef-pi evolve "<what it should do>" [--wait] [--timeout SECONDS]',
         "reef-pi page <step> [--print]",
         "reef-pi doctor",
         "reef-pi setup [--yes] [--mark NAME] [--release ID]",

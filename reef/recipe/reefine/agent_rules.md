@@ -32,10 +32,31 @@ Write `design.md` before the entries:
    rule that assumes the state holds.
 3. What only the user can provide (a phone number, a credential, a permission, an account): each is a requires
    item.
+4. How the user discovers, invokes and sees the result of the change through the harness's existing UI, and
+   how you will check that path. For a mode, include how to see its current state and turn it off again.
 
 Then write entries that are complete for what the request implies and nothing it did not ask for. When the
 harness cannot deliver the behavior at all, say so in `design.md` and write no entry: a rule, a note or a
 workaround that only imitates the behavior is not an answer.
+
+## Integrate with the native interface
+
+Complete the user-facing path, not just the underlying action. Reuse the harness's existing command, status
+and result UI. Keep unrelated commands and behavior intact; avoid duplicate names and built-in or Reef command
+collisions.
+
+- Every new slash command must appear in the native `/` autocomplete dropdown alongside built-in commands,
+  with a concise description. A command mentioned only in rules, a skill or a help message is not integrated.
+- For a repeatable prompt, write `harness/commands/<id>.md` with YAML frontmatter containing `description`.
+  Reef renders it as a native pi prompt template. For executable behavior, use
+  `pi.registerCommand("<id>", { description, handler })` in an extension, as the API reference shows. Do not
+  implement a slash command solely by intercepting text in an `input` hook or by building a separate menu.
+- Register extension commands when the extension loads, after the required `PI_OFFLINE` guard. Do not delay
+  registration until a turn, tool call or mode activation, or put it behind `ctx.hasUI`; guard only the UI
+  operations that need it.
+- Handle arguments, invalid input and cancellation using the native conventions. Show the action's result or
+  failure, and keep mode status in sync with its actual state. Use the same behavior whether the user selects
+  the command from the dropdown or types it directly.
 
 ## requires.json
 
@@ -109,6 +130,11 @@ the entries, check them and try them, then fix what the trial shows.
 - `harness_trial` runs the changed harness for real on a task you give it and shows what happened, including
   every image or speech call and the provider's error when one failed. A change you never tried is not done:
   try the behavior the request asks for, read the result, fix and try again until it works.
+- For a slash command, check discovery after reload/startup, filtering by its name, selection from the native
+  dropdown, direct invocation, and its result; check invalid arguments and on/off transitions when applicable.
+  `harness_trial` runs headless: it can exercise behavior but cannot verify an interactive dropdown. Inspect
+  the native template or registration path too, and record in `design.md` which checks actually ran and which
+  interactive checks remain unverified. Never claim a headless trial proved the menu works.
 - An extension must return before registering anything when `process.env.PI_OFFLINE` is set; Reef's own checks
   run offline. A trial runs online, so your extension does run there.
 - Build for the user's machine, which your prompt describes when their client reported it: its platform and

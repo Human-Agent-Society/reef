@@ -387,10 +387,10 @@ settings and legacy shorthand.
 
 ``serve.yaml`` holds the endpoint (``http://127.0.0.1:8000``, no ``/v1``
 suffix), the model (``qwen3-8b``), and the service token as literals; edit
-them there to point at your own. The model name appears twice, as
-``model.path`` for the proposer and the evolve episodes and as
-``upstream_model`` for served traffic, and ``run.py`` repeats it as
-``MODEL``; a name the endpoint does not serve fails the proposer's call, and
+them there to point at your own. The model name is set once, as
+``inference.upstream-model``: the proposer, the evolve episodes and served
+traffic all use it, and ``run.py`` repeats it as ``MODEL``; a name the
+endpoint does not serve fails the proposer's call, and
 the step records ``skipped: no proposal``. The provider key is the one value
 ``serve.yaml`` does not hold.
 
@@ -422,7 +422,7 @@ still running:
 
    curl -sS -H "Authorization: Bearer reef-local" \
      -H "x-reef-scenario: harness-evolve-demo" \
-     http://127.0.0.1:8900/reef/harness            # 404 until a step publishes
+     http://127.0.0.1:8900/reef/harness            # the seed tree until a step publishes
    curl -sS -H "Authorization: Bearer reef-local" \
      -H "x-reef-scenario: harness-evolve-demo" \
      http://127.0.0.1:8900/reef/harness/releases
@@ -431,15 +431,17 @@ One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B: one failing task entered the
 window, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
-notebook run repeats the arc with no GPU at all, on ollama ``qwen2.5:7b``. The run has succeeded when one
+notebook run, on ollama ``qwen2.5:7b`` with no GPU, records one step whose candidate
+tied the current tree on every task and lost the gate. The run has succeeded when one
 task fails, the failing report opens the window, one evolve step runs, and
-``GET /reef/harness`` stops returning 404. ``/reef/harness/releases`` then
-shows a published version.
+``GET /reef/harness`` serves a release other than the seed.
+``/reef/harness/releases`` then shows that step's training row with
+``published: true`` in its metrics.
 
-If ``/reef/harness`` still returns 404 after a few minutes, the run has
+If ``/reef/harness`` still serves the seed after a few minutes, the run has
 failed. A server without tool calling can start but fails every episode:
-both sides tie, no candidate ever wins, and the route stays 404. The failure
-manifest names the cause. Vendor install failures instead refuse deployment
+both sides tie, no candidate ever wins, and the head never moves. The step's
+row names the cause. Vendor install failures instead refuse deployment
 startup. Confirm that
 ``~/.local/share/reef-harness/pi/node_modules/.bin/pi --version`` runs and
 that the server accepts tool calls before suspecting the recipe; vLLM needs
@@ -484,9 +486,9 @@ the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor``
 (the interpreter and its imports, the service and its token, the binary,
 the tools on PATH, the installed release against the served head) and exits
 0 when they all hold; it also lists every release that waits for your
-review, in the words ``reef-pi harness --wait`` prints. ``reef-pi --help``
+review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
-``harness``, ``page``, ``doctor``, ``setup``, ``update``; anything else
+``evolve``, ``page``, ``doctor``, ``setup``, ``update``; anything else
 runs pi) before pi's help. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
@@ -502,7 +504,9 @@ no mode switch there; a scenario in ``auto`` takes asks after a switch to
      -H "Content-Type: application/json" \
      -d '{"training_mode": "hybrid"}' \
      "$REEF_URL/reef/scenarios/code-repair/update"
-   reef-pi harness "run the tests before you report a fix as done"
+   reef-pi evolve "run the tests before you report a fix as done"
+
+``reef-pi harness`` remains a compatibility alias for ``reef-pi evolve``.
 
 The wrapper submits to ``POST /reef/train`` with the installed release id
 from the release metadata file and the oldest pending session's id, or a fresh session id
@@ -655,13 +659,16 @@ install. A session that starts on a tree with an unmet item prints the
 list once and runs anyway. No check runs at install, and none at session
 start without your yes.
 
-See what a version is with ``/versions`` in a ``reef-pi`` session: one
-line per catalog row, oldest first, with the version (``v0``, ``v1``, ...: the
+See what a version is with ``/versions`` in a ``reef-pi`` session: an
+aligned table, oldest first, with the version (``v0``, ``v1``, ...: the
 row's step), the first eight characters of the release id, the result (``selected``, ``rejected``, ``skipped``,
 ``pending``, ``promoted at vN`` once a later promote serves a pending
 release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
-``recovery``), ``current`` on the served head and the request text the step
-answered. ``/versions <version>`` prints the link to that step's page,
+``recovery``), and a separate status column marking ``installed`` on the
+version this tree runs and ``current`` on the served head. Each request
+summary appears below its row, with line breaks collapsed to spaces. The
+footer explains the status markers and lists the details and install commands.
+``/versions <version>`` prints the link to that step's page,
 ``GET /reef/harness/releases/<step>/page`` with the scenario and the token
 as query parameters so a browser opens it as is, one self contained HTML
 page that reads like the request page, light or dark with the system and

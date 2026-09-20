@@ -40,7 +40,7 @@ How it works
    you must provide. When an open point would change what gets built, it
    asks you up to three questions, each with concrete options, then files
    your original words with the answers as clarifications (``--direct`` as
-   the first word files at once). From the shell, ``reef-pi harness
+   the first word files at once). From the shell, ``reef-pi evolve
    "<text>"`` posts the same instruction to ``POST /reef/train``; add
    ``--wait`` to stay until the step settles. Either ask prints the
    request's page link (``GET /reef/harness/requests/<id>/page``), which
@@ -65,7 +65,7 @@ How it works
    candidate on the health task: it publishes when the tree still works,
    and the step's page carries the design and the review either way.
 3. Result. The session that asked reports it in the chat when the step
-   settles, and ``reef-pi harness ... --wait`` prints the same line:
+   settles, and ``reef-pi evolve ... --wait`` prints the same line:
    published as a release, ready but waiting for your review because it
    changes an extension, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.
@@ -93,6 +93,12 @@ Behavior and configuration
 * The agent proposer, or the served model where the host cannot isolate the
   agent, proposes skills, rules, agent commands, or pi extensions.
   Requests and update notices are enabled in the seed by default.
+* The proposer is instructed to integrate new slash commands into pi's native
+  ``/`` autocomplete dropdown alongside built-in commands, with descriptions,
+  using prompt templates or extension command registration. The review checks
+  that integration and the path from invocation to a visible result, including
+  state and an off command for modes. Headless trials cannot verify the dropdown;
+  the agent records any unverified interactive checks in its design.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
   human promotion. Client requirements must pass setup before installation.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate

@@ -61,6 +61,10 @@ pi.registerCommand("standup", {
 
 The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The evolve and versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
 
+Registered commands appear in pi's native `/` autocomplete dropdown alongside built-in commands; `description` tells the user what each does. Register at extension load, after the required `PI_OFFLINE` guard, not inside an event handler or behind `ctx.hasUI`. Guard UI operations inside the handler instead. An `input` hook that recognizes `/name` does not register it for the dropdown. Avoid names already used by built-in commands, prompt templates or other extensions.
+
+For a command that only expands a prompt, use an `agent_command` entry instead of an extension. Reef renders its text to `pi-agent/prompts/<name>.md`; start the text with YAML frontmatter containing `description` for the native dropdown. Check both menu selection and direct invocation after reload/startup. A headless run does not verify the dropdown.
+
 ## Events: pi.on(name, handler)
 
 Every handler receives (event, ctx). The ones that matter:
