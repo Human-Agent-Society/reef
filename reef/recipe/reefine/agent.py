@@ -84,11 +84,15 @@ def agent_rules(provider: MultimodalProvider | None) -> str:
         )
     else:
         routes = ", ".join(f"`{route}`" for route in provider.preset.paths)
+        if "/v1/decisions" in provider.preset.paths:
+            other_modalities = "`image`, `embeddings`, `decisions`"
+        else:
+            other_modalities = "`image`, `embeddings`"
         note = (
             f"This deployment's multimodal provider is {provider.preset.name} ({provider.base_url}); it serves "
             f"{routes}, and "
             "any other of these routes answers 501. List its models with "
-            '`curl -s "$REEF_PROPOSER_URL/models?modality=speech"` (or `image`, `embeddings`).'
+            f'`curl -s "$REEF_PROPOSER_URL/models?modality=speech"` (or {other_modalities}).'
         )
     return AGENT_RULES.read_text(encoding="utf-8").replace("<!-- provider -->", note)
 

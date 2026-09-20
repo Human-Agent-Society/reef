@@ -72,7 +72,8 @@ class MultimodalProvider:
         return self.preset.paths.get(route)
 
     def models_url(self, modality: str) -> str:
-        """Where the provider lists its models of one output modality (``speech``, ``image``, ``embeddings``)."""
+        """Where the provider lists its models of one output modality (``speech``, ``image``, ``embeddings``,
+        ``decisions``)."""
         return self.preset.models_url.format(base_url=self.base_url, modality=modality)
 
 
