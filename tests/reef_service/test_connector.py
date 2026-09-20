@@ -221,6 +221,48 @@ def test_success_reports_snapshot_atomically_and_cancel_is_unknown(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("status", [200, 409])
+def test_delete_scenario_uses_native_endpoint_and_reports_outcome(tmp_path, status):
+    async def run():
+        seen = []
+
+        async def handler(request):
+            seen.append((request.method, request.path, request.headers.get("Authorization")))
+            if request.method == "DELETE":
+                return web.json_response({"archived": ["/private/records"]}, status=status)
+            if request.path == "/reef/scenarios":
+                return web.json_response({"scenarios": [{"scenario": "keep"}]})
+            return web.json_response({"scenarios": {"keep": {"training_mode": "manual"}}})
+
+        app = web.Application()
+        app.router.add_route("*", "/{path:.*}", handler)
+        async with TestServer(app) as server, aiohttp.ClientSession() as session:
+            runtime = ReefRuntime(JSONClient(session, str(server.make_url("")).rstrip("/"), "local-test-token"))
+            state = ConnectorState(tmp_path)
+            connector = Connector(AsyncMock(), runtime, state)
+            command = {"id": str(uuid.uuid4()), "action": "delete_scenario", "scenario": "existing a"}
+            try:
+                await connector.execute(command)
+                await connector.execute(command)
+                result = dict(state.pending())[command["id"]]
+                assert result["state"] == ("succeeded" if status == 200 else "failed")
+                assert "/private/records" not in json.dumps(result)
+                assert [entry for entry in seen if entry[0] == "DELETE"] == [
+                    ("DELETE", "/reef/scenarios/existing a", "Bearer local-test-token")
+                ]
+                if status == 200:
+                    assert result["value"] == {"scenario": "existing a"}
+                    assert result["snapshot"]["scenarios"] == [{"scenario": "keep", "training_mode": "manual"}]
+                else:
+                    assert "snapshot" not in result
+                with pytest.raises(ValueError, match="Invalid scenario name"):
+                    await runtime.execute({"action": "delete_scenario", "scenario": "../other"})
+            finally:
+                state.close()
+
+    asyncio.run(run())
+
+
 def test_http_boundary_keeps_tokens_separate_and_blocks_redirects():
     async def run():
         seen = []
