@@ -93,6 +93,12 @@ Behavior and configuration
 * The agent proposer, or the served model where the host cannot isolate the
   agent, proposes skills, rules, agent commands, or pi extensions.
   Requests and update notices are enabled in the seed by default.
+* The proposer is instructed to integrate new slash commands into pi's native
+  ``/`` autocomplete dropdown alongside built-in commands, with descriptions,
+  using prompt templates or extension command registration. The review checks
+  that integration and the path from invocation to a visible result, including
+  state and an off command for modes. Headless trials cannot verify the dropdown;
+  the agent records any unverified interactive checks in its design.
 * ``evolution.review_kinds: [code_extension]`` holds code changes pending
   human promotion. Client requirements must pass setup before installation.
 * ``evolution.selection: floor`` is the default: the evaluation runs the candidate
