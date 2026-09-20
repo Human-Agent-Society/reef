@@ -385,6 +385,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/beta/spade/examples/tinker/serve.yaml",
         "recipes/basic/local-sglang.yaml",
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
+        "recipes/openclawrl/examples/openclawrl/serve-mlx.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
         "tutorials/reefine/configs/deployment.yaml",
         "tutorials/tinker/serve.yaml",

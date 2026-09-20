@@ -15,6 +15,7 @@ from reef.train.deployment import TrainingDeployment
 
 # Built-ins are references, so discovery does not import execution dependencies.
 _BUILTINS = {
+    "mlx": "reef.train.mlx_backend.launch:MLXDeployment",
     "slime": "reef.train.slime_backend.launch:SlimeDeployment",
     "tinker": "reef.train.tinker_backend.launch:TinkerDeployment",
 }
