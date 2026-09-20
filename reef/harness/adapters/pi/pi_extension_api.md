@@ -91,8 +91,8 @@ Also: before_agent_start (return { systemPrompt } to add instructions for the tu
 
 ## Keys
 
-- pi.registerShortcut("ctrl+shift+r", { description, handler: async (ctx) => {} }): a key the person presses. There is no click target for a widget, so a key is how a person opens what a widget shows.
-- pi binds most ctrl+letter keys itself, among them ctrl+a, ctrl+c, ctrl+d, ctrl+g, ctrl+l, ctrl+n, ctrl+o, ctrl+p, ctrl+r, ctrl+s, ctrl+t, ctrl+u, ctrl+v, ctrl+x and ctrl+z. Registering one of those makes pi warn at startup about the clash, so add shift: ctrl+shift+<letter> is free.
+- pi.registerShortcut("ctrl+q", { description, handler: async (ctx) => {} }): a key the person presses. There is no click target for a widget, so a key is how a person opens what a widget shows.
+- pi binds most ctrl+letter keys itself, among them ctrl+a, ctrl+c, ctrl+d, ctrl+g, ctrl+l, ctrl+n, ctrl+o, ctrl+p, ctrl+r, ctrl+s, ctrl+t, ctrl+u, ctrl+v, ctrl+x and ctrl+z. Registering one of those makes pi warn at startup about the clash. Do not reach for ctrl+shift+<letter> instead: a terminal without the Kitty keyboard protocol or xterm's modifyOtherKeys (Apple Terminal among them) sends it as the bare control byte, which pi reads as the unshifted ctrl+<letter>. ctrl+q is the letter pi leaves free in every terminal.
 
 ## Messages
 

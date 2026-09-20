@@ -577,7 +577,7 @@ two commands, two tools and two event handlers:
   with ``reef_ask_user`` and files with ``reef_file_request``. The filing,
   a cancel, a reply without a tool call, a failed model call or eight model
   calls end it. While it runs, a widget above the input shows the phase, and
-  ``ctrl+shift+r``, or ``/evolve`` with no argument, opens its latest
+  ``ctrl+q``, or ``/evolve`` with no argument, opens its latest
   steps. When it ends, the chat keeps one
   custom entry (``pi.appendEntry``, type ``reef-harness-clarify``) whose
   line says what happened and whose expanded view (``ctrl+o``) holds the
@@ -617,18 +617,20 @@ two commands, two tools and two event handlers:
   harness``, ``running the step``, ``saving the result``), the time in the
   step, the request's page as a terminal hyperlink (OSC 8, which pi's TUI
   measures around, so a click opens the page where the terminal offers one)
-  and ``ctrl+shift+r or /evolve to look in``. The frames turn every
-  250 ms, so the step reads as alive between polls. ``ctrl+shift+r``
+  and ``ctrl+q or /evolve to look in``. The frames turn every
+  250 ms, so the step reads as alive between polls. ``ctrl+q``
   (``pi.registerShortcut``) expands the same widget in place with the
   request asked, its id, the evaluation's episode count and step record when
   the service reports them, the request page link for the full detail, and a
-  line saying the step runs in the background; ``ctrl+shift+r`` again closes
+  line saying the step runs in the background; ``ctrl+q`` again closes
   it. pi offers extensions no click event for a widget, so the line names
-  three ways in: the hyperlink, the key and the command. The key carries
-  shift because pi binds ``ctrl+r`` itself, to renaming a session, and a
-  terminal that reports no modified keys drops the shift; ``/evolve``
-  with no argument prints the same detail and needs neither the key nor a
-  click. Expanding costs no request: it redraws what
+  three ways in: the hyperlink, the key and the command. The key is a plain
+  ``ctrl+<letter>`` pi leaves free: a terminal without the Kitty keyboard
+  protocol or xterm's modifyOtherKeys (Apple Terminal among them) sends
+  ``ctrl+shift+<letter>`` as the bare control byte, so a shifted key would
+  reach pi as its own binding, and ``ctrl+r`` alone renames a session.
+  ``/evolve`` with no argument prints the same detail and needs
+  neither the key nor a click. Expanding costs no request: it redraws what
   the last poll read. The widget is cleared when the step settles, and a
   headless session draws none.
 - The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request

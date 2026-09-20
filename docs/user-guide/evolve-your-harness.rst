@@ -548,9 +548,9 @@ filed and the agent is told you backed out.
 ``/evolve --direct <request>`` files it as is, and either way the
 filing answers with the link to the request's page. A spinner then sits just
 above your input box with the step's phase (writing the change, checking the
-harness) and how long it has run; ``ctrl+shift+r`` expands it in place with
+harness) and how long it has run; ``ctrl+q`` expands it in place with
 the request, the evaluation's episode count and step record when reef reports
-them, and the page link for the full detail, and ``ctrl+shift+r`` closes it
+them, and the page link for the full detail, and ``ctrl+q`` closes it
 again.
 The step runs in the background the whole time, so you can keep typing. The
 result is reported when it settles, with the same next actions as
