@@ -27,6 +27,7 @@ from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
+from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -196,7 +197,6 @@ def build_dispatcher(
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     experiment_tracker = None
-    record_observer = None
     scenario_storage: ScenarioStorage | None = None
     try:
         if settings.record_backend == "postgres":
@@ -207,6 +207,10 @@ def build_dispatcher(
             )
         else:
             scenario_storage = SQLiteScenarioStorage(Path(settings.agent_record_dir))
+        # Record tracing observes storage events; the storage closes the observer with itself.
+        record_observer = build_record_observer(settings.tracing_config, environ=env)
+        if record_observer is not None:
+            scenario_storage = ObservedScenarioStorage(scenario_storage, record_observer)
         # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
         backend_factory = GitLFSRepositoryBackend.factory(
             _repository_location(settings.artifact_repository),
@@ -221,7 +225,6 @@ def build_dispatcher(
             model=settings.model_path,
             training_config=settings.training_settings,
         )
-        record_observer = build_record_observer(settings.tracing_config, environ=env)
         return Dispatcher(
             recipe,
             backend_factory,
@@ -230,7 +233,6 @@ def build_dispatcher(
             scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
-            record_observer=record_observer,
         )
     except BaseException:
         if scenario_storage is not None:
@@ -243,9 +245,6 @@ def build_dispatcher(
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
-        if record_observer is not None:
-            with suppress(Exception):
-                record_observer.close()
         raise
 
 

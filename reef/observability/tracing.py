@@ -1,62 +1,15 @@
-"""Provider-neutral contract for exporting accepted records and commits as traces.
+"""The ``observability.tracing`` configuration for record tracing.
 
-The dispatcher reports every record it durably accepted and every training
-step it committed to a :class:`RecordObserver`. Recipe, storage and training
-code never see the observer; a concrete exporter (see
-:mod:`reef.observability.open_telemetry`) turns the events into spans for
-whatever tracing backend the deployment points at. Tracing is a side effect:
-the dispatcher isolates observer failures so an exporter can never become part
-of record acceptance or the commit transaction.
+The storage wrappers in :mod:`reef.storage.observer` report every first-time
+record insert and every landed commit; :mod:`reef.observability.open_telemetry`
+turns those into spans for whatever tracing backend this section points at.
+Validating the section needs no tracing SDK.
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Any
-
-from reef.core.artifact_ref import ArtifactRef
-from reef.core.records_types import AgentRecord
-
-
-@dataclass(frozen=True, slots=True)
-class CommittedStepEvent:
-    """One durably committed training step and the records its batch consumed.
-
-    The dispatcher builds it from the scenario's commit record after the commit
-    lands, so an observer sees the same step, release and consumed ids the
-    commit log stores.
-    """
-
-    scenario: str
-    step: int
-    artifact_ref: ArtifactRef
-    operation: str
-    checkpoint: bool
-    pending: bool
-    consumed_ids: frozenset[str]
-    compacted_ids: frozenset[str]
-    recorded_at: float
-    metrics: Mapping[str, Any] | None = None
-    training_job_id: str | None = None
-    rollback_target_release_id: str | None = None
-
-
-class RecordObserver:
-    """Process-level observer of accepted records and committed training steps."""
-
-    def record_accepted(self, item: AgentRecord) -> None:
-        """One record the store accepted for the first time (duplicates are not reported)."""
-
-    def record_committed(self, event: CommittedStepEvent) -> None:
-        """One committed training step, including the record ids its batch consumed."""
-
-    def close(self) -> None:
-        pass
-
-
-class NullRecordObserver(RecordObserver):
-    """No-op observer used when record tracing is disabled."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,4 +93,4 @@ class TracingConfig:
         return headers
 
 
-__all__ = ["CommittedStepEvent", "NullRecordObserver", "RecordObserver", "TracingConfig"]
+__all__ = ["TracingConfig"]

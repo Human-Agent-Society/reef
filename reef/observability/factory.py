@@ -6,8 +6,9 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.observability.base import ExperimentTracker, NullExperimentTracker
-from reef.observability.tracing import NullRecordObserver, RecordObserver, TracingConfig
+from reef.observability.tracing import TracingConfig
 from reef.observability.wandb import WandbConfig, WandbExperimentTracker
+from reef.storage.observer import RecordObserver
 
 
 def build_experiment_tracker(
@@ -22,14 +23,15 @@ def build_experiment_tracker(
     return WandbExperimentTracker(config, model=model, training_config=training_config)
 
 
-def build_record_observer(tracing: object, *, environ: Mapping[str, str] | None = None) -> RecordObserver:
-    """The record observer for ``observability.tracing``; the OpenTelemetry SDK loads only when enabled.
+def build_record_observer(tracing: object, *, environ: Mapping[str, str] | None = None) -> RecordObserver | None:
+    """The record observer for ``observability.tracing``, or ``None`` when tracing is off.
 
-    ``environ`` supplies the ``REEF_TRACING_AUTHORIZATION`` fallback for the credential.
+    The OpenTelemetry SDK loads only when enabled. ``environ`` supplies the
+    ``REEF_TRACING_AUTHORIZATION`` fallback for the credential.
     """
     config = TracingConfig.from_mapping(tracing, environ=environ)
     if not config.enabled:
-        return NullRecordObserver()
+        return None
     try:
         from reef.observability.open_telemetry import OpenTelemetryRecordObserver
     except ImportError as exc:

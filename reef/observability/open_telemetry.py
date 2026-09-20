@@ -36,7 +36,9 @@ from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.trajectories import exchange_messages
 from reef.core.version import __version__
-from reef.observability.tracing import CommittedStepEvent, RecordObserver, TracingConfig
+from reef.observability.tracing import TracingConfig
+from reef.storage.commits import CommitRecord
+from reef.storage.observer import RecordObserver
 
 #: Instrumentation scope name reported with every span.
 INSTRUMENTATION_SCOPE = "reef"
@@ -142,7 +144,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             timestamp_seconds=item.created_at,
         )
 
-    def record_committed(self, commit: CommittedStepEvent) -> None:
+    def record_committed(self, commit: CommitRecord) -> None:
         attributes: dict[str, AttributeValue] = {
             "session.id": commit.scenario,
             "reef.scenario": commit.scenario,

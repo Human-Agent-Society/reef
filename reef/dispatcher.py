@@ -27,11 +27,8 @@ from reef.core.reports import ReportValidationError, validate_report_payload
 from reef.core.training_request import TrainingRequest
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.observability import (
-    CommittedStepEvent,
     ExperimentTracker,
     NullExperimentTracker,
-    NullRecordObserver,
-    RecordObserver,
     RollbackExperimentEvent,
     TrainingExperimentContext,
     TrainingExperimentEvent,
@@ -156,14 +153,12 @@ class Dispatcher:
         agent_record_dir: Path | None = None,
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
-        record_observer: RecordObserver | None = None,
         scenario_storage: ScenarioStorage,
     ) -> None:
         self._recipe = recipe
         self._storage = scenario_storage
         self._record_retention_lock = Lock()
         self._experiment_tracker = experiment_tracker if experiment_tracker is not None else NullExperimentTracker()
-        self._record_observer = record_observer if record_observer is not None else NullRecordObserver()
         self._registry = ScenarioRegistry(
             recipe,
             backend_factory,
@@ -448,10 +443,6 @@ class Dispatcher:
             current.operations.increment("ingest/duplicates_total")
             return stored
         current.operations.increment("ingest/accepted_total")
-        try:
-            self._record_observer.record_accepted(stored)
-        except Exception:
-            logger.exception("record observer failed to export accepted record %s", stored.agent_record_id)
         if current.training_runtime is not None:
             self._training.ready.set()
             return stored
@@ -498,29 +489,6 @@ class Dispatcher:
             )
         except Exception:
             logger.exception("experiment tracker failed to record committed training step")
-        try:
-            committed_step = current.scenario_step
-            for commit in reversed(current.store.history()):
-                if commit.step == committed_step:
-                    self._record_observer.record_committed(
-                        CommittedStepEvent(
-                            scenario=commit.scenario,
-                            step=commit.step,
-                            artifact_ref=commit.artifact_ref,
-                            operation=commit.operation,
-                            checkpoint=commit.checkpoint,
-                            pending=commit.pending,
-                            consumed_ids=commit.consumed_ids,
-                            compacted_ids=commit.compacted_ids,
-                            recorded_at=commit.recorded_at,
-                            metrics=commit.metrics,
-                            training_job_id=commit.training_job_id,
-                            rollback_target_release_id=commit.rollback_target_release_id,
-                        )
-                    )
-                    break
-        except Exception:
-            logger.exception("record observer failed to export committed training step")
 
     def _experiment_context(self, current: Scenario) -> TrainingExperimentContext:
         backend = current.trainer.candidate_backend
@@ -1054,10 +1022,6 @@ class Dispatcher:
             self._experiment_tracker.close()
         except Exception:
             logger.exception("experiment tracker failed to close")
-        try:
-            self._record_observer.close()
-        except Exception:
-            logger.exception("record observer failed to close")
         if errors:
             raise errors[0]
 

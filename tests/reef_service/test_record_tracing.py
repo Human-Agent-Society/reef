@@ -1,4 +1,4 @@
-"""Record tracing: the observer contract, its OpenTelemetry exporter, and the dispatcher's isolation of it."""
+"""Record tracing: the storage observer, its OpenTelemetry exporter, and the wiring through a dispatcher."""
 
 from __future__ import annotations
 
@@ -12,15 +12,11 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import ArtifactRef, LiveWeightArtifactRef
 from reef.dispatcher import Dispatcher
-from reef.observability import (
-    CommittedStepEvent,
-    NullRecordObserver,
-    RecordObserver,
-    TracingConfig,
-    build_record_observer,
-)
+from reef.observability import TracingConfig, build_record_observer
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.storage.commits import CommitRecord
+from reef.storage.observer import ObservedScenarioStorage, RecordObserver
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -111,9 +107,9 @@ def test_service_config_carries_the_tracing_section() -> None:
 
 
 @pytest.mark.unit
-def test_disabled_tracing_builds_the_null_observer_without_the_sdk() -> None:
-    assert isinstance(build_record_observer(None), NullRecordObserver)
-    assert isinstance(build_record_observer({"enabled": False, "endpoint": "http://c:4318"}), NullRecordObserver)
+def test_disabled_tracing_builds_no_observer_and_needs_no_sdk() -> None:
+    assert build_record_observer(None) is None
+    assert build_record_observer({"enabled": False, "endpoint": "http://c:4318"}) is None
 
 
 # -- OpenTelemetry exporter ----------------------------------------------------
@@ -259,13 +255,14 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     observer, exporter = _observer()
     from reef.observability.open_telemetry import commit_span_context, record_span_context
 
-    commit = CommittedStepEvent(
+    commit = CommitRecord(
         scenario="math",
         step=3,
         artifact_ref=ArtifactRef(content_id="c3", release_id="v3", parent_release_id="v2"),
-        operation="training",
         checkpoint=True,
-        pending=False,
+        algorithm_state=None,
+        high_water_sequence=9,
+        high_water_offset=0,
         consumed_ids=frozenset({"i1", "i2"}),
         compacted_ids=frozenset({"i1"}),
         recorded_at=1_700_000_100.0,
@@ -301,19 +298,19 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
         assert span.attributes["reef.release_id"] == "v3"
 
 
-# -- dispatcher integration ---------------------------------------------------
+# -- storage observer ---------------------------------------------------------
 
 
 class _CapturingObserver(RecordObserver):
     def __init__(self) -> None:
         self.accepted: list[str] = []
-        self.committed: list[CommittedStepEvent] = []
+        self.committed: list[CommitRecord] = []
         self.closed = False
 
     def record_accepted(self, item: AgentRecord) -> None:
         self.accepted.append(item.agent_record_id)
 
-    def record_committed(self, commit: CommittedStepEvent) -> None:
+    def record_committed(self, commit: CommitRecord) -> None:
         self.committed.append(commit)
 
     def close(self) -> None:
@@ -325,19 +322,52 @@ class _FailingObserver(_CapturingObserver):
         super().record_accepted(item)
         raise RuntimeError("collector down")
 
-    def record_committed(self, commit: CommittedStepEvent) -> None:
+    def record_committed(self, commit: CommitRecord) -> None:
         super().record_committed(commit)
         raise RuntimeError("collector down")
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("observer_type", [_CapturingObserver, _FailingObserver])
-def test_dispatcher_reports_accepted_records_and_commits_without_depending_on_the_observer(
+def test_observed_storage_reports_first_inserts_and_landed_commits_and_isolates_failures(
     tmp_path, observer_type
 ) -> None:
+    observer = observer_type()
+    storage = ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer)
+    store = storage.open("math")
+    try:
+        first = store.records.append_result(_inference("i1"))
+        retry = store.records.append_result(_inference("i1"))
+        assert first.inserted and not retry.inserted
+        assert store.records.append(_report("r1", "i1")).agent_record_id == "r1"
+        assert store.records.get("math", "i1") is not None
+        commit = CommitRecord(
+            scenario="math",
+            step=1,
+            artifact_ref=ArtifactRef(content_id="c1", release_id="v1", parent_release_id=None),
+            checkpoint=False,
+            algorithm_state=None,
+            high_water_sequence=2,
+            high_water_offset=0,
+            consumed_ids=frozenset({"i1", "r1"}),
+        )
+        recorded = store.commit_step(expected_step=0, commit=commit)
+        assert store.history() == (recorded,)
+    finally:
+        store.close()
+        storage.close()
+
+    assert observer.accepted == ["i1", "r1"]
+    assert [commit.step for commit in observer.committed] == [1]
+    assert observer.committed[0].consumed_ids == frozenset({"i1", "r1"})
+    assert observer.closed
+
+
+@pytest.mark.unit
+def test_dispatcher_traffic_reaches_the_observer_through_the_storage(tmp_path) -> None:
     initial = tmp_path / "initial"
     initial.mkdir()
-    observer = observer_type()
+    observer = _CapturingObserver()
     dispatcher = Dispatcher(
         TestPolicyRecipe(
             **runtime_bindings(RecordingRuntime(served_version="w0")),
@@ -347,8 +377,7 @@ def test_dispatcher_reports_accepted_records_and_commits_without_depending_on_th
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=tmp_path / "records",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-        record_observer=observer,
+        scenario_storage=ObservedScenarioStorage(SQLiteScenarioStorage(tmp_path / "records"), observer),
     )
     try:
         dispatcher.accept_record(_inference("i1"))
@@ -360,7 +389,5 @@ def test_dispatcher_reports_accepted_records_and_commits_without_depending_on_th
 
     assert observer.accepted == ["i1", "r1"]
     (commit,) = observer.committed
-    assert commit.scenario == "math"
-    assert commit.step == 1
-    assert commit.consumed_ids == frozenset({"i1", "r1"})
+    assert (commit.scenario, commit.step, commit.consumed_ids) == ("math", 1, frozenset({"i1", "r1"}))
     assert observer.closed
