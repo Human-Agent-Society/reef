@@ -497,7 +497,7 @@ def _versions(tmp_path: Path, agent_dir: Path, answers: dict[str, Any], args: st
     return _run(tmp_path, agent_dir, TEST_STEP="versions", TEST_ARGS=args, TEST_ANSWERS=json.dumps(answers), **env)
 
 
-def test_versions_lists_the_chain_oldest_first_one_line_per_row(tmp_path: Path) -> None:
+def test_versions_lists_aligned_columns_with_requests_below_each_row(tmp_path: Path) -> None:
     out = _versions(tmp_path, _install_root(tmp_path), CATALOG, REEF_TOKEN="tok")
     assert out["error"] is None
     (catalog,) = _fetches(out)
@@ -506,13 +506,38 @@ def test_versions_lists_the_chain_oldest_first_one_line_per_row(tmp_path: Path) 
     (notice,) = _notices(out)
     assert notice["type"] == "info"
     assert notice["message"].splitlines() == [
-        "v0  rel-0000  creation",
-        f'v1  rel-1111  selected  current  "{LONG_TEXT[:57]}..."',
-        'v2  rel-1111  rejected  "answer with care"',
-        'v3  rel-3333  pending  "log when blocked"',
-        "v4  rel-1111  skipped",
-        "installed (this tree): the version this tree runs; current: the newest version",
+        "Harness versions (5 entries, oldest first)",
+        "",
+        "Version  Release   Result    Status",
+        "-----------------------------------",
+        "v0       rel-0000  creation  -",
+        "v1       rel-1111  selected  current",
+        f'  "{LONG_TEXT[:57]}..."',
+        "v2       rel-1111  rejected  -",
+        '  "answer with care"',
+        "v3       rel-3333  pending   -",
+        '  "log when blocked"',
+        "v4       rel-1111  skipped   -",
+        "",
+        "installed: running in this tree; current: served by Reef",
+        "Details: /versions <version>",
+        "Install: /versions <version> install",
     ]
+
+
+@pytest.mark.parametrize("headless", ["0", "1"])
+def test_versions_keeps_multiline_requests_out_of_columns(tmp_path: Path, headless: str) -> None:
+    rows = [{"release_id": f"release-{step}", "operation": "creation"} for step in range(11)]
+    rows[9]["metrics"] = {"training_request": {"text": "  支持复制图片\n\n Clarification...\t完成  "}}
+    catalog = {"GET /reef/harness/releases": {"status": 200, "body": {"releases": rows}}}
+    out = _versions(tmp_path, _install_root(tmp_path), catalog, TEST_HEADLESS=headless)
+    (notice,) = _notices(out)
+    assert notice["message"].splitlines()[-7:-4] == [
+        "v9       release-  creation  -",
+        '  "支持复制图片 Clarification... 完成"',
+        "v10      release-  creation  current",
+    ]
+    assert [event["kind"] for event in out["events"]] == ["fetch", "notify"]
 
 
 def test_versions_with_a_step_offers_its_page_and_opens_it(tmp_path: Path) -> None:
@@ -688,13 +713,13 @@ def test_versions_marks_the_served_head_current_and_never_the_pending_row(tmp_pa
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": NEWEST_PENDING}}
     listed = _versions(tmp_path, agent_dir, catalog)
     (notice,) = _notices(listed)
-    assert notice["message"].splitlines() == [
-        "v0  rel-0000  creation",
-        'v1  rel-1111  selected  current  "say when blocked"',
-        "v2  rel-1111  rejected",
-        "v3  rel-1111  rejected",
-        "v4  rel-4444  pending",
-        "installed (this tree): the version this tree runs; current: the newest version",
+    assert notice["message"].splitlines()[4:-4] == [
+        "v0       rel-0000  creation  -",
+        "v1       rel-1111  selected  current",
+        '  "say when blocked"',
+        "v2       rel-1111  rejected  -",
+        "v3       rel-1111  rejected  -",
+        "v4       rel-4444  pending   -",
     ]
     head = _versions(tmp_path, agent_dir, catalog, args="1")
     assert _dialogs(head)[0]["message"] == "rel-1111-selected (selected, current)"
@@ -709,13 +734,15 @@ def test_versions_marks_the_installed_release_apart_from_the_head(tmp_path: Path
     (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-1111-selected"}), encoding="utf-8")
     listed = _versions(tmp_path, installed, CATALOG)
     (notice,) = _notices(listed)
-    assert notice["message"].splitlines() == [
-        "v0  rel-0000  creation",
-        f'v1  rel-1111  selected  installed (this tree)  current  "{LONG_TEXT[:57]}..."',
-        'v2  rel-1111  rejected  "answer with care"',
-        'v3  rel-3333  pending  "log when blocked"',
-        "v4  rel-1111  skipped",
-        "installed (this tree): the version this tree runs; current: the newest version",
+    assert notice["message"].splitlines()[4:-4] == [
+        "v0       rel-0000  creation  -",
+        "v1       rel-1111  selected  installed, current",
+        f'  "{LONG_TEXT[:57]}..."',
+        "v2       rel-1111  rejected  -",
+        '  "answer with care"',
+        "v3       rel-3333  pending   -",
+        '  "log when blocked"',
+        "v4       rel-1111  skipped   -",
     ]
     shown = _versions(tmp_path, installed, CATALOG, args="1")
     assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, installed (this tree), current)"
@@ -728,14 +755,14 @@ def test_versions_distinguishes_an_installed_older_release_from_a_newer_head(tmp
     (tmp_path / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-0000-creation"}), encoding="utf-8")
     listed = _versions(tmp_path, installed, {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}})
     (notice,) = _notices(listed)
-    assert notice["message"].splitlines() == [
-        "v0  rel-0000  creation  installed (this tree)",
-        'v1  rel-1111  selected  "say when blocked"',
-        "v2  rel-1111  rejected",
-        "v3  rel-1111  rejected",
-        "v4  rel-4444  promoted at v5",
-        "v5  rel-5555  promote  current",
-        "installed (this tree): the version this tree runs; current: the newest version",
+    assert notice["message"].splitlines()[4:-4] == [
+        "v0       rel-0000  creation        installed",
+        "v1       rel-1111  selected        -",
+        '  "say when blocked"',
+        "v2       rel-1111  rejected        -",
+        "v3       rel-1111  rejected        -",
+        "v4       rel-4444  promoted at v5  -",
+        "v5       rel-5555  promote         current",
     ]
     shown = _versions(
         tmp_path, installed, {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}, args="5"
@@ -750,10 +777,9 @@ def test_versions_reads_a_promoted_row_as_promoted_and_installs_it_without_promo
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": AFTER_PROMOTE}}
     listed = _versions(tmp_path, agent_dir, catalog)
     (notice,) = _notices(listed)
-    assert notice["message"].splitlines()[4:] == [
-        "v4  rel-4444  promoted at v5",
-        "v5  rel-5555  promote  current",
-        "installed (this tree): the version this tree runs; current: the newest version",
+    assert notice["message"].splitlines()[-6:-4] == [
+        "v4       rel-4444  promoted at v5  -",
+        "v5       rel-5555  promote         current",
     ]
     shown = _versions(tmp_path, agent_dir, catalog, args="4")
     assert _dialogs(shown)[0]["message"] == "rel-4444-pending (promoted at v5)"
@@ -1523,9 +1549,8 @@ def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_
     assert out["events"] == []
 
 
-def test_versions_lists_one_line_per_row_whatever_the_step_recorded(tmp_path: Path) -> None:
-    """The design and the review belong to the step's page, which the command offers; the listing stays one line
-    per row however much a row carries."""
+def test_versions_keeps_design_and_review_on_the_detail_page(tmp_path: Path) -> None:
+    """The listing shows summaries; full design and review notes belong to the step's page."""
     notes = {
         "design": "D" * 300,
         "review": {"result": "partial", "covered": ["x"], "uncovered": ["two way replies", "idle detection"]},
@@ -1536,7 +1561,8 @@ def test_versions_lists_one_line_per_row_whatever_the_step_recorded(tmp_path: Pa
     ]
     catalog = {"GET /reef/harness/releases": {"status": 200, "body": {**RELEASES, "releases": rows}}}
     listed = _versions(tmp_path, _install_root(tmp_path), catalog)
-    assert len(_notices(listed)[0]["message"].splitlines()) == 6
+    baseline = _versions(tmp_path, tmp_path / "pi-agent", CATALOG)
+    assert _notices(listed) == _notices(baseline)
     # The step's own dialog names the release and its result, not the notes.
     shown = _versions(tmp_path, _install_root(tmp_path / "one"), catalog, args="1")
     assert _dialogs(shown)[0]["message"] == "rel-1111-selected (selected, current)"
