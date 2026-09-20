@@ -1192,7 +1192,7 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     # The link to the request's page follows, with the scenario and the shell's token as query parameters.
     link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=tok"
     assert out[-2] == f"reef-pi: watch it here: {link}"
-    assert out[-1] == "reef-pi: reef is running the step; add --wait to stay here, or check /reef-versions later"
+    assert out[-1] == "reef-pi: reef is running the step; add --wait to stay here, or check /versions later"
 
 
 @pytest.mark.unit
@@ -1401,9 +1401,9 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
             0,
             [
                 "reef-pi: 'text me when you are blocked' is ready as release rel-3333. This release changes an "
-                "extension, so read it before it runs: /reef-versions 1 opens the page, /reef-versions 1 install "
+                "extension, so read it before it runs: /versions v1 opens the page, /versions v1 install "
                 "serves it. Page: {page}",
-                "reef-pi: next: /reef-versions 1 install in a reef-pi session, or reef-pi setup and reef-pi update",
+                "reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi setup and reef-pi update",
             ],
         ),
         (
@@ -1515,7 +1515,7 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
             pending,
             "\n",
             0,
-            "reef-pi: Promote now? [y/N] reef-pi: next: /reef-versions 1 install in a reef-pi session, or reef-pi setup and reef-pi update",
+            "reef-pi: Promote now? [y/N] reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi setup and reef-pi update",
         ),
         ("selected-failed", selected, "yes\n", 3, "reef-pi: Install now? [Y/n] "),
     ]
@@ -1580,13 +1580,13 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     reef.close()
 
     out = capsys.readouterr().out.splitlines()
-    assert out[3] == "reef-pi: no result yet for 'text me' after 0.05 s; /reef-versions shows it when it settles"
+    assert out[3] == "reef-pi: no result yet for 'text me' after 0.05 s; /versions shows it when it settles"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 2
     link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=dummy"
     assert out[-3:] == [
         "reef-pi: training request q-1 accepted",
         f"reef-pi: watch it here: {link}",
-        "reef-pi: reef is running the step; add --wait to stay here, or check /reef-versions later",
+        "reef-pi: reef is running the step; add --wait to stay here, or check /versions later",
     ]
 
 
@@ -1638,10 +1638,13 @@ def test_main_dispatches_page_with_the_step_and_the_print_flag(tmp_path) -> None
         patch.dict(os.environ, _main_env(tmp_path)),
         patch("reef.harness.client.wrapper.page", lambda *args, **kwargs: fetched.append((args, kwargs)) or 0),
     ):
-        for argv in (["reef-pi", "page", "3", "--print"], ["reef-pi", "page", "3"]):
+        for argv in (["reef-pi", "page", "3", "--print"], ["reef-pi", "page", "v3"]):
             with patch("sys.argv", argv), pytest.raises(SystemExit) as exited:
                 main()
             assert exited.value.code == 0
+        with patch("sys.argv", ["reef-pi", "page", "three"]), pytest.raises(SystemExit) as refused:
+            main()
+        assert refused.value.code == 2
     assert fetched == [
         (("ask-scenario", "pi", str(tmp_path), 3), {"open_page": False}),
         (("ask-scenario", "pi", str(tmp_path), 3), {"open_page": True}),

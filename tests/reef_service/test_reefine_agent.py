@@ -411,6 +411,9 @@ def test_the_agent_is_told_what_its_deployments_provider_serves() -> None:
     rules = agent_rules(compatible)
     assert "openai-compatible (https://gateway.example)" in rules and "`/v1/decisions`" not in rules
     assert "$REEF_PROPOSER_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules
+    assert "(or `image`, `embeddings`)." in rules
+    openrouter = MultimodalProvider(PRESETS["openrouter"], "https://openrouter.ai/api", "k")
+    assert "(or `image`, `embeddings`, `decisions`)." in agent_rules(openrouter)
 
 
 @pytest.mark.unit

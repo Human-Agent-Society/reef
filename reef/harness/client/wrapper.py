@@ -982,14 +982,14 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
     """A row's result as the extension reads it.
 
     A pending row stays pending in the catalog; a later promote row naming
-    it makes it ``promoted at step N``. A settled step is ``selected``,
+    it makes it ``promoted at vN``. A settled step is ``selected``,
     ``rejected`` or ``skipped``; any other row reads as its operation."""
     if row.get("pending"):
         for step, other in enumerate(rows):
             if other.get("operation") == "promote" and other.get("rollback_target_release_id") == row.get(
                 "release_id"
             ):
-                return f"promoted at step {step}"
+                return f"promoted at v{step}"
         return "pending"
     metrics = _metrics_of(row)
     selected = metrics.get("selected")
@@ -1033,7 +1033,7 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
     if selection_result == "pending":
         return (
             f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
-            f"runs: /reef-versions {step} opens the page, /reef-versions {step} install serves it. Page: {page}"
+            f"runs: /versions v{step} opens the page, /versions v{step} install serves it. Page: {page}"
         )
     if selection_result == "rejected":
         selection = metrics.get("selection")
@@ -1100,7 +1100,7 @@ def _await_step(
             return step, rows
         if time.monotonic() >= deadline:
             print(
-                f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; /reef-versions shows it when it settles"
+                f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; /versions shows it when it settles"
             )
             return "timeout"
         if not started:
@@ -1158,7 +1158,9 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
 def _next_commands(adapter: str, step: int, selection_result: str) -> str:
     """The commands that take the next step by hand, for a person who declined it or has no terminal."""
     if selection_result == "pending":
-        return f"/reef-versions {step} install in a reef-{adapter} session, or reef-{adapter} setup and reef-{adapter} update"
+        return (
+            f"/versions v{step} install in a reef-{adapter} session, or reef-{adapter} setup and reef-{adapter} update"
+        )
     return f"reef-{adapter} setup, then reef-{adapter} update"
 
 
@@ -1263,7 +1265,7 @@ def harness(
     print(f"reef-{adapter}: training request {record_id} accepted")
     print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, token, record_id)}")
     if not wait:
-        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /reef-versions later")
+        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /versions later")
         return 0
     print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
     settled = _await_step(
@@ -1294,6 +1296,14 @@ def _open_in_browser(path: Path) -> bool:
         return False
     subprocess.run([opener, str(path)], check=False)
     return True
+
+
+def step_of_version(text: str) -> int:
+    """The step a version names, as ``/versions`` lists it: ``v3`` or ``3``."""
+    digits = text.removeprefix("v")
+    if not digits.isascii() or not digits.isdigit():
+        raise argparse.ArgumentTypeError(f"{text!r} is no version; write v3 or 3")
+    return int(digits)
 
 
 def page(scenario: str, adapter: str, compose_dir: str, step: int, *, open_page: bool = True) -> int:
@@ -1898,7 +1908,7 @@ def main() -> None:
         sys.exit(harness(scenario, adapter, compose, " ".join(ns.request), wait=ns.wait, timeout_s=ns.timeout))
     elif args and args[0] == "page":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} page")
-        parser.add_argument("step", type=int, help="the step, as /reef-versions counts it")
+        parser.add_argument("step", type=step_of_version, help="the version, as /versions lists it: v3 or 3")
         parser.add_argument("--print", dest="print_only", action="store_true", help="print the path; open nothing")
         ns = parser.parse_args(args[1:])
         sys.exit(page(scenario, adapter, compose, ns.step, open_page=not ns.print_only))

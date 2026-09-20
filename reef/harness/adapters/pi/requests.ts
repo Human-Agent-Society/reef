@@ -1,4 +1,4 @@
-// Harness requests: the /reef-harness and /reef-versions commands and the
+// Harness requests: the /evolve and /versions commands and the
 // reef_ask_user and reef_file_request tools for reef-pi. The person asks in
 // plain words. With a UI the command clarifies the request in the background:
 // a loop beside the session calls the session's model with the request, the
@@ -14,13 +14,13 @@
 // how long, and reports the step's result in the session as a custom message
 // the chat keeps, with why the proposer produced nothing when it did. The
 // filed requests not yet reported are kept beside the release file, so a
-// restarted pi reports their results at its next session start. /reef-versions
+// restarted pi reports their results at its next session start. /versions
 // lists the release chain with each step's result and request, marks the step
 // this tree runs as installed and the newest published one as current, and
 // offers a step's page, which holds the design, the review and the numbers.
 // A settled step offers its install once the session is between turns, so a
 // win reaches the person who asked without them going looking; a busy session
-// keeps the report's commands instead. /reef-versions <step> install runs the
+// keeps the report's commands instead. /versions <step> install runs the
 // same install on demand, promoting a release held back from the served head
 // first, so installing is the one decision. Nothing here writes
 // a mutation. Kept free of annotations on purpose: plain JavaScript in a .ts file, so plain
@@ -39,7 +39,7 @@ const RELEASE_FILE = ".reef-harness-release";
 const WRAPPER_NAME = "reef-pi";
 const INSTALL_LATER_TEXT = "reef: install it later with reef-pi update, then reef-pi setup";
 const NO_WRAPPER_TEXT = "reef: no reef-pi wrapper found; install it with reef-pi update, then reef-pi setup";
-// The marker /reef-versions puts on the step this tree runs, so a read lists the installed version beside the
+// The marker /versions puts on the step this tree runs, so a read lists the installed version beside the
 // newest one. The tree always comes from reef's install channel, which writes the release file that names it.
 const INSTALLED_MARK = "installed (this tree)";
 // The wrapper's exit code for an update it refused because an item is unmet: the setup loop runs, then the
@@ -480,16 +480,16 @@ export default function requests(pi) {
 
   // A request the service no longer knows is dropped and said once, instead of a watch that never settles.
   const goneText = (id8) =>
-    `reef: request ${id8} is no longer on the service (its scenario was reset); ask again with /reef-harness`;
+    `reef: request ${id8} is no longer on the service (its scenario was reset); ask again with /evolve`;
 
   // A promoted row stays pending in the catalog; the promote is a later row naming it, so with the rows given
-  // the pending row reads "promoted at step N".
+  // the pending row reads "promoted at vN".
   const resultOf = (row, rows = []) => {
     if (row.pending) {
       const promoted = rows.findIndex(
         (other) => other.operation === "promote" && other.rollback_target_release_id === row.release_id,
       );
-      return promoted >= 0 ? `promoted at step ${promoted}` : "pending";
+      return promoted >= 0 ? `promoted at v${promoted}` : "pending";
     }
     const metrics = metricsOf(row);
     if (typeof metrics.selected === "boolean") return metrics.selected ? "selected" : "rejected";
@@ -504,17 +504,17 @@ export default function requests(pi) {
     const metrics = metricsOf(row);
     const release = String(row.release_id || "").slice(0, 8);
     const selectionResult = resultOf(row, rows);
-    const details = ` Details: /reef-versions ${step}.`;
+    const details = ` Details: /versions v${step}.`;
     if (selectionResult === "selected") {
       return (
-        `reef: '${ask}' is published as release ${release}. Install when ready with /reef-versions ${step} install.` +
+        `reef: '${ask}' is published as release ${release}. Install when ready with /versions v${step} install.` +
         details
       );
     }
     if (selectionResult === "pending") {
       return (
         `reef: '${ask}' is ready as release ${release}. This release changes an extension, so read it before ` +
-        `it runs: /reef-versions ${step} opens the page, /reef-versions ${step} install serves it.`
+        `it runs: /versions v${step} opens the page, /versions v${step} install serves it.`
       );
     }
     if (selectionResult === "rejected") {
@@ -529,7 +529,7 @@ export default function requests(pi) {
       const why = failure ? `${metrics.skipped}: ${failure}` : String(metrics.skipped);
       return `reef: '${ask}' produced no change (${why}). Nothing changed.${details}`;
     }
-    return `reef: '${ask}' settled as ${selectionResult} (release ${release}); /reef-versions ${step} shows it.`;
+    return `reef: '${ask}' settled as ${selectionResult} (release ${release}); /versions v${step} shows it.`;
   };
 
   // The filed requests not yet reported, newest last, filed_at in seconds since the epoch as the service records
@@ -750,7 +750,7 @@ export default function requests(pi) {
     const frame = SPINNER_FRAMES[watch.frame % SPINNER_FRAMES.length];
     const page = link(requestPageLink(watch.recordId), "open the page");
     const head =
-      `${frame} reef: ${phase}${since} - ${page}, ${WATCH_SHORTCUT} or /reef-harness to ` +
+      `${frame} reef: ${phase}${since} - ${page}, ${WATCH_SHORTCUT} or /evolve to ` +
       `${watch.expanded ? "close" : "look in"}`;
     ctx.ui.setWidget(WIDGET_KEY, watch.expanded ? [head, ...watchLines()] : [head]);
   };
@@ -811,7 +811,7 @@ export default function requests(pi) {
       if (Date.now() >= deadline) {
         // The request stays stored: the next session start reports the result once the catalog has it.
         stopWatch(ctx);
-        ctx.ui.notify(`reef: no result yet for '${ask}'; /reef-versions shows it when it settles`, "warning");
+        ctx.ui.notify(`reef: no result yet for '${ask}'; /versions shows it when it settles`, "warning");
         return;
       }
       // The step's own phase, which the record alone cannot tell: proposing, evaluating, and the episode count.
@@ -935,7 +935,7 @@ export default function requests(pi) {
     const since = elapsedText(Date.now() - clarification.startedAt);
     const head =
       `${frame} reef: clarifying '${clarification.ask}' ${since} - ${clarification.phase} - ` +
-      `${WATCH_SHORTCUT} or /reef-harness to ${clarification.expanded ? "close" : "look in"}`;
+      `${WATCH_SHORTCUT} or /evolve to ${clarification.expanded ? "close" : "look in"}`;
     ctx.ui.setWidget(CLARIFY_WIDGET_KEY, clarification.expanded ? [head, ...clarifyLines()] : [head]);
   };
 
@@ -1091,7 +1091,7 @@ export default function requests(pi) {
         const why = reply.errorMessage || reply.stopReason;
         note("error", why);
         finish("failed", `the clarification failed: ${why}`);
-        ctx.ui.notify(`reef: the clarification failed (${why}); file it as is with /reef-harness --direct`, "error");
+        ctx.ui.notify(`reef: the clarification failed (${why}); file it as is with /evolve --direct`, "error");
         return;
       }
       messages.push(reply);
@@ -1106,7 +1106,7 @@ export default function requests(pi) {
         finish("unfiled", "the clarification ended without filing");
         ctx.ui.notify(
           `reef: the clarification ended without filing${said ? `: ${clip(said, 300)}` : ""}; ` +
-            "ask again, or file it as is with /reef-harness --direct",
+            "ask again, or file it as is with /evolve --direct",
           "warning",
         );
         return;
@@ -1153,11 +1153,11 @@ export default function requests(pi) {
       }
     }
     finish("failed", `the clarification took more than ${CLARIFY_MAX_TURNS} model calls`);
-    ctx.ui.notify("reef: the clarification did not settle; file it as is with /reef-harness --direct", "error");
+    ctx.ui.notify("reef: the clarification did not settle; file it as is with /evolve --direct", "error");
   };
 
-  pi.registerCommand("reef-harness", {
-    description: "Ask reef to grow this harness: /reef-harness [--direct] <what it should do>",
+  pi.registerCommand("evolve", {
+    description: "Ask reef to grow this harness: /evolve [--direct] <what it should do>",
     handler: async (args, ctx) => {
       const words = (args || "").trim();
       const direct = words === "--direct" || words.startsWith("--direct ");
@@ -1173,7 +1173,7 @@ export default function requests(pi) {
           ctx.ui.notify([`reef: ${phase}${since}`, ...watchLines()].join("\n"), "info");
           return;
         }
-        ctx.ui.notify("Usage: /reef-harness <what the harness should do>", "warning");
+        ctx.ui.notify("Usage: /evolve <what the harness should do>", "warning");
         return;
       }
       if (!installedRelease()) {
@@ -1186,7 +1186,7 @@ export default function requests(pi) {
           return;
         }
         if (!ctx.model) {
-          ctx.ui.notify("reef: no model to clarify with; pick one with /model, or use /reef-harness --direct", "error");
+          ctx.ui.notify("reef: no model to clarify with; pick one with /model, or use /evolve --direct", "error");
           return;
         }
         // Not awaited: the clarification runs beside the session, so the person's input stays theirs.
@@ -1224,7 +1224,7 @@ export default function requests(pi) {
     return text ? `"${clip(text, 60)}"` : "";
   };
 
-  // The release this tree runs now, so /reef-versions shows which version is installed as well as which is the
+  // The release this tree runs now, so /versions shows which version is installed as well as which is the
   // newest (the head). A step that is both is marked "installed (this tree), current"; one that is only the
   // head is "current".
   const installedStep = (rows) => {
@@ -1234,7 +1234,7 @@ export default function requests(pi) {
 
   const lineOf = (step, rows) =>
     [
-      String(step),
+      `v${step}`,
       String(rows[step].release_id || "").slice(0, 8),
       resultOf(rows[step], rows),
       step === installedStep(rows) ? INSTALLED_MARK : "",
@@ -1272,19 +1272,19 @@ export default function requests(pi) {
     return `${rows[step].release_id} (${marks.join(", ")})`;
   };
 
-  pi.registerCommand("reef-versions", {
-    description: "List this harness's versions, or open one: /reef-versions [step] [install]",
+  pi.registerCommand("versions", {
+    description: "List this harness's versions, or open one: /versions [version] [install]",
     handler: async (args, ctx) => {
       const words = (args || "").trim().split(/\s+/).filter(Boolean);
       const install = words[1] === "install";
-      // Digits only before Number(): "1e1" and "0x3" are numbers to it and no step to the catalog.
+      // v3 or 3, digits only before Number(): "1e1" and "0x3" are numbers to it and no version to the catalog.
       const usable =
-        words.length === 0 || (/^\d+$/.test(words[0]) && (words.length === 1 || (install && words.length === 2)));
+        words.length === 0 || (/^v?\d+$/.test(words[0]) && (words.length === 1 || (install && words.length === 2)));
       if (!usable) {
-        ctx.ui.notify("Usage: /reef-versions [step] [install]", "warning");
+        ctx.ui.notify("Usage: /versions [version] [install]", "warning");
         return;
       }
-      const step = words.length ? Number(words[0]) : null;
+      const step = words.length ? Number(words[0].replace(/^v/, "")) : null;
       let rows;
       try {
         rows = await releases();
@@ -1304,7 +1304,7 @@ export default function requests(pi) {
       }
       const row = rows[step];
       if (!row) {
-        ctx.ui.notify(`no step ${step}: the catalog holds steps 0 to ${rows.length - 1}`, "warning");
+        ctx.ui.notify(`no v${step}: the catalog holds v0 to v${rows.length - 1}`, "warning");
         return;
       }
       const selectionResult = resultOf(row, rows);
@@ -1312,7 +1312,7 @@ export default function requests(pi) {
         // A pending step installs: the confirmation promotes it first. Only a step with no tree of its own refuses.
         if (["rejected", "skipped"].includes(selectionResult)) {
           ctx.ui.notify(
-            `step ${step} is ${selectionResult} and published no tree; /reef-versions lists the ones that did`,
+            `v${step} is ${selectionResult} and published no tree; /versions lists the ones that did`,
             "warning",
           );
           return;
@@ -1328,10 +1328,10 @@ export default function requests(pi) {
       const url = stepPageLink(step);
       const summary = stepSummary(step, rows);
       if (!ctx.hasUI) {
-        ctx.ui.notify(`Harness step ${step}: ${summary}\npage: ${url}`, "info");
+        ctx.ui.notify(`Harness v${step}: ${summary}\npage: ${url}`, "info");
         return;
       }
-      const read = await ctx.ui.confirm(`Open harness step ${step}?`, summary);
+      const read = await ctx.ui.confirm(`Open harness v${step}?`, summary);
       if (!read) {
         ctx.ui.notify(`page: ${url}`, "info");
         return;
@@ -1343,15 +1343,15 @@ export default function requests(pi) {
   // What is ready to install and not installed yet: one step names itself; several share the placeholder. The
   // update notice offers the newest of them; this line names the rest, which a person installs by step.
   const reviewLine = (steps) => {
-    const install = steps.length === 1 ? `/reef-versions ${steps[0]} install` : "/reef-versions <step> install";
-    return `${steps.length} release(s) ready to install: /reef-versions ${steps.join(", ")} (install with ${install})`;
+    const install = steps.length === 1 ? `/versions v${steps[0]} install` : "/versions <version> install";
+    return `${steps.length} release(s) ready to install: /versions ${steps.map((step) => `v${step}`).join(", ")} (install with ${install})`;
   };
 
   // Said once per session start with a UI: the two commands exist, what waits for a review, and the result of
   // any request filed before a restart or reported while the person was away.
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
-    const lines = ["reef: /reef-harness <what it should do> asks for a harness change; /reef-versions lists the versions."];
+    const lines = ["reef: /evolve <what it should do> asks for a harness change; /versions lists the versions."];
     let rows = [];
     try {
       rows = await releases();

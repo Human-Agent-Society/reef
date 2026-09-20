@@ -512,14 +512,14 @@ returns a training record id and does not mean the change has passed the
 evaluation: the wrapper prints ``watch it here: <link>``, the request's page
 (``GET /reef/harness/requests/<id>/page`` with the scenario and the token
 as query parameters, so a browser opens it as is), and says ``reef is
-running the step; add --wait to stay here, or check /reef-versions later``.
+running the step; add --wait to stay here, or check /versions later``.
 With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
 release catalog every 5 s for the step that consumed the request, says
 ``the step started; usually one to three minutes`` once the request's
 record shows a step took it, and prints one line with the result and the
 next action, quoting the request: a selected release to restart ``reef-pi``
 for; a pending one with ``This release changes an extension, so read it before
-it runs: /reef-versions <step> opens the page, /reef-versions <step> install
+it runs: /versions <version> opens the page, /versions <version> install
 serves it. Page: <link>``; a rejected step with the evaluation's reason; a skipped step with why
 (the proposer's own reason when the step recorded one, such as a failed
 model call); ``not covered: ...`` follows when the step's review lists
@@ -528,7 +528,7 @@ release, 1 for a rejected or skipped step, 2 when the timeout passes first.
 On a terminal the wrapper then hands you the next step: a selected release
 asks ``Install now? [Y/n]`` and, on yes, runs ``reef-pi setup`` for it and
 then ``reef-pi update``, closing with ``Installed release <id>. Restart
-reef-pi to use it.``; a pending release names ``reef-pi page <step>`` to
+reef-pi to use it.``; a pending release names ``reef-pi page <version>`` to
 read it, asks ``Promote now? [y/N]`` and, on yes, promotes it and installs
 the new head the same way. Declined, or in a script without a terminal,
 it prints the commands to run instead.
@@ -538,14 +538,14 @@ evolution alone, use the same update endpoint with
 scenario is in ``auto``.
 
 With ``evolution.requests: true``, a tree that boots from the seed also
-carries the pi ``/reef-harness <request>`` command, which uses the same manual
+carries the pi ``/evolve <request>`` command, which uses the same manual
 training API with pi's current session id. In the session the model first
 thinks the request through and asks what is unclear, a few options plus a
 typed answer per question, then files the request with the answers. Every
 question also offers ``Cancel this request``, and Escape does the same: it
 drops the whole request rather than skipping the question, so nothing is
 filed and the agent is told you backed out.
-``/reef-harness --direct <request>`` files it as is, and either way the
+``/evolve --direct <request>`` files it as is, and either way the
 filing answers with the link to the request's page. A spinner then sits just
 above your input box with the step's phase (writing the change, checking the
 harness) and how long it has run; ``ctrl+q`` expands it in place with
@@ -558,7 +558,7 @@ result is reported when it settles, with the same next actions as
 keeps beside a notice. If the step settles while you are between turns, the
 session offers its install right there; while you are mid turn it stays a
 report, so your input is never taken away, and the next session start offers
-the same release. ``/reef-versions <step> install`` starts the same install
+the same release. ``/versions <version> install`` starts the same install
 whenever you are ready, after a confirmation linking the step's page. A
 release still held back from the served head is served as part of installing
 it, so installing is the one decision. Installation runs ``reef-pi update`` for that release, collects
@@ -568,7 +568,7 @@ from a separate terminal. A request filed before a restart, or settled
 while you were away, is
 reported at the next session start, where the update notice offers the
 install. A session start also says the commands exist and counts the
-releases ready to install, with the ``/reef-versions <step> install`` that
+releases ready to install, with the ``/versions <version> install`` that
 installs one. Recovered trees keep their
 existing entries, as with ``version_check``. The proposer must explicitly
 accept ``requests``. The tutorial's proposer asks the served model for a
@@ -655,13 +655,13 @@ install. A session that starts on a tree with an unmet item prints the
 list once and runs anyway. No check runs at install, and none at session
 start without your yes.
 
-See what a version is with ``/reef-versions`` in a ``reef-pi`` session: one
-line per catalog row, oldest first, with the step, the first eight characters
-of the release id, the result (``selected``, ``rejected``, ``skipped``,
-``pending``, ``promoted at step N`` once a later promote serves a pending
+See what a version is with ``/versions`` in a ``reef-pi`` session: one
+line per catalog row, oldest first, with the version (``v0``, ``v1``, ...: the
+row's step), the first eight characters of the release id, the result (``selected``, ``rejected``, ``skipped``,
+``pending``, ``promoted at vN`` once a later promote serves a pending
 release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
 ``recovery``), ``current`` on the served head and the request text the step
-answered. ``/reef-versions <step>`` prints the link to that step's page,
+answered. ``/versions <version>`` prints the link to that step's page,
 ``GET /reef/harness/releases/<step>/page`` with the scenario and the token
 as query parameters so a browser opens it as is, one self contained HTML
 page that reads like the request page, light or dark with the system and
@@ -676,13 +676,13 @@ children: the steps evaluated on it and any promote or rollback made on it,
 each a link to its own page; for
 a rejected or skipped step, the head it ran on). The line under the title
 carries the release id, the commit time and ``Currently served`` on the head.
-``/reef-versions <step> install`` runs the install and setup flow for that
+``/versions <version> install`` runs the install and setup flow for that
 step after you confirm it, serving a release still held back from the head
 first. The page holds the proposer's plan, its review and the numbers, so
-``/reef-versions <step>`` offers to open it rather than reprinting it. The
+``/versions <version>`` offers to open it rather than reprinting it. The
 page itself can also be fetched with a curl that carries the
 scenario header and the token into a file, for a hosted deployment where
-the link is not enough, and ``reef-pi page <step>`` fetches it the same way
+the link is not enough, and ``reef-pi page <version>`` fetches it the same way
 into ``$XDG_CACHE_HOME/reef-harness/<scenario>-step-<step>.html``
 (``~/.cache`` by default), prints the path and opens it with ``open`` or
 ``xdg-open``; ``--print`` prints the path and opens nothing.

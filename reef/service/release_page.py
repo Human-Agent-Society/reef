@@ -160,12 +160,12 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
 
     A pending row stays pending in the catalog after a person promotes it;
     the promote is a later row naming it in ``rollback_target_release_id``,
-    so with ``rows`` given such a row reads ``promoted at step N``."""
+    so with ``rows`` given such a row reads ``promoted at vN``."""
     if row.get("pending"):
         release_id = row.get("release_id")
         for index, other in enumerate(rows):
             if other.get("operation") == "promote" and other.get("rollback_target_release_id") == release_id:
-                return f"promoted at step {index}"
+                return f"promoted at v{index}"
         return "pending"
     metrics = row.get("metrics")
     if isinstance(metrics, Mapping):
@@ -532,7 +532,7 @@ def _chain(
             "</dl>"
         )
     children = [
-        f'<li><a class="step-name" href="{escape(step_href(index, link_query))}">Step {index}</a>'
+        f'<li><a class="step-name" href="{escape(step_href(index, link_query))}">v{index}</a>'
         f'<span class="id">{escape(other.get("release_id"))}</span>{status_span(result_of(other, rows))}</li>'
         for index, other in enumerate(rows)
         if index != step and _ran_on(other, release_id)
@@ -554,14 +554,14 @@ def _steps_nav(step: int, rows: Sequence[Mapping[str, Any]], link_query: Mapping
     """The walk along the catalog: the neighbouring steps, a dead end shown as text, and where this step sits."""
     parts = []
     if step > 0:
-        parts.append(f'<a href="{escape(step_href(step - 1, link_query))}" rel="prev">&#8592; Step {step - 1}</a>')
+        parts.append(f'<a href="{escape(step_href(step - 1, link_query))}" rel="prev">&#8592; v{step - 1}</a>')
     else:
-        parts.append("<span>&#8592; Step</span>")
+        parts.append("<span>&#8592;</span>")
     if step + 1 < len(rows):
-        parts.append(f'<a href="{escape(step_href(step + 1, link_query))}" rel="next">Step {step + 1} &#8594;</a>')
+        parts.append(f'<a href="{escape(step_href(step + 1, link_query))}" rel="next">v{step + 1} &#8594;</a>')
     else:
-        parts.append("<span>Step &#8594;</span>")
-    parts.append(f'<span class="here">Step {step} of {len(rows) - 1}</span>')
+        parts.append("<span>&#8594;</span>")
+    parts.append(f'<span class="here">v{step} of v{len(rows) - 1}</span>')
     return f'<nav class="steps" aria-label="Catalog steps">{"".join(parts)}</nav>\n'
 
 
@@ -602,13 +602,13 @@ def build_release_page(
     data = json.dumps(row, ensure_ascii=True, sort_keys=True).replace("<", "\\u003c")
     served = served_step(rows)
     return document(
-        title=f"Harness step {step}",
+        title=f"Harness v{step}",
         style=STYLE,
         breadcrumb="Versions",
         context=link_query.get("scenario", "") if link_query else "",
         state=selection_result,
         eyebrow="Harness evolution",
-        heading=f"Harness step {step}",
+        heading=f"Harness v{step}",
         subtitle=subtitle,
         # The served head is this scenario's home; on its own page the crumb stays text.
         home="" if served is None or served == step else step_href(served, link_query),

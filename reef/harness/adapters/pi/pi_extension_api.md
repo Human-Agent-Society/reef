@@ -59,7 +59,7 @@ pi.registerCommand("standup", {
 });
 ```
 
-The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The reef-harness and reef-versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
+The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The evolve and versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
 
 ## Events: pi.on(name, handler)
 
@@ -125,7 +125,7 @@ Models beyond the session's chat model are Reef routes too, when the Reef recipe
 - /v1/images: generate an image from a prompt.
 - /v1/embeddings: embed text.
 - /v1/audio/speech: text to speech; the response body is the audio bytes.
-- /v1/decisions: a fast structured choice (routing, classification) from a decision model such as ~typesafe/jev-latest, where the provider serves one.
+- /v1/decisions: a fast structured choice (routing, classification, a risk or completion check) from a decision model such as ~typesafe/jev-latest, where the provider serves one. The body carries a state and typed questions (noul, choice, score); the answer is a value with probabilities, never text.
 
 Name the model in the body. These routes do not stream, and answer 501 when the Reef recipe configures no multimodal provider or its provider serves no such route.
 

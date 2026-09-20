@@ -32,7 +32,7 @@ includes installation, bug-fix and research demos, and recorded measurements.
 How it works
 ------------
 
-1. Ask. In a ``reef-pi`` session, ``/reef-harness <what it should do>`` has
+1. Ask. In a ``reef-pi`` session, ``/evolve <what it should do>`` has
    the model think the change through in the background before anything is
    filed, while the chat shows one line (``ctrl+o`` expands the whole
    clarification) and the session keeps its input and context: when it
@@ -70,11 +70,11 @@ How it works
    changes an extension, rejected by the evaluation, or skipped with the reason,
    followed by the points the review left uncovered.
 4. Read. A release that touches a ``code_extension`` is held back from the
-   served head, so it reaches no session on its own. ``/reef-versions
-   <step>`` opens its page (``reef-pi page <step>`` from the shell), which
+   served head, so it reaches no session on its own. ``/versions
+   <step>`` opens its page (``reef-pi page <version>`` from the shell), which
    carries the design, the review and the numbers.
 5. Install and set up. A step that settles while you are between turns offers
-   its install there; otherwise run ``/reef-versions <step> install``
+   its install there; otherwise run ``/versions <version> install``
    (``reef-pi update`` from the shell). A release held back from the head is
    served as part of installing it, so installing is the one decision. After
    confirmation, the session collects what the change needs: for each unmet ``requires`` item it shows the item's
@@ -131,7 +131,7 @@ documentation on the network, and two tools of its own:
 While it runs, the request page's Activity lists each tool the agent calls,
 each check and trial with its result, and each image or speech call with the
 provider's status, so a long run shows what it is doing; opening the
-``/reef-harness`` spinner in pi lists the latest few.
+``/evolve`` spinner in pi lists the latest few.
 
 When the agent stops, its files are read back into the step's mutations,
 ``requires`` items and design, and the review runs as for the text
@@ -244,7 +244,7 @@ What the step records
 Every step's catalog row carries the request under
 ``metrics.training_request`` and the proposer's notes under
 ``metrics.proposal_notes``; the step page
-(``GET /reef/harness/releases/<step>/page``, ``reef-pi page <step>``) renders
+(``GET /reef/harness/releases/<step>/page``, ``reef-pi page <version>``) renders
 them:
 
 * ``design``: the proposer's plan for the request, a few sentences, as the

@@ -183,15 +183,15 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
         in selection_result
     )
     assert '<dt>Release</dt><dd class="id">rel-1</dd>' in selection_result
-    assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View step 1' in selection_result
+    assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View v1' in selection_result
     assert "<h3>Error</h3>" not in selection_result and "Proposer failure" not in selection_result
     changed = _section(page, "What changed")
     assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in changed
     assert '<span class="tag">rules</span>' in changed
-    assert "<code>/reef-versions 1 install</code>" in selection_result
+    assert "<code>/versions v1 install</code>" in selection_result
     assert settled_step(rows, RECORD_ID) == 1
     bare = build_request_page(_record(compacted_at=1_050.0), rows, now=1_100.0)
-    assert 'href="/reef/harness/releases/1/page">View step 1' in bare
+    assert 'href="/reef/harness/releases/1/page">View v1' in bare
 
     # A rejected proposal is labeled as proposed, never as an applied change.
     second = {"op": "update", "id": "ext", "options": {"name": "code_extension", "config": {"code": "x"}}}
@@ -219,11 +219,11 @@ def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_r
     assert "Proposed changes" in _sections(page)
     assert "Release rel-1 is ready. This change includes an extension" in page
     assert REFRESH not in page
-    assert "<code>/reef-versions 1 install</code>" in page
+    assert "<code>/versions v1 install</code>" in page
     promote = _row({}, release_id="rel-2", parent="rel-0", operation="promote", rollback_target_release_id="rel-1")
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, pending, promote], now=1_100.0)
-    assert '<span class="promoted">Promoted at step 2</span>' in page
-    assert "passed the checks and was promoted at step 2; the release that step published serves it" in page
+    assert '<span class="promoted">Promoted at v2</span>' in page
+    assert "passed the checks and was promoted at v2; the release that step published serves it" in page
     assert "What changed" in _sections(page)
 
 
@@ -385,7 +385,7 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
 
             # The version page opens the same way; the wrong token, no token or a token elsewhere does not.
             response = await client.get("/reef/harness/releases/0/page", params=QUERY)
-            assert response.status == 200 and "<title>Harness step 0</title>" in await response.text()
+            assert response.status == 200 and "<title>Harness v0</title>" in await response.text()
             response = await client.get(link, params={**QUERY, "token": "nope"})
             assert response.status == 401 and await response.text() == "invalid service token"
             response = await client.get(link, params={"scenario": SCENARIO})
@@ -416,8 +416,8 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             # The settled request reads as settled on the JSON route too, naming the step its row landed as.
             settled = await (await client.get(progress_route, headers=headers)).json()
             assert settled["settled"] is True and settled["step"] == 1 and settled["state"] == "selected"
-            assert "Published as release " in page and "/reef-versions 1 install" in page
-            assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View step 1' in page
+            assert "Published as release " in page and "/versions v1 install" in page
+            assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View v1' in page
             assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in page
 
             # An unknown id, and a record that is no training instruction, are 404s naming the id.
