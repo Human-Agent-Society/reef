@@ -718,8 +718,11 @@ two commands, two tools and two event handlers:
   and a second line counts the releases held back from the served head and
   says how to install them: ``N release(s) ready to install: /versions
   <version>[, <version>] (install with /versions <version> install)``.
-- ``/versions [version] [install]``: lists the release chain with each
-  step's version (``v0``, ``v1``, ...), result and request. With a version,
+- ``/versions [version] [install]``: lists the release chain oldest first in
+  aligned version (``v0``, ``v1``, ...), release id, result and status columns.
+  Status distinguishes the locally installed version from the served head;
+  request summaries appear below their rows, with whitespace collapsed.
+  The footer explains the statuses and shows details and install commands. With a version,
   ``v3`` or ``3``, it offers the step's page (``GET
   /reef/harness/releases/{step}/page`` with the scenario and the token as
   query parameters), which holds the design, the review and the numbers;

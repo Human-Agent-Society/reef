@@ -39,8 +39,7 @@ const RELEASE_FILE = ".reef-harness-release";
 const WRAPPER_NAME = "reef-pi";
 const INSTALL_LATER_TEXT = "reef: install it later with reef-pi update, then reef-pi setup";
 const NO_WRAPPER_TEXT = "reef: no reef-pi wrapper found; install it with reef-pi update, then reef-pi setup";
-// The marker /versions puts on the step this tree runs, so a read lists the installed version beside the
-// newest one. The tree always comes from reef's install channel, which writes the release file that names it.
+// The installed marker in a version's detail dialog. The install channel writes the release file naming it.
 const INSTALLED_MARK = "installed (this tree)";
 // The wrapper's exit code for an update it refused because an item is unmet: the setup loop runs, then the
 // update again.
@@ -1218,31 +1217,42 @@ export default function requests(pi) {
     return -1;
   };
 
-  const requestText = (row) => {
-    const request = metricsOf(row).training_request;
-    const text = request && typeof request.text === "string" ? request.text.trim() : "";
-    return text ? `"${clip(text, 60)}"` : "";
-  };
-
-  // The release this tree runs now, so /versions shows which version is installed as well as which is the
-  // newest (the head). A step that is both is marked "installed (this tree), current"; one that is only the
-  // head is "current".
+  // Match the local tree separately from the served head; they can point at different releases.
   const installedStep = (rows) => {
     const installed = installedRelease();
     return installed ? rows.findIndex((row) => row.release_id === installed) : -1;
   };
 
-  const lineOf = (step, rows) =>
-    [
-      `v${step}`,
-      String(rows[step].release_id || "").slice(0, 8),
-      resultOf(rows[step], rows),
-      step === installedStep(rows) ? INSTALLED_MARK : "",
-      step === headStep(rows) ? "current" : "",
-      requestText(rows[step]),
-    ]
-      .filter(Boolean)
-      .join("  ");
+  const versionHistory = (rows) => {
+    if (!rows.length) return "no release on record";
+    const installed = installedStep(rows);
+    const head = headStep(rows);
+    const results = rows.map((row) => resultOf(row, rows));
+    const versionWidth = Math.max("Version".length, `v${rows.length - 1}`.length);
+    const resultWidth = Math.max("Result".length, ...results.map((result) => result.length));
+    const header = `${"Version".padEnd(versionWidth)}  Release   ${"Result".padEnd(resultWidth)}  Status`;
+    const lines = [`Harness versions (${rows.length} entries, oldest first)`, "", header, "-".repeat(header.length)];
+    for (const [step, row] of rows.entries()) {
+      const marks = [];
+      if (step === installed) marks.push("installed");
+      if (step === head) marks.push("current");
+      lines.push(
+        `${`v${step}`.padEnd(versionWidth)}  ${String(row.release_id || "").slice(0, 8).padEnd(8)}  ` +
+          `${results[step].padEnd(resultWidth)}  ${marks.join(", ") || "-"}`,
+      );
+      // Requests live below the columns so long or multilingual text cannot shift the table.
+      const request = metricsOf(row).training_request;
+      const text = request && typeof request.text === "string" ? request.text.replace(/\s+/g, " ").trim() : "";
+      if (text) lines.push(`  "${clip(text, 60)}"`);
+    }
+    lines.push(
+      "",
+      "installed: running in this tree; current: served by Reef",
+      "Details: /versions <version>",
+      "Install: /versions <version> install",
+    );
+    return lines.join("\n");
+  };
 
   // The page in the person's browser. pi opens its own links this way and exposes no opener to an extension, so
   // the launcher is named here per platform. The URL is one argument, never shell source, and a launcher that is
@@ -1293,13 +1303,7 @@ export default function requests(pi) {
         return;
       }
       if (step === null) {
-        ctx.ui.notify(
-          rows.length
-            ? rows.map((_, index) => lineOf(index, rows)).join("\n") +
-                `\n${INSTALLED_MARK}: the version this tree runs; current: the newest version`
-            : "no release on record",
-          "info",
-        );
+        ctx.ui.notify(versionHistory(rows), "info");
         return;
       }
       const row = rows[step];

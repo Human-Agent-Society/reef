@@ -657,13 +657,16 @@ install. A session that starts on a tree with an unmet item prints the
 list once and runs anyway. No check runs at install, and none at session
 start without your yes.
 
-See what a version is with ``/versions`` in a ``reef-pi`` session: one
-line per catalog row, oldest first, with the version (``v0``, ``v1``, ...: the
+See what a version is with ``/versions`` in a ``reef-pi`` session: an
+aligned table, oldest first, with the version (``v0``, ``v1``, ...: the
 row's step), the first eight characters of the release id, the result (``selected``, ``rejected``, ``skipped``,
 ``pending``, ``promoted at vN`` once a later promote serves a pending
 release, else the row's operation: ``creation``, ``promote``, ``rollback`` or
-``recovery``), ``current`` on the served head and the request text the step
-answered. ``/versions <version>`` prints the link to that step's page,
+``recovery``), and a separate status column marking ``installed`` on the
+version this tree runs and ``current`` on the served head. Each request
+summary appears below its row, with line breaks collapsed to spaces. The
+footer explains the status markers and lists the details and install commands.
+``/versions <version>`` prints the link to that step's page,
 ``GET /reef/harness/releases/<step>/page`` with the scenario and the token
 as query parameters so a browser opens it as is, one self contained HTML
 page that reads like the request page, light or dark with the system and
