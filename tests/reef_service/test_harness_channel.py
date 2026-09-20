@@ -44,6 +44,7 @@ from reef.service.install_script import (
     HARNESS_RELEASE_FILE,
     PREAMBLE_MIN_BYTES,
     TOKEN_PLACEHOLDER,
+    checksummed_files,
     composition_checksum,
     render_install_preamble,
     render_install_script,
@@ -664,18 +665,21 @@ def _install_fixture(
     npm: str,
     scenario: str = "",
     binding_files: dict[str, str] | None = None,
+    files: dict[str, str] | None = None,
 ) -> tuple[Path, Path, Path, dict]:
     """A rendered script, a PATH shim dir, and an install prefix.
 
     ``binary_version`` seeds a fake pi at the descriptor's binary_path that
     answers ``--version`` with it (None leaves the binary absent); ``npm``
-    is the shim body dropped onto PATH.
+    is the shim body dropped onto PATH. ``files`` overrides the served
+    composition (the install route serves the binding targets as part of
+    ``files``, which the default hostile set does not model).
     """
     script = tmp_path / "install.sh"
     script.write_text(
         render_install_script(
             descriptor=get_adapter("pi"),
-            files=HOSTILE_FILES,
+            files=HOSTILE_FILES if files is None else files,
             release_id="v-test",
             content_id="content-test",
             scenario=scenario,
@@ -764,6 +768,46 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
     models = json.loads((dest / "pi-agent/models.json").read_text(encoding="utf-8"))
     assert models["providers"]["reef"]["apiKey"] == NO_TOKEN_API_KEY
     assert _extract_reef_token("pi", dest / "pi-agent") is None
+
+
+@pytest.mark.unit
+def test_install_script_rerun_on_a_bound_tree_says_already_current(tmp_path) -> None:
+    """Regression test for #375: the install route serves the binding targets as
+    part of the composition, and the script re-writes them with the client's
+    token on every run. The checksum must cover the served composition alone,
+    so a rerun on an unchanged tree says "already current" instead of
+    rewriting the whole tree."""
+    binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
+    bound = render_composition(
+        [("rules", {"text": "old rules"}), *binding.compose_nodes(get_adapter("pi"))], get_adapter("pi")
+    )
+    # As the route renders it: the binding target rides inside the served composition.
+    binding_files = {"pi-agent/models.json": bound["pi-agent/models.json"]}
+    script, dest, prefix, env = _install_fixture(
+        tmp_path,
+        binary_version="0.84.2",
+        npm="#!/bin/sh\nexit 1\n",
+        binding_files=binding_files,
+        files={**HOSTILE_FILES, **binding_files},
+    )
+    env = {**env, "REEF_TOKEN": "tok-123"}
+    first = _run_install(script, dest, prefix, env)
+    assert first.returncode == 0, first.stderr
+    assert "writing the harness tree" in first.stdout
+    # The binding the script wrote carries the client's token, so before the
+    # fix the on-disk tree could never match the baked checksum.
+    assert "tok-123" in (dest / "pi-agent/models.json").read_text(encoding="utf-8")
+    second = _run_install(script, dest, prefix, env)
+    assert second.returncode == 0, second.stderr
+    assert "composition already current" in second.stdout
+    # The rerun still re-points the binding, and tampering with a checksummed
+    # file still forces a rewrite.
+    assert "tok-123" in (dest / "pi-agent/models.json").read_text(encoding="utf-8")
+    (dest / "pi-agent/AGENTS.md").write_text("tampered", encoding="utf-8")
+    third = _run_install(script, dest, prefix, env)
+    assert third.returncode == 0, third.stderr
+    assert "composition already current" not in third.stdout
+    assert "writing the harness tree" in third.stdout
 
 
 @pytest.mark.unit
@@ -1613,7 +1657,13 @@ def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) 
             assert response.content_type == "text/x-shellscript"
             script = await response.text()
             assert "npm install --prefix \"$PREFIX\" '@earendil-works/pi-coding-agent@0.84.2'" in script
-            assert composition_checksum(second["files"]) in script  # head by default
+            # The checksum covers the served composition alone: the binding targets the script
+            # re-writes with the client's token on every run are out of the stream (#375).
+            binding_paths = {target.path for target in get_adapter("pi").config_targets.values()}
+            assert (
+                composition_checksum(checksummed_files(second["files"], {path: "" for path in binding_paths}))
+                in script
+            )  # head by default
             assert "marker marker rules" in script  # the composition rides inline
             # The binding at the Reef this request reached, the token left for the client's environment.
             host = f"{client.host}:{client.port}"
@@ -1626,7 +1676,10 @@ def test_install_route_serves_the_script_for_head_and_pinned_versions(tmp_path) 
                 headers={"x-reef-scenario": "delivery"},
             )
             assert response.status == 200
-            assert composition_checksum(first["files"]) in await response.text()
+            assert (
+                composition_checksum(checksummed_files(first["files"], {path: "" for path in binding_paths}))
+                in await response.text()
+            )
         finally:
             await client.close()
 

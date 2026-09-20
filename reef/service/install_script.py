@@ -69,6 +69,19 @@ def composition_checksum(files: Mapping[str, str]) -> str:
     return digest.hexdigest()
 
 
+def checksummed_files(
+    files: Mapping[str, str], bindings: Mapping[str, str]
+) -> dict[str, str]:
+    """The composition CHECKSUM covers: every served file except the binding targets.
+
+    The install script re-writes the binding targets with the client's own
+    token on every run, after the checksum, so they can never match the
+    served bytes; keeping them out of the checksum stream is what lets a
+    rerun on an unchanged tree say "already current" (#375).
+    """
+    return {relative: files[relative] for relative in sorted(files) if relative not in bindings}
+
+
 def _heredoc_delimiter(content: str) -> str:
     """A heredoc delimiter that provably never occurs in ``content``.
 
@@ -499,7 +512,12 @@ def render_install_script(
             raise ValueError(f"composition path {relative!r} escapes the destination")
     items = parse_requires(list(requires), limit=None)
     ordered = sorted(files)
-    checksum = composition_checksum(files)
+    # The binding targets are re-written with the client's own token on every
+    # run, after the checksum, so they can never match the served bytes: the
+    # checksum covers the served composition alone (#375).
+    checksummed = checksummed_files(files, bindings)
+    checksum = composition_checksum(checksummed)
+    checksum_paths = sorted(checksummed)
     release_info_text = (
         json.dumps(
             {
@@ -567,7 +585,7 @@ def render_install_script(
         "    :",
         *(
             line
-            for relative in ordered
+            for relative in checksum_paths
             for line in (
                 f"    printf '%s\\n' {_single_quoted(relative)}",
                 f"    printf '%s\\n' $(wc -c < \"$DEST/{_double_quoted(relative)}\")",
@@ -583,7 +601,7 @@ def render_install_script(
         'current=""',
         'current_release_checksum=""',
         "if "
-        + " && ".join(f'[ -f "$DEST/{_double_quoted(relative)}" ]' for relative in (HARNESS_RELEASE_FILE, *ordered))
+        + " && ".join(f'[ -f "$DEST/{_double_quoted(relative)}" ]' for relative in (HARNESS_RELEASE_FILE, *checksum_paths))
         + "; then",
         '    current="$(compose_stream | sha256)"',
         f'    current_release_checksum="$(release_info_tool static "$DEST/{HARNESS_RELEASE_FILE}")"',
