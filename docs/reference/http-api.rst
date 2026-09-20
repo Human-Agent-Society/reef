@@ -234,7 +234,7 @@ An optional ``client`` reports the requesting machine, so a proposer builds
 for it rather than for the sandbox it tries changes in: ``platform``,
 ``arch`` and ``release`` (short words) and ``commands``, a map of command
 names to whether each is on the machine's PATH (at most 64). ``reef-pi`` and
-pi's ``/reef-harness`` send one, reading the PATH without running anything.
+pi's ``/evolve`` send one, reading the PATH without running anything.
 It only informs the proposer: what does not fit that shape is dropped, never
 a reason to refuse the request, and ``training_request.client`` carries what
 was kept.
@@ -653,7 +653,7 @@ directories.
 Harness requests
 ~~~~~~~~~~~~~~~~
 
-``reef-<adapter> harness "<request>"`` and pi's ``/reef-harness <request>``
+``reef-<adapter> harness "<request>"`` and pi's ``/evolve <request>``
 submit the user's instruction through ``POST /reef/train``, described under
 `Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
 (the deployment keeps learning from failures) or ``manual``, or switch an
@@ -763,9 +763,9 @@ than nine digits, is HTTP 404 too. The row itself rides in a
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: code-repair" \
      "$REEF_URL/reef/harness/releases/3/page" > harness-step-3.html
 
-On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
-``/reef-versions 3`` offers to open this page in the browser, printing the URL
-when the offer is declined. ``/reef-versions 3 install`` installs that release,
+On pi, ``/versions`` in a ``reef-pi`` session lists the chain, and
+``/versions v3`` offers to open this page in the browser, printing the URL
+when the offer is declined. ``/versions v3 install`` installs that release,
 promoting it first when it is still held back from the served head.
 
 Request page
@@ -774,7 +774,7 @@ Request page
 ``GET /reef/harness/requests/{record_id}/page`` answers one self contained
 HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
 harness request, ``record_id`` being the ``agent_record_id`` that
-``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/reef-harness``
+``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/evolve``
 print the link. Until the step settles the page reloads itself every five
 seconds. A four-stage progress strip and a status badge summarize the
 request. The responsive layout places Request beside Progress on desktop

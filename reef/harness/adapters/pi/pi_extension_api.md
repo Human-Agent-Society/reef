@@ -59,7 +59,7 @@ pi.registerCommand("standup", {
 });
 ```
 
-The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The reef-harness and reef-versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
+The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The evolve and versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
 
 ## Events: pi.on(name, handler)
 

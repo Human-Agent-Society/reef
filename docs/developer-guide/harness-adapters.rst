@@ -567,7 +567,7 @@ API reference the service proposer reads before it writes an extension).
 The extension registers nothing under ``PI_OFFLINE``; otherwise it registers
 two commands, two tools and two event handlers:
 
-- ``/reef-harness <request>``: with a UI, clarifies the request in the
+- ``/evolve <request>``: with a UI, clarifies the request in the
   background instead of in the session. The command returns at once and a
   loop calls the session's model through ``ctx.modelRegistry.complete`` with
   the last six user and assistant messages of the session as background, the
@@ -577,7 +577,7 @@ two commands, two tools and two event handlers:
   with ``reef_ask_user`` and files with ``reef_file_request``. The filing,
   a cancel, a reply without a tool call, a failed model call or eight model
   calls end it. While it runs, a widget above the input shows the phase, and
-  ``ctrl+shift+r``, or ``/reef-harness`` with no argument, opens its latest
+  ``ctrl+shift+r``, or ``/evolve`` with no argument, opens its latest
   steps. When it ends, the chat keeps one
   custom entry (``pi.appendEntry``, type ``reef-harness-clarify``) whose
   line says what happened and whose expanded view (``ctrl+o``) holds the
@@ -617,7 +617,7 @@ two commands, two tools and two event handlers:
   harness``, ``running the step``, ``saving the result``), the time in the
   step, the request's page as a terminal hyperlink (OSC 8, which pi's TUI
   measures around, so a click opens the page where the terminal offers one)
-  and ``ctrl+shift+r or /reef-harness to look in``. The frames turn every
+  and ``ctrl+shift+r or /evolve to look in``. The frames turn every
   250 ms, so the step reads as alive between polls. ``ctrl+shift+r``
   (``pi.registerShortcut``) expands the same widget in place with the
   request asked, its id, the evaluation's episode count and step record when
@@ -626,7 +626,7 @@ two commands, two tools and two event handlers:
   it. pi offers extensions no click event for a widget, so the line names
   three ways in: the hyperlink, the key and the command. The key carries
   shift because pi binds ``ctrl+r`` itself, to renaming a session, and a
-  terminal that reports no modified keys drops the shift; ``/reef-harness``
+  terminal that reports no modified keys drops the shift; ``/evolve``
   with no argument prints the same detail and needs neither the key nor a
   click. Expanding costs no request: it redraws what
   the last poll read. The widget is cleared when the step settles, and a
@@ -650,25 +650,25 @@ two commands, two tools and two event handlers:
   abort signal with a 10 s deadline (``REEF_HARNESS_FETCH_MS`` shortens it),
   so a hung read costs one poll, not every later tick. When the row appears,
   the report quotes the request's first 60 characters and names the next
-  action by result: a selected release names ``/reef-versions <step> install``;
+  action by result: a selected release names ``/versions <version> install``;
   a pending one says ``This release changes an extension, so read it before it
-  runs: /reef-versions <step> opens the page, /reef-versions <step> install
+  runs: /versions <version> opens the page, /versions <version> install
   serves it.``; a rejected step quotes
   ``selection.reason`` and says to rephrase or split the request; a skipped
   step quotes ``metrics.skipped`` and, when the step recorded one,
   ``proposal_notes.failure``, why the proposer produced nothing. The
-  selected, rejected and skipped lines end with ``Details: /reef-versions
+  selected, rejected and skipped lines end with ``Details: /versions
   <step>.``; ``Not covered: ...`` follows when the step's
   ``proposal_notes.review.uncovered`` lists items. The report is delivered
   twice on purpose: as a custom message (``pi.sendMessage`` with
   ``customType: "reef-harness"`` and ``triggerTurn: false``), which the chat
   renders and the session file keeps, and as a notice, which the next
-  status line may overwrite. Past the cap the watch says ``/reef-versions``
+  status line may overwrite. Past the cap the watch says ``/versions``
   shows the result when it settles.
 - A settled step offers its install, so a win reaches the person who asked
   without them going looking. The dialog waits for a turn to end
   (``ctx.isIdle()``): a busy session keeps the report's commands instead, and
-  the next session start offers the same release. ``/reef-versions <step>
+  the next session start offers the same release. ``/versions <version>
   install`` starts the same install on demand after a confirmation linking the
   step's page. A release still held back from the served head is promoted as
   part of installing it, so installing is the one decision; only a rejected or
@@ -690,7 +690,7 @@ two commands, two tools and two event handlers:
   update. Commands targeting a different install directory use its own configuration.
   Setup values and checks are pinned to the release being installed. If that
   release is absent, the error identifies the queried service and scenario;
-  refresh ``/reef-versions`` before choosing a release again.
+  refresh ``/versions`` before choosing a release again.
 - The setup loop: ``reef-pi setup --json --release <id>`` lists the
   release's items with ``met``; each unmet item is asked once, an ``env``
   item through ``ctx.ui.input`` titled with its ``prompt`` (else ``Value
@@ -714,15 +714,16 @@ two commands, two tools and two event handlers:
   report the person missed, still gets the result in the chat.
 - ``session_start``: with a UI, one info line says the two commands exist,
   and a second line counts the releases held back from the served head and
-  says how to install them: ``N release(s) ready to install: /reef-versions
-  <step>[, <step>] (install with /reef-versions <step> install)``.
-- ``/reef-versions [step] [install]``: lists the release chain with each
-  step's result and request. With a step it offers the step's page (``GET
+  says how to install them: ``N release(s) ready to install: /versions
+  <version>[, <version>] (install with /versions <version> install)``.
+- ``/versions [version] [install]``: lists the release chain with each
+  step's version (``v0``, ``v1``, ...), result and request. With a version,
+  ``v3`` or ``3``, it offers the step's page (``GET
   /reef/harness/releases/{step}/page`` with the scenario and the token as
   query parameters), which holds the design, the review and the numbers;
   taking the offer opens it through the platform's launcher (``open``,
   ``xdg-open``, ``rundll32``), and declining prints the URL. Headless prints
-  the summary and the URL instead. ``/reef-versions <step> install`` installs
+  the summary and the URL instead. ``/versions <version> install`` installs
   the step after a confirmation, promoting a release still held back from the
   served head first.
 
