@@ -72,9 +72,10 @@ class TracingConfig:
     ``REEF_TRACING_AUTHORIZATION``; ``headers`` holds non-secret headers only.
     When neither the endpoint nor any header is configured the exporter reads
     the standard ``OTEL_EXPORTER_OTLP_ENDPOINT`` and ``OTEL_EXPORTER_OTLP_HEADERS``
-    environment variables. ``include_messages`` opts in to exporting prompt,
-    completion, feedback and instruction text; by default only identifiers,
-    model names, token usage and scores leave the process.
+    environment variables. Spans carry the exchange itself (prompt,
+    completion, feedback and instruction text) beside identifiers, model
+    names, token usage and scores, so choose a backend trusted with the
+    scenario's traffic.
     """
 
     enabled: bool = False
@@ -82,7 +83,6 @@ class TracingConfig:
     authorization: str | None = field(default=None, repr=False)
     headers: Mapping[str, str] | None = None
     service_name: str = "reef"
-    include_messages: bool = False
 
     #: Environment fallback for ``authorization``, read by :func:`reef.observability.build_record_observer`.
     AUTHORIZATION_ENVIRONMENT_VARIABLE = "REEF_TRACING_AUTHORIZATION"
@@ -93,16 +93,13 @@ class TracingConfig:
             value = {}
         if not isinstance(value, Mapping):
             raise ValueError("observability.tracing must be a mapping")
-        allowed = {"enabled", "endpoint", "authorization", "headers", "service_name", "include_messages"}
+        allowed = {"enabled", "endpoint", "authorization", "headers", "service_name"}
         unknown = sorted(str(key) for key in value if key not in allowed)
         if unknown:
             raise ValueError(f"unknown observability.tracing settings: {', '.join(unknown)}")
         enabled = value.get("enabled", False)
         if not isinstance(enabled, bool):
             raise ValueError("observability.tracing.enabled must be a boolean")
-        include_messages = value.get("include_messages", False)
-        if not isinstance(include_messages, bool):
-            raise ValueError("observability.tracing.include_messages must be a boolean")
         endpoint = value.get("endpoint")
         if endpoint is not None and (not isinstance(endpoint, str) or not endpoint.strip()):
             raise ValueError("observability.tracing.endpoint must be a non-empty string")
@@ -131,7 +128,6 @@ class TracingConfig:
             authorization=(authorization or "").strip() or None,
             headers=headers,
             service_name=service_name.strip(),
-            include_messages=include_messages,
         )
 
     def request_headers(self) -> dict[str, str] | None:

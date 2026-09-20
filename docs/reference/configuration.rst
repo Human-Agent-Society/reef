@@ -1193,7 +1193,6 @@ OpenTelemetry Collector. Install ``reef-infra[opentelemetry]``.
        endpoint: https://cloud.langfuse.com/api/public/otel/v1/traces  # full OTLP/HTTP traces URL
        authorization: ${LANGFUSE_AUTH}  # the backend credential, sent as the Authorization header
        service_name: reef              # optional resource service.name
-       include_messages: false         # export prompt, completion, feedback and instruction text
 
 ``endpoint`` is the complete traces URL. ``authorization`` is the credential
 the backend expects in its ``Authorization`` header: ``Basic <base64
@@ -1232,9 +1231,10 @@ child span below every record the step consumed, linked back to the commit
 span. Records carry one timestamp, so their spans have zero duration and start
 at the record's creation time.
 
-Prompts, completions, feedback text and instruction text stay in the process
-unless ``include_messages: true``; then they travel as JSON in
-``gen_ai.input.messages``, ``gen_ai.output.messages``, ``reef.feedback`` and
-``reef.instruction``. Export failures are reported in the service log and never
+Spans carry the exchange itself: the request messages and the reply as JSON
+in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, feedback text in
+``reef.feedback`` and instruction text in ``reef.instruction``. The backend
+therefore sees the scenario's traffic; point tracing only at one trusted with
+it. Export failures are reported in the service log and never
 fail record acceptance or a commit; the exporter batches spans in a background
 thread and flushes them during graceful shutdown.

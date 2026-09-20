@@ -90,7 +90,6 @@ def test_tracing_config_parses_every_setting() -> None:
             "authorization": "Basic abc",
             "headers": {"x-team": "ml"},
             "service_name": "reef-prod",
-            "include_messages": True,
         }
     )
     assert config == TracingConfig(
@@ -99,7 +98,6 @@ def test_tracing_config_parses_every_setting() -> None:
         authorization="Basic abc",
         headers={"x-team": "ml"},
         service_name="reef-prod",
-        include_messages=True,
     )
 
 
@@ -150,7 +148,7 @@ def test_enabled_tracing_builds_the_opentelemetry_observer() -> None:
 
 
 @pytest.mark.unit
-def test_inference_record_becomes_a_client_span_with_stable_ids_and_no_messages() -> None:
+def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
     observer, exporter = _observer()
     from reef.observability.open_telemetry import record_span_context
 
@@ -199,12 +197,14 @@ def test_inference_record_becomes_a_client_span_with_stable_ids_and_no_messages(
         "gen_ai.usage.input_tokens": 7,
         "gen_ai.usage.output_tokens": 1,
         "gen_ai.response.finish_reasons": ("stop",),
+        "gen_ai.input.messages": '[{"content": "2+2?", "role": "user"}]',
+        "gen_ai.output.messages": '[{"content": "4", "role": "assistant"}]',
     }
 
 
 @pytest.mark.unit
-def test_include_messages_exports_the_exchange_and_feedback_text() -> None:
-    observer, exporter = _observer(include_messages=True)
+def test_spans_carry_the_exchange_and_feedback_text() -> None:
+    observer, exporter = _observer()
     observer.record_accepted(
         _inference(
             "i1",
@@ -247,7 +247,7 @@ def test_feedback_joins_the_first_referenced_trace_and_links_the_rest() -> None:
     assert [link.context.trace_id for link in scored.links] == [spans["i2"].context.trace_id]
     assert scored.attributes["reef.score"] == 0.25
     assert scored.attributes["reef.references"] == ("i1", "i2")
-    assert "reef.feedback" not in scored.attributes
+    assert scored.attributes["reef.feedback"] == "secret transcript"
 
     unreferenced = spans["r2"]
     assert unreferenced.parent is None

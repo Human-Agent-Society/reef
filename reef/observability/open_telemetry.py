@@ -11,7 +11,7 @@ training step adds one child span below every record it consumed, so a trace
 viewer shows which version an exchange trained. The span attributes follow the
 OpenTelemetry GenAI semantic conventions (``gen_ai.*``); Reef's own identifiers
 use the ``reef.*`` prefix and the scenario also travels as ``session.id``.
-Message text is exported only when ``include_messages`` is set.
+Spans carry the exchange text itself, so the backend sees the scenario's traffic.
 """
 
 from __future__ import annotations
@@ -254,10 +254,9 @@ class OpenTelemetryRecordObserver(RecordObserver):
         finish_reasons = _finish_reasons(response)
         if finish_reasons:
             attributes["gen_ai.response.finish_reasons"] = finish_reasons
-        if self.config.include_messages:
-            request_messages, response_messages = exchange_messages(payload)
-            attributes["gen_ai.input.messages"] = _json_text(request_messages)
-            attributes["gen_ai.output.messages"] = _json_text(response_messages)
+        request_messages, response_messages = exchange_messages(payload)
+        attributes["gen_ai.input.messages"] = _json_text(request_messages)
+        attributes["gen_ai.output.messages"] = _json_text(response_messages)
         return attributes
 
     def _report_attributes(self, payload: Mapping[str, Any]) -> dict[str, AttributeValue]:
@@ -266,7 +265,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         if isinstance(score, (int, float)) and not isinstance(score, bool):
             attributes["reef.score"] = score
         feedback = payload.get("feedback")
-        if self.config.include_messages and feedback is not None:
+        if feedback is not None:
             attributes["reef.feedback"] = feedback if isinstance(feedback, str) else _json_text(feedback)
         return attributes
 
@@ -277,7 +276,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
             if isinstance(value, str) and value:
                 attributes[f"reef.{key}"] = value
         text = payload.get("text")
-        if self.config.include_messages and isinstance(text, str):
+        if isinstance(text, str):
             attributes["reef.instruction"] = text
         return attributes
 
