@@ -18,7 +18,7 @@ from typing import Any
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.observability import build_experiment_tracker
+from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
@@ -196,6 +196,7 @@ def build_dispatcher(
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     experiment_tracker = None
+    record_observer = None
     scenario_storage: ScenarioStorage | None = None
     try:
         if settings.record_backend == "postgres":
@@ -220,6 +221,7 @@ def build_dispatcher(
             model=settings.model_path,
             training_config=settings.training_settings,
         )
+        record_observer = build_record_observer(settings.tracing_config, environ=env)
         return Dispatcher(
             recipe,
             backend_factory,
@@ -228,6 +230,7 @@ def build_dispatcher(
             scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
+            record_observer=record_observer,
         )
     except BaseException:
         if scenario_storage is not None:
@@ -240,6 +243,9 @@ def build_dispatcher(
         if experiment_tracker is not None:
             with suppress(Exception):
                 experiment_tracker.close()
+        if record_observer is not None:
+            with suppress(Exception):
+                record_observer.close()
         raise
 
 
