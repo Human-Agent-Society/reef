@@ -118,7 +118,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
         kind = SpanKind.INTERNAL
         if item.request_type is RequestType.INFERENCE:
             kind = SpanKind.CLIENT
-            attributes.update(self._inference_attributes(item.payload))
+            attributes.update(self.inference_attributes(item.payload))
             model = attributes.get("gen_ai.request.model")
             name = f"chat {model}" if isinstance(model, str) else "chat"
         elif item.request_type is RequestType.REPORT:
@@ -229,7 +229,7 @@ class OpenTelemetryRecordObserver(RecordObserver):
                 self._ids.planned = None
         span.end(end_time=timestamp_nanoseconds)
 
-    def _inference_attributes(self, payload: Mapping[str, Any]) -> dict[str, AttributeValue]:
+    def inference_attributes(self, payload: Mapping[str, object]) -> dict[str, AttributeValue]:
         attributes: dict[str, AttributeValue] = {"gen_ai.operation.name": "chat"}
         model = payload.get("model")
         if isinstance(model, str) and model:
@@ -246,11 +246,14 @@ class OpenTelemetryRecordObserver(RecordObserver):
         if isinstance(response_id, str) and response_id:
             attributes["gen_ai.response.id"] = response_id
         usage = response.get("usage")
+        body = response.get("body")
+        if not isinstance(usage, Mapping) and response.get("stream") is True and isinstance(body, str):
+            usage = stream_token_usage(body)
         if isinstance(usage, Mapping):
-            input_tokens = _token_count(usage, "input_tokens", "prompt_tokens")
+            input_tokens = token_count(usage, "input_tokens", "prompt_tokens")
             if input_tokens is not None:
                 attributes["gen_ai.usage.input_tokens"] = input_tokens
-            output_tokens = _token_count(usage, "output_tokens", "completion_tokens")
+            output_tokens = token_count(usage, "output_tokens", "completion_tokens")
             if output_tokens is not None:
                 attributes["gen_ai.usage.output_tokens"] = output_tokens
         finish_reasons = _finish_reasons(response)
@@ -298,7 +301,39 @@ def _tags(payload: Mapping[str, Any]) -> list[str]:
     return [tag for tag in tags if isinstance(tag, str)]
 
 
-def _token_count(usage: Mapping[str, Any], *keys: str) -> int | None:
+def stream_token_usage(body: str) -> dict[str, int]:
+    """Read cumulative token counts from a recorded provider SSE response."""
+    counts: dict[str, int] = {}
+    for frame in body.replace("\r\n", "\n").replace("\r", "\n").split("\n\n"):
+        data = "\n".join(line[5:].removeprefix(" ") for line in frame.split("\n") if line.startswith("data:"))
+        if not data or data == "[DONE]":
+            continue
+        try:
+            event = json.loads(data)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(event, Mapping):
+            continue
+        if event.get("type") == "message_start":
+            response = event.get("message")
+        elif event.get("type") in ("response.completed", "response.incomplete"):
+            response = event.get("response")
+        else:
+            response = event
+        if not isinstance(response, Mapping):
+            continue
+        usage = response.get("usage")
+        if not isinstance(usage, Mapping):
+            continue
+        # Streaming providers report cumulative totals, not per-chunk increments.
+        for name, alias in (("input_tokens", "prompt_tokens"), ("output_tokens", "completion_tokens")):
+            count = token_count(usage, name, alias)
+            if count is not None:
+                counts[name] = count
+    return counts
+
+
+def token_count(usage: Mapping[str, object], *keys: str) -> int | None:
     for key in keys:
         value = usage.get(key)
         if isinstance(value, int) and not isinstance(value, bool):

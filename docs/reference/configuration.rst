@@ -1231,6 +1231,13 @@ child span below every record the step consumed, linked back to the commit
 span. Records carry one timestamp, so their spans have zero duration and start
 at the record's creation time.
 
+For streamed provider responses, token usage is read from the captured SSE
+events, including Chat Completions usage chunks, Responses terminal events
+and Anthropic message usage. Cumulative counts are not summed across chunks.
+If the provider sends no usage, token counts remain absent; for Chat
+Completions, request ``stream_options: {include_usage: true}`` when supported.
+The stored response and the forwarded stream remain unchanged.
+
 Spans carry the exchange itself: the request messages and the reply as JSON
 in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, feedback text in
 ``reef.feedback`` and instruction text in ``reef.instruction``. The backend

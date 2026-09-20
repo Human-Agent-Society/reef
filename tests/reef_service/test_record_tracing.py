@@ -7,6 +7,7 @@ import json
 import pytest
 from reef_service.runtime_stubs import runtime_bindings
 from reef_service.test_commit_log import RecordingRuntime, TestPolicyRecipe, wait_for_step
+from reef_service.test_skill_delivery import FakeStream
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
@@ -15,6 +16,7 @@ from reef.dispatcher import Dispatcher
 from reef.observability import TracingConfig, build_record_observer
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service.deploy.service_config import service_config_from_mapping
+from reef.service.streaming import stream_record
 from reef.storage.commits import CommitRecord
 from reef.storage.observer import ObservedScenarioStorage, RecordObserver
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -196,6 +198,82 @@ def test_inference_record_becomes_a_client_span_with_stable_ids() -> None:
         "gen_ai.input.messages": '[{"content": "2+2?", "role": "user"}]',
         "gen_ai.output.messages": '[{"content": "4", "role": "assistant"}]',
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param(
+            'data: {"choices":[{"delta":{"content":"hello"}}],"usage":null}\n\n'
+            'data: {"choices":[],"usage":{"prompt_tokens":15,"completion_tokens":5}}\n\n'
+            "data: [DONE]\n\n",
+            id="chat-completions",
+        ),
+        pytest.param(
+            "event: response.completed\r\n"
+            'data: {"type":"response.completed",\r\n'
+            'data: "response":{"usage":{"input_tokens":15,"output_tokens":5}}}\r\n\r\n',
+            id="responses-multiline-crlf",
+        ),
+        pytest.param(
+            'data: {"type":"response.incomplete","response":{"usage":{"input_tokens":15,"output_tokens":5}}}\n\n',
+            id="responses-token-limit",
+        ),
+        pytest.param(
+            'data: {"type":"message_start","message":{"usage":{"input_tokens":15,"output_tokens":0}}}\n\n'
+            'data: {"type":"message_delta","usage":{"output_tokens":3}}\n\n'
+            'data: {"type":"message_delta","usage":{"output_tokens":5}}\n\n'
+            'data: {"type":"message_stop"}\n\n',
+            id="anthropic-cumulative-usage",
+        ),
+    ],
+)
+def test_streaming_records_export_provider_token_usage(body: str) -> None:
+    observer, exporter = _observer()
+    response = stream_record(FakeStream(), body.encode(), complete=True)
+    observer.record_accepted(_inference("stream", model="qwen", response=response))
+    attributes = _spans(observer, exporter)["chat qwen"].attributes
+
+    assert attributes["gen_ai.usage.input_tokens"] == 15
+    assert attributes["gen_ai.usage.output_tokens"] == 5
+    assert response["body"] == body
+    assert "usage" not in response  # Export must not rewrite the persisted provider response.
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "body",
+    [
+        'data: {"choices":[{"delta":{"content":"hello"}}]}\n\ndata: [DONE]\n\n',
+        ": keepalive\n\ndata: {broken json}\n\ndata: [DONE]\n\n",
+    ],
+)
+def test_streaming_records_without_usage_do_not_invent_token_counts(body: str) -> None:
+    observer, exporter = _observer()
+    observer.record_accepted(_inference("stream", model="qwen", response={"stream": True, "body": body}))
+    attributes = _spans(observer, exporter)["chat qwen"].attributes
+    assert "gen_ai.usage.input_tokens" not in attributes
+    assert "gen_ai.usage.output_tokens" not in attributes
+
+
+@pytest.mark.unit
+def test_captured_usage_takes_precedence_over_stream_body() -> None:
+    observer, exporter = _observer()
+    observer.record_accepted(
+        _inference(
+            "stream",
+            model="qwen",
+            response={
+                "stream": True,
+                "body": 'data: {"usage":{"prompt_tokens":99,"completion_tokens":99}}\n\n',
+                "usage": {"input_tokens": 15, "output_tokens": 0},
+            },
+        )
+    )
+    attributes = _spans(observer, exporter)["chat qwen"].attributes
+    assert attributes["gen_ai.usage.input_tokens"] == 15
+    assert attributes["gen_ai.usage.output_tokens"] == 0
 
 
 @pytest.mark.unit
