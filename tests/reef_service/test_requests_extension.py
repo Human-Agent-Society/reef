@@ -861,7 +861,7 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
     assert request["body"]["text"] == "text me when you are blocked\n\nClarifications:\n- Q: Which channel?\n  A: SMS"
     # The filing ends it at once: no further model call, its widget is cleared, and the step's watch starts.
     widgets = [event for event in _of_kind(out, "widget") if event["key"] == "reef-harness-clarify"]
-    assert widgets[0]["content"][0].endswith("thinking it through - ctrl+shift+r or /reef-harness to look in")
+    assert widgets[0]["content"][0].endswith("thinking it through - ctrl+q or /reef-harness to look in")
     assert widgets[-1]["content"] is None
     assert _of_kind(out, "status")[0] == {"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}
     (entry,) = _of_kind(out, "entry")
@@ -1206,7 +1206,7 @@ def test_the_spinner_sits_above_the_input_and_names_the_phase_the_service_report
     # One line while it is closed, above the input box, naming the phase in the person's words and the way in.
     assert all(len(content) == 1 for content in drawn)
     assert any("checking the harness" in content[0] for content in drawn)
-    assert all("ctrl+shift+r or /reef-harness to look in" in content[0] for content in drawn)
+    assert all("ctrl+q or /reef-harness to look in" in content[0] for content in drawn)
     # The line carries the request's page as a terminal hyperlink, so a click opens it where the terminal offers one.
     assert all(f"\x1b]8;;{REQUEST_PAGE}\x1b\\open the page\x1b]8;;\x1b\\" in content[0] for content in drawn)
     # The frames turn, so the person sees the step is alive between the polls.
@@ -1238,11 +1238,13 @@ def test_the_look_in_key_opens_the_spinner_in_place_and_closes_it_again(tmp_path
         TEST_SHORTCUT_AT_MS=json.dumps([80, 170]),
     )
     assert out["error"] is None
-    assert out["shortcuts"] == ["ctrl+shift+r"]
+    # A plain ctrl+letter pi leaves free: a terminal without modified-key reporting drops the shift from
+    # ctrl+shift+<letter>, so such a key would reach pi as its own binding (issue #541).
+    assert out["shortcuts"] == ["ctrl+q"]
     opened = [content for content in _widgets(out) if content and len(content) > 1]
     assert opened, "the key never opened the spinner"
     panel = opened[-1]
-    assert "ctrl+shift+r or /reef-harness to close" in panel[0] and "writing the change" in panel[0]
+    assert "ctrl+q or /reef-harness to close" in panel[0] and "writing the change" in panel[0]
     body = "\n".join(panel[1:])
     assert "asked: text me when you are blocked" in body and "request: q-1" in body
     assert "step record: /work/steps/1" in body

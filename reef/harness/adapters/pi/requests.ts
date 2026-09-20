@@ -104,9 +104,11 @@ function link(url, label) {
 }
 
 // The key that opens the spinner's detail, which the spinner itself names so the person knows it is there.
-// pi's own keybindings hold every ctrl+letter this extension would want, so the key carries shift as well:
-// ctrl+r alone renames a session, and pi warns at startup about the clash.
-const WATCH_SHORTCUT = "ctrl+shift+r";
+// It must be a plain ctrl+letter that pi leaves free: a terminal without the Kitty keyboard protocol or xterm's
+// modifyOtherKeys (Apple Terminal among them) sends ctrl+shift+<letter> as the bare control byte, so pi reads
+// ctrl+shift+r as ctrl+r, its session rename. ctrl+q is the letter pi binds nowhere, and its control byte, the
+// Kitty sequence and the modifyOtherKeys sequence all match it.
+const WATCH_SHORTCUT = "ctrl+q";
 // The service's phase for a running step, in the words the spinner and the panel show.
 const PHASE_WORDS = {
   queued: "queued, waiting for a step",
