@@ -427,6 +427,24 @@ class InferenceHandler(ABC):
         return InferenceStream(status=200, headers={"Content-Type": "application/json"}, chunks=chunks())
 
 
+#: The routes a client calls on Reef for a multimodal call; a recipe's relay decides which its provider serves.
+MULTIMODAL_ROUTES: tuple[str, ...] = ("/v1/images", "/v1/embeddings", "/v1/audio/speech", "/v1/decisions")
+
+
+class MultimodalRelay(ABC):
+    """Relay a recipe's multimodal calls (images, embeddings, speech, decisions) to the provider it configured.
+
+    A recipe that offers one keeps the provider's address and key; Reef only
+    forwards the client's request body and streams the answer back unchanged,
+    and records nothing.
+    """
+
+    @abstractmethod
+    async def relay(self, path: str, payload: dict[str, Any]) -> InferenceStream:
+        """Forward one request body to the provider and return its answer as a stream; raise
+        :class:`NotImplementedError` for a route the provider does not serve."""
+
+
 # -- Runtime contracts --------------------------------------------------------
 
 

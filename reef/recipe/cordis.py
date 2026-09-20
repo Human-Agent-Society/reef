@@ -13,6 +13,7 @@ and its selection policy into the candidate evaluator executed by ``Trainer``.
 from __future__ import annotations
 
 import importlib
+import logging
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -24,7 +25,14 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.executor import EpisodeExecutor, build_executor
+from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
+from reef.harness.episodes.executor import (
+    EpisodeExecutor,
+    LocalExecutor,
+    SandboxExecutor,
+    SandboxUnavailable,
+    build_executor,
+)
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
@@ -63,6 +71,64 @@ _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
     "floor": FloorPluginFactory(),
     "always": AlwaysSelectPluginFactory(),
 }
+
+
+def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[EpisodeExecutor | None, float, float]:
+    """``evolution.proposer_agent`` as the agent's executor and its two timeouts; no section runs no agent.
+
+    ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
+    but the gateway's, and refuses to start where bwrap or pasta is missing;
+    ``sandbox: e2b`` runs it in an E2B cloud sandbox (``e2b_api_key``, else
+    ``E2B_API_KEY``; ``e2b_template``, else the harness's pinned binary, built on
+    first use) that reaches the gateway through a tunnel and nothing else of the
+    host; ``sandbox: none`` runs it unisolated with the service's privileges, and must
+    be chosen. Left empty (and ``REEF_PROPOSER_SANDBOX`` unset), the agent is
+    jailed where the host can, and off (the text proposer answers requests)
+    where it cannot.
+    """
+    if section is None:
+        return None, 1800.0, 300.0
+    if not isinstance(section, Mapping):
+        raise RecipeConfigError("evolution.proposer_agent must be a mapping")
+    timeouts = []
+    for key, default in (("timeout_s", 1800.0), ("trial_timeout_s", 300.0)):
+        value = section.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise RecipeConfigError(f"evolution.proposer_agent.{key} must be a positive number")
+        timeouts.append(float(value))
+    sandbox = str(section.get("sandbox") or environ.get("REEF_PROPOSER_SANDBOX") or "").strip()
+    if sandbox == "none":
+        logging.getLogger(__name__).warning(
+            "evolution.proposer_agent.sandbox is none: the agent proposer runs with the service's own privileges and "
+            "full network access, fed text from clients; use it only where you trust every client"
+        )
+        return LocalExecutor(), timeouts[0], timeouts[1]
+    if sandbox == "e2b":
+        remote = E2BExecutor(
+            api_key=str(section.get("e2b_api_key") or environ.get("E2B_API_KEY") or "").strip(),
+            template=str(section.get("e2b_template") or "").strip(),
+            timeout_s=timeouts[0],
+        )
+        try:
+            remote.preflight()
+        except SandboxUnavailable as exc:
+            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is e2b, but {exc}") from exc
+        return remote, timeouts[0], timeouts[1]
+    if sandbox not in ("", "bwrap"):
+        raise RecipeConfigError("evolution.proposer_agent.sandbox must be 'bwrap', 'e2b' or 'none'")
+    executor = SandboxExecutor(network="isolated")
+    try:
+        executor.preflight()
+    except SandboxUnavailable as exc:
+        if sandbox == "bwrap":
+            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is bwrap, but {exc}") from exc
+        logging.getLogger(__name__).warning(
+            "the agent proposer is off: %s. Requests are answered by the text proposer; set "
+            "evolution.proposer_agent.sandbox: none to run the agent without isolation",
+            exc,
+        )
+        return None, timeouts[0], timeouts[1]
+    return executor, timeouts[0], timeouts[1]
 
 
 @dataclass(frozen=True)
@@ -237,6 +303,10 @@ class CordisRecipe(Recipe):
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     worker_gpus: float | None = None
+    #: The isolation an agent proposer runs under (``evolution.proposer_agent``); ``None`` runs no agent.
+    agent_executor: EpisodeExecutor | None = None
+    agent_timeout_s: float = 1800.0
+    agent_trial_timeout_s: float = 300.0
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
     batch_size: int = config_field(1)
@@ -512,7 +582,17 @@ class CordisRecipe(Recipe):
             evaluation_selection(scorer, episode_workers, worker_executor, worker_gpus)
         except (TypeError, ValueError) as exc:
             raise RecipeConfigError(str(exc)) from exc
+        agent_executor, agent_timeout_s, agent_trial_timeout_s = proposer_agent_settings(
+            evolution.get("proposer_agent"), values
+        )
+        if isinstance(agent_executor, E2BExecutor):
+            # The deployment's own state directory names its sandboxes, so its first sandbox can stop the ones a
+            # previous run left, which a stop mid run never closed.
+            agent_executor = replace(agent_executor, owner=deployment_owner(Path(proposals_dir.strip())))
         return {
+            "agent_executor": agent_executor,
+            "agent_timeout_s": agent_timeout_s,
+            "agent_trial_timeout_s": agent_trial_timeout_s,
             "proposals_dir": proposals_dir.strip(),
             "max_pending_proposals": max_pending,
             "propose": resolve_proposer(evolution.get("propose")),
@@ -652,6 +732,9 @@ class CordisRecipe(Recipe):
             "max_pending_proposals": self.max_pending_proposals,
             "step_record_dir": self.step_record_dir,
             "worker_executor": self.worker_executor,
+            "agent_executor": self.agent_executor,
+            "agent_timeout_s": self.agent_timeout_s,
+            "agent_trial_timeout_s": self.agent_trial_timeout_s,
         }
 
     def _build_trainer(

@@ -59,7 +59,7 @@ pi.registerCommand("standup", {
 });
 ```
 
-The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The reef-harness and reef-versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
+The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The evolve and versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
 
 ## Events: pi.on(name, handler)
 
@@ -91,8 +91,8 @@ Also: before_agent_start (return { systemPrompt } to add instructions for the tu
 
 ## Keys
 
-- pi.registerShortcut("ctrl+shift+r", { description, handler: async (ctx) => {} }): a key the person presses. There is no click target for a widget, so a key is how a person opens what a widget shows.
-- pi binds most ctrl+letter keys itself, among them ctrl+a, ctrl+c, ctrl+d, ctrl+g, ctrl+l, ctrl+n, ctrl+o, ctrl+p, ctrl+r, ctrl+s, ctrl+t, ctrl+u, ctrl+v, ctrl+x and ctrl+z. Registering one of those makes pi warn at startup about the clash, so add shift: ctrl+shift+<letter> is free.
+- pi.registerShortcut("ctrl+q", { description, handler: async (ctx) => {} }): a key the person presses. There is no click target for a widget, so a key is how a person opens what a widget shows.
+- pi binds most ctrl+letter keys itself, among them ctrl+a, ctrl+c, ctrl+d, ctrl+g, ctrl+l, ctrl+n, ctrl+o, ctrl+p, ctrl+r, ctrl+s, ctrl+t, ctrl+u, ctrl+v, ctrl+x and ctrl+z. Registering one of those makes pi warn at startup about the clash. Do not reach for ctrl+shift+<letter> instead: a terminal without the Kitty keyboard protocol or xterm's modifyOtherKeys (Apple Terminal among them) sends it as the bare control byte, which pi reads as the unshifted ctrl+<letter>. ctrl+q is the letter pi leaves free in every terminal.
 
 ## Messages
 
@@ -119,6 +119,15 @@ Pass values as arguments, never as shell source. The directory of this harness's
 ## Network
 
 fetch is global. Pass signal. Reef's own routes take the headers { "x-reef-scenario": process.env.REEF_SCENARIO } and, when set, { authorization: `Bearer ${process.env.REEF_TOKEN}` }; the service is at process.env.REEF_SERVICE_URL.
+
+Models beyond the session's chat model are Reef routes too, when the Reef recipe configures a multimodal provider: POST a JSON body in that provider's own format (OpenRouter's by default) to process.env.REEF_SERVICE_URL + one of the routes below, with Reef's headers above and { "content-type": "application/json" }. Reef adds the provider's key; the extension holds none.
+
+- /v1/images: generate an image from a prompt.
+- /v1/embeddings: embed text.
+- /v1/audio/speech: text to speech; the response body is the audio bytes.
+- /v1/decisions: a fast structured choice (routing, classification, a risk or completion check) from a decision model such as ~typesafe/jev-latest, where the provider serves one. The body carries a state and typed questions (noul, choice, score); the answer is a value with probabilities, never text.
+
+Name the model in the body. These routes do not stream, and answer 501 when the Reef recipe configures no multimodal provider or its provider serves no such route.
 
 ## Rules for a reef tree entry
 

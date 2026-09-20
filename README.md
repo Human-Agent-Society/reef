@@ -12,6 +12,8 @@
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
+<a href="https://trendshift.io/repositories/204783?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-204783" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/204783/daily?language=Python" alt="Human-Agent-Society%2Freef | Trendshift" width="250" height="55"/></a>
+
 English | [中文](README.zh.md)
 
 <div align="left">
@@ -210,8 +212,7 @@ reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b
 ```
-
-The example connects to a local Ollama server. For another provider, change
+For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
 `REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
 listens on `127.0.0.1:8901` without authentication (set `REEF_TOKEN` before
@@ -234,12 +235,15 @@ curl -fsS -H "x-reef-scenario: my-harness" \
 reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-Inside a `reef-pi` session, `/reef-harness <text>` files the same ask. The served
+Inside a `reef-pi` session, `/evolve <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
-extension, and the next session's update notice offers the install; a step that
+extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
+non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it
+works as a coding agent that runs the changed harness before handing the change
+back. The next session's update notice offers the install; a step that
 settles while you are between turns offers its install right away. Review the
-versions with `/reef-versions`, which opens a step's page, and install one with
-`/reef-versions <step> install`. To change the model, restart
+versions with `/versions`, which opens a step's page, and install one with
+`/versions <version> install`. To change the model, restart
 `reef serve` with another `--inference.upstream-model` and rerun the install
 command: installation writes the model ID into the local harness configuration.
 See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and

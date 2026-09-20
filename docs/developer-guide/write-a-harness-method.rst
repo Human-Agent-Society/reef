@@ -43,6 +43,13 @@ already refused, and can read the refused content rather than only its id.
 An optional keyword-only ``entries`` argument receives the tree as entry
 options, ``{"id", "name", "config"}`` mappings in tree order, so an ``update``
 or ``remove`` can name the entry it targets instead of creating a second one.
+An optional keyword-only ``agent_host`` argument receives an ``AgentHost``
+when the deployment configured ``evolution.proposer_agent``, else ``None``:
+the adapter descriptor and its installed binary, the executor built for the
+agent (its isolation, not the episodes'), the step's record directory, the
+two timeouts, and ``calls``, the step's model-call budget and record
+(``spend()`` and ``record(entry)``) for traffic the agent's own process makes
+outside ``models``. ``reef.recipe.reefine.agent`` is the reference user.
 Reef passes each keyword only to a signature that names it.
 
 ``evaluate`` grades one finished episode. Reef calls it for both sides of every

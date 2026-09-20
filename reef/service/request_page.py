@@ -10,8 +10,10 @@ version page. Until then the page names the state the request is in
 (``queued`` before a step takes it, ``proposing`` and ``evaluating`` from the
 backend's progress, ``running`` while the trainer holds the request and the
 backend reports no phase, ``settling`` while the row that consumed the
-record lands) and reloads itself every ``REFRESH_SECONDS``, so a person
-opens the link right after asking and watches. The chrome, the palette and
+record lands), lists what the proposer has done so far (the step's
+activity: model calls, and an agent's tool calls, checks and trials), and
+reloads itself every ``REFRESH_SECONDS``, so a person opens the link right
+after asking and watches. The chrome, the palette and
 the status wording come from :mod:`reef.service.page_chrome`, which the
 version page draws with too; this module adds only its own sections' style.
 """
@@ -67,22 +69,29 @@ padding:14px 0;border-top:1px solid var(--line)}.mutations li:first-child{border
 .review-card h3{margin:22px 0 8px}
 .request-meta{border-top:1px solid var(--line);padding-top:20px}.request-meta .metadata{border:0;padding-top:20px}
 .requirements{margin-top:20px;border-top:1px solid var(--line);padding-top:18px}
+.activity-card{grid-column:1}.activity{list-style:none;margin:0;padding:0;font-size:12px;max-height:560px;overflow:auto}
+.activity li{display:grid;grid-template-columns:64px 72px minmax(0,1fr);gap:10px;padding:8px 0;border-top:1px solid var(--line)}
+.activity li:first-child{border-top:0;padding-top:0}.activity .at{font:11px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--mute)}
+.activity .kind{font-size:10px;line-height:1.9;color:var(--mute);text-transform:uppercase;letter-spacing:.5px}
+.activity .what{overflow-wrap:anywhere;line-height:1.6}.activity .failed .what{color:var(--bad)}
+.activity .age{color:var(--mute);white-space:nowrap}.activity-empty{font-size:13px;color:var(--mute);margin:0}
 @media(min-width:1500px){main{padding-top:64px}}
 @media(max-width:800px){main{padding:32px 24px 24px}
-.layout{grid-template-columns:1fr}.request-card,.outcome-card,.changes-card,.review-card{grid-column:auto;grid-row:auto}
+.layout{grid-template-columns:1fr}.request-card,.outcome-card,.changes-card,.review-card,.activity-card{grid-column:auto;grid-row:auto}
 .journey{padding:20px}.journey li:not(:last-child):after{margin:0 10px}.stage-copy small{display:none}}
 @media(max-width:480px){main{padding:28px 16px 20px}.text{font-size:17px;padding-left:16px}
 .journey{padding:18px 12px;gap:6px}.journey li{flex-direction:column;gap:7px}.journey li:not(:last-child):after{position:absolute;
 left:calc(50% + 21px);right:calc(-50% + 15px);top:14px;margin:0}.stage-copy{font-size:11px}.metadata{gap:18px 12px}
 .mutations li{display:grid;grid-template-columns:auto minmax(0,1fr);align-items:start}
 .mutations li>.tag:last-child{grid-column:2;justify-self:start}
+.activity li{grid-template-columns:52px minmax(0,1fr)}.activity .kind{grid-column:2}.activity .what{grid-column:2}
 .layout{gap:16px}}
 """
 
 #: What each state means, in the words the page prints beside it.
 STATE_WORDS = {
     "queued": "no step has taken the request yet; the trainer runs one step per instruction, oldest first",
-    "proposing": "the proposer is writing the change: the served model reads the request and the tree",
+    "proposing": "the proposer is writing the change; the activity shows what it has done so far",
     "evaluating": "the evaluation is running the candidate through its episodes",
     "running": "the step holds the request and reports no phase; its row follows",
     "settling": "the step that consumed the request is committing its row",
@@ -105,6 +114,44 @@ def elapsed(seconds: float) -> str:
     if whole < 120:
         return f"{whole} s"
     return f"{whole // 60} min {whole % 60:02d} s"
+
+
+#: The most activity lines the page lists, newest first; the step record keeps every call.
+MAX_ACTIVITY_SHOWN = 80
+
+
+def step_clock(seconds: float) -> str:
+    """Seconds into the step as a clock: ``+4:05``, or ``+1:02:05`` past an hour."""
+    whole = max(0, int(seconds))
+    hours, rest = divmod(whole, 3600)
+    return f"+{hours}:{rest // 60:02d}:{rest % 60:02d}" if hours else f"+{rest // 60}:{rest % 60:02d}"
+
+
+def activity_html(progress: StepProgress, now: float) -> str:
+    """What the proposer has done so far, newest first, each line at its time into the step; the newest says how
+    long ago it happened, so a long wait on one model call shows as that."""
+    lines = list(progress.activity)[-MAX_ACTIVITY_SHOWN:]
+    if not lines:
+        return '<p class="activity-empty">Nothing yet: the proposer has not called a model.</p>'
+    items = []
+    for index, line in enumerate(reversed(lines)):
+        at = line.get("at")
+        at = float(at) if isinstance(at, (int, float)) else progress.started_at
+        age = f' <span class="age">&middot; {escape(elapsed(now - at))} ago</span>' if index == 0 else ""
+        failed = ' class="failed"' if line.get("failed") else ""
+        items.append(
+            f'<li{failed}><span class="at">{escape(step_clock(at - progress.started_at))}</span>'
+            f'<span class="kind">{escape(line.get("kind"))}</span>'
+            f'<span class="what">{escape(line.get("text"))}{age}</span></li>'
+        )
+    earlier = len(progress.activity) - len(lines)
+    more = (
+        f'<p class="live-note">{earlier} earlier line{"s" if earlier != 1 else ""} not shown; the step record keeps '
+        "every call.</p>"
+        if earlier > 0
+        else ""
+    )
+    return '<ol class="activity" aria-label="Proposer activity, newest first">' + "".join(items) + "</ol>" + more
 
 
 def request_state(record: Mapping[str, object], progress: StepProgress | None, consumed: bool) -> str:
@@ -202,7 +249,7 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
         f"<p>{escape(meaning(selection_result, row, metrics))}</p></div>",
         '<dl class="fact-list">',
-        f"<div><dt>Step</dt><dd>{step}</dd></div>",
+        f"<div><dt>Version</dt><dd>v{step}</dd></div>",
         f'<div><dt>Release</dt><dd class="id">{escape(row.get("release_id"))}</dd></div>',
         "</dl>",
     ]
@@ -215,10 +262,10 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
     # Carry the scenario and authentication to the version page without displaying the token.
     href = step_href(step, link_query)
     if selection_result == "pending":
-        command = f"/reef-versions {step} install"
+        command = f"/versions v{step} install"
         action = "Read this page, then install"
     elif selection_result == "selected":
-        command = f"/reef-versions {step} install"
+        command = f"/versions v{step} install"
         action = "Install when ready"
     else:
         command = ""
@@ -229,7 +276,7 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
             "<p>Run this in your reef-pi session. You can keep chatting until you are ready.</p></div>"
         )
     parts.append(
-        f'<a class="version-link" href="{escape(href)}">View step {step}<span aria-hidden="true">&#8599;</span></a>'
+        f'<a class="version-link" href="{escape(href)}">View v{step}<span aria-hidden="true">&#8599;</span></a>'
     )
     return "\n".join(parts)
 
@@ -295,6 +342,10 @@ def build_request_page(
     head = "" if step is not None else f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">\n'
     if step is None:
         body = f'<section class="card outcome-card">\n<h2>Progress</h2>\n{progress_html(record, state, progress, now)}</section>\n'
+        if progress is not None and progress.request_id == record_id:
+            body += (
+                f'<section class="card activity-card">\n<h2>Activity</h2>\n{activity_html(progress, now)}</section>\n'
+            )
         subtitle = "Follow your request from instruction to outcome."
         current_stage = {"queued": 0, "proposing": 1, "evaluating": 1, "running": 1, "settling": 2}.get(state, 1)
     else:
@@ -349,4 +400,12 @@ def build_request_page(
     )
 
 
-__all__ = ["REFRESH_SECONDS", "STATE_WORDS", "build_request_page", "request_state", "settled_step"]
+__all__ = [
+    "MAX_ACTIVITY_SHOWN",
+    "REFRESH_SECONDS",
+    "STATE_WORDS",
+    "activity_html",
+    "build_request_page",
+    "request_state",
+    "settled_step",
+]

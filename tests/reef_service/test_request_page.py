@@ -22,7 +22,13 @@ from reef_service.test_harness_proposals import _dispatcher, _recipe
 from reef.core import AgentRecord, RequestType
 from reef.service.app import create_app
 from reef.service.release_page import build_release_page
-from reef.service.request_page import REFRESH_SECONDS, STATE_WORDS, build_request_page, settled_step
+from reef.service.request_page import (
+    MAX_ACTIVITY_SHOWN,
+    REFRESH_SECONDS,
+    STATE_WORDS,
+    build_request_page,
+    settled_step,
+)
 from reef.train.cordis_backend import Mutation, StepProgress
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
@@ -177,15 +183,15 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
         in selection_result
     )
     assert '<dt>Release</dt><dd class="id">rel-1</dd>' in selection_result
-    assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View step 1' in selection_result
+    assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View v1' in selection_result
     assert "<h3>Error</h3>" not in selection_result and "Proposer failure" not in selection_result
     changed = _section(page, "What changed")
     assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in changed
     assert '<span class="tag">rules</span>' in changed
-    assert "<code>/reef-versions 1 install</code>" in selection_result
+    assert "<code>/versions v1 install</code>" in selection_result
     assert settled_step(rows, RECORD_ID) == 1
     bare = build_request_page(_record(compacted_at=1_050.0), rows, now=1_100.0)
-    assert 'href="/reef/harness/releases/1/page">View step 1' in bare
+    assert 'href="/reef/harness/releases/1/page">View v1' in bare
 
     # A rejected proposal is labeled as proposed, never as an applied change.
     second = {"op": "update", "id": "ext", "options": {"name": "code_extension", "config": {"code": "x"}}}
@@ -213,11 +219,11 @@ def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_r
     assert "Proposed changes" in _sections(page)
     assert "Release rel-1 is ready. This change includes an extension" in page
     assert REFRESH not in page
-    assert "<code>/reef-versions 1 install</code>" in page
+    assert "<code>/versions v1 install</code>" in page
     promote = _row({}, release_id="rel-2", parent="rel-0", operation="promote", rollback_target_release_id="rel-1")
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, pending, promote], now=1_100.0)
-    assert '<span class="promoted">Promoted at step 2</span>' in page
-    assert "passed the checks and was promoted at step 2; the release that step published serves it" in page
+    assert '<span class="promoted">Promoted at v2</span>' in page
+    assert "passed the checks and was promoted at v2; the release that step published serves it" in page
     assert "What changed" in _sections(page)
 
 
@@ -297,6 +303,42 @@ def _propose_holding(entered: Event, release: Event):
     return propose
 
 
+def test_a_running_request_lists_the_proposers_activity_newest_first() -> None:
+    activity = (
+        {"at": 1_000.0, "kind": "proposer", "text": "the coding agent started on the request"},
+        {"at": 1_065.0, "kind": "agent", "text": "write harness/extensions/speak.ts"},
+        {"at": 1_130.0, "kind": "provider", "text": "/v1/audio/speech not/real -> 400: <no model>", "failed": True},
+    )
+    proposing = StepProgress(RECORD_ID, "proposing", started_at=1_000.0, step_record=None, activity=activity)
+    page = build_request_page(_record(), [CREATION], progress=proposing, now=1_200.0)
+    assert _sections(page) == ["Request", "Progress", "Activity"]
+    listed = _section(page, "Activity")
+    lines = re.findall(
+        r"<li( class=\"failed\")?><span class=\"at\">([^<]+)</span><span class=\"kind\">(\w+)</span>", listed
+    )
+    assert lines == [(' class="failed"', "+2:10", "provider"), ("", "+1:05", "agent"), ("", "+0:00", "proposer")]
+    # The newest line says how long ago it happened: a long wait shows as that. Text is escaped.
+    assert '&lt;no model&gt; <span class="age">&middot; 70 s ago</span>' in listed
+    assert "earlier line" not in listed
+
+    many = tuple({"at": 1_000.0 + i, "kind": "model", "text": f"call {i}"} for i in range(MAX_ACTIVITY_SHOWN + 5))
+    listed = _section(
+        build_request_page(_record(), [CREATION], progress=replace(proposing, activity=many), now=1_200.0), "Activity"
+    )
+    assert (
+        listed.count("<li") == MAX_ACTIVITY_SHOWN
+        and f"call {MAX_ACTIVITY_SHOWN + 4}" in listed
+        and "call 4<" not in listed
+    )
+    assert "5 earlier lines not shown" in listed
+
+    quiet = build_request_page(_record(), [CREATION], progress=replace(proposing, activity=()), now=1_200.0)
+    assert "Nothing yet: the proposer has not called a model." in _section(quiet, "Activity")
+    # Another request's step lists nothing here.
+    other = build_request_page(_record(), [CREATION], progress=replace(proposing, request_id="another"), now=1_200.0)
+    assert _sections(other) == ["Request", "Progress"]
+
+
 def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_browser_link(tmp_path: Path) -> None:
     entered, release = Event(), Event()
     recipe = replace(_recipe(tmp_path, _propose_holding(entered, release)), training_mode="manual")
@@ -336,13 +378,14 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             assert progress["state"] == "proposing" and progress["settled"] is False and progress["step"] is None
             assert progress["request_id"] == record_id
             assert progress["meaning"] == STATE_WORDS["proposing"]
+            assert progress["activity"] == []  # the holding proposer has called no model
             # A JSON route reads the headers alone: the page's query token is refused here.
             assert (await client.get(progress_route, params=QUERY)).status == 401
             assert (await client.get("/reef/harness/requests/nope/progress", headers=headers)).status == 404
 
             # The version page opens the same way; the wrong token, no token or a token elsewhere does not.
             response = await client.get("/reef/harness/releases/0/page", params=QUERY)
-            assert response.status == 200 and "<title>Harness step 0</title>" in await response.text()
+            assert response.status == 200 and "<title>Harness v0</title>" in await response.text()
             response = await client.get(link, params={**QUERY, "token": "nope"})
             assert response.status == 401 and await response.text() == "invalid service token"
             response = await client.get(link, params={"scenario": SCENARIO})
@@ -373,8 +416,8 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             # The settled request reads as settled on the JSON route too, naming the step its row landed as.
             settled = await (await client.get(progress_route, headers=headers)).json()
             assert settled["settled"] is True and settled["step"] == 1 and settled["state"] == "selected"
-            assert "Published as release " in page and "/reef-versions 1 install" in page
-            assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View step 1' in page
+            assert "Published as release " in page and "/versions v1 install" in page
+            assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View v1' in page
             assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in page
 
             # An unknown id, and a record that is no training instruction, are 404s naming the id.

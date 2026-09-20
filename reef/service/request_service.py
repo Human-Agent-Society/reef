@@ -330,6 +330,25 @@ class RequestService:
                 operations.increment("serve/version_mismatch_total")
             raise
 
+    async def relay_multimodal(
+        self, headers: Mapping[str, str], payload: dict[str, Any], path: str
+    ) -> InferenceStream:
+        """A multimodal call for a scenario, relayed by the deployment's recipe to the provider it configured;
+        nothing is recorded. The relay is the deployment's: its key and gateway, whatever model a scenario chats
+        with."""
+        parsed = parse_request_headers(headers, RequestType.INFERENCE)
+        scenario = await asyncio.to_thread(
+            self._dispatcher.get_or_create_scenario,
+            parsed.scenario,
+            release_id=parsed.release_id,
+        )
+        if scenario is None:
+            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        relay = self._dispatcher.recipe.multimodal_relay
+        if relay is None:
+            raise NotImplementedError(f"the served recipe relays no multimodal calls, so it serves no {path}")
+        return await relay.relay(path, payload)
+
     def record_stream(self, pending: PendingInference, response: Mapping[str, Any]) -> AgentRecord:
         succeeded = False
         try:
@@ -719,6 +738,7 @@ class RequestService:
                 "started_at": None,
                 "episodes_total": None,
                 "step_record": None,
+                "activity": [],
             }
         backend = scenario.trainer.candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
@@ -736,6 +756,8 @@ class RequestService:
             "started_at": None if mine is None else mine.started_at,
             "episodes_total": None if mine is None else mine.episodes_total,
             "step_record": None if mine is None else mine.step_record,
+            # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
+            "activity": [] if mine is None else [dict(line) for line in mine.activity],
         }
 
     def harness_install_script(

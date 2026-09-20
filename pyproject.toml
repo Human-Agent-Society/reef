@@ -43,6 +43,8 @@ tinker = [
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
+# The agent proposer's E2B cloud sandbox (evolution.proposer_agent.sandbox: e2b).
+e2b = ["e2b>=2.46"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.
 wandb = [
@@ -116,7 +118,7 @@ namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "service/profiles/*.yaml"]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts"]
 
 [tool.isort]
 profile = "black"  # black-compatible

@@ -727,13 +727,20 @@ class TrainingPublication:
         if status not in {"CHECKPOINT", "UPDATING_WEIGHTS"}:
             raise RuntimeError(f"training job is {status}; operator recovery required")
         recovering = status == "UPDATING_WEIGHTS"
+        # Whether the marker already says the engines need rebuilding. Every
+        # failure below retires them, so the answer has to be yes before this
+        # call returns unsuccessfully.
+        engines_declared_uncertain = recovering
         try:
             if recovering:
                 self._publisher.recover(marker)
             self._publisher.pause()
-            # A failed pause has changed no weights. Keep CHECKPOINT retryable.
+            # Persist uncertainty once every engine has crossed the pause
+            # barrier, so a publication that fails from here on replays as a
+            # recovery rather than as a fresh checkpoint.
             if not recovering:
                 self._require_store().transition(marker, "UPDATING_WEIGHTS")
+                engines_declared_uncertain = True
             self.phase = "publishing"
             version = self._publisher.publish(marker, force_full=recovering)
             if not isinstance(version, str) or not version:
@@ -750,8 +757,20 @@ class TrainingPublication:
             raise
         except BaseException:
             self._abort()
+            if not engines_declared_uncertain:
+                self._declare_engines_uncertain(marker)
             raise
         return PublicationResult(marker, published=True)
+
+    def _declare_engines_uncertain(self, marker: dict[str, Any]) -> None:
+        """Record that a failed barrier retired the engines before the marker moved.
+
+        Retiring them made CHECKPOINT unreplayable: a retry from it would pause
+        handles that no longer exist. UPDATING_WEIGHTS is the status whose
+        replay rebuilds the engines and forces a full publication.
+        """
+        with suppress(Exception):
+            self._require_store().transition(marker, "UPDATING_WEIGHTS")
 
     def republish(self, runtime_load_id: str) -> str:
         """Restore replaced engines without bypassing the durable commit gate.
@@ -829,11 +848,19 @@ class TrainingPublication:
         """Reassert startup pause, including committed and marker-free restarts."""
         if marker is not None and marker["status"] == "RUNNING":
             raise RuntimeError(f"ambiguous training job {marker['job_id']}")
-        with self._aborting_on_failure():
-            self._publisher.pause()
-            self.phase = "recovering"
+        try:
+            with self._aborting_on_failure():
+                self._publisher.pause()
+                self.phase = "recovering"
+                if marker is not None and marker["status"] == "CHECKPOINT":
+                    self._require_store().transition(marker, "UPDATING_WEIGHTS")
+        except BaseException:
             if marker is not None and marker["status"] == "CHECKPOINT":
-                self._require_store().transition(marker, "UPDATING_WEIGHTS")
+                # Startup retires the engines the same way a publication does,
+                # so the next boot must rebuild them instead of replaying a
+                # CHECKPOINT whose engines are gone.
+                self._declare_engines_uncertain(marker)
+            raise
 
     def finish_recovery(self, marker: dict[str, Any] | None, runtime_load_id: str) -> None:
         """Record recovered publication while preserving the durable commit gate.
