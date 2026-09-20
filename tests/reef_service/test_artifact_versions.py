@@ -249,6 +249,11 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
 
     value.rollback("math", target_version)
     train(value, 4)
+    # The step is visible before the tracker hears about the commit; wait for the event rather than race it.
+    for _ in range(1000):
+        if len(tracker.events) == 3:
+            break
+        time.sleep(0.001)
 
     assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [
         (0, 0),

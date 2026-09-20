@@ -50,6 +50,11 @@ e2b = ["e2b>=2.46"]
 wandb = [
     "wandb>=0.29.0",
 ]
+# Record tracing over OTLP/HTTP (observability.tracing); any OpenTelemetry-compatible backend receives it.
+opentelemetry = [
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
+]
 # Python-side dependencies used by the Slime backend. The runtime source pin
 # lives in the `runtime` dependency group below.
 # torch / SGLang / Megatron-Core / FlashAttention remain supplied by the

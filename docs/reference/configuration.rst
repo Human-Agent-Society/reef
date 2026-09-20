@@ -1174,3 +1174,74 @@ Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.
+
+Record tracing
+--------------
+
+Record tracing exports every accepted record and every committed training
+step as OpenTelemetry spans, so a tracing backend shows what an agent did in a
+scenario and which version it trained. It is optional, off by default, and
+independent of experiment tracking. Reef speaks OTLP over HTTP and names no
+vendor: point it at Langfuse, Arize Phoenix, Jaeger, Grafana Tempo or an
+OpenTelemetry Collector. Install ``reef-infra[opentelemetry]``.
+
+.. code:: yaml
+
+   observability:
+     tracing:
+       enabled: true
+       endpoint: https://cloud.langfuse.com/api/public/otel/v1/traces  # full OTLP/HTTP traces URL
+       authorization: ${LANGFUSE_AUTH}  # the backend credential, sent as the Authorization header
+       service_name: reef              # optional resource service.name
+
+``endpoint`` is the complete traces URL. ``authorization`` is the credential
+the backend expects in its ``Authorization`` header: ``Basic <base64
+public:secret>`` for Langfuse, ``Bearer <token>`` for most others. It is
+handled like ``inference.upstream_api_key``: write it as an environment
+reference in the YAML, or omit it and export ``REEF_TRACING_AUTHORIZATION``;
+the startup report masks it and it never appears in a span or a log line. A
+backend that expects its credential under another header name, such as
+``x-api-key``, takes it in the ``headers`` mapping; the startup report masks
+every header value, and ``Authorization`` itself is rejected there so the
+credential has one place. When no endpoint, credential or header is configured the
+exporter reads the standard ``OTEL_EXPORTER_OTLP_ENDPOINT`` and
+``OTEL_EXPORTER_OTLP_HEADERS`` environment variables instead.
+
+Each accepted inference record becomes the root span of its own trace, named
+``chat <model>``. Its trace and span ids derive from the scenario and record
+id, so a restart or a second Reef host produces the same ids. The span carries:
+
+* ``session.id`` and ``reef.scenario``: the scenario.
+* ``reef.agent_record_id`` and ``reef.request_type``: the receipt and record kind.
+* ``gen_ai.request.model``, ``gen_ai.response.model``, ``gen_ai.response.id``,
+  ``gen_ai.usage.input_tokens``, ``gen_ai.usage.output_tokens`` and
+  ``gen_ai.response.finish_reasons`` from the provider request and response,
+  following the OpenTelemetry GenAI semantic conventions.
+* ``reef.release_id``, ``reef.content_id`` and ``reef.runtime_load_id``: the
+  version that served the request, when the record names one.
+* ``reef.tags``: the ``x-reef-tag-*`` request tags.
+
+A feedback record becomes a ``feedback`` span inside the trace of the first
+inference it references, with ``reef.score`` and ``reef.references``; further
+references are span links. A training instruction becomes a
+``training request`` span. A committed step adds a ``training step N`` span
+with the commit's step, release, job id, consumed and compacted record counts
+and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
+child span below every record the step consumed, linked back to the commit
+span. Records carry one timestamp, so their spans have zero duration and start
+at the record's creation time.
+
+For streamed provider responses, token usage is read from the captured SSE
+events, including Chat Completions usage chunks, Responses terminal events
+and Anthropic message usage. Cumulative counts are not summed across chunks.
+If the provider sends no usage, token counts remain absent; for Chat
+Completions, request ``stream_options: {include_usage: true}`` when supported.
+The stored response and the forwarded stream remain unchanged.
+
+Spans carry the exchange itself: the request messages and the reply as JSON
+in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, feedback text in
+``reef.feedback`` and instruction text in ``reef.instruction``. The backend
+therefore sees the scenario's traffic; point tracing only at one trusted with
+it. Export failures are reported in the service log and never
+fail record acceptance or a commit; the exporter batches spans in a background
+thread and flushes them during graceful shutdown.
