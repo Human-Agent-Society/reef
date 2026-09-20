@@ -26,6 +26,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -303,6 +304,9 @@ class AgentRun(WorkspaceTools):
         self.gateway: AgentGateway | None = None
         #: The E2B sandbox the agent and its trials run in, when the host's executor is one.
         self.session: E2BSession | None = None
+        #: pi runs the tool calls of one turn concurrently, and the gateway serves each on its own thread; the
+        #: pull replaces the workspace directory, so one call at a time reads it.
+        self.workspace_lock = threading.Lock()
         self.trials = 0
 
     def executor(self) -> EpisodeExecutor:
@@ -318,10 +322,11 @@ class AgentRun(WorkspaceTools):
     def admitted(self) -> tuple[list[Mutation], list[dict[str, Any]] | None, list[str], str | None]:
         """The workspace's mutations, the entries admission turns them into (``None`` when it refuses), what could
         not be read, and the refusal."""
-        if self.session is not None:
-            # The agent edits its copy in the sandbox; the check reads that copy as it stands now.
-            self.session.pull(self.workspace.parent, self.workspace.name)
-        mutations, problems = workspace_mutations(self.workspace, self.entries, self.nodes)
+        with self.workspace_lock:
+            if self.session is not None:
+                # The agent edits its copy in the sandbox; the check reads that copy as it stands now.
+                self.session.pull(self.workspace.parent, self.workspace.name)
+            mutations, problems = workspace_mutations(self.workspace, self.entries, self.nodes)
         admitted, refusal = admit_mutations(self.entries, mutations, self.host.descriptor)
         return mutations, (None if refusal is not None else [dict(entry) for entry in admitted]), problems, refusal
 
