@@ -151,9 +151,9 @@ def test_enabled_tracing_builds_the_opentelemetry_observer() -> None:
 
 @pytest.mark.unit
 def test_inference_record_becomes_a_client_span_with_stable_ids_and_no_messages() -> None:
+    observer, exporter = _observer()
     from reef.observability.open_telemetry import record_span_context
 
-    observer, exporter = _observer()
     served = LiveWeightArtifactRef(content_id="c1", release_id="v3", parent_release_id="v2", runtime_load_id="load-3")
     item = AgentRecord.create(
         scenario="math",
@@ -228,9 +228,9 @@ def test_include_messages_exports_the_exchange_and_feedback_text() -> None:
 
 @pytest.mark.unit
 def test_feedback_joins_the_first_referenced_trace_and_links_the_rest() -> None:
+    observer, exporter = _observer()
     from reef.observability.open_telemetry import record_span_context
 
-    observer, exporter = _observer()
     observer.record_accepted(_inference("i1", model="qwen"))
     observer.record_accepted(_inference("i2", model="qwen"))
     observer.record_accepted(_report("r1", "i1", "i2", score=0.25, feedback="secret transcript"))
@@ -256,9 +256,9 @@ def test_feedback_joins_the_first_referenced_trace_and_links_the_rest() -> None:
 
 @pytest.mark.unit
 def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
+    observer, exporter = _observer()
     from reef.observability.open_telemetry import commit_span_context, record_span_context
 
-    observer, exporter = _observer()
     commit = CommittedStepEvent(
         scenario="math",
         step=3,

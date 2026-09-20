@@ -484,6 +484,21 @@ class Dispatcher:
         value = current.commit(tracked_result)
         self._publication.record(scenario, value)
         try:
+            self._experiment_tracker.record(
+                TrainingExperimentEvent(
+                    context=context,
+                    produced_artifact_ref=current.current_artifact_ref(),
+                    metrics=dict(tracked_result.metrics),
+                    outcome="rejected" if tracked_result.metrics.get("selected") is False else "committed",
+                    training_job_id=tracked_result.training_job_id,
+                    source_runtime_load_id=tracked_result.source_runtime_load_id,
+                    produced_runtime_load_id=tracked_result.runtime_load_id,
+                    checkpoint_path=tracked_result.checkpoint_path,
+                )
+            )
+        except Exception:
+            logger.exception("experiment tracker failed to record committed training step")
+        try:
             committed_step = current.scenario_step
             for commit in reversed(current.store.history()):
                 if commit.step == committed_step:
@@ -506,21 +521,6 @@ class Dispatcher:
                     break
         except Exception:
             logger.exception("record observer failed to export committed training step")
-        try:
-            self._experiment_tracker.record(
-                TrainingExperimentEvent(
-                    context=context,
-                    produced_artifact_ref=current.current_artifact_ref(),
-                    metrics=dict(tracked_result.metrics),
-                    outcome="rejected" if tracked_result.metrics.get("selected") is False else "committed",
-                    training_job_id=tracked_result.training_job_id,
-                    source_runtime_load_id=tracked_result.source_runtime_load_id,
-                    produced_runtime_load_id=tracked_result.runtime_load_id,
-                    checkpoint_path=tracked_result.checkpoint_path,
-                )
-            )
-        except Exception:
-            logger.exception("experiment tracker failed to record committed training step")
 
     def _experiment_context(self, current: Scenario) -> TrainingExperimentContext:
         backend = current.trainer.candidate_backend
