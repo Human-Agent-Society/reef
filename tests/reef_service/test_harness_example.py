@@ -517,7 +517,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     # the explicit toggle rule, what the user must provide, then the entries, complete and nothing more.
     assert "1. Restate the request in one sentence." in request_prompt
     assert "turn it on and off" in request_prompt and "never a rule that assumes the state holds" in request_prompt
-    assert "4. Then write the entries: complete for what the request implies" in request_prompt
+    assert "5. Then write the entries: complete for what the request implies" in request_prompt
     assert "nothing the request did not ask for" in request_prompt and "smallest change" not in request_prompt
     # What only the user can provide is declared, with a prompt for setup: the extension never asks for it,
     # stores it or hardcodes it, and reads an env item's value from the environment at run time.
