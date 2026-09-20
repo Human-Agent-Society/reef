@@ -137,6 +137,10 @@ REQUEST_PROMPT = (
     "- service, an account or endpoint the user connects; check is a shell command that exits 0 once "
     'connected: {{"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "Sign in to '
     'the GitHub CLI"}}\n'
+    "- binary, a program the user installs, which an entry then spawns; name is the program looked for on "
+    "PATH, and check is optional, a shell command that exits 0 when the program is usable: "
+    '{{"name": "pdftotext", "kind": "binary", "prompt": "Install pdftotext: brew install poppler on macOS, '
+    'apt install poppler-utils on Linux"}}\n'
     "Omit the object when the change needs nothing."
 )
 

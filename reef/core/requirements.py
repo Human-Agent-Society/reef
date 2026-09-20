@@ -17,8 +17,9 @@ import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-#: What a ``requires`` item asks of the person: an OS permission to grant, a variable to set, a service to connect.
-REQUIRE_KINDS = ("permission", "env", "service")
+#: What a ``requires`` item asks of the person: an OS permission to grant, a variable to set, a service to
+#: connect, a program to install. A ``binary`` item's name is the program, looked for on PATH.
+REQUIRE_KINDS = ("permission", "env", "service", "binary")
 #: A release names a handful of things to set up; a longer list is a request that should be split.
 MAX_REQUIRES = 8
 #: A prompt is one sentence saying what to enter or grant; the listings show it beside the item, so it stays short.
@@ -39,8 +40,10 @@ def parse_requires(value: object, *, limit: int | None = MAX_REQUIRES) -> list[d
     non empty ``check`` and an optional ``prompt``, one sentence telling the
     person what to enter or grant, stripped, at most ``MAX_REQUIRE_PROMPT``
     characters and dropped when blank; for kind ``env`` the variable named
-    (the check, else the name) is a shell identifier. Unknown keys are
-    dropped; ``None`` means no items."""
+    (the check, else the name) is a shell identifier. A ``binary`` item's
+    name is the program to look for on PATH, so the entry name pattern,
+    which admits no separator, is the whole of its constraint. Unknown keys
+    are dropped; ``None`` means no items."""
     if value is None:
         return []
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)):
