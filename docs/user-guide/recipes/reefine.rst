@@ -65,7 +65,11 @@ How it works
    delivering answer with the fewest uncovered points; when no answer
    delivers, it is skipped with the reason. The evaluation runs the
    candidate on the health task: it publishes when the tree still works,
-   and the step's page carries the design and the review either way.
+   and the step's page carries the design and the review either way. A
+   review call that answers with no text is asked once more with room for
+   both its reasoning and its reply; when it still gives none, the step
+   records why and both pages say the review did not run, rather than
+   reading like a step that had no review to give.
 3. Result. The session that asked reports it in the chat when the step
    settles, and ``reef-pi evolve ... --wait`` prints the same line:
    published as a release, ready but waiting for your review because it

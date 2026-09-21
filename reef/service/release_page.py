@@ -371,13 +371,16 @@ def _listed(items: Sequence[str], empty: str) -> str:
 def _review(metrics: Mapping[str, Any]) -> str:
     """The Review section: the proposer's reading of its entries against the request, then what it left undeclared.
 
-    ``proposal_notes.review`` is absent when the method's review call failed;
-    the ``undeclared_env`` line shows all the same, being the warning the
-    person needs. Empty when the step recorded neither."""
+    ``proposal_notes.review`` is absent when the method's review call failed,
+    and ``review_failure`` then says why: the one check of whether the entries
+    deliver the request did not run, which the page says rather than leaving
+    the section out. The ``undeclared_env`` line shows all the same, being the
+    warning the person needs. Empty when the step recorded none of them."""
     notes = _notes(metrics)
     review = notes.get("review")
+    failure = notes.get("review_failure")
     undeclared = _strings(notes.get("undeclared_env"))
-    if not isinstance(review, Mapping) and not undeclared:
+    if not isinstance(review, Mapping) and not isinstance(failure, str) and not undeclared:
         return ""
     parts = []
     if isinstance(review, Mapping):
@@ -385,6 +388,11 @@ def _review(metrics: Mapping[str, Any]) -> str:
         parts.append(f"<p>The proposer's review of its entries against the request: {review_result}</p>")
         parts.append("<h3>Covered</h3>" + _listed(_strings(review.get("covered")), "nothing listed as covered"))
         parts.append("<h3>Uncovered</h3>" + _listed(_strings(review.get("uncovered")), "nothing left uncovered"))
+    elif isinstance(failure, str) and failure.strip():
+        parts.append(
+            "<p>The proposer's review of its entries against the request did not run, so nothing checked "
+            f"whether they deliver it: {escape(failure)}</p>"
+        )
     else:
         parts.append('<p class="empty">no review on record</p>')
     if undeclared:

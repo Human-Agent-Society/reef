@@ -743,6 +743,16 @@ the two tools above change that rule on purpose (issue #435): a request is
 clarified from the session where the person asked it, while they are still
 there to answer, and the tools still write no mutation and start no step of
 their own beyond the filing. Asking needs no extension:
+Admission also refuses a ``code_extension`` that writes to the harness
+process's own stdout or stderr without a ``ctx.hasUI`` guard
+(``console.log``, ``console.error``, ``process.stdout.write``). An extension
+runs inside the harness process, which owns the terminal in a session with a
+UI, so a raw write lands in a drawn frame and leaves the session without its
+input box until the next full redraw; console output stays the fallback for a
+session without a UI, and the guard, on the write's own line or the one above
+it, is what separates the two. Text for a session with a UI belongs in
+``ctx.ui.notify``, ``ctx.ui.setStatus`` or ``ctx.ui.setWidget``.
+
 ``reef-<adapter> harness "<request>"`` is a wrapper subcommand on every
 adapter. The ids ``reef-version-check``,
 ``reef-requests`` and ``reef-pi-extension-api`` are ``RESERVED_ENTRY_IDS`` in

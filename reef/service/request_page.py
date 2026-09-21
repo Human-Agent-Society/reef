@@ -303,11 +303,19 @@ def what_changed(metrics: Mapping[str, object]) -> str:
 
 
 def review_html(metrics: Mapping[str, object]) -> str:
-    """The Review section, only when the step recorded one: the result and what the entries left uncovered."""
+    """The Review section: the result and what the entries left uncovered, or, when the review call failed, the
+    reason it did not run, so a step never quietly publishes with nothing checking that it delivers the request."""
     notes = metrics.get("proposal_notes")
-    review = notes.get("review") if isinstance(notes, Mapping) else None
+    notes = notes if isinstance(notes, Mapping) else {}
+    review = notes.get("review")
     if not isinstance(review, Mapping):
-        return ""
+        failure = notes.get("review_failure")
+        if not isinstance(failure, str) or not failure.strip():
+            return ""
+        return (
+            f'<section class="card review-card">\n<h2>Review</h2>\n<p>The review of the entries against your '
+            f"request did not run, so nothing checked whether they deliver it: {escape(failure)}</p>\n</section>\n"
+        )
     uncovered = review.get("uncovered")
     items = [item for item in uncovered if isinstance(item, str)] if isinstance(uncovered, Sequence) else []
     listed = "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>" if items else ""
