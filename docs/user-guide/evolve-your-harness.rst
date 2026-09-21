@@ -136,119 +136,115 @@ With the ``pi`` adapter, ``GET /reef/harness`` serves:
 The loop
 --------
 
-The loop below runs in the default ``data.training_mode: auto``, from
-failures alone; an ask is refused there. A deployment that also takes asks
-sets ``data.training_mode: hybrid``, as the tutorial's ``deployment.yaml``
-does: ``POST /reef/train`` with ``text``, ``session`` and ``release_id``
-(see the `manual training API
-<../reference/http-api.rst#manual-training>`__) queues an instruction, and
-the next step that reads it runs it first, oldest first, one per step,
-with no call to the update route; the failure path continues between
-instructions. ``data.training_mode: manual`` runs instructions only:
-ordinary traffic never starts evolution in that mode. No inference receipts
-or failure report are needed for an ask. A request
-whose text is credential shaped or directive shaped is refused with the
-rule named, and the scenario must already exist. A request whose step fails
-is not retried: it is consumed with a ``skipped`` row in the catalog that
-carries the error, and you send it again if you want it run; the failures
-beside it in ``hybrid`` stay held for the next step. The step cap and the
-failure streak count every step, a request's step included, and stop
-automatic steps only; a request still runs past them.
-``POST /reef/scenarios/{scenario}/update`` switches a running deployment
-between the three.
-
-The proposer must explicitly accept ``requests`` before the recipe builds
-in ``manual`` or ``hybrid``. It receives one request mapping containing
-``id``, ``text``, ``session``, ``release_id`` and ``untrusted=True``,
-together with the current harness and model bindings. In ``hybrid``,
-``samples`` carries what an automatic batch would take next, up to
-``batch_size`` and possibly none (scored traces, or
-records under ``data.batch_policy: records``), so the method answers the
-request with the failures beside it; in ``manual`` it is empty. Its mutations pass
-through the same evaluation and ``evolution.publish`` policy. Pending agent
-proposals and periodic rollback rechecks cannot take the step an
-instruction owns. The tutorial's ``propose`` takes ``requests``; a
-failure-only proposer must be extended with a ``requests`` branch first.
+Harness evolution advances one step at a time. A step is a single pass of
+the cycle described above: Reef snapshots the tree, asks ``propose`` for a
+mutation, applies it, runs the candidate tree and the current tree over the
+same tasks, and then publishes the winner or restores the snapshot. The
+step is the unit the rest of this page counts in.
 
 .. flow::
    :loop: publish the winner, or restore the snapshot
 
-   Batch :: scored reports with existing inference references
+   Batch :: a batch of units, or a queued request, or both
    ``propose`` :: one proposal, a mutation or a sequence applied as one, or ``None``
    Episodes* :: run the candidate and current tree on the same tasks
    Result :: publish the candidate or restore the snapshot
 
-With the reports policy, inference traffic alone does not trigger evolution.
-Every valid scored report with at least one existing inference reference
-contributes a trace, including successful outcomes. A report over one
-receipt batches as that exchange; a report over several batches as one
-trajectory sample carrying every referenced exchange in order, which is what
-``reef-pi report`` sends for a whole run (``--per-receipt`` fans the score
-across the receipts as separate reports instead). When ``batch_size``
-trace samples have accumulated, one step runs the loop once. With
-``evolution.promote_failures: true`` a failing trace's prompt is added to the
-evaluation as a permanent task, so the seed tasks are the floor of a suite that
-grows from real failures and no later candidate can win while bringing one
-back (the method's ``evaluate`` must score an arbitrary prompt); an
-instruction step in ``hybrid`` promotes the failures it carries the same way.
-A prompt is
-real traffic, so it meets the tree's own credential tripwire first: a prompt
-carrying a key-shaped literal is never promoted, never persisted, and never
-re-run as a task, and the step goes on without it. A prompt shaped like an
-instruction override (``ignore the previous instructions``, a forged system
-message, a chat-template control token) is screened the same way, and one
-tagged client holds at most ``evolution.max_promoted_per_client`` promoted
-tasks, so a single sender cannot fill the suite. Which prompts are
-promoted is the method's call: an optional ``evolution.promote`` names a
-``Promoter`` subclass or instance. Its ``__call__(samples, *, manifest=None)``
-receives the step's trace samples and failure manifest and returns the prompts to promote; without it
-every failing trace's user prompt is promoted. Reef still dedupes, screens,
-and caps whatever it returns. ``batch_size`` lives under ``data:`` in the
-recipe config, and
-``data.batch_policy: records`` drops the report requirement entirely:
-recorded traffic alone batches, unscored, for methods that judge for
-themselves.
+A step begins either from a batch of recorded traffic or from a training
+request (i.e. ``POST /reef/train`` requests). ``data.training_mode`` in the recipe config
+decides which of the two a deployment accepts.
 
-A publish passes the evaluation as the suite stood at the time, so a suite that
-keeps growing can later expose a published tree as a regression on a task the
-evaluation had not seen yet. ``evolution.recheck_every: N`` (0, off, by default)
-closes that gap: every ``N`` steps, and at once when the served model or the
-adapter version has changed since the publish, the loop re-evaluates the last
-published tree against the tree it replaced on the current suite instead of
-proposing. If
-the older tree now wins, the loop publishes it, which rolls the deployment
-back; if the published tree still wins, nothing changes. Only the tree from
-the most recent publish is kept as a rollback target, and a rollback consumes
-it, so the recheck reverts one bad publish rather than walking the whole
-history back.
+- ``auto`` (the default): steps start from a batch of recorded traffic
+  alone. Training requests are ignored.
+- ``manual``: steps start from training requests alone. Ordinary
+  traffic never starts evolution.
+- ``hybrid``: steps start from either, as the tutorial's ``deployment.yaml``
+  sets. Training requests are queued and takes precedence, and batching continues
+  between those requests.
 
-Two more settings shape the search itself. ``evolution.min_win_margin: M``
-(0 by default) is a noise floor on the result: the candidate must win more
-than ``M`` task pairings beyond its losses, so on a stochastic episode a
-single lucky flip does not publish. ``evolution.max_rejected_history: N``
-(25 by default, 0 off) keeps the last ``N`` rejected proposals in the
-scenario state, each with its step, its mutations with the options they
-carried, and the result's reason; a ``propose`` whose signature names
-``rejected`` receives them and can stop re-proposing what the evaluation already
-refused.
+``POST /reef/scenarios/{scenario}/update`` switches a running deployment
+between the three.
 
-By default a successful evaluation is served at once. ``evolution.publish: review`` holds
-every win as a pending release instead, and ``evolution.review_kinds`` (a
-list of node kinds, empty by default) holds only the wins that touch those
-kinds, so ``[code_extension]`` lets rules and config auto publish while code
-waits for a person; a win that touches a ``native_loop`` waits whether or not
-the list names it. A pending release sits in the catalog with its evaluation
-metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
-names it; the loop keeps evolving from it in the meantime, so promoting the
-latest pending release serves everything accumulated since the head.
+Trigger of step
+~~~~~~~~~~~~~~~
 
-Most of a step's cost is the evaluation. Every task runs on both trees,
-``episode_repeats`` times each (once by default), which makes
-``2 x len(tasks) x episode_repeats`` headless episodes, interleaved so both
-sides of a pairing see the same upstream conditions. Each episode renders one
-side into a throwaway root, runs the agent binary with the task as its prompt
-under the ``episode_timeout_s`` limit (600 s by default), reads the
-trajectory back, and deletes the root.
+``auto`` mode
+^^^^^^^^^^^^^
+
+In ``auto`` mode, two settings determine when Reef should start a step:
+
+- ``data.batch_size``: when this number of units is collected, trigger a step.
+- ``data.batch_policy``: decides what counts as one unit toward ``batch_size``.
+
+``data.batch_policy`` supports two settings:
+
+- ``reports`` (default): every valid scored report with at least one unique
+  inference reference counts as one unit, including successful outcomes.  This
+  can be either a report over one receipt batches as that exchange, or a
+  report over several batches as one trajectory sample carrying every
+  referenced exchange in order, which is what ``reef-pi report`` sends for a
+  whole run (``--per-receipt`` fans the score across the receipts as
+  separate reports instead). Reports referencing inferences trained in
+  earlier batches are dropped.
+- ``records``: every inference counts as one unit. The report requirement is
+  dropped entirely: recorded traffic alone batches, unscored, for methods
+  that judge for themselves.
+
+Under ``auto`` mode, training requests are rejected.
+
+``manual`` mode
+^^^^^^^^^^^^^^^
+
+In ``manual`` mode, a step is triggered by every training request. These
+requests are queued against the scenario, and the next step runs the oldest
+queued request first, one per step. See `manual training API
+<../reference/http-api.rst#manual-training>`__ for more details of this API,
+e.g. what fields a request carries, the screens its text passes, and what
+happens to a request whose step fails.
+
+``data.batch_size`` and ``data.batch_policy`` trigger no evolution in this
+mode, but units are still collected while training requests run. However,
+these units are never used in evolution until ``data.training_mode`` is
+switched to ``auto`` or ``hybrid``. The held reports are capped at four
+times ``data.batch_size``, and the oldest are released once the batch
+passes that.
+
+``hybrid`` mode
+^^^^^^^^^^^^^^^
+
+In ``hybrid`` mode, either condition starts a step: enough units collected
+under ``data.batch_size`` and ``data.batch_policy``, or a training request
+received.
+
+When both conditions are met, training requests take precedence to make
+next step. Regardless of whether ``data.batch_size`` are met, Reef will
+construct a step that consumes both information. I.e. the ``propose``
+callable will see both the training request content and the units an
+automatic batch would have taken next, up to ``data.batch_size`` and
+possibly none, to determine a mutation.
+
+Propose: mutation to the harness tree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Reef calls ``propose`` once per step, with the current tree, the step's
+trace samples, and the model bindings it may call. It may return one or
+multiple mutations or a ``None`` to skip it. Anything but ``None`` becomes
+the step's proposal, and the episodes and comparison that follow are what
+test it.
+
+For more detail, refer to `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__.
+
+Evaluation: selection of the better tree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Reef runs episodes for the prompts from the evaluation suite (seeded from
+``evolution.tasks``) on both the mutated tree (the candidate tree) and the
+current tree, and asks ``evaluate`` to score the results. The harness tree
+with the better result is selected to become the next harness tree.
+
+Running episodes
+^^^^^^^^^^^^^^^^
 
 Each episode runs through an executor. The default ``local`` executor runs the
 binary as a plain subprocess, which is right for development and the tests. A
@@ -274,64 +270,181 @@ machine. A task must therefore state the whole problem in its prompt. A task
 that refers to files the episode cannot see fails on both sides, which ties
 the comparison and publishes nothing.
 
-The edge cases resolve conservatively. A ``None`` proposal skips the step. An
-episode that could not run ranks below every real score, so a candidate
-cannot win on a crash, and when both sides fail the step is a tie; a native
-episode whose turn ended on an error (a tree that cannot load, a graph that
-cannot run) counts as one that could not run, whatever its text. When the
-result is a rejection, Reef restores the snapshot it took before the
-mutation. Every result is recorded in the scenario's commit log together
-with its mutation (op, id and the full options, so a rejected rewrite is
-readable too), both score vectors, how many model calls the proposer made,
-the seconds they took and the tokens the endpoint counted for them
-(``proposer_calls``, ``proposer_seconds``, ``proposer_input_tokens``,
-``proposer_output_tokens``; the tokens are recorded, never charged), and per
-side and task the path each episode took: on the native harness the stage
-names the loop exited in order and the reason its turn ended
-(``candidate_paths`` and ``current_paths``, one ``{stages, reason}`` per
-episode, with ``error`` and ``errored_agent`` when a turn ended on an error,
-beside ``candidate_agents``).
+Evaluating the result
+^^^^^^^^^^^^^^^^^^^^^
+
+Two settings shape the evaluation result:
+
+- ``evolution.min_win_margin: M`` (0 by default) is a noise floor on the
+  result: the candidate must win more than ``M`` task pairings beyond its
+  losses, so on a stochastic episode a single lucky flip does not publish.
+- ``evolution.max_rejected_history: N`` (25 by default, 0 off) keeps the
+  last ``N`` rejected proposals in the scenario state, each with its step,
+  its mutations with the options they carried, and the result's reason; a
+  ``propose`` whose signature names ``rejected`` receives them and can stop
+  re-proposing what the evaluation already refused.
+
+By default a successful evaluation is served at once.
+``evolution.publish: review`` holds every win as a pending release instead,
+and ``evolution.review_kinds`` (a
+list of node kinds, empty by default) holds only the wins that touch those
+kinds, so ``[code_extension]`` lets rules and config auto publish while code
+waits for a person; a win that touches a ``native_loop`` waits whether or not
+the list names it. A pending release sits in the catalog with its evaluation
+metrics and is never served until ``POST /reef/scenarios/{scenario}/promote``
+names it; the loop keeps evolving from it in the meantime, so promoting the
+latest pending release serves everything accumulated since the head.
+
+Similarly, for more detail, refer to `Write a harness method
+<../developer-guide/write-a-harness-method.rst>`__.
+
+Promotion: growing evaluation suite
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The evaluation suite consists of the seed tasks specified in
+``evolution.tasks`` by default. To grow it automatically from failed tasks,
+configure ``evolution.promote_failures: true``, which adds failing traces'
+prompts to the evaluation set permanently. This also means the method's
+``evaluate`` implementation must be able to score any arbitrary prompt. A
+request step in ``hybrid`` promotes the failures it carries the same way.
+
+A promoted prompt is real client traffic, so it is screened before it
+becomes a task. A prompt carrying a key-shaped literal meets the tree's own
+credential tripwire: it is never promoted, never persisted, and never re-run
+as a task, and the step goes on without it. A prompt shaped like an
+instruction override (``ignore the previous instructions``, a forged system
+message, a chat-template control token) is screened the same way. One tagged
+client holds at most ``evolution.max_promoted_per_client`` promoted tasks,
+so a single sender cannot fill the suite.
+
+Which prompts are promoted is the method's call. An optional
+``evolution.promote`` names a ``Promoter`` subclass or instance, whose
+``__call__(samples, *, manifest=None)`` receives the step's trace samples
+and failure manifest and returns the prompts to promote. Without it, every
+failing trace's user prompt is promoted. Reef dedupes, screens and caps
+whatever it returns either way.
+
+Rechecking published tree with grown evaluation suite
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A publish passes the evaluation as the suite stood at the time, so a suite that
+keeps growing can later expose a published tree as a regression on a task the
+evaluation had not seen yet. ``evolution.recheck_every: N`` (0, off, by default)
+closes that gap: every ``N`` steps, and at once when the served model or the
+adapter version has changed since the publish, the loop re-evaluates the last
+published tree against the tree it replaced on the current suite instead of
+proposing. If
+the older tree now wins, the loop publishes it, which rolls the deployment
+back; if the published tree still wins, nothing changes. Only the tree from
+the most recent publish is kept as a rollback target, and a rollback consumes
+it, so the recheck reverts one bad publish rather than walking the whole
+history back.
+
+Cost
+^^^^
+
+Most of a step's cost is the evaluation. Every task runs on both trees,
+``episode_repeats`` times each (once by default), which makes
+``2 x len(tasks) x episode_repeats`` headless episodes, interleaved so both
+sides of a pairing see the same upstream conditions. Each episode renders one
+side into a throwaway root, runs the agent binary with the task as its prompt
+under the ``episode_timeout_s`` limit (600 s by default), reads the
+trajectory back, and deletes the root.
+
+Bookkeeping of the steps
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+Commit log
+^^^^^^^^^^
+
+Every result is recorded in the scenario's commit log, whether the candidate
+was published or rejected. A commit carries:
+
+- its mutation: op, id and the full options, so a rejected rewrite is
+  readable too;
+- both score vectors;
+- what the proposer cost: ``proposer_calls``, ``proposer_seconds``,
+  ``proposer_input_tokens`` and ``proposer_output_tokens`` (the tokens are
+  recorded, never charged);
+- the path each episode took, per side and task. On the native harness this
+  is the stage names the loop exited in order and the reason its turn ended
+  (``candidate_paths`` and ``current_paths``, one ``{stages, reason}`` per
+  episode, with ``error`` and ``errored_agent`` when a turn ended on an
+  error, beside ``candidate_agents``).
+
+Step record
+^^^^^^^^^^^
 
 The commit log holds the result; the step record holds what decided it.
-``evolution.step_record_dir`` (off by default) names a directory, made
-absolute at build, under which each scenario's steps write
-``<scenario>/<step>/proposer.json``, one entry per model call the proposer
-made: the ``model``, the ``messages`` and ``params`` of a ``chat`` or the
-``body`` of a ``complete``, then the ``reply`` and provider ``response``
-for a built-in ``chat`` binding, the ``response`` for ``complete``, or the
-``error``, and the ``seconds`` it took; ``<scenario>/<step>/mutations.json``,
-the parsed proposal with its options, written before admission so a refused
-proposal is on file; and ``<scenario>/<step>/episodes/<side>-<task index>/``,
-each evaluation episode's trajectory files as the adapter writes them
-(``session.jsonl`` and ``agents/*.jsonl`` on native, the vendor's own session
-tree on pi and the others) copied out of the throwaway root before it is
-removed, beside an ``episode.json`` with the task, the exit code, stdout and
-stderr, the residue, the score, the failure and the stage path, so a scorer
-can be replayed from the record alone. Long text is clipped with a marker
-naming what was dropped, and a credential shaped literal anywhere in the
-record is replaced by ``[redacted credential]``: the record holds what the
-tree boundary has not seen yet. Provider reasoning remains separate from
-the final reply: Chat Completions responses keep ``reasoning``,
-``reasoning_content`` and ``reasoning_details`` as returned; Messages keeps
-thinking content blocks, and Responses keeps reasoning output items.
-Streaming responses retain these fields too. Opaque encrypted blocks and
-signatures are retained as provider data, not converted into readable
-thinking. A provider that returns no reasoning, an older record, or a custom
-text-only binding has none to display; Reef does not reconstruct it.
-A proposer failure keeps its ``step_record`` directory on the instruction's
-failed commit, including after the trainer reloads. A later retry points to
-its own directory. Older failed commits that did not record this link are
-not matched to files by directory order or timestamps.
-A recheck step asks the proposer nothing, so
-it writes ``episodes/`` only and counts zero proposer calls; a step skipped
-on the step cap or the failure streak writes nothing and names no
-``step_record``. A step directory is never reused: a step retried after a
-crash lands in ``<step>-2``, so the earlier attempt stays on file, and
-nothing prunes the directory. A reader can rebuild why the tree changed, or
-did not, from those files and the commit record, which names the step's
-directory as ``step_record``. The record is the proposer's raw traffic and
-the episodes' full logs, so keep the directory where the commit log lives; a
-copy that fails (a full disk) aborts the step rather than scoring it.
+Recording of step records is off by default and exists for debugging and audit:
+set ``evolution.step_record_dir`` to a directory, made absolute at build, and
+each scenario's steps write their raw material under it.
+
+A step writes three things:
+
+- ``<scenario>/<step>/proposer.json`` holds one entry per model call the
+  proposer made: the ``model``, the ``messages`` and ``params`` of a
+  ``chat`` or the ``body`` of a ``complete``, then the ``reply`` and
+  provider ``response`` for a built-in ``chat`` binding, the ``response``
+  for ``complete``, or the ``error``, and the ``seconds`` it took.
+- ``<scenario>/<step>/mutations.json`` holds the parsed proposal with its
+  options, written before admission so a refused proposal is on file.
+- ``<scenario>/<step>/episodes/<side>-<task index>/`` holds each evaluation
+  episode's trajectory files as the adapter writes them (``session.jsonl``
+  and ``agents/*.jsonl`` on native, the vendor's own session tree on pi and
+  the others), copied out of the throwaway root before it is removed,
+  beside an ``episode.json`` with the task, the exit code, stdout and
+  stderr, the residue, the score, the failure and the stage path, so a
+  scorer can be replayed from the record alone.
+
+Two rules govern what the text may contain. Long text is clipped with a
+marker naming what was dropped, and a credential shaped literal anywhere in
+the record is replaced by ``[redacted credential]``: the record holds what
+the tree boundary has not seen yet.
+
+The provider ``response`` stored in ``<scenario>/<step>/proposer.json``
+keeps the reasoning the provider returned, separate from the final reply.
+Chat Completions
+responses keep ``reasoning``, ``reasoning_content`` and
+``reasoning_details`` as returned; Messages keeps thinking content blocks,
+and Responses keeps reasoning output items. Streaming responses retain these
+fields too. Opaque encrypted blocks and signatures are retained as provider
+data, not converted into readable thinking. A provider that returns no
+reasoning, an older record, or a custom text-only binding has none to
+display; Reef does not reconstruct it.
+
+Not every step writes a full record. A recheck step asks the proposer
+nothing, so it writes ``episodes/`` only and counts zero proposer calls; a
+step skipped on the step cap or the failure streak writes nothing and names
+no ``step_record``. A proposer failure keeps its ``step_record`` directory
+on the request's failed commit, including after the trainer reloads, and a
+later retry points to its own directory; older failed commits that did not
+record this link are not matched to files by directory order or timestamps.
+A step directory is never reused: a step retried after a crash lands in
+``<step>-2``, so the earlier attempt stays on file, and nothing prunes the
+directory.
+
+Together with the commit record, which names the step's directory as
+``step_record``, those files let a reader rebuild why the tree changed or
+did not. They are the proposer's raw traffic and the episodes' full logs, so
+keep the directory where the commit log lives; a copy that fails (a full
+disk) aborts the step rather than scoring it.
+
+Edge cases
+~~~~~~~~~~
+
+Edge cases in the loop are resolved conservatively, so a step never
+publishes accidentally.
+
+- A ``None`` proposal skips the step.
+- An episode that could not run ranks below every real score, so a
+  candidate cannot win on a crash.
+- When both sides fail, the step is a tie.
+- A native episode whose turn ended on an error (a tree that cannot load, a
+  graph that cannot run) counts as one that could not run, whatever its
+  text.
+- When the result is a rejection, Reef restores the snapshot it took before
+  the mutation.
 
 When it fits
 ------------
