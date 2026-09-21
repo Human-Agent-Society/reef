@@ -310,6 +310,41 @@ def test_rows_consumed_before_a_restart_are_still_retired(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+def test_dispatched_result_overtaken_by_another_trainer_is_merged(tmp_path: Path) -> None:
+    """The remote job has published its weights; the step lands on the release served now instead of being refused."""
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        base = scenario.current_artifact_ref().release_id
+        for record in _records(1):
+            scenario.records.append(record)
+        assert scenario.reserve_training_batch(WEIGHTS) is not None
+        execution = scenario.execute_reserved_training_step(WEIGHTS)
+        assert execution.outcome == "commit" and execution.result is not None
+
+        # The harness worker commits while the weights job is out.
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        after_harness = scenario.current_artifact_ref().release_id
+        assert after_harness != base
+
+        scenario.commit(execution.result, component=WEIGHTS)
+        assert backends[WEIGHTS].prepared == 1
+        assert scenario.scenario_step == 2
+        assert _component_files(scenario, scenario.current_artifact_ref()) == {
+            WEIGHTS: "weights step 1",
+            HARNESS: "harness step 1",
+        }
+        records = scenario.store.history()
+        assert (records[-1].component, records[-1].base_release_id) == (WEIGHTS, base)
+        assert scenario.committed_training_job_id == "job-1"
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path) -> None:
     """The backend must finish the weights job even after the harness moved the scenario step."""
     dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path))

@@ -840,8 +840,10 @@ class Dispatcher:
         result = execution.result
         if execution.outcome != "commit" or result is None:
             raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
-        # A stale base on a dispatched result propagates: the existing failure
-        # path reloads the scenario and the backend recovers the pending job.
+        # Another component may have moved the head while the job ran. The
+        # committer merges a dispatched result rather than refusing it: the
+        # backend has published the weights already and its job can only be
+        # finished, never taken back.
         self._commit_result(current.name, result, component)
         if result.training_job_id is not None:
             backend.acknowledge_commit(current.scenario_step, result.training_job_id)

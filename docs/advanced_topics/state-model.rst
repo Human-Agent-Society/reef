@@ -134,17 +134,20 @@ durable store, the order is:
 Every trainer is bound to a release component (``records`` when the recipe
 serves none), and every commit record names the ``component`` that made it
 and the ``base_release_id`` its batch was reserved against. A scenario whose
-recipe builds one trainer per component runs those trainers as independent
-workers; the harness worker and the weights worker never wait for each
-other's preparation. They meet only at this commit boundary: the scenario
-lock serializes their commits, and a result whose base another trainer's
-commit has replaced is refused (``StaleTrainingResultError``) instead of being
-attached to a combination it was never evaluated with. A lone trainer is
-never refused: only its own retried attempt can have moved the head. The worker keeps its batch and prepares it again
-against the release served now. Rows every trainer consumes are retired only
-once every trainer has released them, and on restart each trainer recovers
-its state and read cursor from its own commits, which needs durable commit
-storage.
+recipe builds one trainer per component runs those trainers as separate
+workers that meet at this commit boundary, where the scenario lock
+serializes their commits. A local result whose base another trainer's
+commit has replaced is refused (``StaleTrainingResultError``) instead of
+being attached to a combination it was never evaluated with; the worker
+keeps its batch and prepares it again against the release served now. A
+dispatched result is merged instead: the backend published its weights
+before the result arrived and its job can only be finished, so the step
+lands on the release served now and the record's ``base_release_id`` shows
+what the batch was reserved against. A lone trainer is never refused: only
+its own retried attempt can have moved the head. Rows every trainer
+consumes are retired only once every trainer has released them, and on
+restart each trainer recovers its state and read cursor from its own
+commits, which needs durable commit storage.
 
 Without a durable store, live and local saved releases advance the serving
 head before settling the in-memory commit. A conflicting head therefore

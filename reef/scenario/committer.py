@@ -9,6 +9,7 @@ operations.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from contextlib import suppress
 from copy import deepcopy
@@ -43,6 +44,8 @@ from reef.train.types import (
     TrainStepResult,
 )
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class _ArtifactHeadSync:
@@ -52,11 +55,12 @@ class _ArtifactHeadSync:
 
 
 class StaleTrainingResultError(ReefError):
-    """A result was prepared against a release that another component's commit has since replaced.
+    """A local result was prepared against a release that another component's commit has since replaced.
 
     The result is not attached to the newer combination. The caller keeps
     the batch, drops the result, and prepares it again against the release
-    served now.
+    served now. A dispatched result is never refused this way: see
+    :meth:`ScenarioCommitter.commit`.
     """
 
 
@@ -414,10 +418,15 @@ class ScenarioCommitter:
         """Commit ``component``'s pending training result as one atomic version record.
 
         Several trainers of one scenario meet here: the scenario lock serializes
-        their commits, and a result whose batch was reserved against a release
-        that another trainer has since replaced is refused as
-        :class:`StaleTrainingResultError` rather than attached to a combination it
-        was never evaluated with.
+        their commits. A local result whose batch was reserved against a
+        release that another trainer has since replaced is refused as
+        :class:`StaleTrainingResultError` rather than attached to a combination
+        it was never evaluated with. A dispatched result is merged instead:
+        the backend published its weights before the result arrived and its
+        job marker only moves forward, so refusing it would leave that job
+        unfinished and inference admission paused for good. The step lands on
+        the release served now and the record's ``base_release_id`` names the
+        release the batch was reserved against.
         """
         with self._lock, self._publication_lock:
             next_step = self._step + 1
@@ -434,9 +443,18 @@ class ScenarioCommitter:
             base = trainer.pending_base_release_id
             served = self._artifacts.current.release_id
             if not retrying and len(self._trainers) > 1 and base is not None and base != served:
-                raise StaleTrainingResultError(
-                    f"scenario {self._name!r} component {component!r} prepared its result against release "
-                    f"{base!r} but {served!r} is served now"
+                backend = trainer.candidate_backend
+                if backend is None or not backend.dispatched:
+                    raise StaleTrainingResultError(
+                        f"scenario {self._name!r} component {component!r} prepared its result against release "
+                        f"{base!r} but {served!r} is served now"
+                    )
+                logger.info(
+                    "scenario %r component %r: merging a dispatched result reserved against release %r onto %r",
+                    self._name,
+                    component,
+                    base,
+                    served,
                 )
             prepared = trainer.prepare_commit(result, compactable=self._compactable_for(component))
             recorded = self._recorded_training_retry(prepared, result, next_step, component)
