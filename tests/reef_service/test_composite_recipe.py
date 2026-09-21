@@ -14,6 +14,7 @@ from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
+from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
@@ -81,6 +82,15 @@ class _TreeRecipe(Recipe):
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
         )
+
+
+@dataclass(frozen=True)
+class _ScoredTreeRecipe(_TreeRecipe):
+    """The same tree recipe, consuming scored rollout reports."""
+
+    @property
+    def report_type(self) -> type[ScoredRolloutReport]:
+        return ScoredRolloutReport
 
 
 @dataclass(frozen=True)
@@ -233,6 +243,48 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
         assert manifest["files"] == {"harness.txt": "harness step 1"}
         assert set(manifest["components"]) == {"harness", "config"}
         assert manifest["components"]["harness"] == result.artifact.ref.content_id
+    finally:
+        dispatcher.close()
+
+
+def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
+    initial = tmp_path / "initial"
+    for relative, text in (recipe.base_artifact_files() or {}).items():
+        (initial / relative).parent.mkdir(parents=True, exist_ok=True)
+        (initial / relative).write_text(text, encoding="utf-8")
+    return Dispatcher(
+        recipe,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+    )
+
+
+@pytest.mark.unit
+def test_composite_scenario_enforces_the_agreed_report_type_whatever_the_component_order(tmp_path: Path) -> None:
+    # The component with no report contract is listed first; the harness contract still guards ingress.
+    recipe = CompositeRecipe(
+        components={
+            "config": _ConfigRecipe(),
+            "harness": _ScoredTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+        }
+    )
+    assert recipe.report_type is ScoredRolloutReport
+    dispatcher = _serve(recipe, tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        assert scenario.report_type is ScoredRolloutReport
+        scoreless = AgentRecord.create(
+            scenario="agent",
+            request_type=RequestType.REPORT,
+            payload={"references": ["i1"]},
+            agent_record_id="r1",
+            references=("i1",),
+        )
+        with pytest.raises(ReportValidationError):
+            dispatcher.accept_record(scoreless)
     finally:
         dispatcher.close()
 

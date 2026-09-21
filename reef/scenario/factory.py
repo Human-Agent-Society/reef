@@ -284,7 +284,9 @@ class ScenarioFactory:
                     runtime=runtime,
                     training_runtime=recipe.training_runtime,
                     inference_handler=recipe.inference_handler,
-                    report_type=trainers[0].trainer.report_type,
+                    # The recipe's own contract, not the first trainer's: a composite agrees
+                    # one across its components, whatever order they are listed in.
+                    report_type=recipe.report_type,
                 ),
                 repository=repository,
                 checkpoint_strategy=recipe.checkpoint_strategy,
