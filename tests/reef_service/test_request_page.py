@@ -287,6 +287,18 @@ def test_a_settled_request_ends_with_the_design_and_how_to_use_the_change() -> N
     assert "<p>A plan.</p>" in _section(page, "Design") and "<p>Run /x.</p>" in _section(page, "How to use")
 
 
+@pytest.mark.unit
+def test_a_step_whose_review_did_not_run_says_so_instead_of_dropping_the_section() -> None:
+    """The review is the one check of whether the entries deliver the request; when its call fails the page says
+    that nothing checked, rather than reading like a step that simply had no review."""
+    notes = {"design": "plan", "review_failure": "model call failed after 91.9 s: non-text content"}
+    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes=notes))
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    review = _section(page, "Review")
+    assert "did not run, so nothing checked whether they deliver it" in review
+    assert "non-text content" in review
+
+
 def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_and_the_link() -> None:
     MODULE.read_text(encoding="utf-8").encode("ascii")
     text = 'text me <script>alert(1)</script> & "quote" caf\u00e9'

@@ -139,6 +139,8 @@ Name the model in the body. These routes do not stream, and answer 501 when the 
 - Credentials come from process.env at run time, never from the file: admission refuses a credential shaped literal, and the tree persists every version.
 - Keep state in tool result details, not in module variables, so a resumed or forked session rebuilds it.
 - Never throw out of an event handler for an expected condition: log with ctx.ui.notify or return nothing.
+- Never write to the session's own stdout or stderr while it has a UI. The harness process owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame and leave the session without its input box. Admission refuses an unguarded write. Show text with ctx.ui.notify, a footer with ctx.ui.setStatus, progress with ctx.ui.setWidget, and keep console output for the no-UI path: `if (ctx.hasUI) ctx.ui.notify(text, "warning"); else console.error(text);`
+- A failure the person would otherwise wait for in silence reaches them through ctx.ui: an empty `catch {}` around pi.exec, fetch or a dialog turns a broken feature into one that does nothing and says nothing.
 - One file, no dependencies, ASCII text.
 
 ## A complete example

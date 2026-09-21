@@ -555,9 +555,13 @@ def read_answer(
     added, refused = workspace_requires(workspace)
     if refused:
         notes["refused_requires"] = refused
-    review = evolution._review(models, str(request.get("text", "")), design or None, mutations, [*own, *added])
+    review, review_failure = evolution._review(
+        models, str(request.get("text", "")), design or None, mutations, [*own, *added]
+    )
     if review is not None:
         notes["review"] = review
+    else:
+        notes["review_failure"] = review_failure or "the review did not run"
     undeclared = evolution._undeclared_env(mutations, [*own, *added])
     if undeclared:
         notes["undeclared_env"] = undeclared
