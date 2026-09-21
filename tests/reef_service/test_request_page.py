@@ -239,7 +239,8 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
     skipped = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, skipped], now=1_100.0)
     assert REFRESH not in page and '<span class="skipped">No changes</span>' in page
-    assert _sections(page) == ["Request", "Result", "Proposed changes", "Review"]
+    assert _sections(page) == ["Request", "Result", "Proposed changes", "Review", "Design"]
+    assert "<p>one rules entry</p>" in _section(page, "Design")
     selection_result = _section(page, "Result")
     assert "produced no change (no proposal); nothing changed" in selection_result
     assert (
@@ -255,11 +256,35 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
     assert '<span class="complete">Complete</span>' in page and "Nothing left uncovered." in page
     row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": "plan"}))
-    assert "<h2>Review</h2>" not in build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    assert "<h2>Review</h2>" not in page and _sections(page)[-1] == "Design" and "<h2>How to use</h2>" not in page
     failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison proposer"), release_id="rel-0")
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, failed], now=1_100.0)
     assert "produced no change (instruction failed)" in page
     assert "<h3>Error</h3><p>RuntimeError: poison proposer</p>" in page
+
+
+@pytest.mark.unit
+def test_a_settled_request_ends_with_the_design_and_how_to_use_the_change() -> None:
+    """The proposer's design closes with a How to use section; the page shows the two as its last cards, the plan
+    and the usage of the change, escaped."""
+    design = (
+        "Restated: read each answer aloud.\n\nTrigger: the /speak command; state: the last answer, from the session.\n\n"
+        "## How to use\n\nType /speak after an answer; it plays through <afplay>. /speak off stops it."
+    )
+    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": design}))
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    assert _sections(page) == ["Request", "Result", "What changed", "Design", "How to use"]
+    assert _section(page, "Design").strip() == (
+        "<p>Restated: read each answer aloud.\n\nTrigger: the /speak command; state: the last answer, from the session.</p>"
+    )
+    assert _section(page, "How to use").strip() == (
+        "<p>Type /speak after an answer; it plays through &lt;afplay&gt;. /speak off stops it.</p>"
+    )
+    # A plain "How to use:" line splits the same way, wherever the proposer put the heading marks.
+    row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": "A plan.\nHow to use:\nRun /x."}))
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    assert "<p>A plan.</p>" in _section(page, "Design") and "<p>Run /x.</p>" in _section(page, "How to use")
 
 
 def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_and_the_link() -> None:

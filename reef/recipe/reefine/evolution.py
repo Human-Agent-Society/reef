@@ -55,8 +55,9 @@ API_SKILL_NAME = "reef-pi-extension-api"
 #: How much of each entry's body the request prompt shows: enough to recognize it, never the whole tree.
 _PREVIEW_CHARS = 240
 
-#: How much of a design the step records: a few sentences, never a second copy of the entries.
-_DESIGN_CHARS = 1500
+#: How much of a design the step records: a few paragraphs with its How to use section, never a second copy of
+#: the entries.
+_DESIGN_CHARS = 4000
 
 #: The two words a review result may be.
 REVIEW_RESULTS = ("complete", "partial")
@@ -99,7 +100,9 @@ REQUEST_PROMPT = (
     "grant. The value of an env item is read at run time from process.env.NAME; an extension never asks "
     "the user for it, never stores it in a file of its own and never hardcodes it.\n"
     "4. Describe how the user discovers, invokes and sees the result through the existing UI, and how to "
-    "check that path. For a mode, include visible state and a way to turn it off.\n"
+    "check that path. For a mode, include visible state and a way to turn it off. End the design with a "
+    "paragraph headed 'How to use', written for the user: the exact command or trigger, what they see, how "
+    "to turn it off or undo it, and anything they must set up first.\n"
     "5. Then write the entries: complete for what the request implies, and nothing the request did not "
     "ask for. When these kinds and the extension API cannot deliver the behavior the request asks for, "
     "write the design saying why and no entry: a rule, a note or a workaround that only imitates the "
@@ -129,7 +132,7 @@ REQUEST_PROMPT = (
     "{plan}"
     "{api}"
     "Respond with a JSON array and nothing else. Its first object is your design, points 1 to 4 in a few "
-    'sentences: {{"design": "<the design>"}}\n'
+    'sentences, ending with the How to use paragraph: {{"design": "<the design>"}}\n'
     "Then one object per entry, each of the form:\n"
     '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}} (the kind goes under the key name)\n'
     "Reuse an existing entry's id to update it; use a new lowercase id to add one. "

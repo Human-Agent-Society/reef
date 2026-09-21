@@ -34,6 +34,9 @@ Write `design.md` before the entries:
    item.
 4. How the user discovers, invokes and sees the result of the change through the harness's existing UI, and
    how you will check that path. For a mode, include how to see its current state and turn it off again.
+5. End the file with a `## How to use` section, written for the user: the exact command or trigger, what they
+   see, how to turn it off or undo it, and anything they must set up first. The request's page shows the design
+   and this section as the plan and the usage of the change, so keep both concrete.
 
 Then write entries that are complete for what the request implies and nothing it did not ask for. When the
 harness cannot deliver the behavior at all, say so in `design.md` and write no entry: a rule, a note or a
