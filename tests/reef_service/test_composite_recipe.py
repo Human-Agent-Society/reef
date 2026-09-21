@@ -21,7 +21,7 @@ from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, TextFileTree, create_config_surface, create_harness_surface
-from reef.surface.config import CONFIG_FILE, ConfigValidator
+from reef.surface.config import CONFIG_FILE, ConfigInferenceHooks, ConfigValidator
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 
@@ -324,6 +324,37 @@ def test_config_validator_requires_a_json_object(tmp_path: Path) -> None:
         ConfigValidator().validate(Artifact.local(root))
     (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": {"top_p": 0.9}}), encoding="utf-8")
     ConfigValidator().validate(Artifact.local(root))
+    (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": {"/v1/responses": 3}}), encoding="utf-8")
+    with pytest.raises(ReefError, match="/v1/responses must be an object"):
+        ConfigValidator().validate(Artifact.local(root))
+
+
+@pytest.mark.unit
+def test_config_defaults_follow_the_route(tmp_path: Path) -> None:
+    """Shared fields reach every generation route; a route's own entry wins there; a token count takes none."""
+    root = tmp_path / "config"
+    root.mkdir()
+    defaults = {
+        "temperature": 0.2,
+        "/v1/chat/completions": {"max_tokens": 256},
+        "/v1/responses": {"max_output_tokens": 256, "temperature": 0.5},
+    }
+    (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": defaults}), encoding="utf-8")
+    artifact = Artifact.local(root)
+    hooks = ConfigInferenceHooks()
+    assert hooks.prepare_request(artifact, "/v1/chat/completions", {"messages": []}) == {
+        "temperature": 0.2,
+        "max_tokens": 256,
+        "messages": [],
+    }
+    assert hooks.prepare_request(artifact, "/v1/responses", {"input": "x"}) == {
+        "temperature": 0.5,
+        "max_output_tokens": 256,
+        "input": "x",
+    }
+    assert hooks.prepare_request(artifact, "/v1/messages", {"messages": []}) == {"temperature": 0.2, "messages": []}
+    count = {"messages": [], "model": "m"}
+    assert hooks.prepare_request(artifact, "/v1/messages/count_tokens", count) == count
 
 
 @pytest.mark.unit

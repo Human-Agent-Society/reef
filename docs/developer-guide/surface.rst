@@ -138,10 +138,14 @@ client owns how the tree is installed and interpreted.
 **Configuration.** ``create_config_surface()`` serves the ``config``
 component: one ``config.json`` object whose ``request_defaults`` fill
 provider request fields the caller left unset (``temperature``,
-``max_tokens``, ...). A change of defaults is a release like any other,
-frozen per request and recorded against the release that served it. The
-service applies it; it exposes no pulled tree, so it composes beside a
-harness component.
+``max_tokens``, ...). A plain key applies to every generation route. A key
+that names a route path (``"/v1/responses"``) holds that route's own
+fields and wins over the plain ones, since the API dialects spell the same
+setting differently; ``/v1/messages/count_tokens`` takes only its own entry,
+because a token count carries no generation fields. A change of defaults is
+a release like any other, frozen per request and recorded against the
+release that served it. The service applies it; it exposes no pulled tree,
+so it composes beside a harness component.
 
 **Skill trees.** ``create_skill_surface()`` adds optional server-side
 injection to the same ``TextFileTree``. A ``SkillLayer`` owns one top-level
