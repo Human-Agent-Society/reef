@@ -564,17 +564,25 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     assert proposal.notes == {"review": REVIEW} and "(none written)" in model.prompts[2]
 
 
-def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stand(evolution) -> None:
-    for review in (
-        "no json here",
-        json.dumps({"result": "done", "covered": []}),
-        json.dumps(["complete"]),
-        ModelBindingError("model endpoint unreachable: connection refused"),
+def test_a_review_that_fails_says_so_in_the_notes_and_the_mutations_stand(evolution) -> None:
+    """A step whose review did not run publishes with nothing checking that it delivers the request, so the notes
+    carry the reason and the page shows it, rather than reading as a step that had no review to give."""
+    for review, reason in (
+        ("no json here", "carried no result object"),
+        (json.dumps({"result": "done", "covered": []}), "carried no result object"),
+        (json.dumps(["complete"]), "carried no result object"),
+        (ModelBindingError("model endpoint unreachable: connection refused"), "connection refused"),
     ):
         model = Model(designed(skill("run-tests")), review)
         proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
         assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
-        assert proposal.notes == {"design": DESIGN} and model.calls == 3
+        assert set(proposal.notes) == {"design", "review_failure"} and model.calls == 3
+        assert proposal.notes["design"] == DESIGN and reason in proposal.notes["review_failure"]
+    # A reply the model's reasoning ate is asked once more with room for both, and the second answer is the review.
+    model = Model(designed(skill("run-tests")), ModelBindingError("model endpoint returned non-text content"))
+    model.replies.append(json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes["review"] == REVIEW and "review_failure" not in proposal.notes and model.calls == 4
     # The verdict's case and the lists are read leniently: strings only, trimmed, anything else dropped.
     lenient = {"result": "Complete", "covered": ["a", 1, " b ", ""], "uncovered": "none"}
     model = Model(designed(skill("run-tests")), json.dumps(lenient))
