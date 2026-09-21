@@ -808,8 +808,8 @@ CLARIFY_HEAD = (
 )
 QUESTIONS = {
     "questions": [
-        {"question": "Which channel?", "options": ["SMS", "Email"]},
-        {"question": "When?", "options": ["Always", "Nights", "Weekends"]},
+        {"question": "Which channel?", "options": ["Email", "SMS"], "recommended": "SMS"},
+        {"question": "When?", "options": ["Always", "Nights", "Weekends"], "recommended": "not an option"},
     ]
 }
 OTHER = "Other (type an answer)"
@@ -859,8 +859,13 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
         {"content": [thinking, *_call("reef_ask_user", QUESTIONS)["content"]], "stopReason": "toolUse"},
         _call("reef_file_request", filing, "c-2"),
     ]
-    out = _clarify(tmp_path, replies, TEST_SELECT=json.dumps(["SMS", "Nights"]), REEF_TOKEN="tok")
+    out = _clarify(tmp_path, replies, TEST_SELECT=json.dumps(["SMS (recommended)", "Nights"]), REEF_TOKEN="tok")
     assert out["error"] is None
+    # The recommended option leads its question, marked; a recommendation that names no option changes nothing.
+    assert [event["options"] for event in _of_kind(out, "select")] == [
+        ["SMS (recommended)", "Email", OTHER, CANCEL],
+        ["Always", "Nights", "Weekends", OTHER, CANCEL],
+    ]
     # Nothing reaches the session: no message in it, and the model is called directly with the two tools.
     assert _of_kind(out, "user_message") == [] and _of_kind(out, "message") == []
     first, second = _of_kind(out, "model_call")
@@ -876,7 +881,10 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
         "user: we keep missing the blocked builds\n\nassistant: I can watch them.\n```\n\n" + CLARIFY_HEAD
     )
     assert "tool output" not in prompt["content"]
-    assert "- at most 3, one decision per question" in prompt["content"]
+    # The model asks only what a default cannot settle, and may recommend an option.
+    assert "a clear request needs no question, so file it at once" in prompt["content"]
+    assert "- as few as the request needs, often none; one decision per question" in prompt["content"]
+    assert "name it as recommended: it is shown first, marked" in prompt["content"]
     assert prompt["content"].endswith("Do not write the change yourself: reef's service writes it.")
     # The second call carries the answers back as the first call's tool result.
     tool_result = second["context"]["messages"][-1]
@@ -1002,17 +1010,19 @@ def test_ask_user_returns_the_chosen_option_or_the_typed_answer(tmp_path: Path) 
         agent_dir,
         "ask_user",
         QUESTIONS,
-        TEST_SELECT=json.dumps(["SMS", OTHER]),
+        TEST_SELECT=json.dumps(["SMS (recommended)", OTHER]),
         TEST_INPUT=json.dumps(["Slack"]),
     )
     assert out["error"] is None
+    # The recommended option is filed as the option alone, without its mark.
     assert json.loads(out["result"]["content"][0]["text"]) == [
         {"question": "Which channel?", "answer": "SMS"},
         {"question": "When?", "answer": "Slack"},
     ]
-    # Every question offers its options, then the free text answer and the way out.
+    # Every question offers its options, the recommended one first and marked, then the free text answer and the
+    # way out; a recommendation that names no option leaves the list as given.
     assert [event["options"] for event in _of_kind(out, "select")] == [
-        ["SMS", "Email", OTHER, CANCEL],
+        ["SMS (recommended)", "Email", OTHER, CANCEL],
         ["Always", "Nights", "Weekends", OTHER, CANCEL],
     ]
     assert _of_kind(out, "input") == [{"kind": "input", "title": "When?", "placeholder": ""}]

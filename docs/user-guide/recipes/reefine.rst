@@ -37,15 +37,17 @@ How it works
    filed, while the chat shows one line (``ctrl+o`` expands the whole
    clarification) and the session keeps its input and context: when it
    triggers, what state the harness must know and how it learns it, what
-   you must provide. When an open point would change what gets built, it
-   asks you up to three questions, each with concrete options, then files
-   your original words with the answers as clarifications (``--direct`` as
-   the first word files at once). From the shell, ``reef-pi evolve
+   you must provide. It asks only about an open point that changes what
+   gets built and that a reasonable default cannot settle, so a clear
+   request files without a question; each question offers concrete options,
+   the one it recommends first and marked, and it then files your original
+   words with the answers as clarifications (``--direct`` as the first word
+   files at once). From the shell, ``reef-pi evolve
    "<text>"`` posts the same instruction to ``POST /reef/train``; add
    ``--wait`` to stay until the step settles. Either ask prints the
    request's page link (``GET /reef/harness/requests/<id>/page``), which
    reloads every five seconds, naming the step's state, until the result
-   is on it.
+   is on it, ending with the design and how to use the change.
 2. Step. In ``training-mode: manual`` the service runs one evolve step for
    each accepted instruction. Where the host can isolate it, a coding agent
    answers the instruction (see `The agent proposer`_): it edits the tree,
@@ -72,7 +74,7 @@ How it works
 4. Read. A release that touches a ``code_extension`` is held back from the
    served head, so it reaches no session on its own. ``/versions
    <step>`` opens its page (``reef-pi page <version>`` from the shell), which
-   carries the design, the review and the numbers.
+   carries the design, how to use the change, the review and the numbers.
 5. Install and set up. A step that settles while you are between turns offers
    its install there; otherwise run ``/versions <version> install``
    (``reef-pi update`` from the shell). A release held back from the head is

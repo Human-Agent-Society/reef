@@ -555,9 +555,9 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     ]
     # A design longer than the record keeps is cut, and a fenced review still reads.
     fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
-    model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
+    model = Model(designed(skill("run-tests"), design="x" * 5000), fenced)
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
-    assert proposal.notes["design"] == "x" * 1500 and proposal.notes["review"] == REVIEW
+    assert proposal.notes["design"] == "x" * 4000 and proposal.notes["review"] == REVIEW
     # Without a design object the notes carry the review alone, and the review prompt says none was written.
     model = Model(request_reply(skill("run-tests")), json.dumps(REVIEW))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)

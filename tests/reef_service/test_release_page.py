@@ -757,6 +757,14 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_
     assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
     design = _section(page, "Design")
     assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
+    # A design that ends with a How to use section shows it as the card after the design.
+    with_usage = dict(
+        row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\n## How to use\n/away on"}}
+    )
+    usage_page = build_release_page(1, [creation, with_usage])
+    assert _sections(usage_page)[:3] == ["Why", "Design", "How to use"]
+    assert '<p class="text">Add /away.</p>' in _section(usage_page, "Design")
+    assert '<p class="text">/away on</p>' in _section(usage_page, "How to use")
     review = _section(page, "Review")
     assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
     assert (

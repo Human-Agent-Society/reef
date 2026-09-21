@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlencode
@@ -243,12 +244,30 @@ def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     return "<p>A failure in the batch; no request asked for this step.</p>"
 
 
-def _design(metrics: Mapping[str, Any]) -> str:
-    """The Design section: the proposer's plan for the request, when the method recorded ``proposal_notes.design``."""
-    design = _notes(metrics).get("design")
+#: The heading that ends a design and starts its How to use section: a markdown heading or a labelled line.
+USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:
+    """The design the method recorded as ``proposal_notes.design`` and its How to use section, each stripped;
+    empty where the record has none. The proposer writes the usage under a ``How to use`` heading at the end."""
+    design = notes.get("design")
     if not isinstance(design, str) or not design.strip():
-        return ""
-    return _card("Design", f'<p class="text">{escape(design)}</p>\n')
+        return "", ""
+    match = USAGE_HEADING.search(design)
+    if match is None:
+        return design.strip(), ""
+    return design[: match.start()].strip(), design[match.end() :].strip()
+
+
+def _design(metrics: Mapping[str, Any]) -> str:
+    """The Design section and, when the design ends with one, the How to use section, when the method recorded
+    ``proposal_notes.design``."""
+    design, usage = design_sections(_notes(metrics))
+    cards = _card("Design", f'<p class="text">{escape(design)}</p>\n') if design else ""
+    if usage:
+        cards += _card("How to use", f'<p class="text">{escape(usage)}</p>\n')
+    return cards
 
 
 def _diff_block(path: str, before: str, after: str, before_id: str | None, release_id: Any) -> str:

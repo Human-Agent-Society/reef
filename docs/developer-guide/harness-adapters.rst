@@ -589,9 +589,12 @@ two commands, two tools and two event handlers:
   available for feedback. Either way the ``.reef-harness-release`` file
   beside the tree names the release the request runs on; without it nothing
   is sent.
-- ``reef_ask_user``, a tool: up to four questions, each with two to four
-  options offered through ``ctx.ui.select`` plus ``Other (type an answer)``,
-  which opens ``ctx.ui.input``, and ``Cancel this request``. Escape is the
+- ``reef_ask_user``, a tool: the questions a reasonable default cannot
+  settle, often none and at most four, each with two to four options
+  offered through ``ctx.ui.select`` plus ``Other (type an answer)``, which
+  opens ``ctx.ui.input``, and ``Cancel this request``. A question may name
+  one option as ``recommended``: it is listed first with ``(recommended)``
+  after it, and the answer filed is the option alone. Escape is the
   way out of the whole request, not a skipped question: no choice on a
   question, the cancel option, or no text in the free text answer all stop
   the dialogs there, notify ``reef: request cancelled; nothing was filed``

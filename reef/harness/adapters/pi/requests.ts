@@ -121,6 +121,8 @@ const REQUEST_MAX_CHARS = 4000;
 // The choice under every question that opens a free text answer, and the one that drops the request.
 const OTHER = "Other (type an answer)";
 const CANCEL = "Cancel this request";
+// The mark on the option the model recommends, which is listed first; the answer filed is the option alone.
+const RECOMMENDED = " (recommended)";
 const NO_UI_TEXT = "no UI in this session: proceed with your best assumptions and list them in the request";
 // What the model is told when the person backs out: it must not file, and it must not ask again.
 const CANCELLED_TEXT =
@@ -147,6 +149,10 @@ const ASK_USER_PARAMETERS = {
         properties: {
           question: { type: "string", description: "one open point, as a question" },
           options: { type: "array", items: { type: "string" }, minItems: 2, maxItems: 4 },
+          recommended: {
+            type: "string",
+            description: "the option you would choose, word for word as it appears in options, when one is clearly better",
+          },
         },
         required: ["question", "options"],
       },
@@ -174,10 +180,12 @@ const ASK_USER_TOOL = {
   name: "reef_ask_user",
   label: "Ask the user",
   description:
-    "Ask the user up to 4 questions before filing a harness change with reef_file_request, each about one " +
-    "decision that changes what gets built, with 2 to 4 concrete options that do not overlap; the user can " +
-    "always type an answer of their own, and can cancel the whole request. Never ask for a setup value (a " +
-    "phone number, a credential, an account, a permission): reef-pi setup collects those after the install.",
+    "Ask the user before filing a harness change with reef_file_request, only about a decision that changes " +
+    "what gets built and that a reasonable default cannot settle: a clear request needs no question. Each " +
+    "question is one decision with 2 to 4 concrete options that do not overlap; name the one you would choose " +
+    "as recommended when one is clearly better. The user can always type an answer of their own, and can " +
+    "cancel the whole request. Never ask for a setup value (a phone number, a credential, an account, a " +
+    "permission): reef-pi setup collects those after the install.",
   parameters: ASK_USER_PARAMETERS,
 };
 const FILE_REQUEST_TOOL = {
@@ -266,10 +274,14 @@ function clarifyMessage(text, conversation) {
     "",
     "Before filing it with reef_file_request, decide what would be built: when the behavior triggers, what it " +
       "does, what state it keeps and how it learns that state. Ask with reef_ask_user only about a decision that " +
-      "changes what gets built and that the request leaves open. Rules for the questions:",
-    "- at most 3, one decision per question, worded so the user can answer without knowing how the harness works;",
+      "changes what gets built, that the request leaves open, and that a reasonable default cannot settle: a " +
+      "clear request needs no question, so file it at once. Rules for the questions:",
+    "- as few as the request needs, often none; one decision per question, worded so the user can answer " +
+      "without knowing how the harness works;",
     "- 2 to 4 options that are concrete, mutually exclusive and cover the likely answers; no two options that " +
       "mean the same thing; the user can always type their own;",
+    "- when one option is clearly the better choice, name it as recommended: it is shown first, marked, and the " +
+      "user can take it in one keystroke;",
     "- never ask for a value or a setup detail the user provides when the change is installed: a phone number, " +
       "a credential, an account, a permission, or which app or service to use when the request already names " +
       "one; reef-pi setup collects those once, after the install;",
@@ -966,11 +978,16 @@ export default function requests(pi) {
     if (!ctx.hasUI) return { content: [{ type: "text", text: NO_UI_TEXT }], details: {} };
     const answers = [];
     for (const item of params.questions) {
+      // The recommended option leads, marked; the others keep their order. The answer filed is the option alone.
+      const recommended = item.options.includes(item.recommended) ? item.recommended : null;
+      const options = recommended
+        ? [recommended + RECOMMENDED, ...item.options.filter((option) => option !== recommended)]
+        : [...item.options];
       // Esc on a question is the person dropping the request, not an unanswered question: the dialogs stop
       // here and nothing is filed. A dialog the turn aborted reads the same way.
-      const choice = await ctx.ui.select(item.question, [...item.options, OTHER, CANCEL], { signal });
+      const choice = await ctx.ui.select(item.question, [...options, OTHER, CANCEL], { signal });
       if (choice === undefined || choice === CANCEL) return cancelled();
-      let answer = choice;
+      let answer = recommended && choice === recommended + RECOMMENDED ? recommended : choice;
       if (choice === OTHER) {
         answer = await ctx.ui.input(item.question, "", { signal });
         // Esc on the free text answer steps back out of the request too, for one meaning of Esc throughout.
