@@ -259,6 +259,8 @@ def scenario_metadata_for(
     training_job_id: str | None = None,
     operation: str = "training",
     rollback_target_release_id: str | None = None,
+    component: str | None = None,
+    base_release_id: str | None = None,
 ) -> dict[str, object]:
     if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
         raise ValueError("scenario_step must be non-negative")
@@ -274,9 +276,22 @@ def scenario_metadata_for(
     if operation in ("rollback", "promote"):
         if not isinstance(rollback_target_release_id, str) or not rollback_target_release_id:
             raise ValueError("rollback scenario metadata requires rollback_target_release_id")
+        if component is not None:
+            raise ValueError("rollback scenario metadata cannot carry component")
         metadata["rollback_target_release_id"] = rollback_target_release_id
     elif rollback_target_release_id is not None:
         raise ValueError("training scenario metadata must not carry rollback_target_release_id")
+    # The trainer that made the checkpoint and the release its batch was reserved
+    # against: a checkpoint adopted from the artifact head after the commit log
+    # is lost must still be attributed to its component's trainer.
+    if component is not None:
+        if not isinstance(component, str) or not component:
+            raise ValueError("scenario metadata component must be a non-empty string or None")
+        metadata["component"] = component
+    if base_release_id is not None:
+        if not isinstance(base_release_id, str) or not base_release_id:
+            raise ValueError("scenario metadata base_release_id must be a non-empty string or None")
+        metadata["base_release_id"] = base_release_id
     if algorithm_state is not None:
         metadata["algorithm_state"] = dict(algorithm_state)
     if record_progress is not None:
@@ -336,6 +351,14 @@ def parse_scenario_metadata(
             raise ValueError("rollback scenario metadata cannot carry training_job_id")
     elif rollback_target_release_id is not None:
         raise ValueError("non-rollback scenario metadata cannot carry rollback_target_release_id")
+    component = value.get("component")
+    if component is not None and (not isinstance(component, str) or not component):
+        raise ValueError("scenario metadata component must be a non-empty string or null")
+    if component is not None and operation in ("rollback", "promote"):
+        raise ValueError("rollback scenario metadata cannot carry component")
+    base_release_id = value.get("base_release_id")
+    if base_release_id is not None and (not isinstance(base_release_id, str) or not base_release_id):
+        raise ValueError("scenario metadata base_release_id must be a non-empty string or null")
     if scenario_step == 0:
         return scenario, base_artifact, None
     if record_progress is None:
@@ -355,6 +378,8 @@ def parse_scenario_metadata(
         operation=operation or "training",
         operation_verified=operation is not None,
         rollback_target_release_id=rollback_target_release_id,
+        component=component,
+        base_release_id=base_release_id,
     )
     return scenario, base_artifact, commit
 

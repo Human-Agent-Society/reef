@@ -19,7 +19,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
-from reef.storage.commits import CommitLogError, CommitRecord
+from reef.storage.commits import SCENARIO_METADATA_KEY, CommitLogError, CommitRecord, parse_scenario_metadata
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
@@ -114,18 +114,25 @@ def _records(step: int) -> tuple[AgentRecord, AgentRecord]:
     return inference, report
 
 
-def _dispatcher(tmp_path: Path) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
+def _dispatcher(
+    tmp_path: Path,
+    *,
+    records_dir: Path | None = None,
+    backend_factory: Any = None,
+) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
     initial = tmp_path / "initial"
-    for component in (WEIGHTS, HARNESS):
-        (initial / component).mkdir(parents=True)
-        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    if not initial.exists():
+        for component in (WEIGHTS, HARNESS):
+            (initial / component).mkdir(parents=True)
+            (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
     backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    records = tmp_path / "records" if records_dir is None else records_dir
     dispatcher = Dispatcher(
         _TwoTrainerRecipe(backends=backends),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        backend_factory or InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "records",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        agent_record_dir=records,
+        scenario_storage=SQLiteScenarioStorage(records),
     )
     return dispatcher, backends
 
@@ -197,6 +204,49 @@ def test_component_trainers_meet_at_the_commit_boundary(tmp_path: Path) -> None:
         assert reloaded.prepare_training_step(WEIGHTS) is not None
     finally:
         dispatcher.close()
+
+
+@pytest.mark.unit
+def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(tmp_path: Path) -> None:
+    """A checkpoint read back from the artifact head names its component, so a lost commit log resets no trainer."""
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher, _ = _dispatcher(tmp_path, records_dir=tmp_path / "records-1", backend_factory=backend_factory)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        base = scenario.current_artifact_ref().release_id
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        head = scenario.repository.materialize(scenario.current_artifact_ref())
+        checkpoint = head.metadata[SCENARIO_METADATA_KEY]
+        assert isinstance(checkpoint, Mapping)
+        assert checkpoint["component"] == HARNESS
+        assert checkpoint["base_release_id"] == base
+        _, _, adopted = parse_scenario_metadata(checkpoint, checkpoint_head=head.ref)
+        assert adopted is not None and adopted.component == HARNESS and adopted.base_release_id == base
+    finally:
+        dispatcher.close()
+
+    # The record store is gone; the checkpoint is adopted from the head and belongs to the harness trainer.
+    recovered, _ = _dispatcher(tmp_path, records_dir=tmp_path / "records-2", backend_factory=backend_factory)
+    try:
+        scenario = recovered.get_or_create_scenario("agent")
+        assert scenario is not None
+        assert scenario.scenario_step == 1
+        assert scenario.trainer_for(HARNESS).state == {"steps": 1}
+        assert scenario.trainer_for(WEIGHTS).state == {"steps": 0}
+        last = scenario.last_commit_for(HARNESS)
+        assert last is not None and last.step == 1 and last.component == HARNESS
+        assert scenario.last_commit_for(WEIGHTS) is None
+    finally:
+        recovered.close()
 
 
 @pytest.mark.unit

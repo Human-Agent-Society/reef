@@ -518,6 +518,8 @@ class ScenarioCommitter:
                     ),
                     metrics=prepared.metrics,
                     training_job_id=prepared.training_job_id,
+                    component=component,
+                    base_release_id=prepared.base_release_id,
                 )
                 published_ref = artifacts.publish(
                     local_artifact,
