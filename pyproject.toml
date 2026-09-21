@@ -37,7 +37,7 @@ dependencies = [
 # Python-side inference adapters; install native SGLang in its GPU environment.
 sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 tinker = [
-    "tinker==0.28.1",
+    "tinker==0.29.1",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
     "tinker-cookbook==0.5.7",
     "jinja2>=3.1.0",
@@ -85,7 +85,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    "ruff==0.16.7",
+    "ruff==0.16.8",
 ]
 
 [dependency-groups]
