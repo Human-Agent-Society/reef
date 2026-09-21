@@ -137,6 +137,10 @@ class Trainer:
         self._data_offset = 0
         self._data_sequence = 0
         self._pending: _PendingStep | None = None
+        # Rows a committed step of this trainer consumed that retention still
+        # keeps stored. A rebuilt processor never sees them, so the trainer
+        # itself has to keep releasing them until every trainer has.
+        self._stored_consumed_ids: set[str] = set()
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -438,10 +442,14 @@ class Trainer:
         return execution
 
     def releasable_agent_record_ids(self) -> frozenset[str]:
-        """The rows this trainer's processor no longer needs and does not protect."""
+        """The rows this trainer no longer needs and does not protect."""
         with self._lock:
-            retention = self._processor.retention_decision()
-            return frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
+            return self._releasable_ids()
+
+    def _releasable_ids(self) -> frozenset[str]:
+        retention = self._processor.retention_decision()
+        released = retention.releasable_agent_record_ids | self._stored_consumed_ids
+        return frozenset(released - retention.protected_agent_record_ids)
 
     def prepare_commit(
         self, result: TrainStepResult | None, *, compactable: frozenset[str] | None = None
@@ -475,8 +483,7 @@ class Trainer:
             consumed = self._pending.consumed_ids
             if consumed is None:
                 consumed = self._processor.acknowledge(batch_id)
-            retention = self._processor.retention_decision()
-            compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
+            compacted = self._releasable_ids()
             if compactable is not None:
                 compacted = compacted & compactable
             metrics = dict(result.metrics)
@@ -549,8 +556,7 @@ class Trainer:
             batch_id = self._pending.batch_id
             self._processor.dropped(batch_id)
             self._processor.acknowledge(batch_id)
-            retention = self._processor.retention_decision()
-            compacted = frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
+            compacted = self._releasable_ids()
             if compactable is not None:
                 compacted = compacted & compactable
             self._records.compact(
@@ -560,6 +566,7 @@ class Trainer:
                 receipt_metadata={"outcome": "stale", "metrics": dict(metrics or {})},
             )
             self._processor.compaction_applied(compacted)
+            self._stored_consumed_ids -= compacted
             self._pending = None
 
     def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
@@ -573,12 +580,14 @@ class Trainer:
         with self._lock:
             self._records.compact(self.scenario, compacted_ids)
             self._processor.compaction_applied(compacted_ids)
+            self._stored_consumed_ids -= compacted_ids
 
     def compaction_applied(self, compacted_ids: frozenset[str]) -> None:
         """Notify the processor after the scenario store retires committed rows."""
         if compacted_ids:
             with self._lock:
                 self._processor.compaction_applied(compacted_ids)
+                self._stored_consumed_ids -= compacted_ids
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
@@ -632,6 +641,9 @@ class Trainer:
                     if sequence > up_to_sequence:
                         return
                     if item.agent_record_id in consumed_ids:
+                        # Still stored, already trained: this trainer has released it and says so
+                        # until every other trainer has too.
+                        self._stored_consumed_ids.add(item.agent_record_id)
                         continue
                     if item.request_type in self.processor.required_request_types:
                         self._processor.ingest(item)

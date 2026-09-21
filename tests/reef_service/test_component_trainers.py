@@ -242,6 +242,31 @@ def _dispatched_pair(tmp_path: Path, job_id: str = "job-1") -> dict[str, _Compon
 
 
 @pytest.mark.unit
+def test_rows_consumed_before_a_restart_are_still_retired(tmp_path: Path) -> None:
+    """A trainer rebuilt after a restart keeps releasing the rows its committed steps consumed."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        assert scenario.store.history()[-1].compacted_ids == frozenset()
+
+        # Restart between the two trainers' commits of the same rows.
+        reloaded = dispatcher._registry.reload("agent")
+        weights = reloaded.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        reloaded.commit(weights, component=WEIGHTS)
+        assert reloaded.store.history()[-1].compacted_ids == frozenset({"i1", "r1"})
+        assert reloaded.records.count("agent") == 0
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path) -> None:
     """The backend must finish the weights job even after the harness moved the scenario step."""
     dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path))
