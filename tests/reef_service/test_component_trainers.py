@@ -66,6 +66,30 @@ class _ComponentBackend(CandidateBackend):
         pass
 
 
+class _DispatchedBackend(_ComponentBackend):
+    """The same cycle run as a dispatched job: its result carries a job identity the backend must finish."""
+
+    def __init__(self, component: str, artifact_dir: Path, job_id: str) -> None:
+        super().__init__(component, artifact_dir)
+        self.job_id = job_id
+
+    @property
+    def dispatched(self) -> bool:
+        return True
+
+    def settle_step(self, prepared, decision):
+        result = super().settle_step(prepared, decision)
+        assert result.artifact is not None and result.artifact.local_path is not None
+        load = f"inc:{self.prepared}"
+        return TrainStepResult(
+            result.state,
+            metrics=result.metrics,
+            artifact=Artifact.local(result.artifact.local_path, metadata={"runtime_load_id": load}),
+            runtime_load_id=load,
+            training_job_id=self.job_id,
+        )
+
+
 @dataclass(frozen=True)
 class _TwoTrainerRecipe(Recipe):
     """A scenario serving weights and a harness tree, each evolved by its own local backend."""
@@ -119,13 +143,17 @@ def _dispatcher(
     *,
     records_dir: Path | None = None,
     backend_factory: Any = None,
+    backends: dict[str, _ComponentBackend] | None = None,
 ) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
     initial = tmp_path / "initial"
     if not initial.exists():
         for component in (WEIGHTS, HARNESS):
             (initial / component).mkdir(parents=True)
             (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    if backends is None:
+        backends = {
+            component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)
+        }
     records = tmp_path / "records" if records_dir is None else records_dir
     dispatcher = Dispatcher(
         _TwoTrainerRecipe(backends=backends),
@@ -202,6 +230,44 @@ def test_component_trainers_meet_at_the_commit_boundary(tmp_path: Path) -> None:
             reloaded.records.append(record)
         assert reloaded.prepare_training_step(HARNESS) is not None
         assert reloaded.prepare_training_step(WEIGHTS) is not None
+    finally:
+        dispatcher.close()
+
+
+def _dispatched_pair(tmp_path: Path, job_id: str = "job-1") -> dict[str, _ComponentBackend]:
+    return {
+        WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", job_id),
+        HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates"),
+    }
+
+
+@pytest.mark.unit
+def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path) -> None:
+    """The backend must finish the weights job even after the harness moved the scenario step."""
+    dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        assert scenario.dispatched_component == WEIGHTS
+        base = scenario.current_artifact_ref().release_id
+        for record in _records(1):
+            scenario.records.append(record)
+        assert scenario.reserve_training_batch(WEIGHTS) is not None
+        execution = scenario.execute_reserved_training_step(WEIGHTS)
+        assert execution.outcome == "commit" and execution.result is not None
+        scenario.commit(execution.result, component=WEIGHTS)
+        assert scenario.committed_training_job_id == "job-1"
+
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        assert scenario.scenario_step == 2
+        assert scenario.committed_training_job_id == "job-1"
+        assert scenario.committed_training_without_job_id is False
+
+        # A rollback after the weights commit is the one thing that unmakes the proof.
+        scenario.rollback(base)
+        assert scenario.committed_training_job_id is None
     finally:
         dispatcher.close()
 

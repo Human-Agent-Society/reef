@@ -208,6 +208,19 @@ class ScenarioCommitter:
         name = self._bound_trainer(component).component
         return next((record for record in reversed(records) if self._own_record(record, name)), None)
 
+    def record_is_current(self, record: CommitRecord) -> bool:
+        """Whether ``record`` still describes what is served.
+
+        A lone trainer's newest record is current only at the scenario step:
+        a rollback after it moves the step on. With several trainers the step
+        also moves on every other trainer's commit, so the record stays current
+        until a rollback or promote lands after it.
+        """
+        if len(self._trainers) == 1:
+            return record.step == self._step
+        records = self._store.history() if self._store.durable else ()
+        return all(later.operation == "training" for later in records if later.step > record.step)
+
     def _release_manifest(self, artifact: Artifact) -> ReleaseComponents:
         """The manifest a release carries: its own, or the one-component manifest a flat release implies."""
         manifest = artifact.components

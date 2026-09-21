@@ -211,19 +211,23 @@ class Scenario:
 
     @property
     def committed_training_job_id(self) -> str | None:
-        """Training-job identity proven by the dispatched component's current durable commit."""
+        """Training-job identity proven by the dispatched component's newest durable commit.
+
+        Another trainer's commit after it moves the scenario step but does not
+        unmake the proof: the backend still has to finish that job.
+        """
         with self._committer.lock:
             record = self._committer.last_record_for(self.dispatched_component)
-            if record is None or record.step != self.scenario_step:
+            if record is None or not self._committer.record_is_current(record):
                 return None
             return record.training_job_id
 
     @property
     def committed_training_without_job_id(self) -> bool:
-        """Whether the dispatched component's current head is a pre-identity training commit."""
+        """Whether the dispatched component's newest commit is a pre-identity training commit."""
         with self._committer.lock:
             record = self._committer.last_record_for(self.dispatched_component)
-            if record is None or record.step != self.scenario_step:
+            if record is None or not self._committer.record_is_current(record):
                 return False
             return record.operation == "training" and record.operation_verified and record.training_job_id is None
 
