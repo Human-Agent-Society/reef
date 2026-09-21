@@ -183,6 +183,13 @@ Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
   Node 22) on first use, in about a minute. The sandbox's own user can reach
   root in it; nothing there holds a key.
 
+  If the command connection drops, Reef attempts to reconnect to the same
+  process twice within the original time limit; it does not rerun the command.
+  The tunnel retries interrupted response transfers without duplicating chunks.
+  A response that cannot be completed remains a failed stream. Failed proposal
+  steps appear as ``Failed`` on the request and release pages, with the recorded
+  error, and publish no release. After resolving the error, submit the request again.
+
   .. code:: bash
 
      E2B_API_KEY=e2b_... reef serve --recipe reefine \

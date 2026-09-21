@@ -240,6 +240,8 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
         return f"did not pass the checks ({reason or 'the checks failed'}); nothing changed: rephrase or split the request"
     if selection_result == "skipped":
         return f"produced no change ({metrics.get('skipped')}); nothing changed"
+    if selection_result == "failed":
+        return "The step failed before evaluation. Nothing was published; see the error below before retrying."
     return f"the step ended as {selection_result}"
 
 
@@ -375,7 +377,7 @@ def build_request_page(
     else:
         metrics = rows[step].get("metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}
-        change_label = "Proposed changes" if state in ("pending", "rejected", "skipped") else "What changed"
+        change_label = "Proposed changes" if state in ("pending", "rejected", "skipped", "failed") else "What changed"
         body = (
             f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query)}</section>\n'
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'

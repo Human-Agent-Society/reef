@@ -61,13 +61,13 @@ padding:6px 12px;font-size:12px;background:var(--card);white-space:nowrap}
 .status:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
 .tone-selected,.tone-promoted{--status:var(--good);--status-bg:var(--good-bg)}
 .tone-pending,.tone-skipped{--status:var(--warn);--status-bg:var(--warn-bg)}
-.tone-rejected{--status:var(--bad);--status-bg:var(--bad-bg)}
+.tone-rejected,.tone-failed{--status:var(--bad);--status-bg:var(--bad-bg)}
 .tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-settling,.tone-creation,.tone-promote,
 .tone-rollback,.tone-recovery,.tone-unknown{--status:var(--accent);--status-bg:var(--soft)}
 .status{color:var(--status);background:var(--status-bg);border-color:transparent}
 .selected,.promoted,.complete{color:var(--good)}
 .pending,.skipped,.partial,.queued,.proposing,.evaluating,.running,.settling{color:var(--warn)}
-.rejected{color:var(--bad)}.creation,.promote,.rollback,.recovery,.unknown{color:var(--accent)}
+.rejected,.failed{color:var(--bad)}.creation,.promote,.rollback,.recovery,.unknown{color:var(--accent)}
 /* A status word inside a pill takes the pill's tone, which the hero and the summary set. */
 .status span{color:inherit}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px;min-width:0;box-shadow:var(--shadow)}
@@ -106,6 +106,7 @@ STATUS_LABELS = {
     "pending": "Ready for review",
     "rejected": "Not selected",
     "skipped": "No changes",
+    "failed": "Failed",
     "complete": "Complete",
     "partial": "Partial",
     "creation": "Starting point",

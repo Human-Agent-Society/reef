@@ -30,6 +30,7 @@ from reef.service.request_page import (
     settled_step,
 )
 from reef.train.cordis_backend import Mutation, StepProgress
+from reef.train.cordis_backend.strategies import StepProposal
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "request_page.py"
 REFRESH = f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">'
@@ -238,11 +239,11 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
     }
     skipped = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, skipped], now=1_100.0)
-    assert REFRESH not in page and '<span class="skipped">No changes</span>' in page
+    assert REFRESH not in page and '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Request", "Result", "Proposed changes", "Review", "Design"]
     assert "<p>one rules entry</p>" in _section(page, "Design")
     selection_result = _section(page, "Result")
-    assert "produced no change (no proposal); nothing changed" in selection_result
+    assert "The step failed before evaluation. Nothing was published" in selection_result
     assert (
         "<h3>Proposer failure</h3><p>model call failed after 60.0 s (max_tokens=16384): timeout</p>"
         in selection_result
@@ -260,7 +261,7 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
     assert "<h2>Review</h2>" not in page and _sections(page)[-1] == "Design" and "<h2>How to use</h2>" not in page
     failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison proposer"), release_id="rel-0")
     page = build_request_page(_record(compacted_at=1_050.0), [CREATION, failed], now=1_100.0)
-    assert "produced no change (instruction failed)" in page
+    assert '<span class="failed">Failed</span>' in page
     assert "<h3>Error</h3><p>RuntimeError: poison proposer</p>" in page
 
 
@@ -331,10 +332,12 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_
     assert "<script>" not in queued and "caf&#233;" in queued
 
 
-def _propose_holding(entered: Event, release: Event):
+def _propose_holding(entered: Event, release: Event, failure: bool = False):
     def propose(nodes, samples, models, *, requests=()):
         entered.set()
         release.wait(30)
+        if failure:
+            return StepProposal((), {"failure": "the E2B command connection was interrupted"})
         return MARKER
 
     return propose
@@ -376,9 +379,12 @@ def test_a_running_request_lists_the_proposers_activity_newest_first() -> None:
     assert _sections(other) == ["Request", "Progress"]
 
 
-def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_browser_link(tmp_path: Path) -> None:
+@pytest.mark.parametrize("failure", [False, True])
+def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_browser_link(
+    tmp_path: Path, failure: bool
+) -> None:
     entered, release = Event(), Event()
-    recipe = replace(_recipe(tmp_path, _propose_holding(entered, release)), training_mode="manual")
+    recipe = replace(_recipe(tmp_path, _propose_holding(entered, release, failure)), training_mode="manual")
     dispatcher = _dispatcher(tmp_path, recipe)
     scenario = dispatcher.get_or_create_scenario(SCENARIO)
     assert scenario is not None
@@ -449,13 +455,20 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
                     break
                 await asyncio.sleep(0.05)
             assert response.status == 200 and REFRESH not in page, page
-            assert '<span class="selected">Published</span>' in page
             # The settled request reads as settled on the JSON route too, naming the step its row landed as.
             settled = await (await client.get(progress_route, headers=headers)).json()
-            assert settled["settled"] is True and settled["step"] == 1 and settled["state"] == "selected"
-            assert "Published as release " in page and "/versions v1 install" in page
+            assert settled["settled"] is True and settled["step"] == 1
+            if failure:
+                assert settled["state"] == "failed"
+                assert '<span class="failed">Failed</span>' in page
+                assert "the E2B command connection was interrupted" in page
+                assert "/versions v1 install" not in page
+            else:
+                assert settled["state"] == "selected"
+                assert '<span class="selected">Published</span>' in page
+                assert "Published as release " in page and "/versions v1 install" in page
+                assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in page
             assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View v1' in page
-            assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in page
 
             # An unknown id, and a record that is no training instruction, are 404s naming the id.
             response = await client.get("/reef/harness/requests/nope/page", params=QUERY)
