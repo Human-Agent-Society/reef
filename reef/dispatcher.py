@@ -91,6 +91,11 @@ class _TrainingState:
     thread: Thread | None = None
     #: One worker thread per (scenario, component) with a local candidate backend.
     local_workers: dict[tuple[str, str | None], _LocalBackendWorkerState] = field(default_factory=dict)
+    #: One local candidate cycle at a time per scenario: prepare and commit together.
+    local_cycle_locks: dict[str, Lock] = field(default_factory=dict)
+    #: Results refused because another trainer's commit replaced their base, per (scenario, component).
+    stale_refusals_in_a_row: dict[tuple[str, str | None], int] = field(default_factory=dict)
+    stale_refusals_total: dict[tuple[str, str | None], int] = field(default_factory=dict)
 
 
 @dataclass
@@ -139,6 +144,10 @@ class Dispatcher:
     derivation_poll_seconds: float = 1.0
     # One drain, plus one more after reloading the scenario from durable state.
     drain_attempts: int = 2
+    # A local result refused this many times in a row, each time because a
+    # dispatched commit replaced its base, stops spinning: the worker keeps
+    # the batch, reports the refusals, and prepares it again on its next wake.
+    stale_refusal_limit: int = 3
     # A ready batch should be reserved by the next drain; one that sits longer
     # means the training thread is not waking. Status reads perform the check,
     # so the alarm rides the health polling that already watches the service.
@@ -608,8 +617,19 @@ class Dispatcher:
         with self._training.lock:
             keys = [key for key in self._training.local_workers if key[0] == scenario]
             workers = [self._training.local_workers.pop(key) for key in keys]
+            for key in keys:
+                self._training.stale_refusals_in_a_row.pop(key, None)
+                self._training.stale_refusals_total.pop(key, None)
         for worker in workers:
             worker.ready.set()
+
+    def _local_cycle_lock(self, scenario: str) -> Lock:
+        with self._training.lock:
+            return self._training.local_cycle_locks.setdefault(scenario, Lock())
+
+    def _stale_refusals_total(self, scenario: str, component: str | None) -> int:
+        with self._training.lock:
+            return self._training.stale_refusals_total.get((scenario, component), 0)
 
     def _local_backend_worker_registered(self, scenario: str, component: str | None) -> bool:
         with self._training.lock:
@@ -682,35 +702,65 @@ class Dispatcher:
         if current.trainer_for(component).candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
-        try:
-            result = current.prepare_training_step(component)
-        except Exception as exc:
-            self._recover_failed_step(scenario, current, exc, component)
-            raise
-        if result is None:
-            return False
-        # Keep only the short commit and recovery window under the scenario
-        # registry lock. Candidate generation above can take minutes and must
-        # not block record acceptance for this scenario.
-        with self._registry.lock_for(scenario):
-            if self._registry.get_optional(scenario) is not current:
-                raise RuntimeContractError(f"local backend scenario {scenario!r} changed before commit")
+        # Local workers of one scenario take turns for a whole cycle, prepare
+        # and commit together. Preparation already ran one at a time under
+        # the scenario lock; letting the commits race after it only had the
+        # slower worker refused as stale on every cycle, and each refusal
+        # threw away a full candidate evaluation.
+        with self._local_cycle_lock(scenario):
             try:
-                self._commit_result(scenario, result, component)
-            except StaleTrainingResultError as stale:
-                # Another component's commit replaced the release this result
-                # was prepared against. Keep the batch and prepare it again
-                # against the release served now; the loop comes straight back.
-                logger.info("scenario %r component %r: %s; preparing the batch again", scenario, component, stale)
-                current.retry_pending(component)
-                return True
-            except Exception:
-                # A record may already have crossed the fsync commit point.
-                # Reload before rollback or acceptance can observe the stale
-                # in-memory step and append the same step number again.
-                self._reload_durable_local_scenario(scenario, current)
+                result = current.prepare_training_step(component)
+            except Exception as exc:
+                self._recover_failed_step(scenario, current, exc, component)
                 raise
+            if result is None:
+                return False
+            # Keep only the short commit and recovery window under the scenario
+            # registry lock. Candidate generation above can take minutes and must
+            # not block record acceptance for this scenario.
+            with self._registry.lock_for(scenario):
+                if self._registry.get_optional(scenario) is not current:
+                    raise RuntimeContractError(f"local backend scenario {scenario!r} changed before commit")
+                try:
+                    self._commit_result(scenario, result, component)
+                except StaleTrainingResultError as stale:
+                    return self._retry_stale_result(scenario, current, component, stale)
+                except Exception:
+                    # A record may already have crossed the fsync commit point.
+                    # Reload before rollback or acceptance can observe the stale
+                    # in-memory step and append the same step number again.
+                    self._reload_durable_local_scenario(scenario, current)
+                    raise
+        with self._training.lock:
+            self._training.stale_refusals_in_a_row.pop((scenario, component), None)
         return True
+
+    def _retry_stale_result(
+        self, scenario: str, current: Scenario, component: str | None, stale: StaleTrainingResultError
+    ) -> bool:
+        """Keep the refused batch for another preparation; after a few refusals in a row, wait for the next wake.
+
+        Only a dispatched commit can still overtake a local result: the local
+        workers take turns. A weights job that lands during every local cycle
+        would otherwise keep the local worker preparing and discarding forever
+        with nothing in the status to show for it.
+        """
+        key = (scenario, component)
+        with self._training.lock:
+            in_a_row = self._training.stale_refusals_in_a_row.get(key, 0) + 1
+            self._training.stale_refusals_in_a_row[key] = in_a_row
+            self._training.stale_refusals_total[key] = self._training.stale_refusals_total.get(key, 0) + 1
+        current.retry_pending(component)
+        if in_a_row < self.stale_refusal_limit:
+            logger.info("scenario %r component %r: %s; preparing the batch again", scenario, component, stale)
+            return True
+        message = (
+            f"StaleTrainingResultError: component {component!r} was refused {in_a_row} times in a row; "
+            "its batch is kept and prepared again on the next wake"
+        )
+        logger.warning("scenario %r: %s", scenario, message)
+        self._record_training_error(scenario, message)
+        return False
 
     def _run_training(self) -> None:
         # Keep prepare, remote execution, and the trainer/version-chain commit
@@ -987,6 +1037,7 @@ class Dispatcher:
                     "batch_ready": bound.trainer.batch_ready(),
                     "training_mode": bound.trainer.training_mode,
                     "processor": dict(bound.trainer.processor_status()),
+                    "stale_refusals_total": self._stale_refusals_total(scenario_name, bound.component),
                     "last_committed_step": (
                         None
                         if last is None

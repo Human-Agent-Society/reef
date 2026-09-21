@@ -136,11 +136,15 @@ serves none), and every commit record names the ``component`` that made it
 and the ``base_release_id`` its batch was reserved against. A scenario whose
 recipe builds one trainer per component runs those trainers as separate
 workers that meet at this commit boundary, where the scenario lock
-serializes their commits. A local result whose base another trainer's
-commit has replaced is refused (``StaleTrainingResultError``) instead of
-being attached to a combination it was never evaluated with; the worker
-keeps its batch and prepares it again against the release served now. A
-dispatched result is merged instead: the backend published its weights
+serializes their commits. Local workers of one scenario take turns for a
+whole cycle, prepare and commit together, so they never overtake each
+other. A local result whose base a dispatched commit has replaced is
+refused (``StaleTrainingResultError``) instead of being attached to a
+combination it was never evaluated with; the worker keeps its batch and
+prepares it again against the release served now, and after a few
+refusals in a row it reports them in ``/reef/status`` and waits for its
+next wake instead of spinning. A dispatched result is merged instead: the
+backend published its weights
 before the result arrived and its job can only be finished, so the step
 lands on the release served now and the record's ``base_release_id`` shows
 what the batch was reserved against. A lone trainer is never refused: only

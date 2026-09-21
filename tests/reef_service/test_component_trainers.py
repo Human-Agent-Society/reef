@@ -444,7 +444,43 @@ def test_dispatcher_runs_one_worker_per_component(tmp_path: Path) -> None:
             HARNESS: "harness step 2",
         }
         assert all(record.base_release_id is not None for record in current.store.history())
-        assert dispatcher.build_training_status()["error"] is None
+        status = dispatcher.build_training_status()
+        assert status["error"] is None
+        # Local workers take turns for a whole cycle, so neither is ever refused as stale.
+        components = status["scenarios"]["agent"]["components"]
+        assert [components[name]["stale_refusals_total"] for name in (WEIGHTS, HARNESS)] == [0, 0]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_stale_refusals_are_counted_and_bounded(tmp_path: Path) -> None:
+    """A local result overtaken again and again is reported and parked, not prepared and discarded forever."""
+    dispatcher, backends = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        outcomes = []
+        for step in (1, 2, 3):
+            for record in _records(step):
+                scenario.records.append(record)
+            # The weights result is prepared against the served release; the harness cycle then replaces it.
+            assert scenario.prepare_training_step(WEIGHTS) is not None
+            assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+            outcomes.append(dispatcher._process_local_backend_step("agent", WEIGHTS))
+        assert outcomes == [True, True, False]
+        assert backends[WEIGHTS].prepared == 3
+        assert scenario.trainer_for(WEIGHTS).pending_batch is not None
+        status = dispatcher.build_training_status()
+        assert status["scenarios"]["agent"]["components"][WEIGHTS]["stale_refusals_total"] == 3
+        assert "refused 3 times in a row" in status["error"]
+
+        # The kept batch is prepared again on the next wake and commits.
+        assert dispatcher._process_local_backend_step("agent", WEIGHTS) is True
+        assert scenario.trainer_for(WEIGHTS).state == {"steps": 1}
+        status = dispatcher.build_training_status()
+        assert status["error"] is None
+        assert status["scenarios"]["agent"]["components"][WEIGHTS]["stale_refusals_total"] == 3
     finally:
         dispatcher.close()
 
