@@ -753,3 +753,25 @@ def test_both_proposers_are_told_the_machine_the_change_runs_on() -> None:
     assert "platform: darwin 24.6.0" in told and "on its PATH: afplay" in told and "not on its PATH: mpv" in told
     assert "requires item" in told
     assert "unknown" in client_text({}) and "WSL 2" in client_text({})
+
+
+def test_a_binary_item_names_the_program_and_its_check_stays_optional() -> None:
+    """``binary`` is a kind the route admits: the name is the program to look for, the check is optional, and
+    the entry name pattern, which admits no separator, is the whole of what a program name has to satisfy."""
+    from reef.core.requirements import parse_requires
+
+    assert "binary" in REQUIRE_KINDS
+    items = [
+        {"name": "pdftotext", "kind": "binary", "prompt": "  Install poppler  "},
+        {"name": "wkhtmltopdf", "kind": "binary", "check": "wkhtmltopdf --version"},
+    ]
+    assert parse_requires(items) == [
+        {"name": "pdftotext", "kind": "binary", "prompt": "Install poppler"},
+        {"name": "wkhtmltopdf", "kind": "binary", "check": "wkhtmltopdf --version"},
+    ]
+    # A path is not a program name, so the name pattern refuses it before any kind specific rule could.
+    with pytest.raises(ValueError, match=r"requires\[0\]\.name"):
+        parse_requires([{"name": "/usr/local/bin/pdftotext", "kind": "binary"}])
+    # An empty check is refused for a binary as for any other kind.
+    with pytest.raises(ValueError, match=r"requires\[0\]\.check"):
+        parse_requires([{"name": "pdftotext", "kind": "binary", "check": "   "}])

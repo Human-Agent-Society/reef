@@ -57,8 +57,9 @@ When invoked with ``doctor`` (e.g. ``reef-pi doctor``):
   the interpreter behind the wrapper and whether it imports reef and
   reef-client, the service address and whether the token is accepted, the
   agent binary and its version, the tools the adapter wants on PATH, the
-  installed release against the served head, and any release that waits for
-  a person's review with its step page.
+  installed release against the served head, every program a ``binary``
+  requires item of the installed release names (looked for on PATH, never
+  run), and any release that waits for a person's review with its step page.
 
 When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
 ``reef-pi setup --mark <name>``, ``reef-pi setup --release <id>``, ``reef-pi setup --json``,
@@ -68,9 +69,9 @@ When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
      names any catalog release instead, a pending one included) requires of
      you: every ``training_request.requires`` item over the release's chain
      in ``GET /reef/harness/releases``, merged by name as the manifest merges
-     them (``permission``, ``env`` or ``service`` items, each with an optional
-     ``check`` and an optional ``prompt``, one sentence saying what to enter
-     or grant), the check offs the ``.reef-harness-release`` release file
+     them (``permission``, ``env``, ``service`` or ``binary`` items, each with
+     an optional ``check`` and an optional ``prompt``, one sentence saying what
+     to enter, grant or install), the check offs the ``.reef-harness-release`` release file
      records under ``setup``, and the values the ``.reef-harness-env`` env
      file beside it holds.
   2. Prints every item with its check as written and its prompt. An ``env``
@@ -80,7 +81,11 @@ When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
      ``input`` else; ``--yes`` asks nothing) and stores it in the env file.
      For an unmet ``permission`` or ``service`` item it asks ``run it?
      [y/N]`` (``--yes`` answers yes) and runs the check through the shell,
-     exit status zero meaning met; ``--mark <name>`` checks an item off by
+     exit status zero meaning met. A ``binary`` item names a program: it is
+     met when the program is on PATH and the item names no check, and when it
+     names one, the program is looked for first and the check is then asked
+     for and run the same way, so no check runs for a program that is not
+     there. ``--mark <name>`` checks an item off by
      hand and runs nothing. A check off records the check it stood for, so
      an item whose check changed since counts as unmet and runs again.
   3. Records each met item in the release file's ``setup`` and exits 0 when every
@@ -718,6 +723,29 @@ def _env_met(item: Mapping[str, Any], values: Mapping[str, str]) -> bool:
     return bool(os.environ.get(variable) or values.get(variable))
 
 
+def _binary_found(item: Mapping[str, Any]) -> str | None:
+    """Where a ``binary`` item's program is on PATH, None when it is not there; runs nothing."""
+    name = item.get("name")
+    return shutil.which(name) if isinstance(name, str) and name else None
+
+
+def _auto_met(item: Mapping[str, Any], values: Mapping[str, str]) -> bool:
+    """Whether an item is met without a check off, by looking and never by running.
+
+    An ``env`` item whose variable the environment or the env file sets, and a
+    ``binary`` item with no check whose program is on PATH. A ``binary`` item
+    that names a check is met only once that check has run and been checked
+    off, as a ``permission`` or ``service`` item is. Nothing here is recorded:
+    the look is cheap and stays true to the machine, so a program that goes
+    away stops meeting its item."""
+    kind = item.get("kind")
+    if kind == "env":
+        return _env_met(item, values)
+    if kind == "binary":
+        return not item.get("check") and _binary_found(item) is not None
+    return False
+
+
 def _installed_release(compose_dir: str) -> str | None:
     """The release id of the installed tree, from the release file beside it."""
     release = (_read_release_info(compose_dir) or {}).get("release_id")
@@ -757,12 +785,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     record = _read_release_info(compose_dir) or {}
     release = _installed_release(compose_dir)
     stored = _read_env_file(compose_dir)
-    # An env item the environment or the env file meets needs no check off to run.
-    unmet = [
-        item
-        for item in _unmet(record.get("requires"), record.get("setup"))
-        if not (item.get("kind") == "env" and _env_met(item, stored))
-    ]
+    # An item the machine already meets by itself (an env variable set, a program on PATH) needs no check off.
+    unmet = [item for item in _unmet(record.get("requires"), record.get("setup")) if not _auto_met(item, stored)]
     if unmet:
         # Said once, on stderr so a -p run's output stays clean; no check runs here and the session runs anyway.
         print(
@@ -1401,10 +1425,10 @@ class _Setup:
         return next((item for item in self.requires if item["name"] == name), None)
 
     def met(self, item: Mapping[str, Any]) -> bool:
-        """Checked off with its check, or an ``env`` item whose variable the environment or the env file sets."""
+        """Checked off with its check, or met by the machine itself: see :func:`_auto_met`."""
         if _met(item, self.checked.get(item["name"])):
             return True
-        return item.get("kind") == "env" and _env_met(item, self.values)
+        return _auto_met(item, self.values)
 
     def unmet(self) -> list[dict[str, Any]]:
         return [item for item in self.requires if not self.met(item)]
@@ -1517,6 +1541,21 @@ def _settle_env(compose_dir: str, state: _Setup, item: Mapping[str, Any], yes: b
     return True
 
 
+def _settle_binary(item: Mapping[str, Any], yes: bool) -> bool:
+    """Whether a ``binary`` item is met: its program on PATH, and its check, when it names one, run and passed.
+
+    The look costs nothing and runs nothing, so it happens first: a check
+    that names a program the machine does not have would only fail, and the
+    person needs to install it either way."""
+    name = str(item["name"])
+    found = _binary_found(item)
+    if found is None:
+        print(f"    {name} is not on PATH; install it, then run setup again", flush=True)
+        return False
+    print(f"    found at {found}", flush=True)
+    return True if not item.get("check") else _settle_command(item, yes)
+
+
 def _settle_command(item: Mapping[str, Any], yes: bool) -> bool:
     """Whether a ``permission`` or ``service`` item is met once its check ran, after the person confirmed it."""
     check = item.get("check")
@@ -1547,7 +1586,9 @@ def setup(
 
     An unmet ``env`` item asks for its value and keeps it in the env file
     (``yes`` asks nothing); an unmet ``permission`` or ``service`` item runs
-    its check once the person confirms it (``yes`` confirms). ``marks`` are
+    its check once the person confirms it (``yes`` confirms); an unmet
+    ``binary`` item is looked for on PATH, and its check, when it names one,
+    runs on the same confirmation. ``marks`` are
     items checked off by hand, running nothing; an unknown name is exit 2.
     A check runs here and nowhere else."""
     state = _load_setup(scenario, adapter, compose_dir, release, "setup")
@@ -1582,6 +1623,9 @@ def setup(
             print("    met (marked by hand)", flush=True)
         elif item.get("kind") == "env":
             if not _settle_env(compose_dir, state, item, yes):
+                continue
+        elif item.get("kind") == "binary":
+            if not _settle_binary(item, yes):
                 continue
         elif not _settle_command(item, yes):
             continue
@@ -1656,7 +1700,9 @@ def setup_run(scenario: str, adapter: str, compose_dir: str, name: str, *, relea
     """Run one item's check without asking, the caller having confirmed it, and check it off when it passes.
 
     0 when the item is met, 1 when it is not, 2 for a name the release does
-    not require; an ``env`` item's check is reading its variable."""
+    not require; an ``env`` item's check is reading its variable, and a
+    ``binary`` item's is looking for its program on PATH, before the check
+    it names, if any, runs."""
     state = _load_setup(scenario, adapter, compose_dir, release, "setup")
     if state is None:
         return 2
@@ -1668,6 +1714,10 @@ def setup_run(scenario: str, adapter: str, compose_dir: str, name: str, *, relea
     if item.get("kind") == "env":
         met = _env_met(item, state.values)
         detail = "met" if met else f"not met ({_env_variable(item)} is not set; --set {name}=VALUE stores it)"
+    elif item.get("kind") == "binary" and _binary_found(item) is None:
+        met, detail = False, f"not met ({name} is not on PATH; install it, then run this again)"
+    elif item.get("kind") == "binary" and not item.get("check"):
+        met, detail = True, f"met ({name} at {_binary_found(item)})"
     elif not item.get("check"):
         met, detail = False, f"not met (no check; --mark {name} checks it off by hand)"
     else:
@@ -1764,6 +1814,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     rows: list[tuple[bool, str, str]] = []
     catalog: list[Mapping[str, Any]] | None = None
     token: str | None = None
+    prog = f"reef-{adapter}"
     try:
         from reef.core.version import __version__
 
@@ -1808,6 +1859,14 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
         rows.append(
             (found is not None, "tool", f"{command} {'at ' + found if found else 'missing: install ' + package}")
         )
+    # The programs the installed release names, looked for the same way. A release's check is a command it
+    # wrote, and one runs only where the person confirmed it, in setup; doctor says what is there, and nothing more.
+    for item in _named_items((_read_release_info(compose_dir) or {}).get("requires")):
+        if item.get("kind") != "binary":
+            continue
+        found = _binary_found(item)
+        hint = f": {item['prompt']}" if item.get("prompt") else f"; {prog} setup says what it is for"
+        rows.append((found is not None, "program", f"{item['name']} {'at ' + found if found else 'missing' + hint}"))
     installed = _installed_release(compose_dir)
     if installed is None:
         rows.append(

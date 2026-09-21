@@ -20,6 +20,7 @@ import yaml
 from reef_service._trajectories import recorded_trajectory
 from reef_service.config_helpers import load_harness_deployment as load_config
 
+from reef.core.requirements import REQUIRE_KINDS
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
@@ -710,7 +711,7 @@ def test_propose_keeps_the_prompt_of_a_requires_item_for_setup(evolution) -> Non
     model = Model(designed(skill("sms"), requires=refused), json.dumps(REVIEW))
     proposal = evolution.propose(NODES, (), model, requests=(dict(REQUEST),), entries=ENTRIES)
     assert proposal.notes["refused_requires"] == [
-        {"item": refused[0], "reason": "requires[0].kind must be one of ('permission', 'env', 'service')"}
+        {"item": refused[0], "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"}
     ]
 
 
@@ -744,7 +745,7 @@ def test_propose_records_the_requires_items_it_could_not_honor_with_the_reason(e
     assert proposal.notes["refused_requires"] == [
         {
             "item": {"name": "phone", "kind": "sms"},
-            "reason": "requires[0].kind must be one of ('permission', 'env', 'service')",
+            "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}",
         },
         {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
         {

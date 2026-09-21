@@ -14,6 +14,7 @@ import pytest
 from reef_service.test_harness_recipe import MODEL, backend, batch, evaluate, make_binary, run_backend_step
 
 import reef.train.cordis_backend.backend as reef_cordis_backend
+from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters import get_adapter
 from reef.recipe import RecipeConfigError
@@ -297,7 +298,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
     # A prompt rides with its item, and meets the screens a check meets.
     assert recorded["requires"] == [*person, added[0], added[3]]
     assert recorded["refused_requires"][:2] == [
-        {"item": added[1], "reason": "requires[0].kind must be one of ('permission', 'env', 'service')"},
+        {"item": added[1], "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"},
         {"item": added[2], "reason": "carries an instruction override phrasing"},
     ]
     (leak,) = recorded["refused_requires"][2:]

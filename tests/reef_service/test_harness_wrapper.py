@@ -2724,3 +2724,91 @@ def test_page_writes_the_step_page_to_the_cache_prints_its_path_and_opens_it(tmp
     with pytest.raises(SystemExit, match=r"page read failed \(404\): scenario 'team/scenario' has no step 9"):
         page("team/scenario", "pi", compose, 9)
     reef.close()
+
+
+@pytest.mark.unit
+def test_setup_meets_a_binary_item_by_looking_on_path_before_any_check_runs(tmp_path, capsys) -> None:
+    """A binary item with no check is met once its program is on PATH; one that is not there is not met and says
+    to install it; a binary that names a check is looked for first and the check runs on the confirmation a
+    permission's does, so no check runs for a program the machine does not have."""
+    ran = tmp_path / "ran"
+    never = tmp_path / "never"
+    rows = [
+        _row("v1"),
+        _row(
+            "v2",
+            [
+                {"name": "pdftotext", "kind": "binary", "prompt": "Install poppler for the PDF reader"},
+                {"name": "ffmpeg", "kind": "binary"},
+                {"name": "gh", "kind": "binary", "check": f"touch {ran}"},
+                {"name": "wkhtmltopdf", "kind": "binary", "check": f"touch {never}"},
+            ],
+        ),
+    ]
+    reef = _ReleasesReef(rows)
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    env = _ask_env(tmp_path / "captures", compose)
+    on_path = {"pdftotext": "/usr/local/bin/pdftotext", "gh": "/usr/bin/gh"}
+    with (
+        patch.dict(os.environ, env, clear=True),
+        patch("shutil.which", lambda command: on_path.get(command)),
+    ):
+        assert setup("setup-scenario", "pi", compose, yes=True) == 1
+    assert capsys.readouterr().out.splitlines() == [
+        "reef-pi setup: release v2 requires 4 item(s)",
+        "  pdftotext (binary)",
+        "    Install poppler for the PDF reader",
+        "    found at /usr/local/bin/pdftotext",
+        "  ffmpeg (binary)",
+        "    ffmpeg is not on PATH; install it, then run setup again",
+        f"  gh (binary): touch {ran}",
+        "    found at /usr/bin/gh",
+        "    met",
+        f"  wkhtmltopdf (binary): touch {never}",
+        "    wkhtmltopdf is not on PATH; install it, then run setup again",
+        "reef-pi setup: 2 item(s) not met: ffmpeg, wkhtmltopdf",
+    ]
+    # The check of a program that is not there never ran: the look comes first, and it decided.
+    assert ran.exists() and not never.exists()
+    assert [item["name"] for item in json.loads(release_file.read_text())["setup"]] == ["pdftotext", "gh"]
+    reef.close()
+
+
+@pytest.mark.unit
+def test_doctor_reports_a_required_program_and_runs_no_check_of_its_own(tmp_path, capsys, monkeypatch) -> None:
+    """Each ``binary`` item of the installed release is a program row, ok when the program is on PATH and not
+    when it is missing, with the item's prompt as the hint. The check an item names is a command the release
+    wrote: it runs in setup, where the person confirms it, and never here."""
+    from reef.harness.client.wrapper import doctor
+
+    ran = tmp_path / "ran"
+    reef = _DoctorReef(token="dummy", head="rel-3")
+    compose, _ = _ask_tree(tmp_path, reef.port)
+    (tmp_path / ".reef-harness-release").write_text(
+        json.dumps(
+            {
+                "release_id": "rel-3",
+                "requires": [
+                    {"name": "pdftotext", "kind": "binary", "prompt": "brew install poppler"},
+                    {"name": "ffmpeg", "kind": "binary", "check": f"touch {ran}"},
+                    {"name": "REEF_AWAY_PHONE", "kind": "env"},
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    binary = tmp_path / "fake-pi"
+    binary.write_text("#!/bin/sh\necho 0.84.2\n")
+    binary.chmod(0o755)
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    monkeypatch.setattr("shutil.which", lambda command: None if command == "pdftotext" else f"/usr/bin/{command}")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 1  # pdftotext is missing
+    out = capsys.readouterr().out.splitlines()
+    assert any(line.startswith("!!  program") and "pdftotext missing: brew install poppler" in line for line in out)
+    assert any(line.startswith("ok  program") and "ffmpeg at /usr/bin/ffmpeg" in line for line in out)
+    # Only the binary items become program rows, and nothing the release wrote ran.
+    assert not [line for line in out if "REEF_AWAY_PHONE" in line]
+    assert not ran.exists()
+    monkeypatch.setattr("shutil.which", lambda command: f"/usr/bin/{command}")
+    assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
+    reef.close()
