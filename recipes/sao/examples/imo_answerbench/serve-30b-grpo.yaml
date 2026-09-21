@@ -1,0 +1,120 @@
+# GRPO(+DIS) control arm at the paper's model scale (arXiv:2607.07508 §4.2
+# baseline): same model, topology, sequence budget and objective schedule as
+# serve-30b.yaml, but a synchronous group of SAO_BATCH rollouts of one prompt
+# with the group-relative baseline and no critic. The group is scored before
+# any update, which is the barrier SAO removes.
+#
+# Started by run.sh with SAO_SERVE_YAML=serve-30b-grpo.yaml SAO_DRIVER=stream.py
+# SAO_GROUP=8: the driver sends eight rollouts of one prompt per step, the
+# paper's GRPO group size, at the SAO arm's rollouts per step.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: work/stack
+  ready-timeout: 3600
+
+inference:
+  num-gpus: "8"
+  tensor-parallel-size: "8"
+  timeout-s: 1800
+  retry-timeout-s: 7200
+  retry-max-s: 60
+  options:
+    router-port: "30000"
+    disable-radix-cache: true
+    incremental-streaming-output: true
+    # Eight concurrent 61k-token rollouts: the KV pool must leave room for the
+    # prefill logits of a chunk (all-gathered across TP with return_logprob),
+    # which is what ran out of memory at the default fraction after the first
+    # weight update.
+    mem-fraction-static: "0.7"
+    chunked-prefill-size: "4096"
+    max-running-requests: "16"
+  model-path: ~/models/Qwen3-30B-A3B-Thinking-2507
+recipe:
+  implementation: recipes.sao.control_recipe:SAOGrpoControlRecipe
+  config:
+    batch-size: ${SAO_BATCH}           # MUST equal training.config.global_batch_size and n-samples-per-prompt
+    max-staleness: 18
+    checkpoint-every-n-versions: 1
+training:
+  backend: slime
+  colocate: true
+  ready-timeout: 1800
+  timeout-s: 14400
+  config:
+    checkpoint_dir: ${SAO_CKPT_DIR}
+    global_batch_size: ${SAO_BATCH}
+  options:
+    megatron-to-hf-mode: "bridge"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "100"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "16384"
+    log-probs-max-tokens-per-gpu: "16384"
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    qk-layernorm: true
+    normalization: "RMSNorm"
+    moe-token-dispatcher-type: "alltoall"
+    moe-router-topk: "8"
+    moe-grouped-gemm: true
+    moe-router-dtype: "fp32"
+    moe-permute-fusion: true
+    moe-aux-loss-coeff: "0"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "8"
+    num-gpus-per-node: "8"
+    tensor-model-parallel-size: "8"
+    pipeline-model-parallel-size: "1"
+    expert-model-parallel-size: "8"
+    expert-tensor-parallel-size: "1"
+    sequence-parallel: true
+    recompute-granularity: "full"
+    recompute-method: "uniform"
+    recompute-num-layers: "1"
+    seq-length: "65536"
+    rollout-max-response-len: "61440"
+    optimizer: "adam"
+    optimizer-cpu-offload: true
+    optimizer-offload-fraction: "1.0"
+    use-precision-aware-optimizer: true
+    no-save-optim: true
+    reef-checkpoint-min-free-space-fraction: "0.03"
+    lr: "1e-6"
+    lr-decay-style: "constant"
+    loss-type: "policy_loss"
+    use-rollout-logprobs: true
+    eps-clip: "0.3"
+    eps-clip-high: "5.0"
+    gamma: "1.0"
+    lambd: "1.0"
+    entropy-coef: "0.0"
+    n-samples-per-prompt: "${SAO_BATCH}"
+    advantage-estimator: "grpo"
+storage:
+  # Every update publishes a full copy of the model (tens of GB); keep the
+  # artifact repository and caches beside the checkpoints on local disk.
+  artifact-repository: ${SAO_CKPT_DIR}/artifacts.git
+  artifact-work-dir: ${SAO_CKPT_DIR}/artifact-work
+  artifact-cache-dir: ${SAO_CKPT_DIR}/artifact-cache
+  agent-record-dir: work/agent-record
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    tags: []
+    mode: online
+    directory: work/wandb
+    upload_checkpoints: false
