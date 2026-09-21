@@ -35,7 +35,7 @@ serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config, critic 
 run.py                the loop, written out: solve, verify, report, task by task
 run.sh                starts the Reef training stack, then runs run.py
 pyproject.toml        makes the harness importable
-results/              the reward curves of the Qwen3-30B-A3B comparison
+results/              held-out accuracy and training curves of the batch-128 comparison
 ```
 
 ## The harness
@@ -72,7 +72,8 @@ self._client.report(SCENARIO, {"score": score, "references": [agent_record_id]},
    (`inference_with_record`) and keep the returned `agent_record_id` as the
    generation receipt.
 2. After the local grader computes the reward, report it against that exact
-   receipt. With `batch_size: 1`, each report is one training step.
+   receipt. The dispatcher collects `batch_size` reports into one training
+   step; this smoke config sets `batch_size: 1`, so each report is one step.
 
 A third piece runs after the trial. Harbor writes `result.json` when the
 verifier finishes, and a watcher thread posts the verifier's reward as one
@@ -193,8 +194,10 @@ curl -s -H "Authorization: Bearer reef-local" \
 ```
 
 The runtime reports `pg_clipfrac` (the fraction of tokens the DIS mask
-removed), `critic/explained_variance`, actor and critic `grad_norm`, and the
-asynchrony telemetry `sao/policy_lag_*`, `sao/queue_age_s_*`, and
+removed), `train_rollout_logprob_abs_diff` (the mean per-token gap between the
+engine's and the trainer's log-probabilities, the quantity DIS masks on),
+`critic/explained_variance` (meaningful only with more than one sample per
+step), actor and critic `grad_norm`, and the asynchrony telemetry `sao/policy_lag_*`, `sao/queue_age_s_*`, and
 `sao/effective_token_rate`. Set `observability.wandb.enabled: true` in
 `serve.yaml` and export `WANDB_API_KEY` to keep them per committed step;
 `observability.wandb.directory` is where the run files go.
@@ -211,12 +214,14 @@ equal, because each rollout sample is its own data-parallel unit.
 
 The integration reproduces:
 
-- one rollout per training step, with no comparison group and no
-  slowest-sample barrier (`batch_size: 1`, `--global-batch-size=1`);
+- single-rollout sampling, one rollout per prompt with no comparison group and
+  no slowest-sample barrier, with `batch_size` such rollouts per optimizer
+  step (the recipe default is the paper's 128; this smoke config sets
+  `batch_size: 1`, `--global-batch-size=1`, see below);
 - a value model colocated with the actor and two critic steps per actor step
   (`--critic-steps-per-actor=2`), trained at the paper's value learning rate
   of `5e-6` (`--critic-lr=5e-6`) with the paper's 10-step value warmup
-  (`--num-critic-only-steps=10`: the first ten rollout steps fit the
+  (`--num-critic-only-steps=10`: the first ten optimizer steps fit the
   zero-initialized value head before any policy update);
 - value targets from Monte-Carlo returns (λ = 1) and policy advantages from
   the length-adaptive λ with α = 1.5, built by skip-observation GAE in the
@@ -228,96 +233,172 @@ The integration reproduces:
 - sampling at `temperature=1.0, top_p=1.0`, a constant policy learning rate
   of `1e-6`, and no entropy bonus.
 
+### Batch size is not group size
+
+The paper trains with "a batch size of 128, a group size of 1" (§4.1): one
+rollout per prompt, 128 prompts per optimizer step. Single-rollout is a
+statement about the group, not about the step. `run.py` and `serve.yaml` set
+`batch_size: 1` and `--global-batch-size=1`, which is a different estimator:
+each optimizer step is one REINFORCE sample with a critic baseline. That is
+the smallest instance of the paper's loop and a good smoke test, but the gradient of one rollout at the
+paper's learning rate is mostly noise, and two of its diagnostics are
+degenerate at that size: `critic/explained_variance` is
+`1 - Var(R - V) / Var(R)` over the batch, which is identically 0 for one
+sample, and the per-step reward is a coin flip. The streaming protocol below
+uses the paper's shape at a budget one node can afford.
+
+### The streaming protocol
+
+`stream.py` keeps `SAO_IN_FLIGHT` requests open at all times, each on a
+problem drawn from a training pool, grades each completion with the
+verifier's rule and reports it against its receipt; `serve-30b.yaml` takes
+the optimizer step size from `SAO_BATCH` (the recipe's `batch-size` and the
+driver's `--global-batch-size`, which must agree). Held-out problem indices
+are never served, and `evaluate.py` scores the base and the trained weights
+on them afterwards with fresh samples. `SAO_GROUP=8` turns the same driver
+into the GRPO control: eight rollouts of one prompt per step, scored before
+the step, which is the barrier SAO removes.
+
+```bash
+python export_problems.py work/imo_answerbench.jsonl          # problem_idx, problem, gold
+SAO_BATCH=8 SAO_SERVE_YAML=serve-30b.yaml SAO_DRIVER=stream.py \
+SAO_PROBLEMS=work/imo_answerbench.jsonl SAO_HOLDOUT=0,1,7,... SAO_POOL=2,5,... \
+SAO_IN_FLIGHT=8 SAO_BUDGET=320 ./run.sh
+python evaluate.py --problems work/imo_answerbench.jsonl --indices 0,1,7,... --runs 8 \
+    --url http://127.0.0.1:30001/v1/chat/completions --label sao --out work/eval-sao.jsonl
+python plot_stream.py results/curve.png --records work/records/stream-*.jsonl \
+    --eval base=work/eval-base.jsonl sao=work/eval-sao.jsonl --batch 8
+```
+
 The cookbook configuration is a functional smoke rather than the paper's
 setup: it serves Qwen2.5-1.5B-Instruct with a 2048-token generation window,
-trains on the benchmark's own problems, and starts from the public
-instruction-tuned checkpoint. The paper-scale run below closes the model gap
-and lists its remaining deviations.
+trains on the benchmark's own problems, starts from the public
+instruction-tuned checkpoint, and runs one optimizer step per rollout
+(`batch_size: 1`). That last point matters more than the model size. The paper
+trains with a batch of 128 rollouts from 128 prompts per step (§4.1); "single
+rollout" refers to one rollout per prompt, not one rollout per update. A batch
+of one gives the critic a single sample per step, so it cannot learn a
+baseline and the advantages it feeds the policy are noise; the paper's
+argument for single-rollout training rests on the value model doing that
+job. Use the recipe default (128, or `SAO_BATCH` in the paper-scale configs)
+for any run whose numbers are meant to be read. The runs in Results use the paper's
+model and batch shape and list their remaining deviations.
 
 ## Results
 
-### Qwen3-30B-A3B on IMOAnswerBench, 48 scored rollouts per arm
+In this setting, with no tools, the public checkpoint, the DeepMath pool, and 128 rollouts per step, SAO trained stably. At step 80 it was 5 to 13 points above GRPO(+DIS) on the three held-out sets, and by step 140 GRPO(+DIS) had fallen to 9.6% AIME, 5.4% HMMT and 9.9% IMO-AnswerBench, because it shortened its answers until held-out accuracy collapsed. Against the untrained model, SAO gained 2 to 4 points on AIME and IMO and was flat on HMMT, within the per-checkpoint intervals. The paper’s absolute numbers, obtained with a Python tool, an SFT initialisation, and about 1,000 steps, are not reachable here; the Limitations subsection explains why.
 
-Two arms were trained on the same three problems, from the same checkpoint,
-at the same rollout budget, and only the objective differed: one arm ran the
-`sao` recipe, the other a GRPO control with the same DIS mask
-(`--advantage-estimator=grpo`, groups of four). The runs were made in August 2026 with an earlier version of
-this harness, on the tree before the `recipes/` layout; the drivers and the
-recipe have been ported since, and every number below was read from the run
-records and the version endpoints captured at the time. The per-rollout
-records are in the repository history
-(`examples/sao/bench/deployments/qwen3_30b_a3b_main/results/` at commit
-`375e0036`); the figure below is plotted from them.
+### Setup and evaluation
 
-This is a budget-limited comparison. Every scored rollout became a report
-against the training bridge (SAO commits once per rollout, GRPO once per
-filled group), but 48 rollouts per arm is far short of a training run, so the
-table answers whether the paper's ordering holds at this budget, not where
-the methods converge.
+We started from the public Qwen3-30B-A3B-Thinking-2507 checkpoint, without additional SFT. Training and evaluation used plain chain of thought, no tools, and a final answer in `\boxed{}`.
 
-| Setting | Value |
-| --- | --- |
-| Task | IMOAnswerBench `problem_idx` 4, 8, 12; one rollout per task in rotation (SAO), one group of four per task (GRPO) |
-| Model | `Qwen3-30B-A3B-Thinking-2507`, converted to Megatron `torch_dist` |
-| Actor, with the SAO critic | one 8-GPU node, TP4 / PP2 / EP4, sequence parallel, full recompute, CPU-offloaded precision-aware Adam |
-| Rollout | a second 8-GPU node, SGLang TP8, temperature 1.0, top-p 1.0 |
-| Generation window | 61,440 tokens in a 65,536-token sequence |
-| Objective | DIS 0.3 / 5.0, two critic steps per actor step, length-adaptive λ with α 1.5, policy lr `1e-6`, value lr `5e-6` |
-| Budget | 48 scored rollouts per arm; batch 1 (SAO), group 4 (GRPO) |
-| Reward | strict `\boxed{}` equivalence against the gold answer, no LLM judge |
+The main training set, called the mid-pass pool, contains 1,107 DeepMath-103K problems with difficulty ≥ 7 and integer answers. Selection used estimated base pass rates in [0.125, 0.75], from at least three earlier samples per problem at a 24k window. That estimate averaged 0.51. At the 32k training window, we measured about 0.70 at step 0 because the earlier estimate counted truncations as failures.
 
-| Arm | Scored rollouts | Training commits | Mean reward | imo-4 | imo-8 | imo-12 | Wall-clock |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
-| base (untrained; 16 runs per problem, same grader and window) | 48 | 0 | `0.458` | 15/16 | 3/16 | 4/16 | n/a |
-| SAO | 48 | 47 | `0.479` | 15/16 | 4/16 | 4/16 | 22,623 s |
-| GRPO(+DIS) | 48 | 12 | `0.417` | 16/16 | 2/16 | 2/16 | 8,055 s |
+Both objectives used the paper’s settings where applicable:
 
-The ordering matches the paper at this budget: SAO (0.479) above the base
-rate (0.458) above GRPO (0.417). An earlier summary of these runs listed
-GRPO's imo-12 count as 3/16; the run records give 2/16, which is the count
-the mean of 0.417 (20 of 48) corresponds to. SAO's gain is on imo-8, with imo-12 at the
-base rate and imo-4 close to saturated. GRPO(+DIS) ends below the base rate:
-12 filled groups over 48 rollouts, and most of those groups uniform (all four
-correct or all four wrong), which leaves no gradient. The paper's per-step
-batch is 128 over a full training run.
+| Setting | Configuration |
+|---|---|
+| DIS mask | 0.3 / 5.0 against the engine’s rollout log-probabilities |
+| Policy learning rate | Constant 1e-6 |
+| SAO critic | Learning rate 5e-6; two critic updates per actor update; 10 critic-only warmup steps |
+| Value estimation | Monte-Carlo targets; length-adaptive lambda with alpha 1.5 |
+| Regularization and sampling | No entropy bonus or KL term; temperature 1.0; top-p 1.0; dropout off, with the earlier bug fixed upstream |
+| Batch size | 128 rollouts per optimizer step |
+| SAO collection | One rollout per prompt, group size 1; 256 rollouts in flight; maximum staleness 4 |
+| GRPO(+DIS) control | 16 prompts × 8 rollouts; group-relative advantages; one training step per 16 complete groups |
+| Training window | 32,768 generated tokens; `seq-length` 36,864 |
+| Topology | Actor tensor-parallel 8 with `SAO_TRAIN_NODES=4`; critic colocated with actor; rollout engines tensor-parallel 4 |
+| Driver and step time | `stream.py`; about 10 minutes per SAO step and 3 minutes per GRPO step |
 
-![Cumulative mean reward over the 48 scored rollouts per arm](results/2026-08-15-imo-answerbench-qwen3-30b-a3b/learning_curve.png)
+Held-out accuracy measures strict boxed-answer equivalence, without an LLM judge. Evaluation used a 128k generation window, temperature 1.0, and top-p 1.0. AIME 2025 and HMMT February 2025 each contain 30 problems evaluated with eight samples per problem. IMO-AnswerBench contains 400 problems evaluated with two samples each. We kept SAO checkpoints every 20 optimizer steps and GRPO(+DIS) checkpoints at steps 40 and 80.
 
-The curve is the cumulative mean reward against scored rollouts, per arm,
-with the base rate as the dashed line. The runs predate Reef's experiment tracking, so no per-step W&B
-history exists for them. A new run with `observability.wandb.enabled: true`
-records the step metrics that the TTT-Discover and OpenClaw-RL results keep
-(mean reward, response length, KL, step time).
+### Observed held-out results
 
-Wall-clock includes a per-step serving-weight export whose cost is the same
-at every step, so it penalizes SAO's four times higher step count; compare
-step times on the reward-versus-rollout records rather than on wall-clock.
+All accuracies below are percentages.
 
-Deviations from the paper's protocol:
+| Run | Optimizer step | AIME 2025 | HMMT February 2025 | IMO-AnswerBench |
+|---|---:|---:|---:|---:|
+| Base | 0 | 80.4 | 66.7 | 48.6 |
+| SAO, seed 0 | 20 | 82.9 | 67.5 | 51.4 |
+| SAO, seed 0 | 40 | 83.3 | 67.1 | 50.1 |
+| SAO, seed 0 | 60 | 84.2 | 62.5 | 52.1 |
+| SAO, seed 0 | 80 | 83.8 | 62.9 | 51.9 |
+| SAO, seed 0 | 99 | 82.5 | 68.3 | 49.4 |
+| SAO, seed 0 continuation | 119 | 82.1 | 67.9 | 50.1 |
+| SAO, seed 0 continuation | 139 | 80.0 | 66.3 | 50.3 |
+| SAO, seed 1 | 20 | 81.2 | 67.1 | 50.5 |
+| SAO, seed 1 | 40 | 82.5 | 68.3 | 50.9 |
+| SAO, seed 1 | 60 | 82.5 | 65.8 | 50.0 |
+| GRPO(+DIS), first run | 40 | 84.6 | 66.3 | 50.9 |
+| GRPO(+DIS), first run | 80 | 70.8 | 52.9 | 44.1 |
+| GRPO(+DIS), rerun | 20 | 83.3 | 69.2 | 50.1 |
+| GRPO(+DIS), rerun | 40 | 82.5 | 66.3 | 51.6 |
+| GRPO(+DIS), rerun | 60 | 78.8 | 62.5 | 49.2 |
+| GRPO(+DIS), rerun | 80 | 74.2 | 55.0 | 46.5 |
+| GRPO(+DIS), rerun | 100 | 45.8 | 26.7 | 28.5 |
+| GRPO(+DIS), rerun | 120 | 24.6 | 13.8 | 20.0 |
+| GRPO(+DIS), rerun | 140 | 9.6 | 5.4 | 9.9 |
+| Pooled, eight SAO checkpoints (both seeds, steps 20 to 99) | | 82.9 | 66.2 | 50.8 |
 
-- **No TIR SFT init.** The paper's math arm starts from an unpublished SFT on
-  GPT-OSS-120B tool-integrated-reasoning data; these runs start from the
-  public Thinking checkpoint. The paper's absolute number (74.0 accuracy
-  after full training) is not reachable from this init at any budget.
-- **Generation window 61,440 tokens** (paper: 128k). Some rollouts truncate at
-  the cap; the cap is the same for both arms.
-- **Budget 48 rollouts per arm, batch 1 (SAO) / group 4 (GRPO)**; the paper
-  trains with batch 128 over a full run.
-- **Trained on the benchmark's own problems**; the paper trains on a separate
-  math corpus and evaluates on the benchmark.
+SAO seed 0 and the first GRPO(+DIS) run each completed 99 steps before failing during step-100 artifact publication; with publication disabled, the GRPO(+DIS) rerun (same pool, same seed and prompt order) ran 144 steps and was stopped, with checkpoints every 20 steps. We continued from seed 0’s saved step-99 weights with a fresh critic and optimizer, including 10 critic-only warmup steps. The continuation uses a +99 plotting offset. Seed 1 ended at step 61. Seeds differ only in prompt order, with the same order for a given seed value.
 
-For a base number comparable with the paper's Table 1, the untrained model
-was also run on the full 400-problem IMOAnswerBench, four runs per problem,
-temperature 1.0, top-p 1.0, in a 65,536-token window:
+Several SAO checkpoints gained 2 to 4 points over base on AIME and IMO. HMMT fluctuated around base, including below-base checkpoints. The pooled scores suggest the same overall pattern, but checkpoints are correlated and do not provide independent evidence.
 
-| Grader | Reef base | Paper base (without Python) |
-| --- | ---: | ---: |
-| Strict answer equivalence | `44.69` | 55.3 |
+After the restart with a fresh critic and optimizer, the continuation drifted, with training reward falling from 0.83 to about 0.80 and response length and truncation rising over its 47 steps; its held-out points at steps 119 and 139 sit near the base rate, and we stopped it without reading it as evidence either way about SAO.
 
-The paper does not specify its grading protocol for IMOAnswerBench. The
-strict rule is a lower bound, an LLM-judge upgrade path measured earlier is
-an upper bound at 63.44, and the paper's 55.3 falls between the two. Compare
-arms against the Reef base column, not against the paper's number.
+GRPO(+DIS) matches SAO through step 40 in both of its runs (the two runs agree within about 4 points at their shared steps 40 and 80), then falls below SAO on all three sets by step 80: 5 to 13 points below, depending on the run and the set. The rerun reaches 9.6 / 5.4 / 9.9 by step 140, between a tenth and a fifth of the base rate, with its mean response length under 1k tokens. Its training reward on the pool also falls after step 100, from about 0.90 to between 0.55 and 0.75.
+
+### Training observations and interpretation
+Training metrics are per-step means over 128 rollouts, smoothed over four steps. On the mid-pass pool, SAO reward rose from 0.70 at step 0 to 0.83 at step 99. Mean response length stayed between 15k and 18k tokens, and truncation fell from 5% to 2%. Both seeds showed the same pattern over their observed runs.
+
+GRPO(+DIS) reward increased from 0.60 to 0.90 by step 90. Over that period, mean response length fell from 19k to 1.3k tokens and truncation reached zero. Its rising training reward therefore accompanied declining held-out accuracy.
+
+Earlier runs used the full 8,745-problem DeepMath difficulty ≥ 7 integer-answer set, called the easy pool. The base solves about 0.87 of this pool. These runs used a 24k training window and an earlier harness revision.
+
+| Easy-pool run | Step | AIME 2025 | HMMT February 2025 | IMO-AnswerBench |
+|---|---:|---:|---:|---:|
+| SAO | 40 | 84.6 | 68.3 | 48.6 |
+| GRPO(+DIS), second run | 40 | 81.2 | 65.0 | 49.2 |
+| GRPO(+DIS) | 80 | 44.2 | 27.5 | 31.2 |
+
+On the easy pool, SAO stayed near 12k tokens and reward 0.88. GRPO(+DIS) shortened from 12k to 1k tokens over 100 steps; reward rose from 0.85 to 0.93 before falling.
+
+Our hypothesis is that, on mostly solvable problems without tools or length or KL control, shorter correct answers beat truncated long answers within a group. Group-relative advantages may then reward brevity, a pressure we hypothesize the SAO critic baseline does not create. The aggregate measurements do not establish this mechanism. Whether it explains the collapse remains an open question.
+
+![Held-out accuracy and training dynamics against optimizer step](results/2026-09-21-mid-pass-pool/learning_curve.png)
+
+The learning-curve figure in `results/2026-09-21-mid-pass-pool/learning_curve.png` shows held-out accuracy with 95% Wilson intervals, a dotted base line, and its interval shaded grey. The bottom row shows response length, training reward, and truncation against optimizer steps completed when each rollout was scored, using times parsed from the training log. `plot_paper.py` accepts `--evals`, `--records`, `--steps`, and continuation offsets through `--offset`.
+
+### Paper comparison
+
+Table 1 of arXiv 2607.07508 reports the following percentages, using a 128k window and means over 16 evaluation runs. Its trained SAO and GRPO results include Python during reasoning and evaluation.
+
+| Paper model or objective | Python | AIME 2025 | BeyondAIME | HMMT November 2025 | IMO-AnswerBench |
+|---|---|---:|---:|---:|---:|
+| SAO | Yes | 97.3 | 74.8 | 88.3 | 74.0 |
+| GRPO(+DIS) | Yes | 93.5 | 70.8 | 84.0 | 70.0 |
+| SAO with DIS only | Yes | 94.2 | 71.5 | 86.7 | 71.3 |
+| Base Qwen3-30B-A3B | No | 85.0 | 63.0 | 76.7 | 55.3 |
+| SFT initialization | No | 14.6 | 46.8 | 17.3 | 42.0 |
+| SFT initialization | Yes | 80.4 | 53.3 | 75.2 | 53.3 |
+
+### Limitations
+
+We used no Python tool in training or evaluation. For the paper’s SFT model, Python raises AIME from 14.6% to 80.4% and IMO from 42.0% to 53.3%. Our chain-of-thought results, roughly 83% and 51%, remain far below its SAO scores of 97.3% and 74.0%. We do not claim to approach those scores.
+
+Our public Thinking checkpoint is already RL-trained. The paper initializes Qwen3-30B-A3B from tool-integrated-reasoning SFT on unpublished GPT-OSS-120B traces. We have less headroom and a different starting point.
+
+Our DeepMath subsets are smaller and different from the paper’s unpublished training corpus. The base already solves about 0.70 of the mid-pass pool and 0.87 of the easy pool.
+
+Our budget is about 130 optimizer steps versus about 1,000 steps of 128 rollouts in the paper. Its SAO and GRPO(+DIS) separate only after about 400 steps, beyond our runs.
+
+Our training window is 32,768 tokens versus 128k. Evaluation uses eight samples per AIME/HMMT problem and two per IMO problem, versus 16 in the paper, and HMMT February rather than November 2025. Per-checkpoint 95% intervals are about ±5 points on AIME/HMMT and ±3.4 on IMO. No single checkpoint separates SAO from base.
+
+We ran two SAO seeds and two GRPO(+DIS) runs of one seed on the mid-pass pool. The seed-0 continuation after step 99 resets both critic and optimizer.
+
+The GRPO(+DIS) collapse belongs to this setting; the proposed mechanism remains a hypothesis. The paper’s GRPO(+DIS) stays stable and finishes four IMO points behind SAO. Its vanilla GRPO collapses around step 160.
+
+Three of four runs ended in engine watchdog kills. Two followed publication pauses exceeding the SGLang scheduler’s 300-second watchdog; seed 1 failed after a weight update at step 61, with cause unresolved. Checkpoints use shared storage with a retention cap. The stack files now set `checkpoint-every-n-versions`, `save-interval`, and `critic-save-interval` very large, disabling periodic publication and Megatron/critic saves. The weight-update path in this configuration has not been hardened.
 
 ### Attempts that produced no result
 
