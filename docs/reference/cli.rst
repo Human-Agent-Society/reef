@@ -186,9 +186,11 @@ using this action; they reject the new ``delete_scenario`` command.
 
 The connector reconnects after network failures. It does not install an OS
 startup service; use ``--foreground`` with your process supervisor for restart
-after a machine reboot. It reports heartbeats every three seconds and scenario
-summaries about every fifteen seconds, or every five seconds while Reef does
-not answer. When Reef does not answer, the summary names the address it
+after a machine reboot. It polls every three seconds while idle or running a
+slow operation. Completed commands are reported immediately, so queued commands
+do not each wait for another heartbeat. For thirty seconds after activity, it
+checks for follow-up commands every second. It reports scenario summaries about
+every fifteen seconds, or every five seconds while Reef does not answer. When Reef does not answer, the summary names the address it
 checked and the reason: nothing listening, a rejected service token, a
 timeout, or a service that is not Reef. The console marks it offline after
 45 seconds without a heartbeat and retains its last scenario summary.
