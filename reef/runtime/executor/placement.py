@@ -88,6 +88,7 @@ class ModelGpuReservation:
         if len(bundles.bundle_indices) != layout.total:
             raise ValueError("reserved bundles do not match the model GPU layout")
         self._bundles = bundles
+        self.training_node_id: str | None = None
         self.layout = layout
         self._released = False
 
@@ -125,11 +126,16 @@ def reserve_model_gpus(
     _wait_until_placed(ray, group, layout.total, wait_log_interval_s)
     identities = _bundle_identities(ray, group, layout.total)
     order = sorted(range(layout.total), key=lambda index: _bundle_sort_key(*identities[index]))
+    node_ids = {node["NodeManagerAddress"]: node["NodeID"] for node in ray.nodes() if node.get("Alive")}
     for position, index in enumerate(order):
         node, gpu = identities[index]
         logger.info("bundle %4d: placement bundle %4d, node %s, gpu %s", position, index, node, gpu)
     bundles = GpuBundles(group, order, [identities[index][1] for index in order])
-    return ModelGpuReservation(bundles, layout)
+    reservation = ModelGpuReservation(bundles, layout)
+    # The node that holds the first training bundle: components that must see
+    # the trainer's local files (its checkpoints) schedule themselves there.
+    reservation.training_node_id = node_ids.get(identities[order[0]][0]) if order else None
+    return reservation
 
 
 def _wait_until_placed(ray: Any, group: Any, count: int, log_interval_s: float) -> None:
