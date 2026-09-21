@@ -2,6 +2,10 @@
 
 When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
 
+  Checks the installed release's requirements before starting the proxy or
+  agent. Unmet items print their setup hints and exit 3. Required programs
+  must still be on PATH, even when setup previously checked them off.
+
   1. Starts a local capture proxy (``reef_client.serve``) that forwards to
      Reef, injecting ``x-reef-scenario`` so the user's agent binary never
      needs to know about Reef headers.
@@ -91,7 +95,7 @@ When invoked with ``setup`` (e.g. ``reef-pi setup``, ``reef-pi setup --yes``,
   3. Records each met item in the release file's ``setup`` and exits 0 when every
      item is met, 1 otherwise. This is the one place a check ever runs: the
      install script only reads the check offs, and a session start prints
-     what is unmet and runs the session anyway.
+     what is unmet and exits 3 without starting the agent.
 
   Three flag forms serve scripts and the extensions, one item at a time:
   ``--json`` prints ``{"release_id": ..., "items": [{name, kind, check,
@@ -785,16 +789,34 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     record = _read_release_info(compose_dir) or {}
     release = _installed_release(compose_dir)
     stored = _read_env_file(compose_dir)
-    # An item the machine already meets by itself (an env variable set, a program on PATH) needs no check off.
-    unmet = [item for item in _unmet(record.get("requires"), record.get("setup")) if not _auto_met(item, stored)]
+    checked = {item["name"]: item for item in _named_items(record.get("setup"))}
+    unmet = []
+    missing_programs: set[str] = set()
+    for item in _named_items(record.get("requires")):
+        # A saved check off cannot make an uninstalled program available.
+        if item.get("kind") == "binary" and _binary_found(item) is None:
+            missing_programs.add(item["name"])
+            unmet.append(item)
+        elif not _met(item, checked.get(item["name"])) and not _auto_met(item, stored):
+            unmet.append(item)
     if unmet:
-        # Said once, on stderr so a -p run's output stays clean; no check runs here and the session runs anyway.
+        # Keep stdout clean for scripted runs and stop before creating a session.
         print(
-            f"reef-{adapter}: this release requires setup you have not checked off; run reef-{adapter} setup:",
+            f"reef-{adapter}: cannot start agent; this release has unmet requirements:",
             file=sys.stderr,
         )
         for item in unmet:
             print(f"  {_item_line(item)}", file=sys.stderr)
+            if item["name"] in missing_programs:
+                print(f"    {item['name']} is not on PATH; install it before starting the agent", file=sys.stderr)
+            if item.get("prompt"):
+                print(f"    {item['prompt']}", file=sys.stderr)
+        named_release = f" --release {release}" if release is not None else ""
+        print(
+            f"reef-{adapter}: run reef-{adapter} setup{named_release}, then start the agent again",
+            file=sys.stderr,
+        )
+        sys.exit(3)
     # Every call carries the session as a tag, so the spool and the agent records name the session an ask refers to.
     tags = {"session": str(uuid.uuid4()), **({"release": release} if release else {})}
     token = _reef_token(adapter, compose_dir)

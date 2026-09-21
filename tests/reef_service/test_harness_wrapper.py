@@ -1887,13 +1887,13 @@ def test_setup_without_a_release_file_a_reef_or_any_item_says_so(tmp_path, capsy
 
 
 @pytest.mark.unit
-def test_run_agent_prints_the_unmet_list_once_and_runs_the_session_without_a_check(tmp_path, capsys) -> None:
+def test_run_agent_refuses_unmet_requirements_and_shows_setup_without_running_checks(tmp_path, capsys) -> None:
     reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
     ran = tmp_path / "ran"
     release_info = {
         "release_id": "v2",
         "requires": [
-            {"name": "notify", "kind": "permission", "check": f"touch {ran}"},
+            {"name": "notify", "kind": "permission", "check": f"touch {ran}", "prompt": "Allow notifications"},
             {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"},
         ],
         "setup": [{"name": "TWILIO_SID", "checked_at": 1.0}],
@@ -1902,18 +1902,72 @@ def test_run_agent_prints_the_unmet_list_once_and_runs_the_session_without_a_che
     binary = _make_fake_pi(tmp_path, reef.port)
     captures = tmp_path / "captures"
     captures.mkdir()
-    with patch.dict(os.environ, _ask_env(captures, compose), clear=True), contextlib.suppress(SystemExit):
+    with (
+        patch.dict(os.environ, _ask_env(captures, compose), clear=True),
+        patch("reef.harness.client.wrapper.CaptureProxy") as proxy,
+        pytest.raises(SystemExit) as exited,
+    ):
         run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
     reef.close()
+    assert exited.value.code == 3
+    proxy.assert_not_called()
     err = capsys.readouterr().err
     assert err.splitlines() == [
-        "reef-pi: this release requires setup you have not checked off; run reef-pi setup:",
+        "reef-pi: cannot start agent; this release has unmet requirements:",
         f"  notify (permission): touch {ran}",
+        "    Allow notifications",
+        "reef-pi: run reef-pi setup --release v2, then start the agent again",
     ]
     assert not ran.exists()
-    # The session ran through the proxy as always: its receipt is spooled.
-    (spooled,) = captures.glob("*.pending.json")
-    assert json.loads(spooled.read_text())["turns"][0]["receipt"] == "ask-receipt"
+    assert not list(captures.glob("*.pending.json"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("installed", [False, True])
+@pytest.mark.parametrize("checked_off", [False, True])
+@pytest.mark.parametrize("has_check", [False, True])
+def test_run_agent_requires_program_on_path_even_when_checked_off(
+    tmp_path, capsys, installed: bool, checked_off: bool, has_check: bool
+) -> None:
+    reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
+    ran = tmp_path / "check-ran"
+    program = tmp_path / "reef-required-pdf-tool"
+    if installed:
+        program.write_text("#!/bin/sh\nexit 0\n")
+        program.chmod(0o755)
+    item = {"name": program.name, "kind": "binary", "prompt": "Install the PDF reader and add it to PATH"}
+    if has_check:
+        item["check"] = f"touch {ran}"
+    release_info = {
+        "release_id": "v2",
+        "requires": [item],
+        "setup": [{"name": program.name, "check": item.get("check")}] if checked_off else [],
+    }
+    compose, _ = _setup_tree(tmp_path, reef.port, release_info)
+    binary = _make_fake_pi(tmp_path, reef.port)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    env = _ask_env(captures, compose, PATH=f"{tmp_path}{os.pathsep}{os.environ['PATH']}")
+    try:
+        with patch.dict(os.environ, env, clear=True), pytest.raises(SystemExit) as exited:
+            run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+    finally:
+        reef.close()
+    err = capsys.readouterr().err
+    if installed and (not has_check or checked_off):
+        assert exited.value.code == 0
+        assert "cannot start agent" not in err
+        (spooled,) = captures.glob("*.pending.json")
+        assert json.loads(spooled.read_text())["turns"][0]["receipt"] == "ask-receipt"
+    else:
+        assert exited.value.code == 3
+        assert "cannot start agent" in err and item["prompt"] in err
+        assert "reef-pi setup --release v2" in err
+        assert not list(captures.glob("*.pending.json"))
+        assert not reef.posts("/v1/chat/completions")
+        if not installed:
+            assert f"{program.name} is not on PATH; install it before starting the agent" in err
+    assert not ran.exists()
 
 
 @pytest.mark.unit

@@ -655,9 +655,14 @@ missing the same way (each item once, a check only after your yes), then
 offers the install, which runs ``reef-pi update`` and ends with
 ``Installed release <id8>. Type /reload to load it now.``; without the
 wrapper, or headless, it prints the setup list instead of offering the
-install. A session that starts on a tree with an unmet item prints the
-list once and runs anyway. No check runs at install, and none at session
-start without your yes.
+install. Starting a session on a tree with an unmet item prints the list
+and each item's setup hint, then exits 3 before starting the proxy or agent.
+A ``binary`` requirement is checked against the current PATH on every
+start, even if setup previously checked it off. Install missing programs
+using the release's hints and make sure they are on PATH, run
+``reef-pi setup --release <installed-release-id>``, then start the agent
+again. A program with an optional ``check`` also needs that check completed
+through setup. No check or installation command runs at session start.
 
 See what a version is with ``/versions`` in a ``reef-pi`` session: an
 aligned table, oldest first, with the version (``v0``, ``v1``, ...: the
