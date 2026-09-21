@@ -490,6 +490,13 @@ def answer_with_agent(
                     continue
                 if message.get("stopReason") in ("error", "aborted"):
                     agent["error"] = str(message.get("errorMessage") or "the model response was interrupted")
+                elif message.get("stopReason") == "length":
+                    # The reply budget ran out mid-answer, so the turn carried no tool call and pi stopped: a
+                    # reasoning model spends the budget on its reasoning first. Say that, not "changed no entry".
+                    agent["error"] = (
+                        "the model's reply hit its token budget and carried no answer; raise the harness's "
+                        "maxTokens (Reef renders the model binding's max_output_tokens into it)"
+                    )
                 break
         except EpisodeTimeout:
             agent["timed_out"] = True

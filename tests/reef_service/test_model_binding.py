@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -562,3 +563,28 @@ def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("demo_models", None)
+
+
+def _models_node(binding: ModelBinding) -> dict:
+    """The ``models`` config node a pi tree gets from ``binding``."""
+    return next(node for _, node in binding.compose_nodes(get_adapter("pi")) if node["target"] == "models")
+
+
+@pytest.mark.unit
+def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
+    """pi falls back to 16384 tokens for a model its config does not size, which a reasoning model spends on its
+    reasoning alone; Reef writes the binding's budget instead, and JSON needs it to stay a number."""
+    binding = ModelBinding(base_url="http://127.0.0.1:8901", model="anthropic/claude-sonnet-5", api_key="tok")
+    models = _models_node(binding)
+    assert models["data"]["providers"]["reef"]["models"][0] == {
+        "id": "anthropic/claude-sonnet-5",
+        "maxTokens": 32000,
+    }
+    assert binding.max_output_tokens == 32000
+
+    smaller = _models_node(replace(binding, max_output_tokens=8000))
+    assert smaller["data"]["providers"]["reef"]["models"][0]["maxTokens"] == 8000
+
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError, match="max_output_tokens"):
+            replace(binding, max_output_tokens=bad)

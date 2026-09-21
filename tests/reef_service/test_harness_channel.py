@@ -750,7 +750,8 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
         "api": "openai-completions",
         "apiKey": "tok-123",
         "baseUrl": "http://reef.test:8901/v1",
-        "models": [{"id": "qwen3-8b"}],
+        # The binding's reply budget rides along, so the installed tree does not fall back to pi's 16384.
+        "models": [{"id": "qwen3-8b", "maxTokens": 32000}],
     }
     assert TOKEN_PLACEHOLDER not in (dest / "pi-agent/models.json").read_text(encoding="utf-8")
     assert _extract_reef_url("pi", dest / "pi-agent") == "http://reef.test:8901"
