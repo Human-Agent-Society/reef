@@ -140,12 +140,29 @@ the entries, check them and try them, then fix what the trial shows.
   interactive checks remain unverified. Never claim a headless trial proved the menu works.
 - An extension must return before registering anything when `process.env.PI_OFFLINE` is set; Reef's own checks
   run offline. A trial runs online, so your extension does run there.
+- Never write to the session's own stdout or stderr while it has a UI: the harness process owns the terminal, so
+  `console.log`, `console.error` and `process.stdout.write` land inside a drawn frame and leave the person
+  without an input box. Admission refuses an unguarded write. Use `ctx.ui.notify`, `ctx.ui.setStatus` and
+  `ctx.ui.setWidget`, and keep console output for the no-UI path (`if (!ctx.hasUI) console.error(...)`). A trial
+  shows you a run's stderr, so it is tempting to debug with `console.error` and ship it; put what you need to
+  see behind that guard, or read it back from the trial's own answer instead.
+- A command your change runs (a speech, sound, notification, clipboard or editor command) is something the
+  user's machine must have: declare it as a `requires` item with a `check` so `reef-pi setup` verifies it on
+  their machine, and branch on `process.platform` for the command each platform uses. When no command is
+  available at run time, say so through `ctx.ui`; never let the feature fall through to silence.
+- Say what a trial did not prove. The sandbox is Linux with no sound card and no display, so a speech or
+  playback command you name for macOS or Windows never runs there, and a Linux one it lacks only reports that it
+  is missing. A trial that took the failure branch every time has not shown the behavior works: record in
+  `design.md` which checks actually ran and which the sandbox could not, and never write that a path works when
+  no trial executed it.
 - Build for the user's machine, which your prompt describes when their client reported it: its platform and
   which common commands are on its PATH. A trial runs in a Linux sandbox that is not that machine, so what the
   sandbox has or lacks says nothing about the user's; anything the change needs that the user's machine lacks
   is a requires item with a check. Without a report, the user may be on macOS, Linux or Windows under WSL 2:
   branch on `process.platform`, prefer commands that exist on all three, and name anything platform specific in
-  requires. The sandbox has no sound card or display: judge a playback step by the command it runs and its exit.
+  requires. The sandbox has no sound card or display: a playback step there can only show that the command was
+  found and exited, and a command the sandbox does not have shows nothing at all, so say which of the two
+  happened in `design.md` instead of counting it as proof.
 
 You may use the network (curl) to read documentation. Work from `reserved/reef-pi-extension-api.md` and the
 provider's documentation; never read pi's own source or its installed packages, the reference is the whole API

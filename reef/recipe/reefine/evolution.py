@@ -125,6 +125,14 @@ REQUEST_PROMPT = (
     "Menu selection and direct invocation must reach the same behavior; handle arguments, cancellation, "
     "results and failures, and keep mode status in sync with its actual state. Preserve unrelated behavior. "
     "Distinguish checks actually run from checks still needed: headless trials cannot verify the dropdown. "
+    "An extension must never write to the session's own stdout or stderr while it has a UI: the harness process "
+    "owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame "
+    "and leave the person without an input box, and admission refuses an unguarded write. Use ctx.ui.notify, "
+    "ctx.ui.setStatus and ctx.ui.setWidget, and keep console output for the no-UI path "
+    "(if (!ctx.hasUI) console.error(...)). A command the change runs, such as a speech, sound or notification "
+    "command, is a requires item with a check so reef-pi setup verifies it on the user's machine; branch on "
+    "process.platform, and when no command is available at run time say so through ctx.ui rather than falling "
+    "through to silence. "
     "The user may be on macOS, Linux or Windows under WSL 2: branch on process.platform, "
     "prefer commands that exist on all three, and name anything platform specific the user "
     "must set up in requires. "
@@ -399,9 +407,11 @@ def _answer_once(
     notes: dict[str, Any] = {}
     if design is not None:
         notes["design"] = design
-    review = _review(models, str(request.get("text", "")), design, mutations, [*own, *added])
+    review, review_failure = _review(models, str(request.get("text", "")), design, mutations, [*own, *added])
     if review is not None:
         notes["review"] = review
+    else:
+        notes["review_failure"] = review_failure or "the review did not run"
     if refused:
         notes["refused_requires"] = refused
     undeclared = _undeclared_env(mutations, [*own, *added])
@@ -533,9 +543,10 @@ def _review(
     design: str | None,
     mutations: Sequence[Mutation],
     requires: Sequence[Mapping[str, Any]],
-) -> dict[str, Any] | None:
-    """The served model's reading of its entries against the request, ``{result, covered, uncovered}``; ``None``
-    when the call or the parse failed, which costs the step its review and nothing else."""
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The served model's reading of its entries against the request, ``{result, covered, uncovered}``, and no
+    reason; or ``None`` and the reason the step has no review, which the step records so the page says the one
+    check of whether the entries deliver the request did not run."""
     written: list[dict[str, Any]] = [{"op": m.op, "id": m.id, **(m.options or {})} for m in mutations]
     if requires:
         written.append({"requires": [dict(item) for item in requires]})
@@ -544,9 +555,17 @@ def _review(
         design="(none written)" if design is None else design,
         entries=json.dumps(written, indent=2),
     )
-    # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live.
-    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
-    return None if reply is None else _parse_review(reply)
+    # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live,
+    # and 16384 still does on a long change, so a reply the reasoning ate is asked once more with room for both.
+    reply, reason = _ask(models, prompt, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
+    if reply is None and reason is not None and "non-text content" in reason:
+        reply, reason = _ask(models, prompt, max_tokens=_max_tokens(16384) * 2, timeout_s=_timeout_s(240.0))
+    if reply is None:
+        return None, reason
+    review = _parse_review(reply)
+    if review is None:
+        return None, "the review reply carried no result object"
+    return review, None
 
 
 def _parse_review(reply: str) -> dict[str, Any] | None:

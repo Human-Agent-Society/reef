@@ -734,6 +734,22 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
 
 
+def test_a_review_that_did_not_run_is_named_on_the_version_page() -> None:
+    """A published step with no review is a step nothing checked; the page says why instead of omitting it."""
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    notes = {"design": "Add /away.", "review_failure": "the review reply carried no result object"}
+    row = {
+        "release_id": "rel-1",
+        "parent_release_id": "rel-0",
+        "operation": "training",
+        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away"}, "proposal_notes": notes},
+    }
+    page = build_release_page(1, [creation, row])
+    review = _section(page, "Review")
+    assert "did not run, so nothing checked whether they deliver it" in review
+    assert "carried no result object" in review
+
+
 @pytest.mark.parametrize("review_key", ["result", "verdict"])
 def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_key) -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
