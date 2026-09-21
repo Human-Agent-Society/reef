@@ -244,6 +244,8 @@ FAKE_PI = textwrap.dedent(
     event = {{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "text", "text": text}}]}}}}
     if mode == "stream-error":
         event["message"].update(stopReason="error", errorMessage="Stream ended without finish_reason")
+    if mode == "budget":
+        event["message"].update(stopReason="length")
     (sessions / "s.jsonl").write_text(json.dumps(event) + "\\n")
     """
 )
@@ -393,6 +395,20 @@ def test_an_agent_with_a_failed_model_response_does_not_publish_its_partial_chan
     assert proposal.mutations == ()
     assert proposal.notes["agent"]["exit_code"] == 0
     assert proposal.notes["failure"] == "the agent's model response failed: Stream ended without finish_reason"
+
+
+@pytest.mark.unit
+def test_a_reply_cut_at_its_token_budget_says_so_rather_than_that_nothing_changed(tmp_path, upstream) -> None:
+    """A reasoning model spends the reply budget on its reasoning and answers with nothing, which pi reads as the
+    end of the turn and exits zero. The step names the budget, so the person raises it instead of guessing."""
+    record: list[dict] = []
+    host = agent_host(tmp_path, record)
+    Path(host.binary).with_name("mode").write_text("budget")
+    proposal = AgentProposer(provider_of(upstream))(
+        NODES, (), served_models(upstream, record, host), requests=[{"text": "x"}], entries=ENTRIES, agent_host=host
+    )
+    assert proposal.mutations == () and proposal.notes["agent"]["exit_code"] == 0
+    assert "hit its token budget" in proposal.notes["failure"] and "maxTokens" in proposal.notes["failure"]
 
 
 @pytest.mark.unit
