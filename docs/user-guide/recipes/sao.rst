@@ -41,8 +41,13 @@ How Reef implements it
 ----------------------
 
 The processor turns every eligible ``ScoredRolloutReport`` into one
-``TrajectoryItem``. With the default ``batch_size`` of 1, each sample is its
-own training step. The ``sao`` loss family runs Slime's ``policy_loss`` with
+``TrajectoryItem``. "Single rollout" means one rollout per prompt, with no
+comparison group; ``batch_size`` such rollouts, from different prompts, form
+one optimizer step. The default is the paper's 128. Setting it to 1 makes
+every sample its own training step, which is convenient for a smoke run but
+is not the paper's estimator: the value model needs a full batch per step to
+learn, and without it the single-sample advantages are noise. The ``sao``
+loss family runs Slime's ``policy_loss`` with
 SAO's per-token primitive and a critic colocated on the actor GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages
 inside the training backend.
@@ -62,7 +67,7 @@ Configuration
 
 .. config::
 
-   batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
+   batch_size | 128 | rollouts (one per prompt) per optimizer step; the paper's value. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
    max_staleness | 0 | accepted lag between the producing and serving version.
 
 Run the example

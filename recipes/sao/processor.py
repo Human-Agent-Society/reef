@@ -31,9 +31,10 @@ class SAOProcessor(ReportedFeedbackProcessor):
     """Turn scored rollouts into independently-scheduled SAO samples.
 
     Single-Rollout Asynchronous Optimization ships each completed rollout on
-    its own — no comparison group, no slowest-sample barrier. With the recipe
-    default ``batch_size=1`` the dispatcher trains once per accepted rollout, so
-    a rollout enters training the moment its score arrives.
+    its own — no comparison group, no slowest-sample barrier. The dispatcher
+    collects ``batch_size`` accepted rollouts (from as many prompts) into one
+    training step; the recipe default is the paper's 128, and 1 trains once
+    per accepted rollout for smoke runs.
 
     SAO reuses ``TrajectoryItem`` / ``TrainingBatch`` and fills ``action_mask``
     and ``rollout_created_at``. The training backend validates required
