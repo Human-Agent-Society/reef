@@ -227,8 +227,37 @@ class ScenarioCommitter:
         if manifest is not None:
             return manifest
         surface = self._binding.surface
+        if not surface.single:
+            raise ReefError(
+                f"scenario {self._name!r} serves components {list(surface.names)} but release "
+                f"{artifact.ref.release_id!r} carries no component manifest"
+            )
         name = surface.names[0] if surface.names else self._trainers[0].component
         return ReleaseComponents({name: ComponentEntry(artifact.ref.content_id)})
+
+    def _require_components(self, artifact: Artifact) -> None:
+        """Refuse a release that does not bind every component this scenario serves.
+
+        Reading such a release as composed would hand the whole tree, or
+        nothing, to each component; every release a composed scenario
+        registers or publishes carries a full manifest, so this is a
+        misdirected repository, not a supported input.
+        """
+        surface = self._binding.surface
+        if surface.single:
+            return
+        manifest = artifact.components
+        if manifest is None:
+            raise ReefError(
+                f"scenario {self._name!r} serves components {list(surface.names)} but release "
+                f"{artifact.ref.release_id!r} carries no component manifest"
+            )
+        missing = [name for name in surface.names if name not in manifest.entries]
+        if missing:
+            raise ReefError(
+                f"scenario {self._name!r} serves components {list(surface.names)} but release "
+                f"{artifact.ref.release_id!r} binds {list(manifest.names)}"
+            )
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
@@ -266,6 +295,10 @@ class ScenarioCommitter:
             source = artifacts.resolve(target_ref)
             durable = self._store.durable
             surface = self._binding.surface
+            try:
+                self._require_components(source)
+            except ReefError as exc:
+                raise ReleaseNotRestorable(str(exc)) from exc
             surface.validate(source)
             # The runtime-loaded component is restored only when the engine serves other content.
             loaded_component = surface.loader_component
@@ -633,6 +666,7 @@ class ScenarioCommitter:
             return self._artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         surface.components[component].validator.validate(publication.artifact)
         carried = self._artifacts.resolve(checkpoint)
+        self._require_components(carried)
         components = {name: carried.component(name) for name in surface.names}
         components[component] = publication.artifact
         return self._artifacts.stage_composed(next_step, components, parent=checkpoint)

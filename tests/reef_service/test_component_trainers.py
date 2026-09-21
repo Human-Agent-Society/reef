@@ -19,7 +19,13 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitLogError, CommitRecord, parse_scenario_metadata
+from reef.storage.commits import (
+    SCENARIO_METADATA_KEY,
+    CommitLogError,
+    CommitRecord,
+    parse_scenario_metadata,
+    scenario_metadata_for,
+)
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
@@ -239,6 +245,43 @@ def _dispatched_pair(tmp_path: Path, job_id: str = "job-1") -> dict[str, _Compon
         WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", job_id),
         HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates"),
     }
+
+
+@pytest.mark.unit
+def test_composite_registration_refuses_a_flat_base(tmp_path: Path) -> None:
+    """A base laid out flat has no directory to carry forward for the component a client pulls."""
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    (initial / "harness.txt").write_text("harness seed", encoding="utf-8")
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        with pytest.raises(ReefError, match=r"keeps no directory for components \['harness'\]"):
+            dispatcher.get_or_create_scenario("agent")
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_composite_recovery_refuses_a_registration_without_a_component_manifest(tmp_path: Path) -> None:
+    """A scenario registered by a recipe serving one component is not read as a composed one."""
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    backend_factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    backend = backend_factory("agent")
+    selected = backend.resolve_release(None)
+    # Registration as written before releases named their components.
+    backend.fork(
+        selected.release_id,
+        metadata={SCENARIO_METADATA_KEY: scenario_metadata_for(name="agent", base_artifact=selected)},
+    )
+    dispatcher, _ = _dispatcher(tmp_path, backend_factory=backend_factory)
+    try:
+        with pytest.raises(ReefError, match="registered without a component manifest"):
+            dispatcher.get_or_create_scenario("agent")
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit

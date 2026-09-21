@@ -27,7 +27,13 @@ from reef.artifact.repository import (
     RepositoryBackendFactory,
     StagedReleaseRepositoryBackend,
 )
-from reef.core.components import COMPONENTS_METADATA_KEY, RECORDS_COMPONENT, ComponentEntry, ReleaseComponents
+from reef.core.components import (
+    COMPONENTS_METADATA_KEY,
+    RECORDS_COMPONENT,
+    ComponentEntry,
+    ReleaseComponents,
+    release_components,
+)
 from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker
@@ -144,16 +150,8 @@ class ScenarioFactory:
                 )
             }
             if surface.names:
-                # Name the base release's components: a flat release is its one
-                # component, a composed base already keeps one directory per
-                # component, and every later step carries the unchanged ones forward.
-                registration_metadata[COMPONENTS_METADATA_KEY] = ReleaseComponents(
-                    {
-                        name: ComponentEntry(
-                            selected.content_id if surface.single else f"{selected.content_id}:{name}"
-                        )
-                        for name in surface.names
-                    }
+                registration_metadata[COMPONENTS_METADATA_KEY] = self._base_manifest(
+                    backend, selected, surface
                 ).to_dict()
             backend.fork(selected.release_id, metadata=registration_metadata)
 
@@ -169,8 +167,50 @@ class ScenarioFactory:
             release_id = selected.release_id
 
         return self._recover(
-            scenario, backend, registration, release_id=release_id, model_config=model_config, surface=surface
+            scenario,
+            backend,
+            registration,
+            release_id=release_id,
+            model_config=model_config,
+            surface=surface,
+            registered_components=release_components(metadata),
         )
+
+    def _base_manifest(self, backend: RepositoryBackend, selected: ArtifactRef, surface: Surface) -> ReleaseComponents:
+        """Name the base release's components, so every later step carries the unchanged ones forward.
+
+        A flat release is its one component. A composed base keeps its own
+        manifest, which must bind every component the surface serves. A base
+        without one must keep one directory per component the runtime loads or
+        a client pulls: laid out flat, a model snapshot at the root say, that
+        component would be carried forward as an empty directory while its
+        manifest entry still named the base content.
+        """
+        if surface.single:
+            return ReleaseComponents({name: ComponentEntry(selected.content_id) for name in surface.names})
+        base = backend.materialize(selected)
+        manifest = base.components
+        if manifest is not None:
+            missing = [name for name in surface.names if name not in manifest.entries]
+            if missing:
+                raise ReefError(
+                    f"base release {selected.release_id!r} binds components {list(manifest.names)}; "
+                    f"the recipe also serves {missing}"
+                )
+            return manifest
+        served = [
+            name
+            for name, component in surface.components.items()
+            if component.loader is not None or component.files is not None
+        ]
+        local_path = base.local_path
+        missing = [name for name in served if local_path is None or not (local_path / name).is_dir()]
+        if missing:
+            raise ReefError(
+                f"base release {selected.release_id!r} keeps no directory for components {missing}: "
+                "a release serving several components keeps one directory per component"
+            )
+        return ReleaseComponents({name: ComponentEntry(f"{selected.content_id}:{name}") for name in surface.names})
 
     def validate_existing(
         self,
@@ -193,9 +233,26 @@ class ScenarioFactory:
         release_id: str | None,
         model_config: ModelConfig,
         surface: Surface,
+        registered_components: ReleaseComponents | None,
     ) -> Scenario:
         if not isinstance(registration, Mapping):
             raise ValueError(f"invalid scenario metadata for {name!r}")
+        if not surface.single:
+            # A registration names the components its releases bind. One made by a
+            # recipe serving a single component, or none, has releases with no
+            # component directories to carry forward; refuse rather than compose
+            # the whole flat tree into every component.
+            if registered_components is None:
+                raise ReefError(
+                    f"scenario {name!r} was registered without a component manifest; a recipe serving components "
+                    f"{list(surface.names)} needs a scenario registered with that layout"
+                )
+            missing = [component for component in surface.names if component not in registered_components.entries]
+            if missing:
+                raise ReefError(
+                    f"scenario {name!r} was registered with components {list(registered_components.names)}; "
+                    f"the recipe also serves {missing}"
+                )
         checkpoint_head = backend.current()
         registered_name, base_artifact, checkpoint = parse_scenario_metadata(
             registration, checkpoint_head=checkpoint_head
