@@ -94,6 +94,13 @@ def test_secrets_are_masked_by_key_name_at_any_depth():
     assert mask_secrets(["a", "b"], "tokens") == ["****", "****"]
     assert mask_secrets("postgres://u:p@h/db", "record_database_url") == "****"
     assert mask_secrets(None, "upstream_api_key") is None
+    assert mask_secrets({"enabled": True, "authorization": "Basic abc"}, "tracing") == {
+        "enabled": True,
+        "authorization": "****",
+    }
+    assert mask_secrets(
+        {"headers": {"x-honeycomb-team": "hc", "Langsmith-Project": "reef", "empty": ""}}, "tracing"
+    ) == {"headers": {"x-honeycomb-team": "****", "Langsmith-Project": "****", "empty": ""}}
     assert mask_secrets({"lr": 1, "api-key": "k", "nested": {"password": "p"}}, "options") == {
         "lr": 1,
         "api-key": "****",

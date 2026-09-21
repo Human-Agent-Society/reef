@@ -41,13 +41,19 @@ class JSONClient:
         self.token = token
 
     async def request(
-        self, path: str, *, body: dict[str, Any] | None = None, scenario: str | None = None, timeout: float = 15
+        self,
+        path: str,
+        *,
+        body: dict[str, Any] | None = None,
+        scenario: str | None = None,
+        timeout: float = 15,
+        method: str | None = None,
     ) -> dict[str, Any]:
         headers = {"Authorization": f"Bearer {self.token}"} if self.token else {}
         if scenario:
             headers["x-reef-scenario"] = scenario
         async with self.session.request(
-            "GET" if body is None else "POST",
+            method or ("GET" if body is None else "POST"),
             self.base_url + path,
             headers=headers,
             json=body,
@@ -129,6 +135,8 @@ class ReefRuntime:
             return {"releases": [release_summary(row) for row in rows[:100]], "truncated": len(rows) > 100}
         if action == "create_scenario":
             await self.client.request("/reef/scenarios", body={"name": name}, timeout=60)
+        elif action == "delete_scenario":
+            await self.client.request(path, method="DELETE", timeout=60)
         elif action == "set_training_mode":
             mode = command.get("training_mode")
             if mode not in ("auto", "manual", "hybrid"):

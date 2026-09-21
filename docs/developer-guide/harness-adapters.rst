@@ -589,9 +589,12 @@ two commands, two tools and two event handlers:
   available for feedback. Either way the ``.reef-harness-release`` file
   beside the tree names the release the request runs on; without it nothing
   is sent.
-- ``reef_ask_user``, a tool: up to four questions, each with two to four
-  options offered through ``ctx.ui.select`` plus ``Other (type an answer)``,
-  which opens ``ctx.ui.input``, and ``Cancel this request``. Escape is the
+- ``reef_ask_user``, a tool: the questions a reasonable default cannot
+  settle, often none and at most four, each with two to four options
+  offered through ``ctx.ui.select`` plus ``Other (type an answer)``, which
+  opens ``ctx.ui.input``, and ``Cancel this request``. A question may name
+  one option as ``recommended``: it is listed first with ``(recommended)``
+  after it, and the answer filed is the option alone. Escape is the
   way out of the whole request, not a skipped question: no choice on a
   question, the cancel option, or no text in the free text answer all stop
   the dialogs there, notify ``reef: request cancelled; nothing was filed``
@@ -718,8 +721,11 @@ two commands, two tools and two event handlers:
   and a second line counts the releases held back from the served head and
   says how to install them: ``N release(s) ready to install: /versions
   <version>[, <version>] (install with /versions <version> install)``.
-- ``/versions [version] [install]``: lists the release chain with each
-  step's version (``v0``, ``v1``, ...), result and request. With a version,
+- ``/versions [version] [install]``: lists the release chain oldest first in
+  aligned version (``v0``, ``v1``, ...), release id, result and status columns.
+  Status distinguishes the locally installed version from the served head;
+  request summaries appear below their rows, with whitespace collapsed.
+  The footer explains the statuses and shows details and install commands. With a version,
   ``v3`` or ``3``, it offers the step's page (``GET
   /reef/harness/releases/{step}/page`` with the scenario and the token as
   query parameters), which holds the design, the review and the numbers;
@@ -737,6 +743,16 @@ the two tools above change that rule on purpose (issue #435): a request is
 clarified from the session where the person asked it, while they are still
 there to answer, and the tools still write no mutation and start no step of
 their own beyond the filing. Asking needs no extension:
+Admission also refuses a ``code_extension`` that writes to the harness
+process's own stdout or stderr without a ``ctx.hasUI`` guard
+(``console.log``, ``console.error``, ``process.stdout.write``). An extension
+runs inside the harness process, which owns the terminal in a session with a
+UI, so a raw write lands in a drawn frame and leaves the session without its
+input box until the next full redraw; console output stays the fallback for a
+session without a UI, and the guard, on the write's own line or the one above
+it, is what separates the two. Text for a session with a UI belongs in
+``ctx.ui.notify``, ``ctx.ui.setStatus`` or ``ctx.ui.setWidget``.
+
 ``reef-<adapter> harness "<request>"`` is a wrapper subcommand on every
 adapter. The ids ``reef-version-check``,
 ``reef-requests`` and ``reef-pi-extension-api`` are ``RESERVED_ENTRY_IDS`` in

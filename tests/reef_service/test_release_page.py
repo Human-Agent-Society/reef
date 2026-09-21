@@ -734,6 +734,22 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
 
 
+def test_a_review_that_did_not_run_is_named_on_the_version_page() -> None:
+    """A published step with no review is a step nothing checked; the page says why instead of omitting it."""
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    notes = {"design": "Add /away.", "review_failure": "the review reply carried no result object"}
+    row = {
+        "release_id": "rel-1",
+        "parent_release_id": "rel-0",
+        "operation": "training",
+        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away"}, "proposal_notes": notes},
+    }
+    page = build_release_page(1, [creation, row])
+    review = _section(page, "Review")
+    assert "did not run, so nothing checked whether they deliver it" in review
+    assert "carried no result object" in review
+
+
 @pytest.mark.parametrize("review_key", ["result", "verdict"])
 def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_key) -> None:
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
@@ -757,6 +773,14 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_
     assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
     design = _section(page, "Design")
     assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
+    # A design that ends with a How to use section shows it as the card after the design.
+    with_usage = dict(
+        row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\n## How to use\n/away on"}}
+    )
+    usage_page = build_release_page(1, [creation, with_usage])
+    assert _sections(usage_page)[:3] == ["Why", "Design", "How to use"]
+    assert '<p class="text">Add /away.</p>' in _section(usage_page, "Design")
+    assert '<p class="text">/away on</p>' in _section(usage_page, "How to use")
     review = _section(page, "Review")
     assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
     assert (
