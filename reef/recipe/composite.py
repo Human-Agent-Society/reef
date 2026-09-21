@@ -85,6 +85,8 @@ class CompositeRecipe(Recipe):
         raw = config.get("components")
         if not isinstance(raw, Mapping) or not raw:
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
+        # Resolve the deployment's runtime once, so the composite and every component share it.
+        runtime = cls._resolve_runtime(environ, runtime)
         components: dict[str, Recipe] = {}
         for component, component_config in raw.items():
             if not isinstance(component_config, Mapping):

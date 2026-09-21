@@ -188,6 +188,27 @@ def test_composite_recipe_builds_from_config() -> None:
 
 
 @pytest.mark.unit
+def test_composite_recipe_shares_one_runtime_resolved_from_the_environment() -> None:
+    # No runtime is injected: the deployment relies on REEF_UPSTREAM_URL, as a flat recipe may.
+    recipe = build_recipe(
+        "reef.recipe.composite:CompositeRecipe",
+        {"REEF_UPSTREAM_URL": "http://upstream.test"},
+        config={
+            "implementation": "reef.recipe.composite:CompositeRecipe",
+            "model": {"path": "served-model"},
+            "components": {
+                "harness": {"implementation": "reef_service.test_composite_recipe:_TreeRecipe"},
+                "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
+            },
+        },
+    )
+    assert isinstance(recipe, CompositeRecipe)
+    assert recipe.runtime is not None
+    assert recipe.inference_handler is not None
+    assert all(component.runtime is recipe.runtime for component in recipe.components.values())
+
+
+@pytest.mark.unit
 def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_path: Path) -> None:
     recipe = _composite(tmp_path)
     initial = tmp_path / "initial"
