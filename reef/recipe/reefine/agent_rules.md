@@ -32,10 +32,34 @@ Write `design.md` before the entries:
    rule that assumes the state holds.
 3. What only the user can provide (a phone number, a credential, a permission, an account): each is a requires
    item.
+4. How the user discovers, invokes and sees the result of the change through the harness's existing UI, and
+   how you will check that path. For a mode, include how to see its current state and turn it off again.
+5. End the file with a `## How to use` section, written for the user: the exact command or trigger, what they
+   see, how to turn it off or undo it, and anything they must set up first. The request's page shows the design
+   and this section as the plan and the usage of the change, so keep both concrete.
 
 Then write entries that are complete for what the request implies and nothing it did not ask for. When the
 harness cannot deliver the behavior at all, say so in `design.md` and write no entry: a rule, a note or a
 workaround that only imitates the behavior is not an answer.
+
+## Integrate with the native interface
+
+Complete the user-facing path, not just the underlying action. Reuse the harness's existing command, status
+and result UI. Keep unrelated commands and behavior intact; avoid duplicate names and built-in or Reef command
+collisions.
+
+- Every new slash command must appear in the native `/` autocomplete dropdown alongside built-in commands,
+  with a concise description. A command mentioned only in rules, a skill or a help message is not integrated.
+- For a repeatable prompt, write `harness/commands/<id>.md` with YAML frontmatter containing `description`.
+  Reef renders it as a native pi prompt template. For executable behavior, use
+  `pi.registerCommand("<id>", { description, handler })` in an extension, as the API reference shows. Do not
+  implement a slash command solely by intercepting text in an `input` hook or by building a separate menu.
+- Register extension commands when the extension loads, after the required `PI_OFFLINE` guard. Do not delay
+  registration until a turn, tool call or mode activation, or put it behind `ctx.hasUI`; guard only the UI
+  operations that need it.
+- Handle arguments, invalid input and cancellation using the native conventions. Show the action's result or
+  failure, and keep mode status in sync with its actual state. Use the same behavior whether the user selects
+  the command from the dropdown or types it directly.
 
 ## requires.json
 
@@ -66,6 +90,39 @@ first model and parameters that answer for what the request needs and build on t
 measure limits such as input length, or tune a choice that works; that is for later, if the user asks. Let the
 user override the model with an environment variable the extension reads, with a working default.
 
+### When to use a decision model
+
+A decision model (`~typesafe/jev-latest` on OpenRouter) is not a chat model: it writes no text. The body carries
+a `state` (the data to judge) and typed `questions`, and each answer is a value with probabilities the extension
+branches on: `noul` for yes or no, `choice` for one of several named options, `score` for a place on an ordered
+rubric. It answers in well under a second at a small fraction of a chat call's price, so use it where an
+extension must decide something on every turn or every tool call; use the chat model where the answer is text,
+an explanation or reasoning over several steps. It reads text only, 32,000 tokens at most. Requests it fits,
+with the hook each one runs from:
+
+- Risk check before a tool runs (`tool_call`): a `noul` on whether the call is dangerous, cannot be undone or
+  strays from what the user asked. Block it, or ask the user with `ctx.ui` when there is one.
+- Stuck and completion checks (`turn_end`, `agent_end`): whether the agent keeps repeating one strategy, whether
+  the task is really finished, whether the answer is supported by what the tools returned. Send a message that
+  says what is wrong; do not answer in the agent's place.
+- Skill, rule and tool selection (`before_agent_start`): when the library is large, a `choice` or a `score` per
+  item against the user's prompt, then add only the relevant ones to the turn, which keeps the context small.
+- Routing (`input`, `before_agent_start`): a `choice` on how hard the task is or which kind it is, to pick the
+  cheaper or the stronger path the request names, such as a model, a command or a second `pi` session.
+- Context reduction (`tool_result`): a `noul` to keep or drop each block of a long result or memory. Drop whole
+  blocks, never single lines, and try it on a real task: a result with holes in it can mislead the model more
+  than a long one.
+
+Put in `state` only what the question needs, and write each question so that its options cover every case. Ask
+several small independent questions in one call and combine the answers in code, rather than one broad
+question. The probabilities are calibrated over many answers and no single one is certain. Pick
+the probability at which the extension acts, and the branch it takes below that: a risk check that is unsure or
+whose call failed asks the user or blocks, a routing or selection that is unsure keeps the default. Deliver only
+what the hooks in `reserved/reef-pi-extension-api.md` allow; when the request needs one the reference lacks
+(replacing the session's model, rewriting past context), say so in `design.md`. Say so too when the provider
+serves no decisions route and the change falls back on a chat call, which is slower and costs more on every
+turn.
+
 ## Prove it works
 
 A run has a time limit, and a change that never reached a trial is not done: once the design is clear, write
@@ -76,14 +133,36 @@ the entries, check them and try them, then fix what the trial shows.
 - `harness_trial` runs the changed harness for real on a task you give it and shows what happened, including
   every image or speech call and the provider's error when one failed. A change you never tried is not done:
   try the behavior the request asks for, read the result, fix and try again until it works.
+- For a slash command, check discovery after reload/startup, filtering by its name, selection from the native
+  dropdown, direct invocation, and its result; check invalid arguments and on/off transitions when applicable.
+  `harness_trial` runs headless: it can exercise behavior but cannot verify an interactive dropdown. Inspect
+  the native template or registration path too, and record in `design.md` which checks actually ran and which
+  interactive checks remain unverified. Never claim a headless trial proved the menu works.
 - An extension must return before registering anything when `process.env.PI_OFFLINE` is set; Reef's own checks
   run offline. A trial runs online, so your extension does run there.
+- Never write to the session's own stdout or stderr while it has a UI: the harness process owns the terminal, so
+  `console.log`, `console.error` and `process.stdout.write` land inside a drawn frame and leave the person
+  without an input box. Admission refuses an unguarded write. Use `ctx.ui.notify`, `ctx.ui.setStatus` and
+  `ctx.ui.setWidget`, and keep console output for the no-UI path (`if (!ctx.hasUI) console.error(...)`). A trial
+  shows you a run's stderr, so it is tempting to debug with `console.error` and ship it; put what you need to
+  see behind that guard, or read it back from the trial's own answer instead.
+- A command your change runs (a speech, sound, notification, clipboard or editor command) is something the
+  user's machine must have: declare it as a `requires` item with a `check` so `reef-pi setup` verifies it on
+  their machine, and branch on `process.platform` for the command each platform uses. When no command is
+  available at run time, say so through `ctx.ui`; never let the feature fall through to silence.
+- Say what a trial did not prove. The sandbox is Linux with no sound card and no display, so a speech or
+  playback command you name for macOS or Windows never runs there, and a Linux one it lacks only reports that it
+  is missing. A trial that took the failure branch every time has not shown the behavior works: record in
+  `design.md` which checks actually ran and which the sandbox could not, and never write that a path works when
+  no trial executed it.
 - Build for the user's machine, which your prompt describes when their client reported it: its platform and
   which common commands are on its PATH. A trial runs in a Linux sandbox that is not that machine, so what the
   sandbox has or lacks says nothing about the user's; anything the change needs that the user's machine lacks
   is a requires item with a check. Without a report, the user may be on macOS, Linux or Windows under WSL 2:
   branch on `process.platform`, prefer commands that exist on all three, and name anything platform specific in
-  requires. The sandbox has no sound card or display: judge a playback step by the command it runs and its exit.
+  requires. The sandbox has no sound card or display: a playback step there can only show that the command was
+  found and exited, and a command the sandbox does not have shows nothing at all, so say which of the two
+  happened in `design.md` instead of counting it as proof.
 
 You may use the network (curl) to read documentation. Work from `reserved/reef-pi-extension-api.md` and the
 provider's documentation; never read pi's own source or its installed packages, the reference is the whole API

@@ -56,7 +56,7 @@ class _TestAlgorithm(SlimeAlgorithm):
 
 
 #: The cookbook families plus the two plain ones tests/conftest.py registers.
-_ALL_FAMILIES = ("openclawrl", "pg", "sao", "sft", "tttd")
+_ALL_FAMILIES = ("openclawrl", "pg", "sao", "sdft", "sft", "tttd")
 
 
 @pytest.mark.unit
@@ -65,6 +65,7 @@ def test_registry_is_the_complete_slime_loss_family_surface() -> None:
     assert resolve_loss_family("sft").loss_type == "sft_loss"
     assert resolve_loss_family("tttd").loss_type == "custom_loss"
     assert resolve_loss_family("openclawrl").loss_type == "custom_loss"
+    assert resolve_loss_family("sdft").loss_type == "custom_loss"
 
     with pytest.raises(UnknownLossFamilyError, match="available families"):
         resolve_loss_family("missing")
@@ -365,7 +366,7 @@ def test_sao_config_freezes_critic_attention_only_for_moe() -> None:
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ADAPTERS_ROOT = _REPO_ROOT / "reef" / "train" / "slime_backend" / "reef_adapters"
-_BUNDLED_FAMILIES = ("openclawrl", "sao", "tttd")
+_BUNDLED_FAMILIES = ("openclawrl", "sao", "sdft", "tttd")
 #: Deprecated flag spellings allowed alongside the canonical --<pkg>-* form.
 _DEPRECATED_FLAG_PREFIXES = ("--openclaw-topk-",)
 #: @objective channel -> required entry-point name for package <pkg>.
@@ -386,6 +387,7 @@ _EXPECTED_OBJECTIVE_CHANNELS = {
         }
     ),
     "sao": frozenset({"custom_advantage_function_path", "custom_pg_loss_function_path"}),
+    "sdft": frozenset({"custom_loss_function_path", "reef_actor_pre_train_hook_path"}),
     "tttd": frozenset({"custom_advantage_function_path", "custom_loss_function_path"}),
 }
 

@@ -59,7 +59,11 @@ pi.registerCommand("standup", {
 });
 ```
 
-The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The reef-harness and reef-versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
+The handler gets the text after /standup as args. A command runs no model call by itself; send a user message to start a turn. The evolve and versions commands and the reef_ask_user and reef_file_request tools belong to reef: register nothing under those names.
+
+Registered commands appear in pi's native `/` autocomplete dropdown alongside built-in commands; `description` tells the user what each does. Register at extension load, after the required `PI_OFFLINE` guard, not inside an event handler or behind `ctx.hasUI`. Guard UI operations inside the handler instead. An `input` hook that recognizes `/name` does not register it for the dropdown. Avoid names already used by built-in commands, prompt templates or other extensions.
+
+For a command that only expands a prompt, use an `agent_command` entry instead of an extension. Reef renders its text to `pi-agent/prompts/<name>.md`; start the text with YAML frontmatter containing `description` for the native dropdown. Check both menu selection and direct invocation after reload/startup. A headless run does not verify the dropdown.
 
 ## Events: pi.on(name, handler)
 
@@ -91,8 +95,8 @@ Also: before_agent_start (return { systemPrompt } to add instructions for the tu
 
 ## Keys
 
-- pi.registerShortcut("ctrl+shift+r", { description, handler: async (ctx) => {} }): a key the person presses. There is no click target for a widget, so a key is how a person opens what a widget shows.
-- pi binds most ctrl+letter keys itself, among them ctrl+a, ctrl+c, ctrl+d, ctrl+g, ctrl+l, ctrl+n, ctrl+o, ctrl+p, ctrl+r, ctrl+s, ctrl+t, ctrl+u, ctrl+v, ctrl+x and ctrl+z. Registering one of those makes pi warn at startup about the clash, so add shift: ctrl+shift+<letter> is free.
+- pi.registerShortcut("ctrl+q", { description, handler: async (ctx) => {} }): a key the person presses. There is no click target for a widget, so a key is how a person opens what a widget shows.
+- pi binds most ctrl+letter keys itself, among them ctrl+a, ctrl+c, ctrl+d, ctrl+g, ctrl+l, ctrl+n, ctrl+o, ctrl+p, ctrl+r, ctrl+s, ctrl+t, ctrl+u, ctrl+v, ctrl+x and ctrl+z. Registering one of those makes pi warn at startup about the clash. Do not reach for ctrl+shift+<letter> instead: a terminal without the Kitty keyboard protocol or xterm's modifyOtherKeys (Apple Terminal among them) sends it as the bare control byte, which pi reads as the unshifted ctrl+<letter>. ctrl+q is the letter pi leaves free in every terminal.
 
 ## Messages
 
@@ -125,7 +129,7 @@ Models beyond the session's chat model are Reef routes too, when the Reef recipe
 - /v1/images: generate an image from a prompt.
 - /v1/embeddings: embed text.
 - /v1/audio/speech: text to speech; the response body is the audio bytes.
-- /v1/decisions: a fast structured choice (routing, classification) from a decision model such as ~typesafe/jev-latest, where the provider serves one.
+- /v1/decisions: a fast structured choice (routing, classification, a risk or completion check) from a decision model such as ~typesafe/jev-latest, where the provider serves one. The body carries a state and typed questions (noul, choice, score); the answer is a value with probabilities, never text.
 
 Name the model in the body. These routes do not stream, and answer 501 when the Reef recipe configures no multimodal provider or its provider serves no such route.
 
@@ -135,6 +139,8 @@ Name the model in the body. These routes do not stream, and answer 501 when the 
 - Credentials come from process.env at run time, never from the file: admission refuses a credential shaped literal, and the tree persists every version.
 - Keep state in tool result details, not in module variables, so a resumed or forked session rebuilds it.
 - Never throw out of an event handler for an expected condition: log with ctx.ui.notify or return nothing.
+- Never write to the session's own stdout or stderr while it has a UI. The harness process owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame and leave the session without its input box. Admission refuses an unguarded write. Show text with ctx.ui.notify, a footer with ctx.ui.setStatus, progress with ctx.ui.setWidget, and keep console output for the no-UI path: `if (ctx.hasUI) ctx.ui.notify(text, "warning"); else console.error(text);`
+- A failure the person would otherwise wait for in silence reaches them through ctx.ui: an empty `catch {}` around pi.exec, fetch or a dialog turns a broken feature into one that does nothing and says nothing.
 - One file, no dependencies, ASCII text.
 
 ## A complete example

@@ -265,11 +265,46 @@ def skill_node(ctx: Any, config: Any) -> None:
     _reject_secret_shaped_text(_require_text(options, "text"), "skill node 'text'")
 
 
+#: A write to the harness process's own stdout or stderr from inside an extension.
+_CONSOLE_WRITE = re.compile(
+    r"\bconsole\.(?:log|error|warn|info|debug|trace|dir|table|group|groupEnd|time|timeEnd|count|assert)\s*\("
+    r"|\bprocess\.(?:stdout|stderr)\.write\s*\("
+)
+
+
+def _reject_unguarded_console_write(code: str, where: str) -> None:
+    """Refuse an extension that writes to the harness's stdout or stderr without a ``ctx.hasUI`` guard.
+
+    An extension runs inside the harness process, and in a session with a UI
+    that process owns the screen: a raw write lands in the middle of a drawn
+    frame and leaves the terminal without its input box until the next full
+    redraw. Console output is the fallback for a session without a UI
+    (``-p``, ``--mode json``), so the guard is what separates the two, and it
+    is read textually: the write's own line or the line above it must name
+    ``hasUI``. In a session with a UI the text belongs in
+    ``ctx.ui.notify``, ``ctx.ui.setStatus`` or ``ctx.ui.setWidget``.
+    """
+    lines = code.splitlines()
+    previous = ""
+    for number, line in enumerate(lines, start=1):
+        if _CONSOLE_WRITE.search(line) and "hasUI" not in line and "hasUI" not in previous:
+            raise ValueError(
+                f"{where} writes to the harness's stdout or stderr at line {number} without a ctx.hasUI guard, "
+                "which overwrites the drawn terminal in a session with a UI; show the text with ctx.ui.notify, "
+                "ctx.ui.setStatus or ctx.ui.setWidget, and keep console output for the no-UI path "
+                "(if (!ctx.hasUI) console.error(...))"
+            )
+        if line.strip():
+            previous = line
+
+
 def code_extension_node(ctx: Any, config: Any) -> None:
     """A named code file the harness loads in-process (extension or plugin)."""
     options = _require_mapping(config)
     _require_name(options)
-    _reject_secret_shaped_text(_require_text(options, "code"), "code_extension node 'code'")
+    code = _require_text(options, "code")
+    _reject_secret_shaped_text(code, "code_extension node 'code'")
+    _reject_unguarded_console_write(code, "code_extension node 'code'")
 
 
 def native_tool_node(ctx: Any, config: Any) -> None:

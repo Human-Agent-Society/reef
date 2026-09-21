@@ -121,7 +121,7 @@ def escape(value: Any) -> str:
 
 
 def tone(state: str) -> str:
-    """The first word of a state, which is its CSS class: ``promoted at step 5`` tones as ``promoted``."""
+    """The first word of a state, which is its CSS class: ``promoted at v5`` tones as ``promoted``."""
     return state.split(" ")[0]
 
 
@@ -130,7 +130,7 @@ def status_label(state: str) -> str:
     label = STATUS_LABELS.get(state)
     if label is not None:
         return label
-    # A composed state, "promoted at step 5", keeps its tail: only the leading word is renamed.
+    # A composed state, "promoted at v5", keeps its tail: only the leading word is renamed.
     first, separator, rest = state.partition(" ")
     named = STATUS_LABELS.get(first)
     if named is not None and separator:

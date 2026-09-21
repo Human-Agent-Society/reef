@@ -37,7 +37,7 @@ dependencies = [
 # Python-side inference adapters; install native SGLang in its GPU environment.
 sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
 tinker = [
-    "tinker==0.28.1",
+    "tinker==0.29.1",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
     "tinker-cookbook==0.5.7",
     "jinja2>=3.1.0",
@@ -49,6 +49,11 @@ e2b = ["e2b>=2.46"]
 # without installing the Slime/GPU dependency stack.
 wandb = [
     "wandb>=0.29.0",
+]
+# Record tracing over OTLP/HTTP (observability.tracing); any OpenTelemetry-compatible backend receives it.
+opentelemetry = [
+    "opentelemetry-sdk>=1.25",
+    "opentelemetry-exporter-otlp-proto-http>=1.25",
 ]
 # Python-side dependencies used by the Slime backend. The runtime source pin
 # lives in the `runtime` dependency group below.
@@ -80,7 +85,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    "ruff==0.16.7",
+    "ruff==0.16.8",
 ]
 
 [dependency-groups]

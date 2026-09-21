@@ -32,7 +32,7 @@ evolve-your-harness/
                  trajectory; the grader is shared
     materialize_recipe.py
                  copies a serve file's recipe sections where the recipe
-                 registry reads them; run.sh calls it
+                 registry reads them; run.sh and the notebook call it
     probe_proposals.py
                  samples the native proposer over one failing task and
                  counts what admission lets through, by kind
@@ -62,7 +62,7 @@ You also need an OpenAI-compatible endpoint for the model under test, and for th
 
 Every run ends by writing `work/replay.html`: the release chain with each step's verdict and tree diff, the loop graph replayed from a session's events, the session event log and the process timeline. Open it in a browser; `python3 run.py replay` rebuilds it from `work/` at any time.
 
-serve.yaml carries the endpoint (`upstream_url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`qwen3-8b`) as literals; edit them there to point at your own. The model name appears twice, as `model.path` (the name the proposer and the evolve episodes call) and as `upstream_model` (the name served traffic is forwarded under), and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
+serve.yaml carries the endpoint (`inference.upstream-url: http://127.0.0.1:8000`, no /v1 suffix) and the model (`inference.upstream-model: qwen3-8b`) as literals; edit them there to point at your own. The recipe takes its model from that same `inference` section, so the proposer, the evolve episodes and served traffic all use the one name, and run.py's `MODEL` must match; a name the endpoint does not serve fails the proposer's call, and the step records `skipped: no proposal`. The one value serve.yaml does not hold is the provider key: `export REEF_UPSTREAM_API_KEY=...` if your endpoint needs one.
 
 ## Worker execution
 
@@ -138,17 +138,17 @@ stop and restart `reef serve`, then rerun the harness install command from the r
 README before retrying `reef-pi`. Installation writes the model ID into the local
 harness configuration.
 
-`deployment.yaml` also sets `evolution.requests: true`, `evolution.version_check: true` and `evolution.review_kinds: [code_extension]`: a session asks for a harness change with `reef-pi harness "..."`, or `/reef-harness ...` in the TUI, and needs no mode switch because the deployment runs in `hybrid`; the notice at session start offers the newest release that is not pending; and a win that touches a `code_extension` waits as a pending release, because an evolved extension runs in pi's process with your privileges. A pending release shows only under a promote or a trial install by id. Promote it with `POST /reef/scenarios/{scenario}/promote` and `{"release_id": ...}`, the id of the row marked `pending: true` in `GET /reef/harness/releases`; the curl is under [Promote a pending release](../../docs/user-guide/evolve-your-harness.rst#promote-a-pending-release) in the user guide. `serve.yaml` and `serve-native.yaml` set none of the three: an ask is refused in `auto`, so a seeded command would have nothing to do there.
+`deployment.yaml` also sets `evolution.requests: true`, `evolution.version_check: true` and `evolution.review_kinds: [code_extension]`: a session asks for a harness change with `reef-pi evolve "..."`, or `/evolve ...` in the TUI, and needs no mode switch because the deployment runs in `hybrid`; the notice at session start offers the newest release that is not pending; and a win that touches a `code_extension` waits as a pending release, because an evolved extension runs in pi's process with your privileges. A pending release shows only under a promote or a trial install by id. Promote it with `POST /reef/scenarios/{scenario}/promote` and `{"release_id": ...}`, the id of the row marked `pending: true` in `GET /reef/harness/releases`; the curl is under [Promote a pending release](../../docs/user-guide/evolve-your-harness.rst#promote-a-pending-release) in the user guide. `serve.yaml` and `serve-native.yaml` set none of the three: an ask is refused in `auto`, so a seeded command would have nothing to do there.
 
 ## Notebook
 
-`evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook patches both serve.yaml bindings (the `reef` section's upstream values and the recipe's `model.path`) into `work/serve-notebook.yaml` and materializes the recipe config from the patched text. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
+`evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook loads serve.yaml, sets `inference.upstream-url` and `inference.upstream-model` to those values, writes the result to `work/serve-notebook.yaml`, and materializes the recipe config from it with `harness/materialize_recipe.py`, the step `run.sh` runs. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
 
-Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks reports no failures, so no evolve step ever runs (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible in `work/agent-record/*.commits.jsonl`. The committed outputs are a full local run with no GPU, the `pi, notebook` row of the results below.
+Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks reports no failures, so no evolve step ever runs (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible on the step's row in `GET /reef/harness/releases`. The committed outputs are a full local run with no GPU, the `pi, notebook` row of the results below.
 
 ## What one run does
 
-1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed composition: one starter `answer-style` skill node. The endpoint lives only on serve.yaml's `reef` section (`upstream_url`, `upstream_api_key`, `upstream_model`) and the recipe names its model as `model.path`; Reef hands the endpoint and that name to `propose` as a model binding and renders them into each evaluation episode, so neither the method nor the published tree ever names them.
+1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed composition: one starter `answer-style` skill node. The endpoint and the model live only in serve.yaml's `inference` section (`upstream-url`, `upstream-api-key`, `upstream-model`); Reef hands them to `propose` as a model binding and renders them into each evaluation episode, so neither the method nor the published tree ever names them.
 2. `run.py` sends each of the three exact-answer coding tasks once through reef inference; reef serves the reply and records the exchange. The reply is graded the same way the evolve gate grades episodes, and the score is reported against the receipt.
 3. Every valid scored report batches, and `batch_size: 1` makes each report one evolve step: `propose` sends the failing requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win.
 4. `run.py` pulls `GET /reef/harness` and prints the gate metrics and the evolved `SKILL.md` files. Point any pi at the pulled tree, with its model set to Reef, and it carries the learned skill.
@@ -170,7 +170,7 @@ The recorded pass is identical, so the two variants are comparable on the same t
 
 ## Results
 
-Last updated: 2026-09-05. Every row was measured on the code of the pull request in its Code column, with the tutorial files as they stood there.
+Last updated: 2026-09-20. Every row was measured on the code of the pull request in its Code column, with the tutorial files as they stood there.
 
 The historical measurements below used the previous failure-only `max_score` filter, which has since been removed. The loop under measurement is one fresh scenario through `./run.sh` (pi adapter) or `./run.sh native` (native adapter): the three tasks `[sieve]`, `[fib]` and `[csv]` go through Reef once, each reply is graded 1.0 for the exact answer alone on the last line and 0.0 otherwise, only a 0.0 report batches (`max_score: 0.0`, `batch_size: 1`), and each batched report runs one evolve step whose gate runs the current and the candidate tree once per task. Scores are listed in task order; W / L / T counts the three task pairings of one gate; the model under test is also the proposer.
 
@@ -194,6 +194,7 @@ The historical measurements below used the previous failure-only `max_score` fil
 | pi, B200 | deepseek-v4-flash | 2 | 2026-08-17 | #58 | 1.0 / 1.0 / 1.0 | none, nothing batched | - | - | - | no step | 4 [1] |
 | pi, B200 | qwen3-8b | 1 | 2026-08-17 | #58 | 1.0 / 0.0 / 1.0 | `create direct-answer` (skill) | 1.0 / 0.0 / 1.0 | 1.0 / 1.0 / 1.0 | 1 / 0 / 2 | published `0fe30330` | 63 [2] |
 | pi, notebook | qwen2.5:7b | 1 | 2026-08-31 | #70 | 1.0 / 0.0 / 1.0 | `update answer-style` (skill) | 0.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 1 / 0 / 2 | published `f98266d2` | not recorded [3] |
+| pi, notebook | qwen2.5:7b | 2 | 2026-09-20 | #544 | 1.0 / 0.0 / 1.0 | `update answer-style` (skill) | 1.0 [19] | 0.0 [19] | 0 / 2 / 1 | rejected | not recorded [3] |
 | native | qwen2.5:7b | 1 | 2026-09-04 | #241 | 1.0 / 0.0 / 1.0 | `create fib-solver` (native_tool) | 0.0 / 0.0 / 1.0 | 0.0 / 1.0 / 0.0 | 1 / 1 / 1 | rejected | 93 [4] |
 | native | qwen2.5:7b | 2 | 2026-09-04 | #241 | 1.0 / 0.0 / 1.0 | `create fib-skill` (skill) | 0.0 / 0.0 / 1.0 | 0.0 / 0.0 / 0.0 | 0 / 1 / 2 | rejected | 217 |
 | native + graph | qwen2.5:7b | 1 | 2026-09-05 | #258 | 1.0 / 0.0 / 1.0 | `update main` (native_graph) [5] | 1.0 / 0.0 / 0.0 | 1.0 / 0.0 / 0.0 | 0 / 0 / 3 | rejected | 645 |
@@ -243,7 +244,7 @@ The graph run's `main`, the stage it added and the edges that route through it:
 {"from": "think", "when": "text", "to": "check"}, {"from": "check", "when": "pass", "to": "done"}, {"from": "check", "when": "fail", "to": "think"}
 ```
 
-The notebook keeps its own run's outputs cell by cell, the evolved `answer-style` skill included.
+The notebook keeps its own run's outputs cell by cell, the step's verdict included.
 
 ### Reproduce
 
@@ -258,7 +259,7 @@ cd tutorials/evolve-your-harness
 python3 harness/probe_proposals.py --samples 30 --model qwen2.5:7b
 ```
 
-The model name is set in three places, `model.path` and `upstream_model` in the serve file and `MODEL` in `run.py`; every row above had all three on the model in its Model column.
+The model name is set in two places, `inference.upstream-model` in the serve file and `MODEL` in `run.py`; every row above had both on the model in its Model column.
 
 ### Notes
 
@@ -277,9 +278,10 @@ The model name is set in three places, `model.path` and `upstream_model` in the 
 [13] The self form sends one turn, not the three tasks: the model inspected its tree, proposed the two rules through `harness_propose` (admitted at the route) and answered the sieve task `\boxed{95920}`, score 0.0, reported.
 [14] The step claimed the model's proposal (the commit's `proposal` names its id and session), the process mounted the release within one second of the commit, and the sieve task ran again on the 9 entry tree with the model's rules in its prompt: stages entered think, act, think, done, answer `\boxed{9657}`, score 0.0. The gate's win and the served turn's miss are both on the record. Launch to verdict is the first turn's start to the commit.
 [15] `./run.sh self` as shipped. The model's first proposal updated the `answer-style` skill into a `rules` entry; the route refused it under the kind rule and said why (remove the entry and create it under the new kind); the model read the reason and proposed the remove plus create pair, admitted. Its own answer put the right number in a sentence, score 0.0. The gate tied all three tasks (both sides 0.0) and rejected; the settled proposal file carries the verdict, and the replay page shows the rejected step beside the seed.
-[16] Historical run on #311 before its rebase onto native auto/manual training: `reef-pi -p "Reply with the single word ready."` for one session, so its receipt spools, then `reef-pi harness "add a skill named test-first that tells you to run the project's tests before you answer any coding question"`, which files the request and reports that receipt with score 0; the step reads the request beside the trace and the service proposer writes the change. The recorded pass is the one turn, not the three tasks.
+[16] Historical run on #311 before its rebase onto native auto/manual training: `reef-pi -p "Reply with the single word ready."` for one session, so its receipt spools, then `reef-pi evolve "add a skill named test-first that tells you to run the project's tests before you answer any coding question"`, which files the request and reports that receipt with score 0; the step reads the request beside the trace and the service proposer writes the change. The recorded pass is the one turn, not the three tasks.
 [17] The model answered the request prompt with a well formed `test-first` skill whose config omitted the name the entry id carries, and the parser refused a named kind without it; the step recorded `skipped: no proposal` and the request settled `skipped`. The parser now takes the entry id as the name.
 [18] The same request on the fixed parser: the proposer took 15 s, the candidate won the sieve task and tied the other two, the release published and the request settled `selected`; the commit's `request` names its id, session and text. Launch to verdict is from the ask to the commit, in 5 s polls.
+[19] The notebook prints the gate's total scores, not the per task ones; W / L / T carries the per task pairings.
 
 The current ask command uses `POST /reef/train`, which `deployment.yaml` takes in `data.training_mode: hybrid` (`manual` takes it too; `auto` refuses it, and `POST /reef/scenarios/{scenario}/update` switches a running scenario). It needs no inference receipts and leaves the feedback spool intact; commits use `training_request` metrics. Runs [16] to [18] describe the earlier request-store implementation and have not been repeated against this path.
 

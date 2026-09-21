@@ -98,13 +98,16 @@ class Connector:
         next_snapshot = 0.0
         snapshot: dict[str, Any] | None = None
         retry_seconds = 3.0
+        active_until = 0.0
+        stop_wait = asyncio.create_task(stop.wait())
         try:
             while not stop.is_set():
+                backing_off = False
                 try:
                     if operation is not None and operation.done():
                         await operation
                         operation = None
-                        next_snapshot = 0
+                        active_until = time.monotonic() + 30
                     await self.flush_results()
                     if time.monotonic() >= next_snapshot:
                         snapshot = await self.snapshot()
@@ -120,18 +123,32 @@ class Connector:
                     command = response.get("command")
                     if command:
                         operation = asyncio.create_task(self.execute(command))
+                        active_until = time.monotonic() + 30
                     retry_seconds = 3.0
                 except HTTPFailure as exc:
                     if exc.status in (401, 403):
                         raise RuntimeError("Connection was revoked. Run reef connect to authorize it again.") from exc
                     logger.warning("Platform unavailable (HTTP %s); reconnecting", exc.status)
                     retry_seconds = min(30, retry_seconds * 2)
+                    backing_off = True
                 except (aiohttp.ClientError, TimeoutError, ValueError):
                     logger.warning("Platform connection interrupted; reconnecting")
                     retry_seconds = min(30, retry_seconds * 2)
-                with suppress(asyncio.TimeoutError):
-                    await asyncio.wait_for(stop.wait(), timeout=retry_seconds)
+                    backing_off = True
+                # Report completed work immediately and drain queued commands. Keep
+                # slow-operation heartbeats and idle polling at three seconds, but
+                # check every second for follow-up commands during active use.
+                wait_seconds = retry_seconds
+                if not backing_off and operation is None and time.monotonic() < active_until:
+                    wait_seconds = 1.0
+                waiters: set[asyncio.Task[bool] | asyncio.Task[None]] = {stop_wait}
+                if operation is not None and not backing_off:
+                    waiters.add(operation)
+                await asyncio.wait(waiters, timeout=wait_seconds, return_when=asyncio.FIRST_COMPLETED)
         finally:
+            stop_wait.cancel()
+            with suppress(asyncio.CancelledError):
+                await stop_wait
             if operation is not None:
                 operation.cancel()
                 with suppress(asyncio.CancelledError):

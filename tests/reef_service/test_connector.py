@@ -221,6 +221,48 @@ def test_success_reports_snapshot_atomically_and_cancel_is_unknown(tmp_path):
     asyncio.run(run())
 
 
+@pytest.mark.parametrize("status", [200, 409])
+def test_delete_scenario_uses_native_endpoint_and_reports_outcome(tmp_path, status):
+    async def run():
+        seen = []
+
+        async def handler(request):
+            seen.append((request.method, request.path, request.headers.get("Authorization")))
+            if request.method == "DELETE":
+                return web.json_response({"archived": ["/private/records"]}, status=status)
+            if request.path == "/reef/scenarios":
+                return web.json_response({"scenarios": [{"scenario": "keep"}]})
+            return web.json_response({"scenarios": {"keep": {"training_mode": "manual"}}})
+
+        app = web.Application()
+        app.router.add_route("*", "/{path:.*}", handler)
+        async with TestServer(app) as server, aiohttp.ClientSession() as session:
+            runtime = ReefRuntime(JSONClient(session, str(server.make_url("")).rstrip("/"), "local-test-token"))
+            state = ConnectorState(tmp_path)
+            connector = Connector(AsyncMock(), runtime, state)
+            command = {"id": str(uuid.uuid4()), "action": "delete_scenario", "scenario": "existing a"}
+            try:
+                await connector.execute(command)
+                await connector.execute(command)
+                result = dict(state.pending())[command["id"]]
+                assert result["state"] == ("succeeded" if status == 200 else "failed")
+                assert "/private/records" not in json.dumps(result)
+                assert [entry for entry in seen if entry[0] == "DELETE"] == [
+                    ("DELETE", "/reef/scenarios/existing a", "Bearer local-test-token")
+                ]
+                if status == 200:
+                    assert result["value"] == {"scenario": "existing a"}
+                    assert result["snapshot"]["scenarios"] == [{"scenario": "keep", "training_mode": "manual"}]
+                else:
+                    assert "snapshot" not in result
+                with pytest.raises(ValueError, match="Invalid scenario name"):
+                    await runtime.execute({"action": "delete_scenario", "scenario": "../other"})
+            finally:
+                state.close()
+
+    asyncio.run(run())
+
+
 def test_http_boundary_keeps_tokens_separate_and_blocks_redirects():
     async def run():
         seen = []
@@ -556,6 +598,111 @@ def test_background_connect_serve_reports_the_service_and_stops_it(tmp_path):
         finally:
             if _running(state):
                 os.kill(int((tmp_path / "state" / "connector.pid").read_text()), signal.SIGTERM)
+            state.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("action", ["releases", "create_scenario"])
+def test_completed_commands_report_and_drain_without_heartbeat_delay(tmp_path, action):
+    async def run():
+        state = ConnectorState(tmp_path)
+        stop = asyncio.Event()
+        commands = [{"id": str(uuid.uuid4()), "action": action, "scenario": "fixture"} for _ in range(3)]
+        expected_ids = [command["id"] for command in commands]
+        reported = []
+        runtime, platform = AsyncMock(), AsyncMock()
+        runtime.execute.return_value = {"scenario": "fixture"}
+        runtime.snapshot.return_value = {"reachable": True, "scenarios": []}
+
+        async def request(path, *, body):
+            if path.endswith("/result"):
+                reported.append(path.split("/")[-2])
+                assert body["state"] == "succeeded"
+                if action == "create_scenario":
+                    assert body["snapshot"] == runtime.snapshot.return_value
+                if len(reported) == 3:
+                    stop.set()
+                return {"accepted": True}
+            assert body["ready"] is True
+            assert len(reported) == 3 - len(commands), "Report before dispatching another operation"
+            return {"protocol": 1, "command": commands.pop(0) if commands else None}
+
+        platform.request.side_effect = request
+        try:
+            # Previously each result waited three seconds, so this batch took nine.
+            await asyncio.wait_for(Connector(platform, runtime, state).run(stop), 1)
+            assert reported == expected_ids
+            assert runtime.execute.await_count == 3
+            assert runtime.snapshot.await_count == (4 if action == "create_scenario" else 1)
+            assert state.pending() == []
+        finally:
+            state.close()
+
+    asyncio.run(run())
+
+
+def test_report_failure_keeps_backoff_and_saved_result(tmp_path):
+    async def run():
+        state = ConnectorState(tmp_path)
+        stop, attempted = asyncio.Event(), asyncio.Event()
+        runtime, platform = AsyncMock(), AsyncMock()
+        runtime.snapshot.return_value = {"reachable": True, "scenarios": []}
+        runtime.execute.return_value = {"releases": []}
+        command = {"id": str(uuid.uuid4()), "action": "releases", "scenario": "fixture"}
+        attempts = 0
+
+        async def request(path, *, body):
+            nonlocal attempts
+            if path.endswith("/result"):
+                attempts += 1
+                attempted.set()
+                raise aiohttp.ClientConnectionError
+            return {"protocol": 1, "command": command}
+
+        platform.request.side_effect = request
+        task = asyncio.create_task(Connector(platform, runtime, state).run(stop))
+        try:
+            await asyncio.wait_for(attempted.wait(), 1)
+            await asyncio.sleep(0.1)
+            assert attempts == 1, "A completed operation must not wake network backoff repeatedly"
+            assert runtime.execute.await_count == 1
+            assert dict(state.pending())[command["id"]]["state"] == "succeeded"
+        finally:
+            stop.set()
+            await asyncio.wait_for(task, 1)
+            state.close()
+
+    asyncio.run(run())
+
+
+def test_slow_operation_keeps_heartbeats_and_stops_without_replay(tmp_path):
+    async def run():
+        state = ConnectorState(tmp_path)
+        stop = asyncio.Event()
+        runtime, platform = AsyncMock(), AsyncMock()
+        runtime.snapshot.return_value = {"reachable": True, "scenarios": []}
+        command = {"id": str(uuid.uuid4()), "action": "train", "scenario": "fixture"}
+        polls = []
+
+        async def execute(_command):
+            await asyncio.Event().wait()
+
+        async def request(path, *, body):
+            polls.append(body["ready"])
+            if len(polls) == 1:
+                return {"protocol": 1, "command": command}
+            stop.set()
+            return {"protocol": 1, "command": None}
+
+        runtime.execute.side_effect = execute
+        platform.request.side_effect = request
+        try:
+            await asyncio.wait_for(Connector(platform, runtime, state).run(stop), 5)
+            assert polls == [True, False]
+            assert runtime.execute.await_count == 1
+            assert dict(state.pending())[command["id"]]["state"] == "unknown"
+        finally:
             state.close()
 
     asyncio.run(run())

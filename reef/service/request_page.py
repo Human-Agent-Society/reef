@@ -6,7 +6,8 @@ The catalog row whose ``metrics.training_request.id`` is the record id
 settles the request: the page then shows that row's result as the version
 page words it, the mutations, what the review left uncovered, why the
 proposer produced nothing when the step recorded that, and links the
-version page. Until then the page names the state the request is in
+version page; it ends with the proposer's design and its How to use
+section, the plan and the usage of the change, when the step recorded them. Until then the page names the state the request is in
 (``queued`` before a step takes it, ``proposing`` and ``evaluating`` from the
 backend's progress, ``running`` while the trainer holds the request and the
 backend reports no phase, ``settling`` while the row that consumed the
@@ -24,7 +25,7 @@ import time
 from collections.abc import Mapping, Sequence
 
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
-from reef.service.release_page import mutations_of, result_of, served_step, step_href
+from reef.service.release_page import design_sections, mutations_of, result_of, served_step, step_href
 from reef.train.cordis_backend.contracts import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -44,7 +45,9 @@ border-radius:50%;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.stage-c
 .journey .current{color:var(--status)}.journey .current .stage-icon{background:var(--status-bg);border-color:var(--status)}
 .layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:24px;align-items:start}
 .request-card{grid-column:1;grid-row:1}.outcome-card{grid-column:2;grid-row:1 / span 3}
-.changes-card,.review-card{grid-column:1}.text{font-size:19px;
+.changes-card,.review-card,.design-card,.usage-card{grid-column:1}
+.design-card p,.usage-card p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.7;margin:0}
+.text{font-size:19px;
 line-height:1.7;letter-spacing:-.3px;margin:0 0 30px;padding-left:20px;border-left:2px solid var(--accent)}
 .metadata{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:18px;margin:0;padding-top:20px;border-top:1px solid var(--line)}
 .record-id{grid-column:1 / -1}.outcome-summary{border-radius:8px;background:var(--status-bg);padding:18px;margin-bottom:22px}
@@ -77,7 +80,7 @@ padding:14px 0;border-top:1px solid var(--line)}.mutations li:first-child{border
 .activity .age{color:var(--mute);white-space:nowrap}.activity-empty{font-size:13px;color:var(--mute);margin:0}
 @media(min-width:1500px){main{padding-top:64px}}
 @media(max-width:800px){main{padding:32px 24px 24px}
-.layout{grid-template-columns:1fr}.request-card,.outcome-card,.changes-card,.review-card,.activity-card{grid-column:auto;grid-row:auto}
+.layout{grid-template-columns:1fr}.request-card,.outcome-card,.changes-card,.review-card,.design-card,.usage-card,.activity-card{grid-column:auto;grid-row:auto}
 .journey{padding:20px}.journey li:not(:last-child):after{margin:0 10px}.stage-copy small{display:none}}
 @media(max-width:480px){main{padding:28px 16px 20px}.text{font-size:17px;padding-left:16px}
 .journey{padding:18px 12px;gap:6px}.journey li{flex-direction:column;gap:7px}.journey li:not(:last-child):after{position:absolute;
@@ -249,7 +252,7 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
         f"<p>{escape(meaning(selection_result, row, metrics))}</p></div>",
         '<dl class="fact-list">',
-        f"<div><dt>Step</dt><dd>{step}</dd></div>",
+        f"<div><dt>Version</dt><dd>v{step}</dd></div>",
         f'<div><dt>Release</dt><dd class="id">{escape(row.get("release_id"))}</dd></div>',
         "</dl>",
     ]
@@ -262,10 +265,10 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
     # Carry the scenario and authentication to the version page without displaying the token.
     href = step_href(step, link_query)
     if selection_result == "pending":
-        command = f"/reef-versions {step} install"
+        command = f"/versions v{step} install"
         action = "Read this page, then install"
     elif selection_result == "selected":
-        command = f"/reef-versions {step} install"
+        command = f"/versions v{step} install"
         action = "Install when ready"
     else:
         command = ""
@@ -276,7 +279,7 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
             "<p>Run this in your reef-pi session. You can keep chatting until you are ready.</p></div>"
         )
     parts.append(
-        f'<a class="version-link" href="{escape(href)}">View step {step}<span aria-hidden="true">&#8599;</span></a>'
+        f'<a class="version-link" href="{escape(href)}">View v{step}<span aria-hidden="true">&#8599;</span></a>'
     )
     return "\n".join(parts)
 
@@ -300,11 +303,19 @@ def what_changed(metrics: Mapping[str, object]) -> str:
 
 
 def review_html(metrics: Mapping[str, object]) -> str:
-    """The Review section, only when the step recorded one: the result and what the entries left uncovered."""
+    """The Review section: the result and what the entries left uncovered, or, when the review call failed, the
+    reason it did not run, so a step never quietly publishes with nothing checking that it delivers the request."""
     notes = metrics.get("proposal_notes")
-    review = notes.get("review") if isinstance(notes, Mapping) else None
+    notes = notes if isinstance(notes, Mapping) else {}
+    review = notes.get("review")
     if not isinstance(review, Mapping):
-        return ""
+        failure = notes.get("review_failure")
+        if not isinstance(failure, str) or not failure.strip():
+            return ""
+        return (
+            f'<section class="card review-card">\n<h2>Review</h2>\n<p>The review of the entries against your '
+            f"request did not run, so nothing checked whether they deliver it: {escape(failure)}</p>\n</section>\n"
+        )
     uncovered = review.get("uncovered")
     items = [item for item in uncovered if isinstance(item, str)] if isinstance(uncovered, Sequence) else []
     listed = "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>" if items else ""
@@ -314,6 +325,19 @@ def review_html(metrics: Mapping[str, object]) -> str:
         + (f"<h3>Still uncovered</h3>{listed}\n" if items else '<p class="empty">Nothing left uncovered.</p>\n')
         + "</section>\n"
     )
+
+
+def design_html(metrics: Mapping[str, object]) -> str:
+    """The Design and How to use sections, only when the step recorded a design: the plan for the request, then
+    how the person uses the change."""
+    notes = metrics.get("proposal_notes")
+    design, usage = design_sections(notes if isinstance(notes, Mapping) else {})
+    cards = (
+        f'<section class="card design-card">\n<h2>Design</h2>\n<p>{escape(design)}</p>\n</section>\n' if design else ""
+    )
+    if usage:
+        cards += f'<section class="card usage-card">\n<h2>How to use</h2>\n<p>{escape(usage)}</p>\n</section>\n'
+    return cards
 
 
 def build_request_page(
@@ -355,7 +379,7 @@ def build_request_page(
         body = (
             f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query)}</section>\n'
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
-            f"{review_html(metrics)}"
+            f"{review_html(metrics)}{design_html(metrics)}"
         )
         subtitle = "Your request has a result. Review the outcome below."
         current_stage = 3

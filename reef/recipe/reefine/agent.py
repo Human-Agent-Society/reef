@@ -26,6 +26,7 @@ import logging
 import os
 import shutil
 import tempfile
+import threading
 import time
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
@@ -84,11 +85,15 @@ def agent_rules(provider: MultimodalProvider | None) -> str:
         )
     else:
         routes = ", ".join(f"`{route}`" for route in provider.preset.paths)
+        if "/v1/decisions" in provider.preset.paths:
+            other_modalities = "`image`, `embeddings`, `decisions`"
+        else:
+            other_modalities = "`image`, `embeddings`"
         note = (
             f"This deployment's multimodal provider is {provider.preset.name} ({provider.base_url}); it serves "
             f"{routes}, and "
             "any other of these routes answers 501. List its models with "
-            '`curl -s "$REEF_PROPOSER_URL/models?modality=speech"` (or `image`, `embeddings`).'
+            f'`curl -s "$REEF_PROPOSER_URL/models?modality=speech"` (or {other_modalities}).'
         )
     return AGENT_RULES.read_text(encoding="utf-8").replace("<!-- provider -->", note)
 
@@ -299,6 +304,9 @@ class AgentRun(WorkspaceTools):
         self.gateway: AgentGateway | None = None
         #: The E2B sandbox the agent and its trials run in, when the host's executor is one.
         self.session: E2BSession | None = None
+        #: pi runs the tool calls of one turn concurrently, and the gateway serves each on its own thread; the
+        #: pull replaces the workspace directory, so one call at a time reads it.
+        self.workspace_lock = threading.Lock()
         self.trials = 0
 
     def executor(self) -> EpisodeExecutor:
@@ -314,10 +322,11 @@ class AgentRun(WorkspaceTools):
     def admitted(self) -> tuple[list[Mutation], list[dict[str, Any]] | None, list[str], str | None]:
         """The workspace's mutations, the entries admission turns them into (``None`` when it refuses), what could
         not be read, and the refusal."""
-        if self.session is not None:
-            # The agent edits its copy in the sandbox; the check reads that copy as it stands now.
-            self.session.pull(self.workspace.parent, self.workspace.name)
-        mutations, problems = workspace_mutations(self.workspace, self.entries, self.nodes)
+        with self.workspace_lock:
+            if self.session is not None:
+                # The agent edits its copy in the sandbox; the check reads that copy as it stands now.
+                self.session.pull(self.workspace.parent, self.workspace.name)
+            mutations, problems = workspace_mutations(self.workspace, self.entries, self.nodes)
         admitted, refusal = admit_mutations(self.entries, mutations, self.host.descriptor)
         return mutations, (None if refusal is not None else [dict(entry) for entry in admitted]), problems, refusal
 
@@ -546,9 +555,13 @@ def read_answer(
     added, refused = workspace_requires(workspace)
     if refused:
         notes["refused_requires"] = refused
-    review = evolution._review(models, str(request.get("text", "")), design or None, mutations, [*own, *added])
+    review, review_failure = evolution._review(
+        models, str(request.get("text", "")), design or None, mutations, [*own, *added]
+    )
     if review is not None:
         notes["review"] = review
+    else:
+        notes["review_failure"] = review_failure or "the review did not run"
     undeclared = evolution._undeclared_env(mutations, [*own, *added])
     if undeclared:
         notes["undeclared_env"] = undeclared

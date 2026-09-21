@@ -6,6 +6,7 @@ import json
 import sys
 import textwrap
 import threading
+import time
 import urllib.error
 import urllib.request
 from dataclasses import replace
@@ -15,11 +16,12 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.e2b import E2BSession, pack
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.recipe.reefine import agent as reefine_agent
-from reef.recipe.reefine.agent import AgentProposer, workspace_mutations, write_workspace
+from reef.recipe.reefine.agent import AgentProposer, AgentRun, workspace_mutations, write_workspace
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
@@ -307,6 +309,61 @@ def test_the_agent_writes_the_change_tries_it_and_hands_it_back_reviewed(tmp_pat
 
 
 @pytest.mark.unit
+def test_concurrent_tool_calls_pull_the_sandbox_workspace_one_at_a_time(tmp_path) -> None:
+    """pi runs the tool calls of one turn at once, and each pull replaces the workspace directory: they take turns,
+    and every one answers from a whole copy."""
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace, ENTRIES)
+    (workspace / "harness" / "skills" / "answer-style.md").write_text("---\nname: x\n---\nnew")
+    archive = pack(workspace)
+
+    class Sandbox:
+        """What a pull asks of the E2B sandbox, counting how many pulls are inside it at once."""
+
+        def __init__(self) -> None:
+            self.commands = self
+            self.files = self
+            self.inside = 0
+            self.most_at_once = 0
+            self.counter = threading.Lock()
+
+        def run(self, command: str, **options: object) -> None:
+            return None
+
+        def read(self, path: str, format: str = "text") -> bytes:
+            with self.counter:
+                self.inside += 1
+                self.most_at_once = max(self.most_at_once, self.inside)
+            time.sleep(0.05)  # long enough for unserialized pulls to overlap
+            with self.counter:
+                self.inside -= 1
+            return archive
+
+    sandbox = Sandbox()
+    run = AgentRun(agent_host(tmp_path, []), ENTRIES, NODES, workspace, ModelBinding(base_url="http://m", model="m"))
+    run.session = E2BSession(sandbox)
+    results: list[dict] = []
+    errors: list[BaseException] = []
+
+    def check() -> None:
+        try:
+            results.append(run.check())
+        except BaseException as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=check) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert errors == []
+    assert all(
+        r["admitted"] and r["mutations"] == [{"op": "update", "id": "answer-style", "kind": "skill"}] for r in results
+    )
+    assert len(results) == 6 and sandbox.most_at_once == 1
+
+
+@pytest.mark.unit
 def test_an_agent_that_changes_nothing_or_runs_out_of_time_hands_back_no_mutation(tmp_path, upstream) -> None:
     record: list[dict] = []
     host = agent_host(tmp_path, record)
@@ -411,6 +468,9 @@ def test_the_agent_is_told_what_its_deployments_provider_serves() -> None:
     rules = agent_rules(compatible)
     assert "openai-compatible (https://gateway.example)" in rules and "`/v1/decisions`" not in rules
     assert "$REEF_PROPOSER_URL/models?modality=speech" in rules and "<!-- provider -->" not in rules
+    assert "(or `image`, `embeddings`)." in rules
+    openrouter = MultimodalProvider(PRESETS["openrouter"], "https://openrouter.ai/api", "k")
+    assert "(or `image`, `embeddings`, `decisions`)." in agent_rules(openrouter)
 
 
 @pytest.mark.unit

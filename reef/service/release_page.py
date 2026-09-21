@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import difflib
 import json
+import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import urlencode
@@ -160,12 +161,12 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
 
     A pending row stays pending in the catalog after a person promotes it;
     the promote is a later row naming it in ``rollback_target_release_id``,
-    so with ``rows`` given such a row reads ``promoted at step N``."""
+    so with ``rows`` given such a row reads ``promoted at vN``."""
     if row.get("pending"):
         release_id = row.get("release_id")
         for index, other in enumerate(rows):
             if other.get("operation") == "promote" and other.get("rollback_target_release_id") == release_id:
-                return f"promoted at step {index}"
+                return f"promoted at v{index}"
         return "pending"
     metrics = row.get("metrics")
     if isinstance(metrics, Mapping):
@@ -243,12 +244,30 @@ def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     return "<p>A failure in the batch; no request asked for this step.</p>"
 
 
-def _design(metrics: Mapping[str, Any]) -> str:
-    """The Design section: the proposer's plan for the request, when the method recorded ``proposal_notes.design``."""
-    design = _notes(metrics).get("design")
+#: The heading that ends a design and starts its How to use section: a markdown heading or a labelled line.
+USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
+
+
+def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:
+    """The design the method recorded as ``proposal_notes.design`` and its How to use section, each stripped;
+    empty where the record has none. The proposer writes the usage under a ``How to use`` heading at the end."""
+    design = notes.get("design")
     if not isinstance(design, str) or not design.strip():
-        return ""
-    return _card("Design", f'<p class="text">{escape(design)}</p>\n')
+        return "", ""
+    match = USAGE_HEADING.search(design)
+    if match is None:
+        return design.strip(), ""
+    return design[: match.start()].strip(), design[match.end() :].strip()
+
+
+def _design(metrics: Mapping[str, Any]) -> str:
+    """The Design section and, when the design ends with one, the How to use section, when the method recorded
+    ``proposal_notes.design``."""
+    design, usage = design_sections(_notes(metrics))
+    cards = _card("Design", f'<p class="text">{escape(design)}</p>\n') if design else ""
+    if usage:
+        cards += _card("How to use", f'<p class="text">{escape(usage)}</p>\n')
+    return cards
 
 
 def _diff_block(path: str, before: str, after: str, before_id: str | None, release_id: Any) -> str:
@@ -352,13 +371,16 @@ def _listed(items: Sequence[str], empty: str) -> str:
 def _review(metrics: Mapping[str, Any]) -> str:
     """The Review section: the proposer's reading of its entries against the request, then what it left undeclared.
 
-    ``proposal_notes.review`` is absent when the method's review call failed;
-    the ``undeclared_env`` line shows all the same, being the warning the
-    person needs. Empty when the step recorded neither."""
+    ``proposal_notes.review`` is absent when the method's review call failed,
+    and ``review_failure`` then says why: the one check of whether the entries
+    deliver the request did not run, which the page says rather than leaving
+    the section out. The ``undeclared_env`` line shows all the same, being the
+    warning the person needs. Empty when the step recorded none of them."""
     notes = _notes(metrics)
     review = notes.get("review")
+    failure = notes.get("review_failure")
     undeclared = _strings(notes.get("undeclared_env"))
-    if not isinstance(review, Mapping) and not undeclared:
+    if not isinstance(review, Mapping) and not isinstance(failure, str) and not undeclared:
         return ""
     parts = []
     if isinstance(review, Mapping):
@@ -366,6 +388,11 @@ def _review(metrics: Mapping[str, Any]) -> str:
         parts.append(f"<p>The proposer's review of its entries against the request: {review_result}</p>")
         parts.append("<h3>Covered</h3>" + _listed(_strings(review.get("covered")), "nothing listed as covered"))
         parts.append("<h3>Uncovered</h3>" + _listed(_strings(review.get("uncovered")), "nothing left uncovered"))
+    elif isinstance(failure, str) and failure.strip():
+        parts.append(
+            "<p>The proposer's review of its entries against the request did not run, so nothing checked "
+            f"whether they deliver it: {escape(failure)}</p>"
+        )
     else:
         parts.append('<p class="empty">no review on record</p>')
     if undeclared:
@@ -532,7 +559,7 @@ def _chain(
             "</dl>"
         )
     children = [
-        f'<li><a class="step-name" href="{escape(step_href(index, link_query))}">Step {index}</a>'
+        f'<li><a class="step-name" href="{escape(step_href(index, link_query))}">v{index}</a>'
         f'<span class="id">{escape(other.get("release_id"))}</span>{status_span(result_of(other, rows))}</li>'
         for index, other in enumerate(rows)
         if index != step and _ran_on(other, release_id)
@@ -554,14 +581,14 @@ def _steps_nav(step: int, rows: Sequence[Mapping[str, Any]], link_query: Mapping
     """The walk along the catalog: the neighbouring steps, a dead end shown as text, and where this step sits."""
     parts = []
     if step > 0:
-        parts.append(f'<a href="{escape(step_href(step - 1, link_query))}" rel="prev">&#8592; Step {step - 1}</a>')
+        parts.append(f'<a href="{escape(step_href(step - 1, link_query))}" rel="prev">&#8592; v{step - 1}</a>')
     else:
-        parts.append("<span>&#8592; Step</span>")
+        parts.append("<span>&#8592;</span>")
     if step + 1 < len(rows):
-        parts.append(f'<a href="{escape(step_href(step + 1, link_query))}" rel="next">Step {step + 1} &#8594;</a>')
+        parts.append(f'<a href="{escape(step_href(step + 1, link_query))}" rel="next">v{step + 1} &#8594;</a>')
     else:
-        parts.append("<span>Step &#8594;</span>")
-    parts.append(f'<span class="here">Step {step} of {len(rows) - 1}</span>')
+        parts.append("<span>&#8594;</span>")
+    parts.append(f'<span class="here">v{step} of v{len(rows) - 1}</span>')
     return f'<nav class="steps" aria-label="Catalog steps">{"".join(parts)}</nav>\n'
 
 
@@ -602,13 +629,13 @@ def build_release_page(
     data = json.dumps(row, ensure_ascii=True, sort_keys=True).replace("<", "\\u003c")
     served = served_step(rows)
     return document(
-        title=f"Harness step {step}",
+        title=f"Harness v{step}",
         style=STYLE,
         breadcrumb="Versions",
         context=link_query.get("scenario", "") if link_query else "",
         state=selection_result,
         eyebrow="Harness evolution",
-        heading=f"Harness step {step}",
+        heading=f"Harness v{step}",
         subtitle=subtitle,
         # The served head is this scenario's home; on its own page the crumb stays text.
         home="" if served is None or served == step else step_href(served, link_query),

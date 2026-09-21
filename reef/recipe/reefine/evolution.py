@@ -55,8 +55,9 @@ API_SKILL_NAME = "reef-pi-extension-api"
 #: How much of each entry's body the request prompt shows: enough to recognize it, never the whole tree.
 _PREVIEW_CHARS = 240
 
-#: How much of a design the step records: a few sentences, never a second copy of the entries.
-_DESIGN_CHARS = 1500
+#: How much of a design the step records: a few paragraphs with its How to use section, never a second copy of
+#: the entries.
+_DESIGN_CHARS = 4000
 
 #: The two words a review result may be.
 REVIEW_RESULTS = ("complete", "partial")
@@ -98,7 +99,11 @@ REQUEST_PROMPT = (
     "is a requires item, described below, with a prompt sentence that tells the user what to enter or "
     "grant. The value of an env item is read at run time from process.env.NAME; an extension never asks "
     "the user for it, never stores it in a file of its own and never hardcodes it.\n"
-    "4. Then write the entries: complete for what the request implies, and nothing the request did not "
+    "4. Describe how the user discovers, invokes and sees the result through the existing UI, and how to "
+    "check that path. For a mode, include visible state and a way to turn it off. End the design with a "
+    "paragraph headed 'How to use', written for the user: the exact command or trigger, what they see, how "
+    "to turn it off or undo it, and anything they must set up first.\n"
+    "5. Then write the entries: complete for what the request implies, and nothing the request did not "
     "ask for. When these kinds and the extension API cannot deliver the behavior the request asks for, "
     "write the design saying why and no entry: a rule, a note or a workaround that only imitates the "
     "behavior is not an answer.\n\n"
@@ -111,14 +116,31 @@ REQUEST_PROMPT = (
     '- code_extension: {{"name": <id>, "code": <a complete pi extension module>}}\n'
     "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt and a "
     "code_extension only when the request needs behavior a prompt cannot give. "
+    "Every new slash command must appear in the native / autocomplete dropdown alongside built-in commands, "
+    "with a concise description. For an agent_command, include description in YAML frontmatter; Reef renders "
+    "it as a native pi prompt template. For executable behavior, use pi.registerCommand with description "
+    "and handler at extension load, after the PI_OFFLINE guard, not inside an event handler or behind "
+    "ctx.hasUI. Guard only UI operations that need it. An input hook, a rule, a skill or a separate menu "
+    "alone does not register a slash command. Avoid duplicate names and built-in or Reef command collisions. "
+    "Menu selection and direct invocation must reach the same behavior; handle arguments, cancellation, "
+    "results and failures, and keep mode status in sync with its actual state. Preserve unrelated behavior. "
+    "Distinguish checks actually run from checks still needed: headless trials cannot verify the dropdown. "
+    "An extension must never write to the session's own stdout or stderr while it has a UI: the harness process "
+    "owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame "
+    "and leave the person without an input box, and admission refuses an unguarded write. Use ctx.ui.notify, "
+    "ctx.ui.setStatus and ctx.ui.setWidget, and keep console output for the no-UI path "
+    "(if (!ctx.hasUI) console.error(...)). A command the change runs, such as a speech, sound or notification "
+    "command, is a requires item with a check so reef-pi setup verifies it on the user's machine; branch on "
+    "process.platform, and when no command is available at run time say so through ctx.ui rather than falling "
+    "through to silence. "
     "The user may be on macOS, Linux or Windows under WSL 2: branch on process.platform, "
     "prefer commands that exist on all three, and name anything platform specific the user "
     "must set up in requires. "
     "Never touch these reserved entries: {reserved}.\n\n"
     "{plan}"
     "{api}"
-    "Respond with a JSON array and nothing else. Its first object is your design, points 1 to 3 in a few "
-    'sentences: {{"design": "<the design>"}}\n'
+    "Respond with a JSON array and nothing else. Its first object is your design, points 1 to 4 in a few "
+    'sentences, ending with the How to use paragraph: {{"design": "<the design>"}}\n'
     "Then one object per entry, each of the form:\n"
     '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}} (the kind goes under the key name)\n'
     "Reuse an existing entry's id to update it; use a new lowercase id to add one. "
@@ -137,6 +159,10 @@ REQUEST_PROMPT = (
     "- service, an account or endpoint the user connects; check is a shell command that exits 0 once "
     'connected: {{"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "Sign in to '
     'the GitHub CLI"}}\n'
+    "- binary, a program the user installs, which an entry then spawns; name is the program looked for on "
+    "PATH, and check is optional, a shell command that exits 0 when the program is usable: "
+    '{{"name": "pdftotext", "kind": "binary", "prompt": "Install pdftotext: brew install poppler on macOS, '
+    'apt install poppler-utils on Linux"}}\n'
     "Omit the object when the change needs nothing."
 )
 
@@ -152,6 +178,14 @@ REVIEW_PROMPT = (
     "that no entry performs, a variable an extension reads that no requires item names (PI_OFFLINE, "
     "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none), a value the user must "
     "provide that the extension asks for or stores itself instead of declaring it as a requires item. "
+    "For each new slash command, check that the entries use a native prompt template or pi.registerCommand "
+    "with a concise description so it appears in the native / autocomplete dropdown alongside built-in "
+    "commands. Treat text interception alone, a separate menu, missing registration, registration delayed "
+    "until a turn or mode activation, or a name collision visible in the supplied entries as uncovered. "
+    "Check that menu selection and direct invocation reach the same behavior, arguments and cancellation "
+    "are handled, results and failures are visible, and modes expose their current state and an off path. "
+    "Review the implementation shown; do not claim interactive verification from a design, a headless trial "
+    "or registration code alone. "
     "Then decide whether the entries deliver the behavior the request asks for at all. They do not when "
     "they put a substitute in its place: a rule or a note where the request asks for behavior, or a "
     "workaround that only imitates it (context the model reads instead of the session the user sees, say). "
@@ -377,9 +411,11 @@ def _answer_once(
     notes: dict[str, Any] = {}
     if design is not None:
         notes["design"] = design
-    review = _review(models, str(request.get("text", "")), design, mutations, [*own, *added])
+    review, review_failure = _review(models, str(request.get("text", "")), design, mutations, [*own, *added])
     if review is not None:
         notes["review"] = review
+    else:
+        notes["review_failure"] = review_failure or "the review did not run"
     if refused:
         notes["refused_requires"] = refused
     undeclared = _undeclared_env(mutations, [*own, *added])
@@ -511,9 +547,10 @@ def _review(
     design: str | None,
     mutations: Sequence[Mutation],
     requires: Sequence[Mapping[str, Any]],
-) -> dict[str, Any] | None:
-    """The served model's reading of its entries against the request, ``{result, covered, uncovered}``; ``None``
-    when the call or the parse failed, which costs the step its review and nothing else."""
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The served model's reading of its entries against the request, ``{result, covered, uncovered}``, and no
+    reason; or ``None`` and the reason the step has no review, which the step records so the page says the one
+    check of whether the entries deliver the request did not run."""
     written: list[dict[str, Any]] = [{"op": m.op, "id": m.id, **(m.options or {})} for m in mutations]
     if requires:
         written.append({"requires": [dict(item) for item in requires]})
@@ -522,9 +559,17 @@ def _review(
         design="(none written)" if design is None else design,
         entries=json.dumps(written, indent=2),
     )
-    # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live.
-    reply, _ = _ask(models, prompt, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
-    return None if reply is None else _parse_review(reply)
+    # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live,
+    # and 16384 still does on a long change, so a reply the reasoning ate is asked once more with room for both.
+    reply, reason = _ask(models, prompt, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
+    if reply is None and reason is not None and "non-text content" in reason:
+        reply, reason = _ask(models, prompt, max_tokens=_max_tokens(16384) * 2, timeout_s=_timeout_s(240.0))
+    if reply is None:
+        return None, reason
+    review = _parse_review(reply)
+    if review is None:
+        return None, "the review reply carried no result object"
+    return review, None
 
 
 def _parse_review(reply: str) -> dict[str, Any] | None:

@@ -18,7 +18,7 @@ from typing import Any
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
-from reef.observability import build_experiment_tracker
+from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
@@ -27,6 +27,7 @@ from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
 from reef.service.app import InferenceRetryPolicy, create_app
 from reef.service.deploy.service_config import ServiceConfig, service_owned_keys
 from reef.service.deploy.training import training_deployment_for
+from reef.storage.observer import ObservedScenarioStorage
 from reef.storage.postgres import PostgresScenarioStorage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -206,6 +207,10 @@ def build_dispatcher(
             )
         else:
             scenario_storage = SQLiteScenarioStorage(Path(settings.agent_record_dir))
+        # Record tracing observes storage events; the storage closes the observer with itself.
+        record_observer = build_record_observer(settings.tracing_config, environ=env)
+        if record_observer is not None:
+            scenario_storage = ObservedScenarioStorage(scenario_storage, record_observer)
         # A harness recipe's seed is the base artifact, so a fresh scenario serves a tree before any step.
         backend_factory = GitLFSRepositoryBackend.factory(
             _repository_location(settings.artifact_repository),

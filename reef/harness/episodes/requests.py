@@ -2,7 +2,7 @@
 
 Like the update notice, the extension is composition, not runtime code:
 ``evolution.requests: true`` appends a ``code_extension`` entry carrying
-``requests.ts`` (the ``/reef-harness`` command, which files the person's
+``requests.ts`` (the ``/evolve`` command, which files the person's
 request through native manual training) and a
 ``skill`` entry carrying the pi extension API reference the service proposer
 reads before it writes an extension. Both
