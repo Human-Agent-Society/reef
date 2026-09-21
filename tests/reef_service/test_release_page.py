@@ -830,6 +830,10 @@ def test_the_result_names_why_the_proposer_produced_nothing_when_the_step_record
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
     # A failure alone adds no Design or Review section; the Result section names it after the skip, escaped.
+    assert result_of(row) == "failed"
+    assert served_step([creation, row]) == 0
+    assert before_release_id(row) == "rel-0"
+    assert '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     selection_result = _section(page, "Result")
     assert "<dt>Skipped</dt><dd>no proposal</dd>" in selection_result
@@ -841,6 +845,7 @@ def test_the_result_names_why_the_proposer_produced_nothing_when_the_step_record
     # Without the note, or with one that is not text, there is no such row.
     for notes in ({}, {"failure": "  "}, {"failure": 3}):
         without = {**row, "metrics": {**row["metrics"], "proposal_notes": notes}}
+        assert result_of(without) == "skipped"
         assert "Proposer failure" not in build_release_page(1, [creation, without])
     # A design written before the reply came to nothing keeps its section beside the row.
     designed = {**row, "metrics": {**row["metrics"], "proposal_notes": {"design": "A tool.", "failure": failure}}}

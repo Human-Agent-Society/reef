@@ -62,7 +62,9 @@ cleanup_whitelist:
 quirks: reef.harness.adapters.pi.quirks
 # How to point pi at a model endpoint, per API dialect. Reef renders the set
 # matching its model binding's api into evaluation episodes; the served tree
-# never carries a provider.
+# never carries a provider. maxTokens is Reef's reply budget rather than pi's
+# own default of 16384: a reasoning model spends that on its reasoning and
+# answers with no text, which ends the turn with nothing written.
 model_binding:
   openai:
     - target: models
@@ -74,6 +76,7 @@ model_binding:
             baseUrl: "{base_url}/v1"
             models:
               - id: "{model}"
+                maxTokens: "{max_output_tokens}"
     - target: primary
       data:
         defaultModel: "reef/{model}"
@@ -88,6 +91,7 @@ model_binding:
             baseUrl: "{base_url}/v1"
             models:
               - id: "{model}"
+                maxTokens: "{max_output_tokens}"
     - target: primary
       data:
         defaultModel: "reef/{model}"
@@ -102,6 +106,7 @@ model_binding:
             baseUrl: "{base_url}"
             models:
               - id: "{model}"
+                maxTokens: "{max_output_tokens}"
     - target: primary
       data:
         defaultModel: "reef/{model}"

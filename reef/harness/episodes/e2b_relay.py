@@ -43,6 +43,7 @@ class Pending:
             "body": base64.b64encode(body).decode(),
         }
         self.pieces: queue.Queue[dict] = queue.Queue()
+        self.sequence = 0
 
 
 class Relay:
@@ -56,8 +57,8 @@ class Relay:
         relay = self
 
         class Local(BaseHTTPRequestHandler):
-            # A close-delimited answer, so a stream passes piece by piece without a length or chunking.
-            protocol_version = "HTTP/1.0"
+            # Chunk framing makes an interrupted answer distinguishable from a complete one.
+            protocol_version = "HTTP/1.1"
 
             def relay_request(self) -> None:
                 length = int(self.headers.get("Content-Length") or 0)
@@ -73,21 +74,31 @@ class Relay:
                     self.send_error(504, "Reef did not answer through the tunnel")
                     return
                 try:
-                    self.send_response(int(first.get("status") or 502))
+                    status = int(first.get("status") or 502)
+                    self.send_response(status)
                     for name, value in (first.get("headers") or {}).items():
                         if name.lower() not in ("content-length", "transfer-encoding", "connection"):
                             self.send_header(name, value)
+                    chunked = status not in (204, 304)
+                    if chunked:
+                        self.send_header("Transfer-Encoding", "chunked")
                     self.end_headers()
                     piece = first
                     while True:
                         data = base64.b64decode(piece.get("data") or "")
-                        if data:
-                            self.wfile.write(data)
+                        if data and chunked:
+                            self.wfile.write(b"%x\r\n%s\r\n" % (len(data), data))
                             self.wfile.flush()
                         if piece.get("end"):
+                            if piece.get("error"):
+                                self.close_connection = True
+                            elif chunked:
+                                self.wfile.write(b"0\r\n\r\n")
+                                self.wfile.flush()
                             return
                         piece = pending.pieces.get(timeout=ANSWER_SECONDS)
                 except (BrokenPipeError, ConnectionResetError, queue.Empty):
+                    self.close_connection = True
                     return
                 finally:
                     with relay.lock:
@@ -147,13 +158,27 @@ class Relay:
                 if not self.path.startswith("/reply/"):
                     self.answer(404)
                     return
+                piece = json.loads(raw or b"{}")
+                sequence = piece.get("sequence")
+                if not isinstance(sequence, int) or isinstance(sequence, bool) or sequence < 0:
+                    self.answer(400)
+                    return
                 with relay.lock:
                     pending = relay.open.get(self.path[len("/reply/") :])
-                if pending is None:
-                    self.answer(410)
-                    return
-                pending.pieces.put(json.loads(raw or b"{}"))
-                self.answer(200)
+                    if pending is None:
+                        status = 410
+                    elif piece.get("error"):
+                        # An abort must arrive even if the last data piece's acknowledgements were all lost.
+                        pending.pieces.put(piece)
+                        status = 200
+                    elif sequence > pending.sequence:
+                        status = 409
+                    else:
+                        if sequence == pending.sequence:
+                            pending.pieces.put(piece)
+                            pending.sequence += 1
+                        status = 200
+                self.answer(status)
 
             def log_message(self, format: str, *args: object) -> None:
                 pass

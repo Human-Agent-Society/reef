@@ -69,6 +69,7 @@ RESULT_WORDS = {
     "selected": "Passed the checks and was published as the served head.",
     "rejected": "Did not pass the checks. The head stayed where it was.",
     "skipped": "No candidate reached the evaluation, so nothing changed.",
+    "failed": "The step failed before evaluation. Nothing was published; see the error below before retrying.",
     "creation": "The tree this scenario started from, before any step ran.",
     "promote": "A person promoted a pending release, which now serves.",
     "rollback": "A person moved the head back to an earlier release.",
@@ -157,7 +158,7 @@ def mutations_of(metrics: Mapping[str, Any] | None) -> list[Mapping[str, Any]]:
 
 
 def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) -> str:
-    """The row's result: pending, selected, rejected, skipped, else the operation (creation, promote, rollback).
+    """The row's result, including failed proposals that published no release.
 
     A pending row stays pending in the catalog after a person promotes it;
     the promote is a later row naming it in ``rollback_target_release_id``,
@@ -173,6 +174,11 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
         if isinstance(metrics.get("selected"), bool):
             return "selected" if metrics["selected"] else "rejected"
         if metrics.get("skipped"):
+            notes = metrics.get("proposal_notes")
+            failure = notes.get("failure") if isinstance(notes, Mapping) else None
+            error = metrics.get("error")
+            if any(isinstance(value, str) and value.strip() for value in (failure, error)):
+                return "failed"
             return "skipped"
     return str(row.get("operation") or "unknown")
 
@@ -184,7 +190,7 @@ def served_step(rows: Sequence[Mapping[str, Any]]) -> int | None:
     pending win or a failed evaluation makes the wrong one: those rows publish
     nothing, and a rejected or skipped row carries the head's id."""
     for index in range(len(rows) - 1, -1, -1):
-        if result_of(rows[index]) not in ("pending", "rejected", "skipped"):
+        if result_of(rows[index]) not in ("pending", "rejected", "skipped", "failed"):
             return index
     return None
 
@@ -198,7 +204,7 @@ def before_release_id(row: Mapping[str, Any]) -> str | None:
     if selection_result in ("selected", "pending"):
         parent = row.get("parent_release_id")
         return str(parent) if parent else None
-    if selection_result in ("rejected", "skipped"):
+    if selection_result in ("rejected", "skipped", "failed"):
         return str(row.get("release_id") or "") or None
     return None
 
@@ -501,7 +507,7 @@ def _setup(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Ma
     requires = request.get("requires")
     own = [item for item in requires if isinstance(item, Mapping)] if isinstance(requires, Sequence) else []
     carried: list[Mapping[str, Any]] = []
-    if result_of(row) not in ("rejected", "skipped"):
+    if result_of(row) not in ("rejected", "skipped", "failed"):
         names = {item.get("name") for item in own}
         carried = [item for item in required_by(rows, row.get("release_id")) if item.get("name") not in names]
     refused = [
@@ -546,7 +552,7 @@ def _chain(
 ) -> str:
     release_id = row.get("release_id")
     selection_result = result_of(row)
-    if selection_result in ("rejected", "skipped"):
+    if selection_result in ("rejected", "skipped", "failed"):
         # The row carries the head's id and published nothing, so the head's parent and children are not its own.
         if selection_result == "rejected":
             ran_on = "the head at this step; the candidate published nothing"

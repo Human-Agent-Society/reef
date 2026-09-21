@@ -803,7 +803,7 @@ id settles the page: the reload stops and Progress gives way to Result
 action, a failed instruction's ``error``, ``proposal_notes.failure`` as
 ``proposer failure``, the release id and a link to the version page), What
 changed (each mutation's op, id and kind; labeled Proposed changes for
-pending, rejected or skipped steps) and, when the step recorded a review,
+pending, rejected, skipped or failed steps) and, when the step recorded a review,
 Review (its result and the points it left uncovered). Published and pending
 results show the session command to install or promote when the person is
 ready, alongside a link to the version page. An unknown
@@ -814,7 +814,8 @@ as JSON (``Cache-Control: no-store``), for a client that polls rather than a
 browser that renders: ``request_id``, ``settled``, ``step`` (the step the
 row landed as once it settles, else null), ``state`` (the page's own
 ``queued``, ``proposing``, ``evaluating``, ``running`` or ``settling``, and
-the settled row's result once a row answers the request), ``meaning`` (the
+the settled row's result once a row answers the request, including ``failed``
+when a skipped step records a proposer failure or execution error), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
 step holds this request, ``started_at``, ``episodes_total``,
 ``step_record`` and ``activity`` (the Activity lines oldest first, each
