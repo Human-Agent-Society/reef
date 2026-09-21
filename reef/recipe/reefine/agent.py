@@ -471,7 +471,7 @@ def answer_with_agent(
             env = {"REEF_PROPOSER_URL": gateway.base_url, **trial_env(gateway.base_url)}
             run.session = open_session(host, gateway.port)
             host.calls.note("proposer", f"the coding agent started on the request (at most {host.timeout_s:g} s)")
-            outcome, _ = launch_pi(
+            outcome, trajectory = launch_pi(
                 host,
                 run.executor(),
                 rendered_files(agent_nodes, binding, host),
@@ -483,11 +483,19 @@ def answer_with_agent(
             agent["exit_code"] = outcome.exit_code
             if outcome.exit_code != 0:
                 agent["stderr_tail"] = outcome.stderr[-MAX_STDERR_CHARS:]
+            # Pi can exit zero after a failed model response; its final assistant event carries the error.
+            for event in reversed(trajectory):
+                message = event.get("message")
+                if not isinstance(message, Mapping) or message.get("role") != "assistant":
+                    continue
+                if message.get("stopReason") in ("error", "aborted"):
+                    agent["error"] = str(message.get("errorMessage") or "the model response was interrupted")
+                break
         except EpisodeTimeout:
             agent["timed_out"] = True
         except EpisodeLaunchError as error:
-            host.calls.note("proposer", f"the coding agent could not start: {error}", failed=True)
-            return StepProposal((), {"failure": f"the agent could not start: {error}"})
+            host.calls.note("proposer", f"the coding agent run failed: {error}", failed=True)
+            return StepProposal((), {"failure": f"the agent run failed: {error}"})
         finally:
             if run.session is not None:
                 run.session.close()
@@ -499,7 +507,7 @@ def answer_with_agent(
         host.calls.note(
             "proposer",
             f"the coding agent {ended} after {agent['seconds']:g} s and {run.trials} trials; reading its workspace",
-            failed=bool(agent.get("timed_out")) or agent.get("exit_code", 0) != 0,
+            failed=bool(agent.get("timed_out") or agent.get("error")) or agent.get("exit_code", 0) != 0,
         )
         return read_answer(workspace, request, models, nodes, entries, agent)
     finally:
@@ -543,6 +551,8 @@ def read_answer(
         notes["design"] = design[: evolution._DESIGN_CHARS]
     if agent.get("timed_out"):
         return StepProposal((), {**notes, "failure": f"the agent ran past its {agent['seconds']:g} s limit"})
+    if agent.get("error"):
+        return StepProposal((), {**notes, "failure": f"the agent's model response failed: {agent['error']}"})
     mutations, problems = workspace_mutations(workspace, entries, nodes)
     if problems:
         notes["unread"] = problems

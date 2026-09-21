@@ -242,6 +242,8 @@ FAKE_PI = textwrap.dedent(
                             {{"model": "not/real", "input": sys.argv[-1]}})
         text = "spoke with status %d" % status
     event = {{"type": "message", "message": {{"role": "assistant", "content": [{{"type": "text", "text": text}}]}}}}
+    if mode == "stream-error":
+        event["message"].update(stopReason="error", errorMessage="Stream ended without finish_reason")
     (sessions / "s.jsonl").write_text(json.dumps(event) + "\\n")
     """
 )
@@ -378,6 +380,19 @@ def test_an_agent_that_changes_nothing_or_runs_out_of_time_hands_back_no_mutatio
     slow_host = replace(host, timeout_s=1.0, step_dir=None)
     slow = propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=slow_host)
     assert slow.mutations == () and "past its" in slow.notes["failure"]
+
+
+@pytest.mark.unit
+def test_an_agent_with_a_failed_model_response_does_not_publish_its_partial_changes(tmp_path, upstream) -> None:
+    record: list[dict] = []
+    host = agent_host(tmp_path, record)
+    Path(host.binary).with_name("mode").write_text("stream-error")
+    proposal = AgentProposer(provider_of(upstream))(
+        NODES, (), served_models(upstream, record, host), requests=[{"text": "x"}], entries=ENTRIES, agent_host=host
+    )
+    assert proposal.mutations == ()
+    assert proposal.notes["agent"]["exit_code"] == 0
+    assert proposal.notes["failure"] == "the agent's model response failed: Stream ended without finish_reason"
 
 
 @pytest.mark.unit

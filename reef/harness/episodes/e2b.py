@@ -41,12 +41,13 @@ import shutil
 import socket
 import tarfile
 import threading
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
-from aiohttp import ClientSession, ClientTimeout
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, ClientSession, ClientTimeout
 
 from reef.harness.episodes.executor import (
     EpisodeExecutor,
@@ -300,21 +301,50 @@ class E2BSession(EpisodeExecutor):
         writable_paths: Sequence[Path] = (),
         readonly_paths: Sequence[Path] = (),
     ) -> ProcessOutcome:
+        from connectrpc.code import Code
+        from connectrpc.errors import ConnectError
         from e2b import CommandExitException, TimeoutException
+        from e2b.sandbox_sync.commands.command_handle import CommandHandle
 
         command, envs = remote_command(argv, env, root)
         cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
+        process: CommandHandle | None = None
+        finished = False
         try:
             self.push(root)
-            result = self.sandbox.commands.run(command, envs=envs, cwd=cwd, timeout=timeout)
-            return ProcessOutcome(result.exit_code, result.stdout, result.stderr)
+            deadline = time.monotonic() + timeout
+            process = self.sandbox.commands.run(command, envs=envs, cwd=cwd, timeout=timeout, background=True)
+            process_id = process.pid
+            for attempt in range(3):
+                try:
+                    if attempt:
+                        remaining_seconds = deadline - time.monotonic()
+                        if remaining_seconds <= 0:
+                            raise TimeoutException("the command deadline expired while reconnecting")
+                        process = self.sandbox.commands.connect(process_id, timeout=remaining_seconds)
+                    result = process.wait()
+                    finished = True
+                    return ProcessOutcome(result.exit_code, result.stdout, result.stderr)
+                except ConnectError as exc:
+                    if exc.code not in (Code.INTERNAL, Code.UNKNOWN, Code.UNAVAILABLE) or attempt == 2:
+                        raise
+                    # Reattach to the same PID: replaying a command could repeat its side effects.
+                    process.disconnect()
+                    logger.warning("the E2B command connection dropped; reconnecting to process %s", process_id)
+            raise EpisodeLaunchError("the E2B command connection could not be restored")
         except CommandExitException as exc:
+            finished = True
             return ProcessOutcome(exc.exit_code, exc.stdout, exc.stderr)
         except TimeoutException as exc:
             raise EpisodeTimeout(f"the process ran past its {timeout:g} s limit in the E2B sandbox") from exc
         except Exception as exc:
             raise EpisodeLaunchError(f"the E2B sandbox could not run the process: {exc}") from exc
         finally:
+            if process is not None and not finished:
+                try:
+                    self.sandbox.commands.kill(process.pid)
+                except Exception as exc:
+                    logger.warning("could not stop the E2B process %s: %s", process.pid, exc)
             try:
                 self.pull(root)
             except Exception as exc:
@@ -427,10 +457,32 @@ class TunnelPump:
 
     async def serve(self, tunnel: ClientSession, local: ClientSession, request: Mapping[str, Any]) -> None:
         reply = f"{self.url}/reply/{request['id']}"
+        sequence = 0
 
         async def send(piece: dict[str, Any]) -> None:
-            async with tunnel.post(reply, json=piece, headers=self.headers) as response:
-                await response.read()
+            nonlocal sequence
+            for attempt in range(3):
+                try:
+                    async with tunnel.post(
+                        reply,
+                        json={**piece, "sequence": sequence},
+                        headers=self.headers,
+                        timeout=ClientTimeout(total=30),
+                    ) as response:
+                        # A final piece can reach the client before its acknowledgement is lost.
+                        if response.status == 410 and piece.get("end") and attempt:
+                            return
+                        response.raise_for_status()
+                        await response.read()
+                    sequence += 1
+                    return
+                except ClientResponseError as exc:
+                    if (exc.status < 500 and exc.status != 429) or attempt == 2:
+                        raise
+                except (ClientConnectionError, ClientPayloadError, TimeoutError):
+                    if attempt == 2:
+                        raise
+                await asyncio.sleep(0.25 * (attempt + 1))
 
         headers = {
             name: value for name, value in (request.get("headers") or {}).items() if name.lower() not in HOP_BY_HOP
@@ -456,14 +508,15 @@ class TunnelPump:
             await send({**(head or {}), "data": "", "end": True})
         except asyncio.CancelledError:
             raise
-        except Exception as exc:
+        except (ClientConnectionError, ClientPayloadError, ClientResponseError, TimeoutError) as exc:
+            logger.warning("the E2B tunnel response was interrupted: %s", exc)
             try:
                 if head is None:
                     error = base64.b64encode(f"the Reef host did not answer: {exc}".encode()).decode()
                     await send({"status": 502, "headers": {"Content-Type": "text/plain"}, "data": error, "end": True})
                 else:
-                    await send({"data": "", "end": True})
-            except Exception as failure:
+                    await send({"data": "", "end": True, "error": True})
+            except (ClientConnectionError, ClientPayloadError, ClientResponseError, TimeoutError) as failure:
                 logger.debug("the E2B tunnel lost a reply: %s", failure)
 
 

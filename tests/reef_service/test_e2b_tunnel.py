@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import http.client
 import io
 import json
 import socket
@@ -15,12 +16,14 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import Mock
 
 import pytest
 
 from reef.harness.episodes.e2b import (
     RELAY_SCRIPT,
     E2BExecutor,
+    E2BSession,
     TunnelPump,
     pack,
     remote_command,
@@ -28,7 +31,87 @@ from reef.harness.episodes.e2b import (
     template_alias,
     unpack,
 )
-from reef.harness.episodes.executor import SandboxUnavailable
+from reef.harness.episodes.e2b_relay import Relay
+from reef.harness.episodes.executor import EpisodeLaunchError, EpisodeTimeout, ProcessOutcome, SandboxUnavailable
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("disconnects", [1, 3])
+def test_command_disconnect_reconnects_without_starting_the_command_again(tmp_path, monkeypatch, disconnects):
+    pytest.importorskip("e2b")
+    rpc = pytest.importorskip("connectrpc.errors")
+    from connectrpc.code import Code
+
+    sandbox = Mock()
+    command = sandbox.commands.run.return_value
+    command.pid = 42
+    failure = rpc.ConnectError(Code.INTERNAL, "peer closed connection without sending TLS close_notify")
+    command.wait.side_effect = failure
+    resumed = sandbox.commands.connect.return_value
+    resumed.pid = 42
+    if disconnects == 1:
+        resumed.wait.return_value = SimpleNamespace(exit_code=0, stdout="complete output", stderr="")
+    else:
+        resumed.wait.side_effect = failure
+    session = E2BSession(sandbox)
+    pushed, pulled = [], []
+    monkeypatch.setattr(session, "push", pushed.append)
+    monkeypatch.setattr(session, "pull", pulled.append)
+    if disconnects == 1:
+        outcome = session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
+        assert outcome == ProcessOutcome(0, "complete output", "")
+    else:
+        with pytest.raises(EpisodeLaunchError, match="connection"):
+            session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
+        sandbox.commands.kill.assert_called_once_with(42)
+    sandbox.commands.run.assert_called_once()
+    assert sandbox.commands.run.call_args.kwargs["background"] is True
+    assert sandbox.commands.connect.call_count == min(disconnects, 2)
+    for call in sandbox.commands.connect.call_args_list:
+        assert call.args == (42,)
+        assert 0 < call.kwargs["timeout"] < 60
+    assert pushed == pulled == [tmp_path]
+
+
+@pytest.mark.unit
+def test_command_timeout_kills_the_process_before_copying_its_files(tmp_path, monkeypatch):
+    e2b = pytest.importorskip("e2b")
+    sandbox = Mock()
+    command = sandbox.commands.run.return_value
+    command.pid = 42
+    command.wait.side_effect = e2b.TimeoutException("deadline exceeded")
+    session = E2BSession(sandbox)
+    monkeypatch.setattr(session, "push", lambda root: None)
+
+    def pull(root):
+        sandbox.commands.kill.assert_called_once_with(42)
+
+    monkeypatch.setattr(session, "pull", pull)
+    with pytest.raises(EpisodeTimeout):
+        session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
+    sandbox.commands.connect.assert_not_called()
+
+
+@pytest.mark.unit
+def test_reconnecting_does_not_extend_the_command_deadline(tmp_path, monkeypatch):
+    pytest.importorskip("e2b")
+    rpc = pytest.importorskip("connectrpc.errors")
+    from connectrpc.code import Code
+
+    import reef.harness.episodes.e2b as executor
+
+    monkeypatch.setattr(executor, "time", SimpleNamespace(monotonic=Mock(side_effect=[0.0, 61.0])))
+    sandbox = Mock()
+    process = sandbox.commands.run.return_value
+    process.pid = 42
+    process.wait.side_effect = rpc.ConnectError(Code.INTERNAL, "connection interrupted")
+    session = E2BSession(sandbox)
+    monkeypatch.setattr(session, "push", lambda root: None)
+    monkeypatch.setattr(session, "pull", lambda root: None)
+    with pytest.raises(EpisodeTimeout):
+        session.launch(["pi"], root=tmp_path, workspace=tmp_path, env={}, timeout=60)
+    sandbox.commands.connect.assert_not_called()
+    sandbox.commands.kill.assert_called_once_with(42)
 
 
 def free_port() -> int:
@@ -80,6 +163,14 @@ class Gateway:
                     self.send_response(204)
                     self.send_header("Content-Length", "0")
                     self.end_headers()
+                elif self.path == "/broken":
+                    self.send_response(200)
+                    self.send_header("Content-Type", "text/event-stream")
+                    self.send_header("Transfer-Encoding", "chunked")
+                    self.end_headers()
+                    self.wfile.write(b"b\r\ndata: one\n\n\r\n")
+                    self.wfile.flush()
+                    self.close_connection = True
 
             def log_message(self, *args) -> None:
                 pass
@@ -173,6 +264,58 @@ def test_the_tunnel_answers_no_one_without_the_secret(tunnel) -> None:
         with pytest.raises(urllib.error.HTTPError) as refused:
             urllib.request.urlopen(request, timeout=5)
         assert refused.value.code == 403
+
+
+@pytest.mark.unit
+def test_an_interrupted_upstream_stream_is_not_reported_as_complete(tunnel) -> None:
+    _, local_port, _ = tunnel
+    with (
+        urllib.request.urlopen(post(f"http://127.0.0.1:{local_port}/broken", {}), timeout=10) as response,
+        pytest.raises(http.client.IncompleteRead),
+    ):
+        response.read()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("lost_acknowledgements", [1, 3])
+def test_a_lost_reply_acknowledgement_does_not_duplicate_stream_content(lost_acknowledgements: int) -> None:
+    gateway = Gateway()
+    relay = Relay("test-secret")
+    handler = relay.tunnel_handler()
+    lost: list[int] = []
+
+    class LoseAcknowledgement(handler):
+        def answer(self, status: int, body: bytes = b"") -> None:
+            if self.path.startswith("/reply/") and status == 200 and len(lost) < lost_acknowledgements:
+                lost.append(status)
+                self.close_connection = True
+                self.connection.shutdown(socket.SHUT_RDWR)
+                return
+            super().answer(status, body)
+
+    local_server = ThreadingHTTPServer(("127.0.0.1", 0), relay.local_handler())
+    tunnel_server = ThreadingHTTPServer(("127.0.0.1", 0), LoseAcknowledgement)
+    for server in (local_server, tunnel_server):
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+    pump = TunnelPump(f"http://127.0.0.1:{tunnel_server.server_port}", "test-secret", gateway.port, pollers=1)
+    try:
+        pump.start(timeout=10)
+        gateway.release.set()
+        request = post(f"http://127.0.0.1:{local_server.server_port}/stream", {})
+        with urllib.request.urlopen(request, timeout=10) as response:
+            if lost_acknowledgements == 1:
+                assert response.read() == b"data: one\n\ndata: two\n\n"
+            else:
+                with pytest.raises(http.client.IncompleteRead):
+                    response.read()
+        assert len(lost) == lost_acknowledgements
+    finally:
+        pump.stop()
+        for server in (local_server, tunnel_server):
+            server.shutdown()
+            server.server_close()
+        gateway.close()
 
 
 @pytest.mark.unit
