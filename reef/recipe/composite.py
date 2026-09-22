@@ -29,7 +29,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from reef.core.components import validate_component_name
 from reef.core.reports import ReportBase
@@ -52,6 +52,8 @@ class CompositeRecipe(Recipe):
 
     components: Mapping[str, Recipe] = field(default_factory=dict)
     name: str = "composite"
+    #: The versioned deployment layout keeps ``components`` under ``recipe.config``.
+    config_sections: ClassVar[tuple[str, ...]] = ("components",)
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -85,12 +87,15 @@ class CompositeRecipe(Recipe):
         raw = config.get("components")
         if not isinstance(raw, Mapping) or not raw:
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
+        # Every step of a composed scenario checkpoints, so a cadence setting is a mistake, not a choice.
+        cls._refuse_checkpoint_cadence(config, "artifact")
         # Resolve the deployment's runtime once, so the composite and every component share it.
         runtime = cls._resolve_runtime(environ, runtime)
         components: dict[str, Recipe] = {}
         for component, component_config in raw.items():
             if not isinstance(component_config, Mapping):
                 raise RecipeConfigError(f"components.{component} must be an object")
+            cls._refuse_checkpoint_cadence(component_config, f"components.{component}.artifact")
             merged = dict(component_config)
             merged.setdefault("model", dict(config.get("model", {})))
             settings = recipe_config_from_mapping(merged)
@@ -113,6 +118,14 @@ class CompositeRecipe(Recipe):
             return cls(components=components, runtime=runtime, training_runtime=training_runtime, **values)
         except ValueError as exc:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
+
+    @staticmethod
+    def _refuse_checkpoint_cadence(config: Mapping[str, Any], section: str) -> None:
+        artifact = config.get("artifact", {})
+        if isinstance(artifact, Mapping) and "checkpoint_every_n_versions" in artifact:
+            raise RecipeConfigError(
+                f"{section}.checkpoint_every_n_versions has no effect: every step of a composite recipe checkpoints"
+            )
 
     def with_model_config(self, config: ModelConfig) -> CompositeRecipe:
         super().with_model_config(config)

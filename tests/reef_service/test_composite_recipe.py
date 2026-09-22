@@ -18,6 +18,7 @@ from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.recipe.config import recipe_config_from_mapping
 from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, TextFileTree, create_config_surface, create_harness_surface
@@ -188,6 +189,55 @@ def test_composite_recipe_builds_from_config() -> None:
 
 
 @pytest.mark.unit
+def test_composite_recipe_reads_components_from_the_versioned_layout() -> None:
+    settings = recipe_config_from_mapping(
+        {
+            "schema-version": 2,
+            "recipe": {
+                "implementation": "reef.recipe.composite:CompositeRecipe",
+                "config": {
+                    "components": {
+                        "harness": {"implementation": "reef_service.test_composite_recipe:_TreeRecipe"},
+                        "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
+                    }
+                },
+            },
+            "inference": {"upstream-model": "served-model"},
+        }
+    )
+    assert sorted(settings["components"]) == ["config", "harness"]
+    recipe = build_recipe(settings["implementation"], {}, config=settings)
+    assert isinstance(recipe, CompositeRecipe)
+
+
+@pytest.mark.unit
+def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
+    components = {
+        "harness": {"implementation": "reef_service.test_composite_recipe:_TreeRecipe"},
+        "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
+    }
+    base = {"implementation": "reef.recipe.composite:CompositeRecipe", "model": {"path": "served-model"}}
+    with pytest.raises(RecipeConfigError, match="artifact.checkpoint_every_n_versions has no effect"):
+        build_recipe(
+            base["implementation"],
+            {},
+            config={**base, "artifact": {"checkpoint_every_n_versions": 5}, "components": components},
+        )
+    with pytest.raises(RecipeConfigError, match="components.harness.artifact.checkpoint_every_n_versions"):
+        build_recipe(
+            base["implementation"],
+            {},
+            config={
+                **base,
+                "components": {
+                    **components,
+                    "harness": {**components["harness"], "artifact": {"checkpoint_every_n_versions": 5}},
+                },
+            },
+        )
+
+
+@pytest.mark.unit
 def test_composite_recipe_shares_one_runtime_resolved_from_the_environment() -> None:
     # No runtime is injected: the deployment relies on REEF_UPSTREAM_URL, as a flat recipe may.
     recipe = build_recipe(
@@ -257,6 +307,8 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
         assert rows[0]["component"] == "harness"
         assert rows[0]["base_release_id"] == rows[1]["release_id"]
         assert "component" not in rows[1]
+        # The config component runs no step, so it has no say over which rows are retired.
+        assert scenario.store.history()[-1].compacted_ids == frozenset({"i1", "r1"})
         status = dispatcher.build_training_status()["scenarios"]["agent"]
         assert status["components"]["harness"]["last_committed_step"]["step"] == 1
         assert status["components"]["config"]["last_committed_step"] is None

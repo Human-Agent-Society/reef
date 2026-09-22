@@ -186,12 +186,17 @@ class ScenarioCommitter:
         return record.component is None and record.operation == "training" and len(self._trainers) == 1
 
     def _compactable_for(self, component: str | None) -> frozenset[str] | None:
-        """The rows every other trainer has released; ``None`` when there is no other trainer.
+        """The rows every other trainer has released; ``None`` when no other trainer runs a step.
 
         Trainers of one scenario consume the same records, so a row is retired
-        only when no trainer still needs it.
+        only when no trainer still needs it. A trainer without a candidate
+        backend runs no step and needs no row, so it has no say.
         """
-        others = [bound.trainer for bound in self._trainers if bound.component != component]
+        others = [
+            bound.trainer
+            for bound in self._trainers
+            if bound.component != component and bound.trainer.candidate_backend is not None
+        ]
         if not others:
             return None
         released: frozenset[str] | None = None
