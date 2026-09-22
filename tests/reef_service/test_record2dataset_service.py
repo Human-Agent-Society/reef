@@ -40,7 +40,13 @@ from reef.record2dataset import (
     readiness_probes,
 )
 from reef.record2dataset.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
-from reef.record2dataset.wire import play_document, play_from_document, task_document, task_from_document
+from reef.record2dataset.wire import (
+    WireError,
+    play_document,
+    play_from_document,
+    task_document,
+    task_from_document,
+)
 from reef.service.deploy.generator import generator_settings
 
 pytestmark = pytest.mark.unit
@@ -590,10 +596,14 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
         task_from_document({**task_document(task), "tests": {}})
     with pytest.raises(ValueError, match="must be a JSON object"):
         task_from_document("task")
-    play = TaskPlay(tmp_path / "t", "t", "e1", None, {}, "the trial raised", (), 2, (), None)
+    play = TaskPlay(tmp_path / "t", "t", "e1", None, {"score": 0.5}, "the trial raised", (), 2, (), None)
     assert play_from_document(play_document(play)) == play
     with pytest.raises(ValueError, match="failed_calls"):
         play_from_document({**play_document(play), "failed_calls": "2"})
+    with pytest.raises(WireError, match="rewards must map names to numbers"):
+        play_from_document({**play_document(play), "rewards": {"score": "high"}})
+    with pytest.raises(WireError, match="rewards must map names to numbers"):
+        play_from_document({**play_document(play), "rewards": {"score": True}})
 
 
 def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_are_refused() -> None:
