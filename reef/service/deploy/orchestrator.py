@@ -115,6 +115,8 @@ class _Stack:
         self._stopping = threading.Event()
         self._unexpected_exit = threading.Event()
         self._closed = False
+        self.stop_requested = False
+        self.force_stop_requested = False
         self._ray_runtime: RayRuntimeLease | None = None
 
     def _is_alive(self, name: str) -> bool:
@@ -288,14 +290,22 @@ class _Stack:
 
     def block(self) -> None:
         def _request_stop(signum: int, frame: FrameType | None) -> None:
-            _log("received signal, shutting down")
-            self._stopping.set()
+            # A signal can interrupt Event.wait/set or stderr while its lock is
+            # held. Record intent only; the main loop performs locking and I/O.
+            if self.stop_requested:
+                self.force_stop_requested = True
+            self.stop_requested = True
 
         signal.signal(signal.SIGTERM, _request_stop)
         signal.signal(signal.SIGINT, _request_stop)
         watcher = threading.Thread(target=self._watchdog, daemon=True)
         watcher.start()
-        self._stopping.wait()
+        while not self._stopping.is_set():
+            if self.stop_requested:
+                _log("received signal, shutting down (press Ctrl-C again to skip the grace period)")
+                self._stopping.set()
+                break
+            self._stopping.wait(timeout=0.1)
         watcher.join(timeout=15)
 
     def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
@@ -312,7 +322,7 @@ class _Stack:
                 _log(f"{name}: stop RPC failed: {exc}")
         deadline = time.monotonic() + max(0, grace)
         pending = ordered
-        while pending and time.monotonic() < deadline:
+        while pending and not self.force_stop_requested and time.monotonic() < deadline:
             living = []
             for name, executor in pending:
                 try:
@@ -321,8 +331,10 @@ class _Stack:
                 except Exception:
                     living.append((name, executor))
             pending = living
-            if pending:
+            if pending and not self.force_stop_requested:
                 time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        if pending and self.force_stop_requested:
+            _log("received another signal, forcing process cleanup")
         for name, executor in ordered:
             try:
                 executor.rpc(0, "shutdown", kwargs={"grace": 0}, timeout=15)
@@ -515,6 +527,7 @@ def _run_orchestrator(
         # block() installs the steady-state handler only after every service is
         # ready. Until then, interruption must unwind start() and stop its peers.
         previous_sigterm = signal.signal(signal.SIGTERM, interrupt_startup)
+        previous_sigint = signal.getsignal(signal.SIGINT)
         try:
             try:
                 stack.start()
@@ -527,8 +540,11 @@ def _run_orchestrator(
             # Startup signals unwind the launch tasks before final cleanup.
             stack._stopping.set()
         finally:
-            signal.signal(signal.SIGTERM, previous_sigterm)
-            stack.shutdown()
+            try:
+                stack.shutdown()
+            finally:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+                signal.signal(signal.SIGINT, previous_sigint)
         return stack.exit_code
     finally:
         if temp_config_path is not None:
