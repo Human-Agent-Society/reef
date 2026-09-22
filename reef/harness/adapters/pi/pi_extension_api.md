@@ -20,23 +20,13 @@ Search for the relevant symbol and read its surrounding lines. Source maps (`*.m
 files and are usually unnecessary. Record confirmed behavior and locations in your progress notes before
 moving on; inspect another provider or subsystem only if a failing check points there.
 
-## File shape
-
-```ts
-import { Type } from "typebox";
-
-export default function (pi) {
-  pi.on("session_start", async (_event, ctx) => { ... });
-  pi.registerTool({ ... });
-  pi.registerCommand("name", { ... });
-}
-```
-
 The default export is a factory that receives the extension API. It may be async; pi awaits it before session_start. Do not start processes, sockets, watchers or timers in the factory: start them in session_start or in the tool or command that needs them, and stop them in a session_shutdown handler.
 
 ## Tools: pi.registerTool
 
 ```ts
+import { Type } from "typebox";
+
 pi.registerTool({
   name: "word_count",
   label: "Word count",
@@ -186,34 +176,11 @@ Name the model in the body. These routes do not stream, and answer 501 when the 
 - A failure the person would otherwise wait for in silence reaches them through ctx.ui: an empty `catch {}` around pi.exec, fetch or a dialog turns a broken feature into one that does nothing and says nothing.
 - One file, no dependencies, ASCII text.
 
-## A complete example
+## Example: confirm a tool call
 
 ```ts
-import { Type } from "typebox";
-
 export default function (pi) {
   if (process.env.PI_OFFLINE) return;
-
-  pi.registerTool({
-    name: "note",
-    label: "Note",
-    description: "Append one line to NOTES.md in the working directory",
-    parameters: Type.Object({ line: Type.String() }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      const result = await pi.exec("sh", ["-c", 'printf "%s\\n" "$1" >> NOTES.md', "note", params.line], { signal });
-      if (result.code !== 0) throw new Error(result.stderr.trim());
-      return { content: [{ type: "text", text: `noted in ${ctx.cwd}/NOTES.md` }], details: {} };
-    },
-  });
-
-  pi.registerCommand("notes", {
-    description: "Show NOTES.md",
-    handler: async (_args, ctx) => {
-      const result = await pi.exec("cat", ["NOTES.md"]);
-      ctx.ui.notify(result.code === 0 ? result.stdout : "no NOTES.md yet", "info");
-    },
-  });
-
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName === "bash" && /\brm -rf\b/.test(event.input.command || "")) {
       if (!ctx.hasUI) return { block: true, reason: "rm -rf needs a person to confirm" };
