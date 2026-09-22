@@ -286,13 +286,13 @@ def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
         "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
     }
     base = {"implementation": "reef.recipe.composite:CompositeRecipe", "model": {"path": "served-model"}}
-    with pytest.raises(RecipeConfigError, match="artifact.checkpoint_every_n_versions has no effect"):
+    with pytest.raises(RecipeConfigError, match=r"artifact\.checkpoint_every_n_versions has no effect"):
         build_recipe(
             base["implementation"],
             {},
             config={**base, "artifact": {"checkpoint_every_n_versions": 5}, "components": components},
         )
-    with pytest.raises(RecipeConfigError, match="components.harness.artifact.checkpoint_every_n_versions"):
+    with pytest.raises(RecipeConfigError, match=r"components\.harness\.artifact\.checkpoint_every_n_versions"):
         build_recipe(
             base["implementation"],
             {},
