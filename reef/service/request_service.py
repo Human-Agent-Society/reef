@@ -604,12 +604,16 @@ class RequestService:
         carries (the creation artifact's is read from the release). A row
         that published no release (a rejected or skipped step) or was
         recorded without a manifest counts when it names no other component.
-        In the rows kept, ``parent_release_id`` names the previous kept
-        release, the one the tree descends from, so a client walking the
-        chain meets only listed releases; the release the combination was
-        published on moves to ``composed_parent_release_id``. The head is the
-        newest kept row that is served and published a release. A flat
-        scenario lists every row and its head is the served release.
+        The rows kept speak of listed releases only, so a client walking them
+        never meets a release that is not listed: ``parent_release_id``
+        names the previous kept release, the one the tree descends from; a
+        row that published nothing is named by the kept release it ran on;
+        and a rollback or promote whose target is not kept names the kept
+        release that target carried. The ids of the combination are kept
+        beside them as ``composed_release_id``, ``composed_parent_release_id``
+        and ``composed_rollback_target_release_id``. The head is the newest
+        kept row that is served and published a release. A flat scenario
+        lists every row and its head is the served release.
         """
         rows = list(scenario.releases())
         files_component = scenario.surface.files_component
@@ -617,13 +621,16 @@ class RequestService:
             return rows, next((str(row["release_id"]) for row in rows if not row.get("pending")), None)
         creation = scenario.creation_components()
         kept: list[dict[str, Any]] = []
+        kept_ids: set[str] = set()
+        carried_by: dict[str, str] = {}  # each served release, to the kept release whose tree it carried
         previous: dict[str, Any] | None = None  # the newest older row that is served
         lineage: str | None = None  # the newest kept release that is served
         head: str | None = None
         for row in reversed(rows):
             if row.get("operation") == "creation" and creation is not None and "components" not in row:
                 row = {**row, "components": dict(creation)}
-            published = previous is None or previous["release_id"] != row["release_id"]
+            release_id = str(row["release_id"])
+            published = previous is None or previous["release_id"] != release_id
             own = None if not published else (row.get("components") or {}).get(files_component)
             before = None if previous is None else (previous.get("components") or {}).get(files_component)
             if own is not None and before is not None:
@@ -632,14 +639,26 @@ class RequestService:
                 changed = row.get("component") in (None, files_component)
             if changed:
                 listed = dict(row)
+                if lineage is not None and not published:
+                    listed["composed_release_id"] = release_id
+                    listed["release_id"] = lineage
                 if lineage is not None and listed.get("parent_release_id") != lineage:
                     listed["composed_parent_release_id"] = listed.get("parent_release_id")
                     listed["parent_release_id"] = lineage
+                target = listed.get("rollback_target_release_id")
+                if isinstance(target, str) and target not in kept_ids and target in carried_by:
+                    listed["composed_rollback_target_release_id"] = target
+                    listed["rollback_target_release_id"] = carried_by[target]
                 kept.append(listed)
-                if published and not row.get("pending"):
-                    lineage = head = str(row["release_id"])
+                if row.get("pending"):
+                    kept_ids.add(release_id)
+                elif published:
+                    lineage = head = release_id
+                    kept_ids.add(release_id)
             if not row.get("pending"):
                 previous = row
+                if lineage is not None:
+                    carried_by[release_id] = lineage
         kept.reverse()
         return kept, head
 

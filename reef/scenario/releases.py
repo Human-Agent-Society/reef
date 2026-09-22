@@ -53,11 +53,12 @@ class ScenarioReleases:
         it is read from the release once and kept.
         """
         if not self._creation_components_read:
-            self._creation_components_read = True
             try:
                 manifest = self._artifacts.resolve(self._creation_artifact).components
             except ArtifactError:
-                manifest = None
+                # A read that failed is asked again next time; only a read that answered is kept.
+                return None
+            self._creation_components_read = True
             if manifest is not None:
                 self._creation_components = {name: entry.content_id for name, entry in manifest.entries.items()}
         return self._creation_components
@@ -106,10 +107,22 @@ class ScenarioReleases:
             return tuple(reversed(rows))
 
     def find_release(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
+        """The release and whether it has durable bytes; a step that published nothing does not hide them.
+
+        A rejected or skipped step records the head's own reference without a
+        checkpoint, so the newest record naming a release is not the one that
+        published it: the release is restorable when any record of it is.
+        """
         records = () if not self._store.durable else self._store.history()
+        found: tuple[ArtifactRef, bool] | None = None
         for record in reversed(records):
             if record.artifact_ref.release_id == release_id:
-                return record.artifact_ref, record.checkpoint
+                if record.checkpoint:
+                    return record.artifact_ref, True
+                if found is None:
+                    found = (record.artifact_ref, False)
+        if found is not None:
+            return found
         if self._creation_artifact.release_id == release_id:
             return self._creation_artifact, True
         return None

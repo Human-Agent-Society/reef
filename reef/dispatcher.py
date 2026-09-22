@@ -494,12 +494,20 @@ class Dispatcher:
 
         value = current.commit(tracked_result, component=component)
         self._publication.record(scenario, value)
+        # The commit may annotate the result further (a merged result names the release it landed on):
+        # the event carries what the record carries.
+        recorded = current.last_commit_for(component)
+        metrics = (
+            dict(recorded.metrics)
+            if recorded is not None and recorded.metrics is not None and recorded.step == current.scenario_step
+            else dict(tracked_result.metrics)
+        )
         try:
             self._experiment_tracker.record(
                 TrainingExperimentEvent(
                     context=context,
                     produced_artifact_ref=current.current_artifact_ref(),
-                    metrics=dict(tracked_result.metrics),
+                    metrics=metrics,
                     outcome="rejected" if tracked_result.metrics.get("selected") is False else "committed",
                     training_job_id=tracked_result.training_job_id,
                     source_runtime_load_id=tracked_result.source_runtime_load_id,

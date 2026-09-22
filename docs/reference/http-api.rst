@@ -102,7 +102,8 @@ Headers
 |                                   | workload a record belongs to.                           |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
-|                                   | configured.                                             |
+|                                   | configured; with no Authorization header, ``x-api-key`` |
+|                                   | carries the token.                                      |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-release-id``             | optional: bind a new scenario to this starting release; |
 |                                   | on an existing scenario it must name the bound starting |
@@ -390,7 +391,8 @@ carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves when
 the response is written, so a head that moves during the call shows on the
 next one. A resident ``reef-native serve`` process compares it with the
 release it mounted and learns of a new head on its next model call, with no
-extra request. A weight serving scenario sends no such header.
+extra request. A weight serving scenario sends no such header, and neither
+does the evaluation route, whose caller runs a candidate and follows no head.
 
 Response
 ~~~~~~~~
@@ -711,8 +713,13 @@ pulled tree: another component's step, or a rollback or promote that restored
 other weights under the same tree, is not listed and is no new head. In the
 rows listed, ``parent_release_id`` names the previous listed release, the one
 the tree descends from, and ``composed_parent_release_id`` the release the
-combination was published on. Every release stays addressable by id through
-``?release_id=`` on the manifest and install routes.
+combination was published on; a rejected or skipped step, which published
+nothing, is named by the listed release it ran on (``composed_release_id``
+keeps the combination served then); and a rollback or promote whose target
+is not listed names the listed release that target carried
+(``composed_rollback_target_release_id`` keeps the target). Every release
+stays addressable by id through ``?release_id=`` on the manifest and install
+routes.
 
 Version page
 ~~~~~~~~~~~~
@@ -958,7 +965,8 @@ Status codes
 |        | scenario-scoped route, or a report violating the recipe's   |
 |        | declared schema                                             |
 +--------+-------------------------------------------------------------+
-| 401    | missing or wrong bearer token; the two harness pages also   |
+| 401    | missing or wrong bearer token, or ``x-api-key`` when no     |
+|        | Authorization header is sent; the two harness pages also    |
 |        | read ``?token=`` (see Request page)                         |
 +--------+-------------------------------------------------------------+
 | 403    | relayed from the upstream provider. Reef issues none of its |

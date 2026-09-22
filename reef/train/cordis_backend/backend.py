@@ -1413,6 +1413,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         artifact = self._rendered_publications.pop(int(state["steps"]), None)
         if artifact is not None:
             artifact.discard()
+        # The step is over: no earlier settlement can be aborted any more.
+        self._settled_proposals.clear()
 
     def prepare_reevaluation(self, prepared: PreparedStep) -> PreparedStep:
         """The kept candidate with a fresh attempt directory for its episodes, shown as evaluating again.
@@ -1449,6 +1451,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own. A
             # proposal an earlier evaluation settled keeps that decision when its second evaluation fails.
             self.proposals.refuse(candidate.proposal_id, "step aborted before a result")
+        self._settled_proposals.clear()
 
     @classmethod
     def _candidate_from(cls, prepared: PreparedStep) -> HarnessCandidate:

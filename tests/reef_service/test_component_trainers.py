@@ -11,7 +11,8 @@ from typing import Any
 
 import pytest
 
-from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef, InMemoryRepositoryBackend
+from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
@@ -646,8 +647,11 @@ def test_the_harness_catalog_is_one_lineage_of_trees(tmp_path: Path) -> None:
         assert service.harness_head(headers) == h1
         assert service.harness_manifest(headers)["release_id"] == h1
         catalog = service.harness_releases(headers)["releases"]
-        assert [row["release_id"] for row in catalog] == [creation, h1, w1]
+        # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head.
+        assert [row["release_id"] for row in catalog] == [creation, h1, h1]
         assert catalog[-1]["metrics"]["selected"] is False
+        assert catalog[-1]["composed_release_id"] == w1
+        assert "ran on" in service.harness_release_page(headers, 2).lower()
         assert f'"release_id": "{h1}"' in service.harness_install_script(headers, adapter="pi")
 
         # The next harness release descends from h1 in the listed chain; the weights release it was published
@@ -663,13 +667,78 @@ def test_the_harness_catalog_is_one_lineage_of_trees(tmp_path: Path) -> None:
         scenario.commit(harness, component=HARNESS)
         h2 = scenario.current_artifact_ref().release_id
         catalog = service.harness_releases(headers)["releases"]
-        assert [row["release_id"] for row in catalog] == [creation, h1, w1, h2]
+        assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2]
         assert catalog[-1]["parent_release_id"] == h1
         assert catalog[-1]["composed_parent_release_id"] == w2
         assert required_by(catalog, h2) == [{"name": "TOKEN", "kind": "env"}]
         assert service.harness_head(headers) == h2
         page = service.harness_release_page(headers, 3)
         assert h2 in page
+
+        # A rollback to the unlisted weights release restores h1's tree: the row names the listed release
+        # that target carried, so the requires chain walks on through it. The rejected step recorded w1's
+        # reference without a checkpoint, which must not hide the checkpoint w1 has.
+        scenario.rollback(w1)
+        restored = scenario.current_artifact_ref().release_id
+        catalog = service.harness_releases(headers)["releases"]
+        assert [row["release_id"] for row in catalog] == [creation, h1, h1, h2, restored]
+        assert catalog[-1]["rollback_target_release_id"] == h1
+        assert catalog[-1]["composed_rollback_target_release_id"] == w1
+        assert required_by(catalog, restored) == [{"name": "TOKEN", "kind": "env"}]
+        assert service.harness_head(headers) == restored
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_merged_result_names_the_release_it_landed_on_in_its_event(tmp_path: Path) -> None:
+    """The tracker event carries what the commit record carries, merged_onto included."""
+    tracker = _RecordingTracker()
+    backends = {
+        WEIGHTS: _ComponentBackend(WEIGHTS, tmp_path / "candidates"),
+        HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates", stale_policy="merge"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends, experiment_tracker=tracker)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert harness is not None and weights is not None
+        dispatcher._commit_result("agent", weights, WEIGHTS)
+        served = scenario.current_artifact_ref().release_id
+        dispatcher._commit_result("agent", harness, HARNESS)
+        assert [event.context.component for event in tracker.events] == [WEIGHTS, HARNESS]
+        assert tracker.events[-1].metrics["merged_onto"] == served
+        assert scenario.releases()[0]["metrics"]["merged_onto"] == served
+        assert "merged_onto" not in tracker.events[0].metrics
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_creation_manifest_read_that_failed_is_asked_again(tmp_path: Path, monkeypatch: Any) -> None:
+    """One failed read of the creation artifact must not refuse every later promote for the process lifetime."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        original = ArtifactReleaseChain.resolve
+        calls = {"failed": 0}
+
+        def fail_once(self: ArtifactReleaseChain, ref: ArtifactRef) -> Artifact:
+            if calls["failed"] == 0:
+                calls["failed"] += 1
+                raise ArtifactNotFound("the remote is away")
+            return original(self, ref)
+
+        monkeypatch.setattr(ArtifactReleaseChain, "resolve", fail_once)
+        assert scenario.creation_components() is None
+        components = scenario.creation_components()
+        assert components is not None and set(components) == {WEIGHTS, HARNESS}
+        assert calls["failed"] == 1
     finally:
         dispatcher.close()
 

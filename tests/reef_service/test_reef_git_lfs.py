@@ -442,5 +442,5 @@ def test_a_broken_symlink_below_the_top_level_is_refused_by_name(tmp_path: Path,
     source = tmp_path / "release"
     (source / "sub").mkdir(parents=True)
     (source / "sub" / "gone").symlink_to(tmp_path / "nowhere")
-    with pytest.raises(ArtifactSourceError, match="sub"):
+    with pytest.raises(ArtifactSourceError, match=r"broken symlink: .*sub/gone"):
         backend.publish(Artifact.local(source), expected_parent=head)

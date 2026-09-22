@@ -196,6 +196,19 @@ def test_composite_recipe_builds_from_config() -> None:
     assert isinstance(recipe, CompositeRecipe)
     assert sorted(recipe.components) == ["config", "harness"]
     assert isinstance(recipe.components["harness"], _TreeRecipe)
+    with pytest.raises(RecipeConfigError, match=r"components\.step is a metric prefix .*rename the component"):
+        build_recipe(
+            "reef.recipe.composite:CompositeRecipe",
+            {},
+            config={
+                "implementation": "x",
+                "model": {"path": "served-model"},
+                "components": {
+                    "step": {"implementation": "reef_service.test_composite_recipe:_TreeRecipe"},
+                    "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
+                },
+            },
+        )
     with pytest.raises(RecipeConfigError, match="components"):
         build_recipe("reef.recipe.composite:CompositeRecipe", {}, config={"implementation": "x", "model": {}})
     with pytest.raises(RecipeConfigError, match="different training modes"):

@@ -52,7 +52,9 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
     sits in the URL, in the browser's history and in whatever logs request
     lines, so the deployment that hands out such links is a local one, as the
     profiles that print them are. Every other route, and any request that
-    carries the header, is judged by the header alone.
+    carries the header, is judged by the header alone. A request with no
+    Authorization header may present the token in ``x-api-key`` instead, the
+    header the Anthropic dialect's clients send.
     """
 
     # Compare digests in constant time so the response time leaks nothing

@@ -47,6 +47,8 @@ from reef.train.trainer import ComponentTrainer
 
 #: The checkpoint cadence key a composite refuses: every one of its steps checkpoints.
 CHECKPOINT_CADENCE_KEY = "checkpoint_every_n_versions"
+#: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
+RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -64,7 +66,7 @@ class CompositeRecipe(Recipe):
             raise RecipeConfigError("a composite recipe binds at least two components")
         for component, recipe in self.components.items():
             validate_component_name(component)
-            if component in ("train", "step", "reef", "operations"):
+            if component in RESERVED_COMPONENT_NAMES:
                 # Experiment tracking prefixes a component's metrics with its name; these prefixes are its own.
                 raise RecipeConfigError(f"component {component!r} is a metric prefix experiment tracking reserves")
             if not isinstance(recipe, Recipe):
@@ -100,6 +102,12 @@ class CompositeRecipe(Recipe):
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
         # Every step of a composed scenario checkpoints, so a cadence setting is a mistake, not a choice.
         cls._refuse_checkpoint_cadence(config, "recipe")
+        for component in raw:
+            if component in RESERVED_COMPONENT_NAMES:
+                raise RecipeConfigError(
+                    f"components.{component} is a metric prefix experiment tracking reserves "
+                    f"({', '.join(RESERVED_COMPONENT_NAMES)}); rename the component"
+                )
         # Resolve the deployment's runtime once, so the composite and every component share it.
         runtime = cls._resolve_runtime(environ, runtime)
         components: dict[str, Recipe] = {}

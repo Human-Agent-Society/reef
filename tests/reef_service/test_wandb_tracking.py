@@ -514,5 +514,10 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
     step_rows = [row for row, _ in run.logged if "weights/step/loss" in row]
     assert step_rows == [{"weights/step/loss": 0.9, "weights/step/step": 0, "reef/step": 7}]
     assert run.summary["reef/weights/optimizer_steps"] == 1 and "reef/optimizer_steps" not in run.summary
-    assert (("weights/step/*",), {"step_metric": "weights/step/step"}) in run.defined
+    # The step key is bound exactly, once: a second glob under the prefix would overlap weights/* in W&B.
+    assert (("weights/step/step",), {}) in run.defined
+    assert run.defined.count((("weights/step/loss",), {"step_metric": "weights/step/step"})) == 1
+    assert not any(args == ("weights/step/*",) for args, _ in run.defined)
+    tracker.record(stepped)
+    assert run.defined.count((("weights/step/loss",), {"step_metric": "weights/step/step"})) == 1
     tracker.close()

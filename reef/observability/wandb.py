@@ -181,6 +181,8 @@ class WandbExperimentTracker(ExperimentTracker):
         self._failed_run_ids: set[str] = set()
         # Per run, the trainers seen so far: each gets its metric axis once and its backend in the config.
         self._components: dict[str, dict[str, dict[str, Any]]] = {}
+        # Per run, the optimizer step keys already bound to a component's counter.
+        self._step_keys: dict[str, set[str]] = {}
         self._lock = RLock()
 
     @property
@@ -258,6 +260,7 @@ class WandbExperimentTracker(ExperimentTracker):
         with self._lock:
             run = self._runs.pop(run_id, None)
             self._components.pop(run_id, None)
+            self._step_keys.pop(run_id, None)
             if run is not None:
                 try:
                     summary = getattr(run, "summary", None)
@@ -298,12 +301,13 @@ class WandbExperimentTracker(ExperimentTracker):
         if run is None:
             return
         if first_step:
-            # A trainer's first step puts its metrics on the run's train/step axis, as train/* is,
-            # and its optimizer step rows on their own counter, as step/* is.
+            # A trainer's first step puts its metrics on the run's train/step axis, as train/* is. Its
+            # optimizer step rows get exact definitions as they appear (_record_optimizer_steps): a
+            # second glob under the same prefix would overlap this one, and W&B picks between
+            # overlapping globs in no fixed order.
             try:
                 run.define_metric(f"{component}/*", step_metric="train/step")
                 run.define_metric(f"{component}/step/step")
-                run.define_metric(f"{component}/step/*", step_metric=f"{component}/step/step")
             except Exception as exc:
                 logger.warning("W&B metric definition failed (%s); training will continue", type(exc).__name__)
         self._update_run_config(run, run_id, event.context)
@@ -340,6 +344,7 @@ class WandbExperimentTracker(ExperimentTracker):
             runs, self._runs = tuple(self._runs.values()), {}
             self._scenario_loggers = {}
             self._components = {}
+            self._step_keys = {}
         for run in runs:
             try:
                 run.finish()
@@ -373,6 +378,7 @@ class WandbExperimentTracker(ExperimentTracker):
             except (TypeError, ValueError, AttributeError):
                 start = 0
         logged = 0
+        defined = self._step_keys.setdefault(self._run_id(event.context), set())
         try:
             for step in steps:
                 if not isinstance(step, Mapping):
@@ -380,6 +386,12 @@ class WandbExperimentTracker(ExperimentTracker):
                 values = {
                     f"{prefix}/{key.removeprefix('train/')}": value for key, value in _numeric_metrics(step).items()
                 }
+                if component is not None:
+                    # An exact definition binds the key to the component's counter ahead of any glob.
+                    for key in values:
+                        if key not in defined:
+                            run.define_metric(key, step_metric=f"{prefix}/step")
+                            defined.add(key)
                 values[f"{prefix}/step"] = start + logged
                 values["reef/step"] = event.context.step
                 run.log(values)
