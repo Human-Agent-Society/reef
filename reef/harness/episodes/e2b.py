@@ -68,6 +68,11 @@ TUNNEL_PORT_BASE = 21080
 POLLERS = 8
 #: How long a sandbox outlives the run it was opened for, so the copy back and the close still find it.
 SANDBOX_MARGIN_S = 600
+#: The longest life E2B grants a sandbox at creation; asking for more is refused outright, so a run that needs
+#: more keeps its own sandbox alive instead (:class:`SandboxKeeper`).
+SANDBOX_MAX_TIMEOUT_S = 3600
+#: How long before that deadline the keeper asks for it again, so a slow extension still lands in time.
+SANDBOX_RENEW_MARGIN_S = 300
 #: How long a new relay has to answer before the session gives up on it.
 RELAY_READY_S = 60.0
 #: The deployments this process has reaped: each once, before its first sandbox.
@@ -243,7 +248,8 @@ class E2BExecutor(EpisodeExecutor):
                 ensure_template(self.template, self.npm_package, self.api_key)
             sandbox = Sandbox.create(
                 template=self.template,
-                timeout=int(self.timeout_s + SANDBOX_MARGIN_S),
+                # E2B refuses a longer life than its ceiling; the session extends it while the run still needs it.
+                timeout=min(int(self.timeout_s + SANDBOX_MARGIN_S), SANDBOX_MAX_TIMEOUT_S),
                 api_key=self.api_key,
                 metadata=self.labels(),
             )
@@ -259,12 +265,40 @@ class E2BExecutor(EpisodeExecutor):
         return session
 
 
+class SandboxKeeper(threading.Thread):
+    """Hold one sandbox open past E2B's creation ceiling, for as long as its session is.
+
+    E2B grants a sandbox at most :data:`SANDBOX_MAX_TIMEOUT_S` when it is created, so an agent run allowed more
+    than that would lose its sandbox mid-run. The keeper asks for the ceiling again before each one expires; it
+    stops with the session, and a refusal ends it rather than repeating against a sandbox that is gone.
+    """
+
+    def __init__(self, sandbox: Any) -> None:
+        super().__init__(name="reef-e2b-keeper", daemon=True)
+        self.sandbox = sandbox
+        self.stopped = threading.Event()
+
+    def run(self) -> None:
+        period = max(SANDBOX_MAX_TIMEOUT_S - SANDBOX_RENEW_MARGIN_S, 1)
+        while not self.stopped.wait(period):
+            try:
+                self.sandbox.set_timeout(SANDBOX_MAX_TIMEOUT_S)
+            except Exception as exc:
+                logger.warning("the E2B sandbox's deadline could not be extended, it may end mid-run: %s", exc)
+                return
+
+    def stop(self) -> None:
+        self.stopped.set()
+
+
 class E2BSession(EpisodeExecutor):
     """One running sandbox: launch processes in it, pull what they wrote, close it when done."""
 
     def __init__(self, sandbox: Any) -> None:
         self.sandbox = sandbox
         self.pumps: list[TunnelPump] = []
+        self.keeper = SandboxKeeper(sandbox)
+        self.keeper.start()
 
     def preflight(self) -> None:
         return None
@@ -371,6 +405,7 @@ class E2BSession(EpisodeExecutor):
         unpack(bytes(data), root / relative if relative else root)
 
     def close(self) -> None:
+        self.keeper.stop()
         for pump in self.pumps:
             pump.stop()
         self.pumps.clear()
