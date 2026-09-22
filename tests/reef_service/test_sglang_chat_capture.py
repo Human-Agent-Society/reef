@@ -10,9 +10,23 @@ from aiohttp.test_utils import TestServer
 
 from recipes.openclawrl.turns import main_turn_message, turn_request_messages
 from reef.artifact import Artifact, LiveWeightArtifactRef
+from reef.inference.chat import ToolCallParserFactory
 from reef.inference.sglang.chat import SGLangInferenceHandler, _NativeStreamCapture
 from reef.service.request_service import client_inference_response
 from reef.service.streaming import stream_record
+
+
+class RecordingToolParserFactory(ToolCallParserFactory):
+    """Build a fresh fake parser per request and remember what the handler asked for."""
+
+    def __init__(self, parser_type, inputs=None) -> None:
+        self._parser_type = parser_type
+        self._inputs = inputs
+
+    def build(self, tools, parser_name, tokenizer):
+        if self._inputs is not None:
+            self._inputs.update(tools=tools, parser_name=parser_name)
+        return self._parser_type()
 
 
 class FakeTokenizer:
@@ -106,8 +120,8 @@ def test_chat_facade_forwards_only_an_explicit_lora_path() -> None:
         tokenizer=FakeTokenizer(),
     )
 
-    without_adapter = backend._native_payload({}, [10, 11], {})
-    with_adapter = backend._native_payload({"lora_path": "reef_lora"}, [10, 11], {})
+    without_adapter = backend.client.payload({}, [10, 11], {}, capture_topk=0, stream=False)
+    with_adapter = backend.client.payload({"lora_path": "reef_lora"}, [10, 11], {}, capture_topk=0, stream=False)
 
     assert "lora_path" not in without_adapter
     assert with_adapter["lora_path"] == "reef_lora"
@@ -359,9 +373,7 @@ def test_chat_facade_parses_tool_calls_without_changing_training_tokens(tmp_path
 
         parser_inputs = {}
 
-        def parser_factory(tools, parser_name):
-            parser_inputs.update(tools=tools, parser_name=parser_name)
-            return FakeToolParser()
+        parser_factory = RecordingToolParserFactory(FakeToolParser, parser_inputs)
 
         app = web.Application()
         app.router.add_post("/generate", generate)
@@ -567,9 +579,7 @@ def test_anthropic_facade_converts_tool_history_and_sampled_tool_use(tmp_path) -
 
         parser_inputs = {}
 
-        def parser_factory(tools, parser_name):
-            parser_inputs.update(tools=tools, parser_name=parser_name)
-            return FakeToolParser()
+        parser_factory = RecordingToolParserFactory(FakeToolParser, parser_inputs)
 
         app = web.Application()
         app.router.add_post("/generate", generate)
@@ -933,7 +943,7 @@ def test_streaming_anthropic_emits_incremental_tool_use_without_raw_markers(tmp_
                 model_path="model",
                 tokenizer=FakeTokenizer(),
                 tool_call_parser="qwen25",
-                tool_parser_factory=lambda tools, name: FakeStreamingToolParser(),
+                tool_parser_factory=RecordingToolParserFactory(FakeStreamingToolParser),
             )
             stream = await backend.inference_stream(
                 _artifact(tmp_path),

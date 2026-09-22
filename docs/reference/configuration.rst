@@ -10,13 +10,17 @@ Local inference needs no YAML file:
 This starts SGLang on an automatically selected loopback port, waits for its
 health endpoint, then starts Reef on ``127.0.0.1:8900``. Use
 ``--inference.tensor-parallel-size 2`` for two visible GPUs; the default is one.
-``--inference.backend sglang`` makes the default backend explicit. The
-service interpreter (``REEF_PYTHON``, otherwise the launcher's interpreter)
-must have SGLang and GPU-enabled PyTorch installed. SGLang validates its GPU environment,
-model compatibility and available device memory during startup. Its output
-is available in ``.reef/run/sglang.log``. The managed path currently supports a single GPU node and SGLang.
-Use the `SGLang installation guide <https://docs.sglang.io/docs/get_started/install>`__
-to prepare the inference environment; the base Reef installation stays CPU-only.
+``--inference.backend sglang`` makes the default backend explicit;
+``--inference.backend vllm`` starts ``vllm.entrypoints.openai.api_server``
+instead. The service interpreter (``REEF_PYTHON``, otherwise the launcher's
+interpreter) must have the selected engine and GPU-enabled PyTorch installed.
+The engine validates its GPU environment, model compatibility and available
+device memory during startup. Its output is available in
+``.reef/run/sglang.log`` or ``.reef/run/vllm.log``. The managed path currently
+supports a single GPU node. Use the `SGLang installation guide
+<https://docs.sglang.io/docs/get_started/install>`__ or the `vLLM installation
+guide <https://docs.vllm.ai/en/latest/getting_started/installation/>`__ to
+prepare the inference environment; the base Reef installation stays CPU-only.
 
 Local model paths and Hugging Face IDs use the existing model resolver.
 Reef resolves a downloaded snapshot once and preserves the original model
@@ -302,12 +306,30 @@ The factory path must name an ``InferenceHandler`` subclass with a
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
-For ``reef.inference.sglang.chat.SGLangInferenceHandler``, set
-``inference.handler-config.force_reasoning`` to ``true`` if the chat template
-pre-opens ``<think>``, or ``false`` if it does not. When omitted, the handler
-detects this by rendering the template and caches only a successful result.
-Tokenizer or template errors propagate to the request; they do not silently
-disable reasoning separation. An explicit value bypasses this detection.
+Two token-native handlers record exact samples: the sampled token ids, their
+rollout log probabilities and the weight version that produced each token.
+``reef.inference.sglang.chat.SGLangInferenceHandler`` calls SGLang
+``/generate`` and relays its incremental stream.
+``reef.inference.vllm.chat.VLLMInferenceHandler`` calls vLLM
+``/inference/v1/generate``; it serves buffered responses and answers a
+streaming request with the completed turn as one burst of protocol frames.
+Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
+``sampling_defaults`` and ``force_reasoning``; per-request sampling extras pass
+through ``sglang_sampling_params`` or ``vllm_sampling_params``. Start a vLLM
+engine with ``--logprobs-mode processed_logprobs`` so its log probabilities
+match what the trainer recomputes; keep ``top_p`` at 1 for recipes that train
+on importance ratios, because vLLM renormalizes log probabilities after
+top-k/top-p while SGLang does not. A vLLM engine serving a training stack
+also needs Reef's version connector selected in its ``--kv-transfer-config``
+so every token carries its version; a local release without it serves under
+its release id.
+
+For both handlers, set ``inference.handler-config.force_reasoning`` to
+``true`` if the chat template pre-opens ``<think>``, or ``false`` if it does
+not. When omitted, the handler detects this by rendering the template and
+caches only a successful result. Tokenizer or template errors propagate to the
+request; they do not silently disable reasoning separation. An explicit value
+bypasses this detection.
 
 Explicit file selection and legacy compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
