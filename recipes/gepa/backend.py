@@ -63,6 +63,7 @@ class GEPABackend(CordisBackend):
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Refresh the JSON mirror only after Reef records ``state`` durably."""
+        super().commit_applied(state)
         self._restore_committed(state)
         self._archive.persist()
 
