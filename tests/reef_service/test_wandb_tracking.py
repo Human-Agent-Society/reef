@@ -484,9 +484,28 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
     event = _event()
     event = dataclasses.replace(event, context=dataclasses.replace(event.context, component="harness"))
     tracker.record(event)
-    logged, _ = client.runs[0].logged[0]
+    run = client.runs[0]
+    logged, _ = run.logged[0]
     assert logged["harness/train/loss"] == pytest.approx(0.25)
     assert "train/loss" not in logged
     assert logged["reef/component"] == "harness"
     assert logged["train/step"] == 0 and logged["reef/step"] == 7
+    # The component's metrics sit on the run's train/step axis, and the config names each trainer's backend.
+    assert (("harness/*",), {"step_metric": "train/step"}) in run.defined
+    assert run.config["reef"]["backend"] is None
+    assert run.config["reef"]["components"] == {"harness": {"backend": "ExampleTrainingBackend"}}
+    assert run.config["backend"] == {"harness": {"runtime": "custom", "optimizer": "adamw"}}
+    weights = dataclasses.replace(
+        event,
+        context=dataclasses.replace(event.context, component="weights", backend="WeightsBackend", backend_config={}),
+    )
+    tracker.record(weights)
+    tracker.record(weights)
+    assert run.defined.count((("harness/*",), {"step_metric": "train/step"})) == 1
+    assert run.defined.count((("weights/*",), {"step_metric": "train/step"})) == 1
+    assert run.config["reef"]["components"] == {
+        "harness": {"backend": "ExampleTrainingBackend"},
+        "weights": {"backend": "WeightsBackend"},
+    }
+    assert run.config["backend"] == {"harness": {"runtime": "custom", "optimizer": "adamw"}, "weights": {}}
     tracker.close()

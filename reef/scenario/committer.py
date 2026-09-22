@@ -21,6 +21,7 @@ from typing import Any, Literal
 from reef.artifact.artifact import (
     Artifact,
     ArtifactConflict,
+    ArtifactError,
     ArtifactNotFound,
     ArtifactPublicationError,
     ArtifactRef,
@@ -278,33 +279,42 @@ class ScenarioCommitter:
                 f"{artifact.ref.release_id!r} binds {list(manifest.names)}"
             )
 
-    def _held_component(self, release_id: str, held: Artifact) -> str | None:
+    def _recorded_components(self, artifact: Artifact) -> dict[str, str] | None:
+        """The content id of each component a release binds, for its commit record; ``None`` for a flat release."""
+        if self._binding.surface.single:
+            return None
+        return {name: entry.content_id for name, entry in self._release_manifest(artifact).entries.items()}
+
+    def _held_component(self, release_id: str) -> str | None:
         """The component a release held for review changed; ``None`` when it is not such a release.
 
         The record names the trainer that made the release, and a trainer may
         publish another component's content, so the component is read off the
-        manifests: the one entry that differs from the release it was carried
-        from. The record's name answers when the manifests cannot be compared.
+        recorded manifests: the one entry that differs from the release it was
+        carried from. The record's name answers when the manifests cannot be
+        compared or differ in other than one entry.
         """
         records = self._store.history() if self._store.durable else ()
         record = next((row for row in reversed(records) if row.artifact_ref.release_id == release_id), None)
         if record is None or not record.pending:
             return None
-        if self._binding.surface.single:
-            return record.component
         parent_id = record.artifact_ref.parent_release_id
-        parent = None if parent_id is None else self._releases.find_release(parent_id)
-        manifest = held.components
-        if parent is None or manifest is None:
+        if self._binding.surface.single or record.components is None or parent_id is None:
             return record.component
-        carried = self._artifacts.resolve(parent[0]).components
+        carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
         if carried is None:
-            return record.component
-        changed = [
-            name
-            for name, entry in manifest.entries.items()
-            if name not in carried.entries or carried.entries[name].content_id != entry.content_id
-        ]
+            # The creation artifact has no record; its manifest is read from the release itself.
+            creation = self._releases.creation_artifact
+            if creation.release_id != parent_id:
+                return record.component
+            try:
+                manifest = self._artifacts.resolve(creation).components
+            except ArtifactError:
+                return record.component
+            if manifest is None:
+                return record.component
+            carried = {name: entry.content_id for name, entry in manifest.entries.items()}
+        changed = [name for name, content_id in record.components.items() if carried.get(name) != content_id]
         return changed[0] if len(changed) == 1 else record.component
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
@@ -347,7 +357,7 @@ class ScenarioCommitter:
                 self._require_components(source)
             except ReefError as exc:
                 raise ReleaseNotRestorable(str(exc)) from exc
-            promoted = self._held_component(release_id, source) if operation == "promote" else None
+            promoted = self._held_component(release_id) if operation == "promote" else None
             staged: Artifact | None = None
             if promoted is not None and not surface.single:
                 # A held release carries the other components as they were when it
@@ -416,6 +426,7 @@ class ScenarioCommitter:
                     prepared=prepared,
                     operation=operation,
                     rollback_target_release_id=release_id,
+                    components=self._recorded_components(source),
                 )
                 if durable:
                     self._install_committed_checkpoint(
@@ -668,6 +679,7 @@ class ScenarioCommitter:
                     prepared=prepared,
                     pending=pending,
                     component=component,
+                    components=self._recorded_components(local_artifact),
                 )
             else:
                 if not durable:
@@ -680,6 +692,7 @@ class ScenarioCommitter:
                     checkpoint=False,
                     prepared=prepared,
                     component=component,
+                    components=self._recorded_components(local_artifact),
                 )
             if not pending:
                 if checkpointed and durable:
@@ -856,6 +869,7 @@ class ScenarioCommitter:
         rollback_target_release_id: str | None = None,
         pending: bool = False,
         component: str | None = None,
+        components: Mapping[str, str] | None = None,
     ) -> CommitRecord:
         record = CommitRecord(
             scenario=self._name,
@@ -874,6 +888,7 @@ class ScenarioCommitter:
             training_job_id=prepared.training_job_id,
             component=component,
             base_release_id=prepared.base_release_id if operation == "training" else None,
+            components=components,
         )
         return self._store.commit_step(expected_step=self._step, commit=record)
 

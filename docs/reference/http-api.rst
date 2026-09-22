@@ -700,7 +700,10 @@ install routes keep serving the previous head, and ``?release_id=`` can pull
 the pending tree for a trial install. ``POST /reef/scenarios/{scenario}/promote``
 with ``{"release_id": "..."}`` serves it by the same republish path as
 rollback, so the promotion is itself a commit record with
-``operation: promote`` and the promoted tree becomes a new release.
+``operation: promote`` and the promoted tree becomes a new release. In a
+scenario with several components the promote publishes the held release's
+changed component on the combination served now, and it is listed as a
+harness release only when the tree changed.
 
 Version page
 ~~~~~~~~~~~~

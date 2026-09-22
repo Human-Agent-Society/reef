@@ -1087,7 +1087,11 @@ binds and another after each rollback. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A rollback
 finishes the current run, marks its summary with the source and target, and
 resets ``train/step`` to zero; the globally monotonic ``reef/step`` stays
-attached for joining a run back to the commit log.
+attached for joining a run back to the commit log. A scenario with several
+trainers shares the run: each step's metrics carry its component name as a
+prefix (``harness/train/loss``) on the same ``train/step`` axis with
+``reef/component`` on the row, and the run config lists each component's
+backend under ``reef.components``.
 
 Recipe and processor code logs through the same object without importing W&B:
 

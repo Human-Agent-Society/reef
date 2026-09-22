@@ -100,7 +100,12 @@ class _GitWorkspace:
         self.git("clean", "-fdx")
 
     def replace_tree(self, source: Path, *, subdirectory: str | None = None) -> None:
-        """Replace the work tree with ``source``, placed under ``subdirectory`` when one is named."""
+        """Replace the work tree with ``source``, placed under ``subdirectory`` when one is named.
+
+        The files are hard links to ``source``'s, so nothing may write through
+        them afterwards: a work tree file Reef rewrites goes through
+        ``_write_fresh``, which unlinks it first.
+        """
         for child in self.clone_dir.iterdir():
             if child.name == ".git":
                 continue
@@ -123,7 +128,7 @@ class _GitWorkspace:
 
     def write_lfs_attributes(self) -> None:
         attributes = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
-        (self.clone_dir / ".gitattributes").write_text(attributes)
+        _write_fresh(self.clone_dir / ".gitattributes", attributes)
 
     def commit(self, message: str) -> str:
         self.git("add", "-A")
@@ -176,6 +181,12 @@ class _GitWorkspace:
         return self._git_client.run(command, cwd=cwd, source_error=source_error)
 
 
+def _write_fresh(path: Path, text: str) -> None:
+    """Write ``text`` to a new inode: a work tree file may be a link to a released or cached file."""
+    path.unlink(missing_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
 def _materialized_metadata(checkout: Path) -> Mapping[str, object]:
     """The release metadata recorded in a materialized checkout's manifest; a bootstrap tree has none."""
     manifest_path = checkout / _MANIFEST
@@ -211,7 +222,7 @@ class _ArtifactManifest:
             "source": dict(source),
             "metadata": dict(metadata),
         }
-        (self._workspace.clone_dir / _MANIFEST).write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        _write_fresh(self._workspace.clone_dir / _MANIFEST, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
 
     def read(self, version: str) -> Mapping[str, object]:
         raw = self._workspace.show_file(version, _MANIFEST)
@@ -499,7 +510,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             for relative, text in files.items():
                 target = self._workspace.clone_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(text, encoding="utf-8")
+                _write_fresh(target, text)
             self._workspace.write_lfs_attributes()
             self._manifest.write(
                 content_id=f"content:{uuid.uuid4().hex}",

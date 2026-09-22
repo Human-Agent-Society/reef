@@ -13,9 +13,13 @@ from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, Releas
 
 
 def link_or_copy(source: str, destination: str) -> None:
-    """Hard-link an immutable released file into another tree; copy when the filesystem refuses."""
+    """Hard-link an immutable released file into another tree; copy when the filesystem refuses.
+
+    A symlink in the source resolves first: a plain link on Linux would link
+    the symlink itself, and the tree would then carry a link into the cache.
+    """
     try:
-        os.link(source, destination)
+        os.link(os.path.realpath(source), destination)
     except OSError:
         shutil.copy2(source, destination)
 

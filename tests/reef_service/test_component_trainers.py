@@ -16,6 +16,7 @@ from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
+from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.recipe import Recipe
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
@@ -152,6 +153,28 @@ class _TwoTrainerRecipe(Recipe):
         )
 
 
+class _RecordingTracker(ExperimentTracker):
+    """Keeps every training event the dispatcher records."""
+
+    def __init__(self) -> None:
+        self.events: list[Any] = []
+
+    def bind_scenario(self, **kwargs):
+        return NullExperimentLogger()
+
+    def correlation_metrics(self, context):
+        return {}
+
+    def record(self, event):
+        self.events.append(event)
+
+    def record_rollback(self, event):
+        pass
+
+    def close(self):
+        pass
+
+
 def _records(step: int) -> tuple[AgentRecord, AgentRecord]:
     inference = AgentRecord.create(
         scenario="agent",
@@ -176,6 +199,7 @@ def _dispatcher(
     backend_factory: Any = None,
     backends: dict[str, _ComponentBackend] | None = None,
     hybrid_components: frozenset[str] = frozenset(),
+    experiment_tracker: ExperimentTracker | None = None,
 ) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
     initial = tmp_path / "initial"
     if not initial.exists():
@@ -193,6 +217,7 @@ def _dispatcher(
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=records,
         scenario_storage=SQLiteScenarioStorage(records),
+        experiment_tracker=experiment_tracker,
     )
     return dispatcher, backends
 
@@ -545,6 +570,30 @@ def test_a_weights_step_is_no_new_harness_head(tmp_path: Path) -> None:
         catalog = service.harness_releases(headers)["releases"]
         assert [row.get("component") for row in catalog] == [None, HARNESS]
         assert dispatcher._experiment_context(scenario, WEIGHTS).component == WEIGHTS
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_each_components_step_reaches_the_tracker_under_its_name(tmp_path: Path) -> None:
+    """The event the dispatcher records for a step names the trainer that made it."""
+    tracker = _RecordingTracker()
+    dispatcher, _ = _dispatcher(tmp_path, experiment_tracker=tracker)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        dispatcher._commit_result("agent", harness, HARNESS)
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        dispatcher._commit_result("agent", weights, WEIGHTS)
+        assert [event.context.component for event in tracker.events] == [HARNESS, WEIGHTS]
+        assert [event.context.backend for event in tracker.events] == ["_ComponentBackend", "_ComponentBackend"]
+        assert [event.context.step for event in tracker.events] == [1, 2]
+        assert [row.get("component") for row in scenario.releases()] == [WEIGHTS, HARNESS, None]
     finally:
         dispatcher.close()
 

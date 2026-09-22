@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -458,6 +459,42 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         catalog = service.harness_releases(headers)["releases"]
         assert catalog[-1]["release_id"] == newest_release
         assert held_weights_release not in {row["release_id"] for row in catalog}
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_held_release_whose_parent_is_gone_is_promoted_as_its_trainers_component(tmp_path: Path) -> None:
+    """The creation artifact has no record; when its bytes are gone too, the record's trainer names the component."""
+    initial = tmp_path / "initial"
+    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
+    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
+    dispatcher = Dispatcher(
+        _TwoComponentRecipe(),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        surface = scenario.surface
+        assert surface.files is not None
+        creation = scenario.repository.materialize(scenario.current_artifact_ref())
+        held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
+        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
+        held_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        later = Artifact.local(
+            _tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
+        )
+        scenario.commit(TrainStepResult(state={}, artifact=later, component=WEIGHTS))
+        assert creation.local_path is not None
+        shutil.rmtree(creation.local_path)
+        scenario.rollback(held_release, operation="promote")
+        promoted = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert promoted.components is not None
+        assert promoted.components.entries[WEIGHTS].content_id == later.ref.content_id
+        assert surface.files.read_files(promoted) == {"AGENTS.md": "held"}
     finally:
         dispatcher.close()
 

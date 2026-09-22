@@ -96,12 +96,23 @@ class CommitRecord:
     component: str | None = None
     #: The release the committed batch was reserved against.
     base_release_id: str | None = None
+    #: The content id of every component the published release binds, by
+    #: name; ``None`` for a flat release and for a step that published none.
+    components: Mapping[str, str] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.step, int) or isinstance(self.step, bool) or self.step < 1:
             raise CommitLogError("commit record step must be a positive integer")
         if self.component is not None and (not isinstance(self.component, str) or not self.component):
             raise CommitLogError("commit record component must be a non-empty string or null")
+        if self.components is not None and (
+            not isinstance(self.components, Mapping)
+            or not all(
+                isinstance(name, str) and name and isinstance(content_id, str) and content_id
+                for name, content_id in self.components.items()
+            )
+        ):
+            raise CommitLogError("commit record components must map component names to content ids")
         if self.base_release_id is not None and (
             not isinstance(self.base_release_id, str) or not self.base_release_id
         ):
@@ -142,6 +153,7 @@ class CommitRecord:
         object.__setattr__(self, "metrics", None if self.metrics is None else deepcopy(dict(self.metrics)))
         object.__setattr__(self, "compacted_ids", frozenset(self.compacted_ids))
         object.__setattr__(self, "consumed_ids", frozenset(self.consumed_ids))
+        object.__setattr__(self, "components", None if self.components is None else dict(self.components))
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {
@@ -175,6 +187,8 @@ class CommitRecord:
             value["component"] = self.component
         if self.base_release_id is not None:
             value["base_release_id"] = self.base_release_id
+        if self.components is not None:
+            value["components"] = dict(self.components)
         return value
 
     @classmethod
@@ -233,6 +247,7 @@ class CommitRecord:
             training_job_id=value.get("training_job_id"),
             component=value.get("component"),
             base_release_id=value.get("base_release_id"),
+            components=value.get("components"),
         )
 
     def __eq__(self, other: object) -> bool:

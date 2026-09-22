@@ -122,7 +122,7 @@ class _WandbScenarioLogger(ExperimentLogger):
         self._defined_namespaces: set[str] = set()
 
     def log(self, metrics: Mapping[str, Any], *, namespace: str) -> None:
-        self._tracker._record_component(self, metrics, namespace)
+        self._tracker._record_namespace(self, metrics, namespace)
 
     def _context(self) -> TrainingExperimentContext:
         return TrainingExperimentContext(
@@ -179,6 +179,8 @@ class WandbExperimentTracker(ExperimentTracker):
         self._runs: dict[str, Any] = {}
         self._scenario_loggers: dict[str, _WandbScenarioLogger] = {}
         self._failed_run_ids: set[str] = set()
+        # Per run, the trainers seen so far: each gets its metric axis once and its backend in the config.
+        self._components: dict[str, dict[str, dict[str, Any]]] = {}
         self._lock = RLock()
 
     @property
@@ -255,6 +257,7 @@ class WandbExperimentTracker(ExperimentTracker):
         )
         with self._lock:
             run = self._runs.pop(run_id, None)
+            self._components.pop(run_id, None)
             if run is not None:
                 try:
                     summary = getattr(run, "summary", None)
@@ -286,12 +289,21 @@ class WandbExperimentTracker(ExperimentTracker):
         if not self.config.active:
             return
         run_id = self._run_id(event.context)
+        component = event.context.component
+        # Decided before the run opens: opening it records the component in the config.
+        first_step = component is not None and component not in self._components.get(run_id, {})
         run = self._runs.get(run_id)
         if run is None:
             run = self._initialize_run(run_id, event.context)
         if run is None:
             return
-        self._update_run_config(run, event.context)
+        if first_step:
+            # A trainer's first step puts its metrics on the run's train/step axis, as train/* is.
+            try:
+                run.define_metric(f"{component}/*", step_metric="train/step")
+            except Exception as exc:
+                logger.warning("W&B metric definition failed (%s); training will continue", type(exc).__name__)
+        self._update_run_config(run, run_id, event.context)
         metadata = self._event_metadata(event, run_id)
         self._record_optimizer_steps(run, event)
         # The backend's drained metrics may themselves carry a "train/step"
@@ -324,6 +336,7 @@ class WandbExperimentTracker(ExperimentTracker):
         with self._lock:
             runs, self._runs = tuple(self._runs.values()), {}
             self._scenario_loggers = {}
+            self._components = {}
         for run in runs:
             try:
                 run.finish()
@@ -393,15 +406,7 @@ class WandbExperimentTracker(ExperimentTracker):
                 resume="allow",
                 reinit="create_new",
                 config={
-                    "reef": {
-                        "scenario": context.scenario,
-                        "recipe": context.recipe,
-                        "backend": context.backend,
-                        "model": self._model,
-                        "run_segment": context.run_segment,
-                        "source_artifact": encode_artifact_ref(context.source_artifact_ref),
-                    },
-                    "backend": _safe_mapping(context.backend_config or {}),
+                    **self._config_values(run_id, context),
                     "training": dict(self._training_config),
                 },
             )
@@ -416,7 +421,7 @@ class WandbExperimentTracker(ExperimentTracker):
             logger.warning("W&B initialization failed (%s); training will continue", type(exc).__name__)
             return None
 
-    def _record_component(
+    def _record_namespace(
         self,
         scenario_logger: _WandbScenarioLogger,
         metrics: Mapping[str, Any],
@@ -454,21 +459,30 @@ class WandbExperimentTracker(ExperimentTracker):
             except Exception as exc:
                 logger.warning("W&B %s logging failed (%s); execution will continue", namespace, type(exc).__name__)
 
-    def _update_run_config(self, run: Any, context: TrainingExperimentContext) -> None:
+    def _config_values(self, run_id: str, context: TrainingExperimentContext) -> dict[str, Any]:
+        """The run config: one backend for a flat scenario, one per component when several trainers share the run."""
+        reef: dict[str, Any] = {
+            "scenario": context.scenario,
+            "recipe": context.recipe,
+            "backend": context.backend,
+            "model": self._model,
+            "run_segment": context.run_segment,
+            "source_artifact": encode_artifact_ref(context.source_artifact_ref),
+        }
+        backend: dict[str, Any] = _safe_mapping(context.backend_config or {})
+        if context.component is not None:
+            components = self._components.setdefault(run_id, {})
+            components[context.component] = {"backend": context.backend, "config": backend}
+            reef["backend"] = None
+            reef["components"] = {name: {"backend": entry["backend"]} for name, entry in components.items()}
+            backend = {name: entry["config"] for name, entry in components.items()}
+        return {"reef": reef, "backend": backend}
+
+    def _update_run_config(self, run: Any, run_id: str, context: TrainingExperimentContext) -> None:
         config = getattr(run, "config", None)
         if config is None:
             return
-        values = {
-            "reef": {
-                "scenario": context.scenario,
-                "recipe": context.recipe,
-                "backend": context.backend,
-                "model": self._model,
-                "run_segment": context.run_segment,
-                "source_artifact": encode_artifact_ref(context.source_artifact_ref),
-            },
-            "backend": _safe_mapping(context.backend_config or {}),
-        }
+        values = self._config_values(run_id, context)
         try:
             config.update(values, allow_val_change=True)
         except Exception as exc:

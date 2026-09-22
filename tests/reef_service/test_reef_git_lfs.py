@@ -395,3 +395,40 @@ def test_a_published_file_is_linked_into_the_work_tree_not_copied(tmp_path: Path
     backend.publish(Artifact.local(source), expected_parent=head)
     assert (source / "weights.bin").stat().st_nlink == 2
     assert (tmp_path / "work" / "repository" / "weights.bin").read_bytes() == b"\x00" * 64
+
+
+@pytest.mark.integration
+def test_the_work_tree_never_writes_through_a_link(tmp_path: Path, fake_git_lfs: None) -> None:
+    """A linked file shares its bytes with the source, so the files Reef rewrites are written to a fresh inode."""
+    remote = tmp_path / "artifacts.git"
+    run_git("init", "--bare", str(remote))
+    snapshot = tmp_path / "models--org--model" / "snapshots" / "upstream-sha"
+    snapshot.mkdir(parents=True)
+    blobs = tmp_path / "hub-cache"
+    blobs.mkdir()
+    (blobs / "attributes").write_text("*.bin filter=lfs\n")
+    (blobs / "weights").write_text("base")
+    (snapshot / ".gitattributes").symlink_to(blobs / "attributes")
+    (snapshot / "model.safetensors").symlink_to(blobs / "weights")
+    backend = GitLFSRepositoryBackend.factory(
+        remote,
+        "org/model@main",
+        work_dir=tmp_path / "work",
+        cache_dir=tmp_path / "cache",
+        snapshot_download=lambda **kwargs: str(snapshot),
+        bootstrap_files={"AGENTS.md": "seed\n"},
+    )("agent")
+    head = backend.fork()
+    # The bootstrap rewrote .gitattributes in the work tree, not the Hugging Face blob behind the snapshot.
+    assert (blobs / "attributes").read_text() == "*.bin filter=lfs\n"
+    assert (blobs / "weights").read_text() == "base"
+    assert "*.safetensors filter=lfs" in backend.materialize(head).local_path.joinpath(".gitattributes").read_text()
+
+    source = tmp_path / "release"
+    source.mkdir()
+    (source / "reef-artifact.json").write_text("{}")
+    (source / ".gitattributes").write_text("stale\n")
+    (source / "weights.bin").write_bytes(b"\x01" * 8)
+    backend.publish(Artifact.local(source), expected_parent=head)
+    assert (source / "reef-artifact.json").read_text() == "{}"
+    assert (source / ".gitattributes").read_text() == "stale\n"
