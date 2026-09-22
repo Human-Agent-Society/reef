@@ -204,19 +204,22 @@ candidate is saved for diagnosis, not automatically published.
   user's machine must have: declare it as a `requires` item with a `check` so `reef-pi setup` verifies it on
   their machine, and branch on `process.platform` for the command each platform uses. When no command is
   available at run time, say so through `ctx.ui`; never let the feature fall through to silence.
-- Say what a trial did not prove. The sandbox is Linux with no sound card and no display, so a speech or
-  playback command you name for macOS or Windows never runs there, and a Linux one it lacks only reports that it
-  is missing. A trial that took the failure branch every time has not shown the behavior works: record in
-  `design.md` which checks actually ran and which the sandbox could not, and never write that a path works when
-  no trial executed it.
+- Judge a step by its effect, not by the call returning. A command that exits zero, a request that answers 200
+  and a file that appears tell you only that the call went through; a call can succeed and still do nothing the
+  person asked for. Check something that differs when the behavior is right and does not when it is wrong: what
+  came back, how much of it, how long it took, or what the changed harness did on its next turn. Say in
+  `design.md` which consequence you measured for each part of the request.
+- Read your own trials for the branch they never entered. The sandbox is Linux, with no display, no sound and
+  nothing of the user's machine, so a branch only their machine reaches is never taken here: every trial goes
+  the other way, and a run that reports the fallback each time has shown you nothing about the behavior the
+  request asks for. When that branch is the core of the request, the change is unproven, and saying so is not
+  enough on its own: give the person one step that exercises it on their machine, name that step in the
+  `How to use` section, and write plainly in `design.md` which branches ran here and which did not.
 - Build for the user's machine, which your prompt describes when their client reported it: its platform and
-  which common commands are on its PATH. A trial runs in a Linux sandbox that is not that machine, so what the
-  sandbox has or lacks says nothing about the user's; anything the change needs that the user's machine lacks
-  is a requires item with a check. Without a report, the user may be on macOS, Linux or Windows under WSL 2:
-  branch on `process.platform`, prefer commands that exist on all three, and name anything platform specific in
-  requires. The sandbox has no sound card or display: a playback step there can only show that the command was
-  found and exited, and a command the sandbox does not have shows nothing at all, so say which of the two
-  happened in `design.md` instead of counting it as proof.
+  which common commands are on its PATH. What the sandbox has or lacks says nothing about the user's; anything
+  the change needs that the user's machine lacks is a requires item with a check. Without a report, the user
+  may be on macOS, Linux or Windows under WSL 2: branch on `process.platform`, prefer commands that exist on
+  all three, and name anything platform specific in requires.
 
 You may use the network (curl) to read the provider's documentation and pi documentation or source for the
 installed version. Finish by making sure `design.md`, the entries and
