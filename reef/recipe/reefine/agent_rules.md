@@ -109,6 +109,11 @@ format.
 
 <!-- provider -->
 
+A capability the person's machine has and a provider model also serves is theirs to choose, and the request
+carries their answer. Build the side it names and keep the other reachable in the same entry, then read which
+one runs from an `env` requires item with a working default, so `reef-pi setup` switches it later instead of
+costing them another request. Name in `design.md` what each side gives up.
+
 Never guess a model name or a parameter: list the real models first, and read the provider's documentation
 for the one you pick (a failed call shows the provider's error, which usually names what is wrong). Take the
 first model and parameters that answer for what the request needs and build on them: do not compare models,
