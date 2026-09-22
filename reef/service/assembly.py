@@ -8,6 +8,7 @@ orchestrates processes around the result.
 
 from __future__ import annotations
 
+import ipaddress
 import os
 from collections.abc import Mapping
 from contextlib import suppress
@@ -256,6 +257,18 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
     )
 
 
+def _served_url(host: str, port: int) -> str:
+    """Where this service reaches itself: loopback for a wildcard bind, an IPv6 literal in brackets."""
+    bound = host.strip()
+    if bound in ("", "0.0.0.0", "::"):
+        return f"http://127.0.0.1:{port}"
+    try:
+        literal = ipaddress.ip_address(bound)
+    except ValueError:
+        return f"http://{bound}:{port}"
+    return f"http://[{bound}]:{port}" if literal.version == 6 else f"http://{bound}:{port}"
+
+
 def build_dispatcher(
     settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None
 ) -> Dispatcher:
@@ -263,9 +276,9 @@ def build_dispatcher(
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     # A recipe's own evaluation calls come back to this Reef, so they sample the release it serves.
-    host = "127.0.0.1" if settings.host.strip() in ("", "0.0.0.0", "::") else settings.host.strip()
+    served_url = settings.served_url or _served_url(settings.host, settings.port)
     recipe = recipe.with_served_endpoint(
-        ServedEndpoint(url=f"http://{host}:{settings.port}", token=settings.tokens[0] if settings.tokens else None)
+        ServedEndpoint(url=served_url, token=settings.tokens[0] if settings.tokens else None)
     )
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None

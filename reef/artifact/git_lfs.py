@@ -119,7 +119,12 @@ class _GitWorkspace:
         for child in source.iterdir():
             destination = target / child.name
             if child.is_dir():
-                shutil.copytree(child, destination, symlinks=False, copy_function=link_or_copy)
+                try:
+                    shutil.copytree(child, destination, symlinks=False, copy_function=link_or_copy)
+                except shutil.Error as exc:
+                    raise ArtifactSourceError(
+                        f"artifact contains a file that cannot be read under {child}: {exc}"
+                    ) from exc
             else:
                 try:
                     link_or_copy(str(child), str(destination))
@@ -548,7 +553,7 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             for relative, text in files.items():
                 target = self._workspace.clone_dir / relative
                 target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_text(text, encoding="utf-8")
+                _write_fresh(target, text)
             self._manifest.write(
                 content_id=f"content:{uuid.uuid4().hex}",
                 parent_release_id=None,

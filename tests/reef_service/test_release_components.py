@@ -13,6 +13,7 @@ import pytest
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactPublicationError, InMemoryRepositoryBackend, Repository
 from reef.artifact.artifact import ArtifactRef, ArtifactValidator
 from reef.artifact.composite import compose_release
+from reef.artifact.release_chain import ReleaseNotRestorable
 from reef.core import RequestType
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, release_components
 from reef.core.errors import ReefError
@@ -464,8 +465,8 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
 
 
 @pytest.mark.unit
-def test_a_held_release_whose_parent_is_gone_is_promoted_as_its_trainers_component(tmp_path: Path) -> None:
-    """The creation artifact has no record; when its bytes are gone too, the record's trainer names the component."""
+def test_a_held_release_whose_parent_manifest_is_unavailable_is_not_promoted(tmp_path: Path) -> None:
+    """The creation artifact has no record; when its bytes are gone too, the promote is refused, not guessed."""
     initial = tmp_path / "initial"
     _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
     _tree(initial / HARNESS, {"AGENTS.md": "seed"})
@@ -490,11 +491,13 @@ def test_a_held_release_whose_parent_is_gone_is_promoted_as_its_trainers_compone
         scenario.commit(TrainStepResult(state={}, artifact=later, component=WEIGHTS))
         assert creation.local_path is not None
         shutil.rmtree(creation.local_path)
-        scenario.rollback(held_release, operation="promote")
-        promoted = scenario.repository.materialize(scenario.current_artifact_ref())
-        assert promoted.components is not None
-        assert promoted.components.entries[WEIGHTS].content_id == later.ref.content_id
-        assert surface.files.read_files(promoted) == {"AGENTS.md": "held"}
+        with pytest.raises(ReleaseNotRestorable, match="manifest of its parent"):
+            scenario.rollback(held_release, operation="promote")
+        served = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert served.components is not None
+        assert served.components.entries[WEIGHTS].content_id == later.ref.content_id
+        assert surface.files.read_files(served) == {"AGENTS.md": "seed"}
+        assert scenario.scenario_step == 2
     finally:
         dispatcher.close()
 

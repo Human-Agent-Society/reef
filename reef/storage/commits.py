@@ -324,9 +324,14 @@ def scenario_metadata_for(
 
 
 def parse_scenario_metadata(
-    value: Mapping[str, Any], *, checkpoint_head: ArtifactRef
+    value: Mapping[str, Any], *, checkpoint_head: ArtifactRef, components: Mapping[str, str] | None = None
 ) -> tuple[str, ArtifactRef, CommitRecord | None]:
-    """Read registration and a checkpoint commit; step zero has no commit."""
+    """Read registration and a checkpoint commit; step zero has no commit.
+
+    ``components`` is the manifest of ``checkpoint_head``, read from the same
+    release metadata, so a commit rebuilt from it carries what a recorded one
+    does.
+    """
     if value.get("format") != SCENARIO_METADATA_KIND:
         raise ValueError(f"unsupported scenario metadata format: {value.get('format')!r}")
     scenario = value.get("scenario")
@@ -395,6 +400,7 @@ def parse_scenario_metadata(
         rollback_target_release_id=rollback_target_release_id,
         component=component,
         base_release_id=base_release_id,
+        components=components,
     )
     return scenario, base_artifact, commit
 

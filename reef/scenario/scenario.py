@@ -269,6 +269,10 @@ class Scenario:
     def releases(self) -> tuple[dict[str, Any], ...]:
         return self._committer.releases()
 
+    def creation_components(self) -> Mapping[str, str] | None:
+        """The content id of each component the creation artifact binds; ``None`` when it has no manifest."""
+        return self._committer.creation_components()
+
     def artifact_for_version(self, release_id: str) -> Artifact:
         """Materialize a scenario release for read-only serving; absence raises ArtifactNotFound."""
         return self._committer.artifact_for_version(release_id)

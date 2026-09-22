@@ -60,7 +60,7 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
     accepted = tuple(_digest(token) for token in normalize_tokens(tokens))
 
     def _presented(request: web.Request) -> str | None:
-        """The credential to judge: the Bearer header's, else ``?token=`` on a page route a browser opens."""
+        """The credential to judge: the Bearer header's, else the Anthropic dialect's ``x-api-key``, else ``?token=`` on a page route a browser opens."""
         authorization = request.headers.get("Authorization")
         if isinstance(authorization, str):
             # The auth-scheme is case-insensitive per RFC 9110 §11.1; only the
@@ -69,6 +69,11 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
             if not separator or scheme.lower() != "bearer" or not credential:
                 return None
             return credential
+        api_key = request.headers.get("x-api-key")
+        if isinstance(api_key, str) and api_key:
+            # A client speaking the Anthropic dialect (an evaluation episode, a
+            # proposer bound to this service) presents its key in this header.
+            return api_key
         if request.method == "GET" and PAGE_ROUTES.match(request.path):
             return request.query.get("token") or None
         return None

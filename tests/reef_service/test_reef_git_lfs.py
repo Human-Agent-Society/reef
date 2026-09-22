@@ -432,3 +432,15 @@ def test_the_work_tree_never_writes_through_a_link(tmp_path: Path, fake_git_lfs:
     backend.publish(Artifact.local(source), expected_parent=head)
     assert (source / "reef-artifact.json").read_text() == "{}"
     assert (source / ".gitattributes").read_text() == "stale\n"
+
+
+@pytest.mark.integration
+def test_a_broken_symlink_below_the_top_level_is_refused_by_name(tmp_path: Path, fake_git_lfs: None) -> None:
+    remote = tmp_path / "artifacts.git"
+    backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    head = backend.fork()
+    source = tmp_path / "release"
+    (source / "sub").mkdir(parents=True)
+    (source / "sub" / "gone").symlink_to(tmp_path / "nowhere")
+    with pytest.raises(ArtifactSourceError, match="sub"):
+        backend.publish(Artifact.local(source), expected_parent=head)

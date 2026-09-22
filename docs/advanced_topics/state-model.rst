@@ -141,8 +141,9 @@ whole cycle, prepare and commit together, so they never overtake each
 other. A local result whose base a dispatched commit has replaced goes
 the way its backend's ``stale_result_policy`` says: ``merge`` commits it
 onto the release served now (the harness backend's default, since each
-of its episode pairings compared candidate and current under one set of
-weights), ``reevaluate`` keeps the candidate and runs its evaluation again
+of its episode pairings compared candidate and current under the same
+conditions when it ran; the commit metrics then name the release in
+``merged_onto``), ``reevaluate`` keeps the candidate and runs its evaluation again
 against the new release, and ``refuse`` (the default for a backend that
 says nothing) drops the result and prepares the batch again; a refused
 worker reports its refusals in ``/reef/status`` and after a few in a row

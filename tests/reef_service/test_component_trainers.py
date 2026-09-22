@@ -15,6 +15,7 @@ from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.errors import ReefError
+from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.recipe import Recipe
@@ -49,6 +50,9 @@ class _ComponentBackend(CandidateBackend):
         self.stale_policy = stale_policy
         self.prepared = 0
         self.evaluated = 0
+        self.reevaluations = 0
+        self.reject_next = False
+        self.hold_next = False
         self.result: TrainStepResult | None = None
 
     @property
@@ -60,14 +64,24 @@ class _ComponentBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         step = int(state["steps"]) + 1
+        self.prepared += 1
+        if self.reject_next:
+            # A rejected step publishes nothing: the row it leaves carries the head's own release.
+            self.reject_next = False
+            self.result = TrainStepResult({"steps": step}, metrics={"prepared": self.prepared, "selected": False})
+            return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
         path = self.artifact_dir / self.component / uuid.uuid4().hex
         path.mkdir(parents=True)
         (path / f"{self.component}.txt").write_text(f"{self.component} step {step}", encoding="utf-8")
-        self.prepared += 1
         self.result = TrainStepResult(
-            {"steps": step}, metrics={"prepared": self.prepared}, artifact=Artifact.local(path)
+            {"steps": step}, metrics={"prepared": self.prepared}, artifact=Artifact.local(path), pending=self.hold_next
         )
+        self.hold_next = False
         return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
+
+    def prepare_reevaluation(self, prepared):
+        self.reevaluations += 1
+        return prepared
 
     def evaluate(self, candidate):
         self.evaluated += 1
@@ -534,6 +548,7 @@ def test_a_local_result_its_backend_reevaluates_keeps_its_candidate(tmp_path: Pa
         again = scenario.prepare_training_step(HARNESS)
         assert again is not None
         assert backends[HARNESS].prepared == 1 and backends[HARNESS].evaluated == 2
+        assert backends[HARNESS].reevaluations == 1
         scenario.commit(again, component=HARNESS)
         assert _component_files(scenario, scenario.current_artifact_ref()) == {
             WEIGHTS: "weights step 1",
@@ -594,6 +609,92 @@ def test_each_components_step_reaches_the_tracker_under_its_name(tmp_path: Path)
         assert [event.context.backend for event in tracker.events] == ["_ComponentBackend", "_ComponentBackend"]
         assert [event.context.step for event in tracker.events] == [1, 2]
         assert [row.get("component") for row in scenario.releases()] == [WEIGHTS, HARNESS, None]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_the_harness_catalog_is_one_lineage_of_trees(tmp_path: Path) -> None:
+    """A rejected step, an unlisted weights step and a promote at step 1 never move the head or break the chain."""
+    dispatcher, backends = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        service = RequestService(dispatcher)
+        headers = {"x-reef-scenario": "agent"}
+        creation = scenario.current_artifact_ref().release_id
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        requires = {"training_request": {"id": "r1", "requires": [{"name": "TOKEN", "kind": "env"}]}}
+        scenario.commit(scenario.trainer_for(HARNESS).add_commit_metrics(harness, requires), component=HARNESS)
+        h1 = scenario.current_artifact_ref().release_id
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        scenario.commit(weights, component=WEIGHTS)
+        w1 = scenario.current_artifact_ref().release_id
+
+        # A rejected harness step is listed for its page, but it published nothing and names no head.
+        for record in _records(2):
+            scenario.records.append(record)
+        backends[HARNESS].reject_next = True
+        rejected = scenario.prepare_training_step(HARNESS)
+        assert rejected is not None and rejected.artifact is None
+        scenario.commit(rejected, component=HARNESS)
+        assert scenario.current_artifact_ref().release_id == w1
+        assert service.harness_head(headers) == h1
+        assert service.harness_manifest(headers)["release_id"] == h1
+        catalog = service.harness_releases(headers)["releases"]
+        assert [row["release_id"] for row in catalog] == [creation, h1, w1]
+        assert catalog[-1]["metrics"]["selected"] is False
+        assert f'"release_id": "{h1}"' in service.harness_install_script(headers, adapter="pi")
+
+        # The next harness release descends from h1 in the listed chain; the weights release it was published
+        # on stays under another name, and the requires chain walks the listed rows.
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        scenario.commit(weights, component=WEIGHTS)
+        w2 = scenario.current_artifact_ref().release_id
+        for record in _records(3):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        h2 = scenario.current_artifact_ref().release_id
+        catalog = service.harness_releases(headers)["releases"]
+        assert [row["release_id"] for row in catalog] == [creation, h1, w1, h2]
+        assert catalog[-1]["parent_release_id"] == h1
+        assert catalog[-1]["composed_parent_release_id"] == w2
+        assert required_by(catalog, h2) == [{"name": "TOKEN", "kind": "env"}]
+        assert service.harness_head(headers) == h2
+        page = service.harness_release_page(headers, 3)
+        assert h2 in page
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_promote_of_weights_held_at_step_one_is_no_harness_release(tmp_path: Path) -> None:
+    """The creation artifact has no record; its manifest still says the promoted tree did not change."""
+    dispatcher, backends = _dispatcher(tmp_path)
+    backends[WEIGHTS].hold_next = True
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        service = RequestService(dispatcher)
+        headers = {"x-reef-scenario": "agent"}
+        creation = scenario.current_artifact_ref().release_id
+        for record in _records(1):
+            scenario.records.append(record)
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None and weights.pending
+        scenario.commit(weights, component=WEIGHTS)
+        held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        scenario.rollback(held, operation="promote")
+        assert _component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
+        assert service.harness_head(headers) == creation
+        assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [creation]
     finally:
         dispatcher.close()
 

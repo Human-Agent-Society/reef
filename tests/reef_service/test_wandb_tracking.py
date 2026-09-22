@@ -508,4 +508,11 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
         "weights": {"backend": "WeightsBackend"},
     }
     assert run.config["backend"] == {"harness": {"runtime": "custom", "optimizer": "adamw"}, "weights": {}}
+    # Optimizer step rows keep the component too, on the component's own counter.
+    stepped = dataclasses.replace(weights, metrics={**weights.metrics, "train_steps": [{"train/loss": 0.9}]})
+    tracker.record(stepped)
+    step_rows = [row for row, _ in run.logged if "weights/step/loss" in row]
+    assert step_rows == [{"weights/step/loss": 0.9, "weights/step/step": 0, "reef/step": 7}]
+    assert run.summary["reef/weights/optimizer_steps"] == 1 and "reef/optimizer_steps" not in run.summary
+    assert (("weights/step/*",), {"step_metric": "weights/step/step"}) in run.defined
     tracker.close()

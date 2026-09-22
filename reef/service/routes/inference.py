@@ -92,7 +92,9 @@ async def _relay_inference_stream(
         for name, value in upstream.headers.items()
         if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
     }
-    response_headers.update(await _release_header(request_service, headers))
+    if record:
+        # Only a resident harness reads the head; an evaluation episode runs a candidate, not the served tree.
+        response_headers.update(await _release_header(request_service, headers))
     content_type = next(
         (value for name, value in response_headers.items() if name.lower() == "content-type"),
         "",
@@ -184,7 +186,8 @@ def register_inference_routes(
             headers, payload, path, inference_handler, record=record
         )
         response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
-        response_headers.update(await _release_header(request_service, headers))
+        if record:
+            response_headers.update(await _release_header(request_service, headers))
         return web.json_response(response_payload, headers=response_headers)
 
     async def inference(request: web.Request) -> web.StreamResponse:

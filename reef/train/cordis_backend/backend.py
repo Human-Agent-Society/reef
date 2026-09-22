@@ -229,6 +229,8 @@ class HarnessCandidate(UpdateCandidate):
 
 #: Characters kept per text in the step record; a longer text ends in a clip marker.
 RECORD_TEXT_CAP = 20_000
+#: The record file of an attempt directory that re-evaluated a kept candidate; it names the first attempt.
+RECORD_REEVALUATION_FILE = "reevaluation.json"
 #: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
 RECORD_PROPOSER_FILE = "proposer.json"
 RECORD_MUTATIONS_FILE = "mutations.json"
@@ -800,6 +802,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._step_progress: StepProgress | None = None
         # The running step's calls, whose activity the progress reports; replaced by the next step's.
         self._step_calls: _StepCalls | None = None
+        self._step_request_id: str | None = None
         if self._step_record_dir is not None:
             try:
                 self._step_record_dir.mkdir(parents=True, exist_ok=True)
@@ -1072,8 +1075,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["step_record"] = str(step_dir)
         # From here the step is under way for the request page; the proposer runs next.
         self._step_calls = None
+        self._step_request_id = None if batch.request is None else batch.request.id
         self._step_progress = StepProgress(
-            request_id=None if batch.request is None else batch.request.id,
+            request_id=self._step_request_id,
             phase="proposing",
             started_at=time.time(),
             step_record=None if step_dir is None else str(step_dir),
@@ -1369,11 +1373,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         else:
             metrics["mutations"] = [_mutation_record(mutation) for mutation in candidate.mutations]
 
-        if (
-            candidate.proposal_id is not None
-            and self.proposals is not None
-            and candidate.proposal_id not in self._settled_proposals
-        ):
+        if candidate.proposal_id is not None and self.proposals is not None:
+            # Filed on every settlement: a candidate evaluated again after a stale refusal files its latest decision.
             selection_result = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
             self.proposals.settle(candidate.proposal_id, selection_result)
             self._settled_proposals.add(candidate.proposal_id)
@@ -1413,12 +1414,40 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         if artifact is not None:
             artifact.discard()
 
+    def prepare_reevaluation(self, prepared: PreparedStep) -> PreparedStep:
+        """The kept candidate with a fresh attempt directory for its episodes, shown as evaluating again.
+
+        The proposer files stay with the first attempt; the new directory
+        names it in ``reevaluation.json`` and receives the episodes.
+        """
+        candidate = self._candidate_from(prepared)
+        metrics = dict(prepared.metrics)
+        step_dir = None
+        if candidate.record_dir is not None:
+            step_dir = self._claim_step_dir(int(prepared.state["steps"]))
+            self._current_step_record = step_dir
+            metrics["step_record"] = str(step_dir)
+            self._write_record(step_dir, RECORD_REEVALUATION_FILE, {"first_attempt": str(candidate.record_dir)})
+        self._step_calls = None
+        self._step_progress = StepProgress(
+            request_id=self._step_request_id,
+            phase="evaluating",
+            started_at=time.time(),
+            step_record=None if step_dir is None else str(step_dir),
+        )
+        return replace(prepared, candidate=replace(candidate, record_dir=step_dir), metrics=metrics)
+
     def abort_step(self, prepared: PreparedStep) -> None:
         self._step_progress = None
         candidate = self._candidate_from(prepared)
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
-        if candidate.proposal_id is not None and self.proposals is not None:
-            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
+        if (
+            candidate.proposal_id is not None
+            and self.proposals is not None
+            and candidate.proposal_id not in self._settled_proposals
+        ):
+            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own. A
+            # proposal an earlier evaluation settled keeps that decision when its second evaluation fails.
             self.proposals.refuse(candidate.proposal_id, "step aborted before a result")
 
     @classmethod

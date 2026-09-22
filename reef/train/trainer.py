@@ -359,6 +359,7 @@ class Trainer:
         backend = self._candidate_backend
         if backend is None:
             raise RuntimeError("cannot evaluate a candidate without a backend")
+        prepared = backend.prepare_reevaluation(prepared)
         candidate = prepared.candidate
         if not isinstance(candidate, UpdateCandidate):
             raise TypeError("a kept step must carry an UpdateCandidate")

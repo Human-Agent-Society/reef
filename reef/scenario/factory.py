@@ -260,7 +260,13 @@ class ScenarioFactory:
                 )
         checkpoint_head = backend.current()
         registered_name, base_artifact, checkpoint = parse_scenario_metadata(
-            registration, checkpoint_head=checkpoint_head
+            registration,
+            checkpoint_head=checkpoint_head,
+            components=(
+                None
+                if surface.single or registered_components is None
+                else {name: entry.content_id for name, entry in registered_components.entries.items()}
+            ),
         )
         if registered_name != name:
             raise ValueError(f"scenario metadata is for {registered_name!r}, not {name!r}")

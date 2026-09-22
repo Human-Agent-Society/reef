@@ -64,6 +64,9 @@ class CompositeRecipe(Recipe):
             raise RecipeConfigError("a composite recipe binds at least two components")
         for component, recipe in self.components.items():
             validate_component_name(component)
+            if component in ("train", "step", "reef", "operations"):
+                # Experiment tracking prefixes a component's metrics with its name; these prefixes are its own.
+                raise RecipeConfigError(f"component {component!r} is a metric prefix experiment tracking reserves")
             if not isinstance(recipe, Recipe):
                 raise RecipeConfigError(f"component {component!r} must be a Recipe")
             if isinstance(recipe, CompositeRecipe):

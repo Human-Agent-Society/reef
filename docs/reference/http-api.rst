@@ -705,6 +705,15 @@ scenario with several components the promote publishes the held release's
 changed component on the combination served now, and it is listed as a
 harness release only when the tree changed.
 
+In a scenario with several components, ``GET /reef/harness/releases``, the
+release pages and ``GET /reef/harness`` speak of the releases that changed the
+pulled tree: another component's step, or a rollback or promote that restored
+other weights under the same tree, is not listed and is no new head. In the
+rows listed, ``parent_release_id`` names the previous listed release, the one
+the tree descends from, and ``composed_parent_release_id`` the release the
+combination was published on. Every release stays addressable by id through
+``?release_id=`` on the manifest and install routes.
+
 Version page
 ~~~~~~~~~~~~
 

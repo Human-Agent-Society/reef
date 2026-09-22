@@ -39,10 +39,28 @@ class ScenarioReleases:
         self._store = store
         self._publication_lock = publication_lock
         self._creation_artifact = self._resolve_creation_artifact(scenario_step)
+        self._creation_components: Mapping[str, str] | None = None
+        self._creation_components_read = False
 
     @property
     def creation_artifact(self) -> ArtifactRef:
         return self._creation_artifact
+
+    def creation_components(self) -> Mapping[str, str] | None:
+        """The content id of each component the creation artifact binds; ``None`` without a manifest or when it cannot be read.
+
+        The creation artifact has no commit record to carry its manifest, so
+        it is read from the release once and kept.
+        """
+        if not self._creation_components_read:
+            self._creation_components_read = True
+            try:
+                manifest = self._artifacts.resolve(self._creation_artifact).components
+            except ArtifactError:
+                manifest = None
+            if manifest is not None:
+                self._creation_components = {name: entry.content_id for name, entry in manifest.entries.items()}
+        return self._creation_components
 
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""

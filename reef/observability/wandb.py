@@ -298,9 +298,12 @@ class WandbExperimentTracker(ExperimentTracker):
         if run is None:
             return
         if first_step:
-            # A trainer's first step puts its metrics on the run's train/step axis, as train/* is.
+            # A trainer's first step puts its metrics on the run's train/step axis, as train/* is,
+            # and its optimizer step rows on their own counter, as step/* is.
             try:
                 run.define_metric(f"{component}/*", step_metric="train/step")
+                run.define_metric(f"{component}/step/step")
+                run.define_metric(f"{component}/step/*", step_metric=f"{component}/step/step")
             except Exception as exc:
                 logger.warning("W&B metric definition failed (%s); training will continue", type(exc).__name__)
         self._update_run_config(run, run_id, event.context)
@@ -358,11 +361,15 @@ class WandbExperimentTracker(ExperimentTracker):
         steps = event.metrics.get(OPTIMIZER_STEPS_KEY)
         if not isinstance(steps, Sequence) or isinstance(steps, str | bytes) or not steps:
             return
+        # A trainer of several keeps its own step rows and counter, as its job level row keeps its own name.
+        component = event.context.component
+        prefix = "step" if component is None else f"{component}/step"
+        counter = OPTIMIZER_STEP_COUNTER if component is None else f"reef/{component}/optimizer_steps"
         summary = getattr(run, "summary", None)
         start = 0
         if summary is not None:
             try:
-                start = int(summary.get(OPTIMIZER_STEP_COUNTER) or 0)
+                start = int(summary.get(counter) or 0)
             except (TypeError, ValueError, AttributeError):
                 start = 0
         logged = 0
@@ -370,13 +377,15 @@ class WandbExperimentTracker(ExperimentTracker):
             for step in steps:
                 if not isinstance(step, Mapping):
                     continue
-                values = {f"step/{key.removeprefix('train/')}": value for key, value in _numeric_metrics(step).items()}
-                values["step/step"] = start + logged
+                values = {
+                    f"{prefix}/{key.removeprefix('train/')}": value for key, value in _numeric_metrics(step).items()
+                }
+                values[f"{prefix}/step"] = start + logged
                 values["reef/step"] = event.context.step
                 run.log(values)
                 logged += 1
             if summary is not None:
-                summary[OPTIMIZER_STEP_COUNTER] = start + logged
+                summary[counter] = start + logged
         except Exception as exc:
             logger.warning("W&B optimizer-step logging failed (%s); training will continue", type(exc).__name__)
 

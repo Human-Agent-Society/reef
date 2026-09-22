@@ -39,6 +39,23 @@ def test_scheme_is_case_insensitive() -> None:
     asyncio.run(run())
 
 
+def test_the_anthropic_dialect_presents_the_token_in_its_own_header() -> None:
+    """An evaluation episode or proposer bound through the Anthropic dialect sends x-api-key, not Bearer."""
+
+    async def run() -> None:
+        client = _make_client("secret")
+        async with client:
+            resp = await client.get("/protected", headers={"x-api-key": "secret"})
+            assert resp.status == 200
+            resp = await client.get("/protected", headers={"x-api-key": "wrong"})
+            assert resp.status == 401
+            # The Bearer header is judged when both are present.
+            resp = await client.get("/protected", headers={"Authorization": "Bearer wrong", "x-api-key": "secret"})
+            assert resp.status == 401
+
+    asyncio.run(run())
+
+
 def test_credential_stays_case_sensitive() -> None:
     async def run() -> None:
         client = _make_client("secret")

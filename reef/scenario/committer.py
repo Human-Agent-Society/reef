@@ -21,7 +21,6 @@ from typing import Any, Literal
 from reef.artifact.artifact import (
     Artifact,
     ArtifactConflict,
-    ArtifactError,
     ArtifactNotFound,
     ArtifactPublicationError,
     ArtifactRef,
@@ -174,6 +173,10 @@ class ScenarioCommitter:
         with self._publication_lock:
             return self._releases.releases(self._step)
 
+    def creation_components(self) -> Mapping[str, str] | None:
+        """The content id of each component the creation artifact binds; ``None`` when it has no manifest."""
+        return self._releases.creation_components()
+
     def _bound_trainer(self, component: str | None) -> ComponentTrainer:
         """The trainer bound to ``component``; ``None`` selects the first, for scenario-wide operations."""
         if component is None:
@@ -291,31 +294,37 @@ class ScenarioCommitter:
         The record names the trainer that made the release, and a trainer may
         publish another component's content, so the component is read off the
         recorded manifests: the one entry that differs from the release it was
-        carried from. The record's name answers when the manifests cannot be
-        compared or differ in other than one entry.
+        carried from. A composed release whose manifests cannot be compared is
+        refused rather than guessed at, since promoting the wrong component
+        would serve a tree the person did not review.
         """
         records = self._store.history() if self._store.durable else ()
         record = next((row for row in reversed(records) if row.artifact_ref.release_id == release_id), None)
         if record is None or not record.pending:
             return None
-        parent_id = record.artifact_ref.parent_release_id
-        if self._binding.surface.single or record.components is None or parent_id is None:
+        if self._binding.surface.single:
             return record.component
+        parent_id = record.artifact_ref.parent_release_id
+        if record.components is None or parent_id is None:
+            raise ReleaseNotRestorable(
+                f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
+                "its commit record carries no manifest"
+            )
         carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
+        if carried is None and self._releases.creation_artifact.release_id == parent_id:
+            carried = self._releases.creation_components()
         if carried is None:
-            # The creation artifact has no record; its manifest is read from the release itself.
-            creation = self._releases.creation_artifact
-            if creation.release_id != parent_id:
-                return record.component
-            try:
-                manifest = self._artifacts.resolve(creation).components
-            except ArtifactError:
-                return record.component
-            if manifest is None:
-                return record.component
-            carried = {name: entry.content_id for name, entry in manifest.entries.items()}
+            raise ReleaseNotRestorable(
+                f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
+                f"the manifest of its parent {parent_id!r} is not available"
+            )
         changed = [name for name, content_id in record.components.items() if carried.get(name) != content_id]
-        return changed[0] if len(changed) == 1 else record.component
+        if len(changed) != 1:
+            raise ReleaseNotRestorable(
+                f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
+                f"it differs from {parent_id!r} in {changed}"
+            )
+        return changed[0]
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
@@ -529,6 +538,8 @@ class ScenarioCommitter:
                     base,
                     served,
                 )
+                # The record names the base its batch was reserved against; the metrics say what it landed on.
+                result = trainer.add_commit_metrics(result, {"merged_onto": served})
             prepared = trainer.prepare_commit(result, compactable=self._compactable_for(component))
             recorded = self._recorded_training_retry(prepared, result, next_step, component)
             if recorded is not None:

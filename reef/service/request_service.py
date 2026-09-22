@@ -156,6 +156,9 @@ class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
         self._retry_policy = retry_policy or InferenceRetryPolicy()
+        # The harness head of a scenario with several components, by scenario step and served release: it is
+        # read on every inference answer and changes only when a commit lands.
+        self._harness_heads: dict[str, tuple[int, str, str]] = {}
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -589,8 +592,8 @@ class RequestService:
         return manifest
 
     @staticmethod
-    def _harness_rows(scenario: Scenario) -> list[dict[str, Any]]:
-        """The catalog rows a client pulls, newest first: the releases that changed the tree.
+    def _harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
+        """The catalog rows a client pulls, newest first, and the head among them.
 
         Another component's step carries the tree forward unchanged, so it is
         no harness release: a client that compared release ids would pull the
@@ -598,35 +601,68 @@ class RequestService:
         is a rollback or promote that restored other weights under the tree
         served already. Each release is compared with the one served before
         it by the content id of its files component, which its commit record
-        carries. A row that published no release (a rejected or skipped step)
-        or was recorded without a manifest counts when it names no other
-        component. A flat scenario lists every row.
+        carries (the creation artifact's is read from the release). A row
+        that published no release (a rejected or skipped step) or was
+        recorded without a manifest counts when it names no other component.
+        In the rows kept, ``parent_release_id`` names the previous kept
+        release, the one the tree descends from, so a client walking the
+        chain meets only listed releases; the release the combination was
+        published on moves to ``composed_parent_release_id``. The head is the
+        newest kept row that is served and published a release. A flat
+        scenario lists every row and its head is the served release.
         """
         rows = list(scenario.releases())
         files_component = scenario.surface.files_component
         if scenario.surface.single or files_component is None:
-            return rows
+            return rows, next((str(row["release_id"]) for row in rows if not row.get("pending")), None)
+        creation = scenario.creation_components()
         kept: list[dict[str, Any]] = []
-        for index, row in enumerate(rows):
-            previous = next((older for older in rows[index + 1 :] if not older.get("pending")), None)
-            changed: bool | None = None
-            if previous is not None and previous["release_id"] != row["release_id"]:
-                own = (row.get("components") or {}).get(files_component)
-                before = (previous.get("components") or {}).get(files_component)
-                changed = None if own is None or before is None else own != before
-            if changed is None:
+        previous: dict[str, Any] | None = None  # the newest older row that is served
+        lineage: str | None = None  # the newest kept release that is served
+        head: str | None = None
+        for row in reversed(rows):
+            if row.get("operation") == "creation" and creation is not None and "components" not in row:
+                row = {**row, "components": dict(creation)}
+            published = previous is None or previous["release_id"] != row["release_id"]
+            own = None if not published else (row.get("components") or {}).get(files_component)
+            before = None if previous is None else (previous.get("components") or {}).get(files_component)
+            if own is not None and before is not None:
+                changed = own != before
+            else:
                 changed = row.get("component") in (None, files_component)
             if changed:
-                kept.append(row)
-        return kept
+                listed = dict(row)
+                if lineage is not None and listed.get("parent_release_id") != lineage:
+                    listed["composed_parent_release_id"] = listed.get("parent_release_id")
+                    listed["parent_release_id"] = lineage
+                kept.append(listed)
+                if published and not row.get("pending"):
+                    lineage = head = str(row["release_id"])
+            if not row.get("pending"):
+                previous = row
+        kept.reverse()
+        return kept, head
 
     @classmethod
-    def _harness_release_id(cls, scenario: Scenario) -> str:
+    def _harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
+        """The catalog rows a client pulls, newest first; see ``_harness_lineage``."""
+        rows, _ = cls._harness_lineage(scenario)
+        return rows
+
+    def _harness_release_id(self, scenario: Scenario) -> str:
         """The newest served release that changed what a client pulls; a release held for review is not served."""
-        for row in cls._harness_rows(scenario):
-            if not row.get("pending"):
-                return str(row["release_id"])
-        return scenario.repository.require_current_artifact().release_id
+        current = scenario.repository.require_current_artifact().release_id
+        if scenario.surface.single or scenario.surface.files_component is None:
+            return current
+        step = scenario.scenario_step
+        cached = self._harness_heads.get(scenario.name)
+        if cached is not None and cached[0] == step and cached[1] == current:
+            return cached[2]
+        _, head = self._harness_lineage(scenario)
+        if head is None:
+            head = current
+        self._harness_heads[scenario.name] = (step, current, head)
+        return head
 
     def harness_head(self, headers: Mapping[str, str]) -> str | None:
         """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
@@ -685,8 +721,10 @@ class RequestService:
         The list side of the update channel: every committed release stays
         addressable through the manifest read's ``release_id``, and each
         training row carries the metrics of the step that published it, so an
-        update is a decision over numbers rather than a blind pull. Same
-        read-only rules as ``harness_manifest``.
+        update is a decision over numbers rather than a blind pull. A scenario
+        with several components lists the releases that changed the pulled
+        tree (see ``_harness_lineage``); the others stay addressable by id.
+        Same read-only rules as ``harness_manifest``.
         """
         scenario = self._file_scenario(headers)
         return {
@@ -841,7 +879,7 @@ class RequestService:
         """A self-contained install script over one served manifest.
 
         The manifest side is adapter-agnostic files, addressed exactly like
-        ``harness_manifest`` (head by default, any catalog release through
+        ``harness_manifest`` (the harness head by default, any release through
         ``release_id``); the named ``adapter`` contributes only its
         descriptor's install section, which the script uses to ensure the
         pinned binary through the vendor's own channel. An unknown adapter
@@ -861,7 +899,7 @@ class RequestService:
             create_if_missing=True,
             release_id=release_id,
         )
-        manifest = self._harness_manifest_for_scenario(scenario, release_id)
+        manifest = self._harness_manifest_for_scenario(scenario, release_id or self._harness_release_id(scenario))
         descriptor = get_adapter(adapter)
         return render_install_script(
             descriptor=descriptor,

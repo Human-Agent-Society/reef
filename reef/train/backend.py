@@ -213,6 +213,15 @@ class CandidateBackend(CandidateEvaluator, ABC):
         stays the one every plugin can rely on.
         """
 
+    def prepare_reevaluation(self, prepared: PreparedStep) -> PreparedStep:
+        """The kept step, ready to be evaluated again after its result was refused as stale.
+
+        The default hands it back unchanged. A backend that keeps a record
+        per attempt claims a fresh one here, so the second evaluation lands
+        beside the first instead of failing on it.
+        """
+        return prepared
+
     @abstractmethod
     def settle_step(
         self,

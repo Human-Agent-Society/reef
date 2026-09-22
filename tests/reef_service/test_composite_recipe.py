@@ -172,6 +172,8 @@ def test_composite_recipe_rejects_incoherent_components(tmp_path: Path) -> None:
         CompositeRecipe(components={"harness": _TreeRecipe(training_mode="manual"), "config": _ConfigRecipe()})
     with pytest.raises(RecipeConfigError, match="not itself"):
         CompositeRecipe(components={"outer": _composite(tmp_path), "config": _ConfigRecipe()})
+    with pytest.raises(RecipeConfigError, match="reserves"):
+        CompositeRecipe(components={"step": _TreeRecipe(), "config": _ConfigRecipe()})
     two_trees = CompositeRecipe(components={"a": _TreeRecipe(label="a"), "b": _TreeRecipe(label="b")})
     with pytest.raises(RecipeConfigError, match="harness information"):
         two_trees.build_surface("agent")
