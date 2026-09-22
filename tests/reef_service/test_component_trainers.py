@@ -96,11 +96,24 @@ class _DispatchedBackend(_ComponentBackend):
         )
 
 
+class _HybridThresholdProcessor(ThresholdProcessor):
+    """The same processor, taking instructions too."""
+
+    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+
+
+class _InferenceOnlyProcessor(DataProcessor):
+    """A processor that never needs a report row."""
+
+    required_request_types = frozenset({RequestType.INFERENCE})
+
+
 @dataclass(frozen=True)
 class _TwoTrainerRecipe(Recipe):
     """A scenario serving weights and a harness tree, each evolved by its own local backend."""
 
     backends: Mapping[str, CandidateBackend]
+    hybrid_components: frozenset[str] = frozenset()
 
     def build_surface(self, scenario: str) -> Surface:
         return Surface(
@@ -111,13 +124,17 @@ class _TwoTrainerRecipe(Recipe):
         )
 
     def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+        def factory_for(component: str):
+            processor = _HybridThresholdProcessor if component in self.hybrid_components else ThresholdProcessor
+            return lambda context: processor(context.with_config({"batch_size": 1}))
+
         return tuple(
             ComponentTrainer(
                 component,
                 Trainer.build(
                     scenario,
                     records,
-                    processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+                    processor_factory=factory_for(component),
                     candidate_backend=backend,
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
@@ -150,6 +167,7 @@ def _dispatcher(
     records_dir: Path | None = None,
     backend_factory: Any = None,
     backends: dict[str, _ComponentBackend] | None = None,
+    hybrid_components: frozenset[str] = frozenset(),
 ) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
     initial = tmp_path / "initial"
     if not initial.exists():
@@ -162,7 +180,7 @@ def _dispatcher(
         }
     records = tmp_path / "records" if records_dir is None else records_dir
     dispatcher = Dispatcher(
-        _TwoTrainerRecipe(backends=backends),
+        _TwoTrainerRecipe(backends=backends, hybrid_components=hybrid_components),
         backend_factory or InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=records,
@@ -245,6 +263,34 @@ def _dispatched_pair(tmp_path: Path, job_id: str = "job-1") -> dict[str, _Compon
         WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", job_id),
         HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates"),
     }
+
+
+@pytest.mark.unit
+def test_training_mode_switches_every_trainer_or_none(tmp_path: Path) -> None:
+    """A mode one component cannot run is refused before any component switches."""
+    dispatcher, _ = _dispatcher(tmp_path, hybrid_components=frozenset({WEIGHTS}))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        with pytest.raises(NotImplementedError, match=r"\['harness'\]"):
+            scenario.set_training_mode("hybrid")
+        assert [bound.trainer.training_mode for bound in scenario.component_trainers] == ["auto", "auto"]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_rows_a_trainer_never_ingests_are_released_by_it() -> None:
+    """A row outside the processor's request types is nobody's to protect, so the trainer releases it at once."""
+    store = SQLiteRecordStore()
+    trainer = Trainer.build("agent", store, processor_factory=_InferenceOnlyProcessor)
+    for record in _records(1):
+        store.append(record)
+    assert trainer.run_once(0) is None
+    assert "r1" in trainer.releasable_agent_record_ids()
+    assert "i1" not in trainer.releasable_agent_record_ids()
+    trainer.compaction_applied(frozenset({"r1"}))
+    assert "r1" not in trainer.releasable_agent_record_ids()
 
 
 @pytest.mark.unit

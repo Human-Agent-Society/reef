@@ -137,10 +137,11 @@ class Trainer:
         self._data_offset = 0
         self._data_sequence = 0
         self._pending: _PendingStep | None = None
-        # Rows a committed step of this trainer consumed that retention still
-        # keeps stored. A rebuilt processor never sees them, so the trainer
-        # itself has to keep releasing them until every trainer has.
-        self._stored_consumed_ids: set[str] = set()
+        # Rows this trainer no longer needs that retention still keeps stored:
+        # consumed by a committed step, or of a type its processor never
+        # ingests. The processor never sees them, so the trainer itself keeps
+        # releasing them until every trainer has.
+        self._released_stored_ids: set[str] = set()
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -186,6 +187,10 @@ class Trainer:
         """Serialize mode selection with record ingestion and batch reservation."""
         with self._lock:
             self._processor.set_training_mode(training_mode)
+
+    def supports_training_mode(self, training_mode: str) -> bool:
+        """Whether the processor can run in ``training_mode``."""
+        return training_mode in self._processor.supported_training_modes
 
     def pending_instructions(self) -> int:
         """Instructions accepted and not yet consumed: the ones the processor buffers plus those unread in storage."""
@@ -295,6 +300,8 @@ class Trainer:
             for sequence, item in items:
                 if item.request_type in self.processor.required_request_types:
                     self._processor.ingest(item)
+                else:
+                    self._released_stored_ids.add(item.agent_record_id)
                 self._data_offset += 1
                 self._data_sequence = sequence
                 if self._processor.ready():
@@ -448,7 +455,7 @@ class Trainer:
 
     def _releasable_ids(self) -> frozenset[str]:
         retention = self._processor.retention_decision()
-        released = retention.releasable_agent_record_ids | self._stored_consumed_ids
+        released = retention.releasable_agent_record_ids | self._released_stored_ids
         return frozenset(released - retention.protected_agent_record_ids)
 
     def prepare_commit(
@@ -566,7 +573,7 @@ class Trainer:
                 receipt_metadata={"outcome": "stale", "metrics": dict(metrics or {})},
             )
             self._processor.compaction_applied(compacted)
-            self._stored_consumed_ids -= compacted
+            self._released_stored_ids -= compacted
             self._pending = None
 
     def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
@@ -580,14 +587,14 @@ class Trainer:
         with self._lock:
             self._records.compact(self.scenario, compacted_ids)
             self._processor.compaction_applied(compacted_ids)
-            self._stored_consumed_ids -= compacted_ids
+            self._released_stored_ids -= compacted_ids
 
     def compaction_applied(self, compacted_ids: frozenset[str]) -> None:
         """Notify the processor after the scenario store retires committed rows."""
         if compacted_ids:
             with self._lock:
                 self._processor.compaction_applied(compacted_ids)
-                self._stored_consumed_ids -= compacted_ids
+                self._released_stored_ids -= compacted_ids
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
@@ -643,10 +650,12 @@ class Trainer:
                     if item.agent_record_id in consumed_ids:
                         # Still stored, already trained: this trainer has released it and says so
                         # until every other trainer has too.
-                        self._stored_consumed_ids.add(item.agent_record_id)
+                        self._released_stored_ids.add(item.agent_record_id)
                         continue
                     if item.request_type in self.processor.required_request_types:
                         self._processor.ingest(item)
+                    else:
+                        self._released_stored_ids.add(item.agent_record_id)
 
     def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
         """Resume consumption from a recovered commit record's high-water mark.

@@ -162,7 +162,17 @@ class Scenario:
         return self._surface
 
     def set_training_mode(self, training_mode: str) -> None:
-        """Select future batches without waiting for a running backend step."""
+        """Select future batches without waiting for a running backend step.
+
+        Every trainer switches or none does: a scenario whose components run
+        in different modes would accept instructions for some and drop them
+        for others.
+        """
+        unsupported = [
+            bound.component for bound in self._trainers if not bound.trainer.supports_training_mode(training_mode)
+        ]
+        if unsupported:
+            raise NotImplementedError(f"components {unsupported} do not implement training_mode={training_mode!r}")
         for bound in self._trainers:
             bound.trainer.set_training_mode(training_mode)
 
