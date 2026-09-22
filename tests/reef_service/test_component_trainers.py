@@ -249,14 +249,40 @@ def _dispatched_pair(tmp_path: Path, job_id: str = "job-1") -> dict[str, _Compon
 
 @pytest.mark.unit
 def test_composite_registration_refuses_a_flat_base(tmp_path: Path) -> None:
-    """A base laid out flat has no directory to carry forward for the component a client pulls."""
+    """Files at the root of the base belong to no component and would be carried forward by none."""
     initial = tmp_path / "initial"
     initial.mkdir()
     (initial / "harness.txt").write_text("harness seed", encoding="utf-8")
     dispatcher, _ = _dispatcher(tmp_path)
     try:
-        with pytest.raises(ReefError, match=r"keeps no directory for components \['harness'\]"):
+        with pytest.raises(ReefError, match=r"keeps \['harness.txt'\] outside its components"):
             dispatcher.get_or_create_scenario("agent")
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_composite_registration_starts_an_unseeded_component_empty(tmp_path: Path) -> None:
+    """A fresh repository seeds only the harness; the weights component starts empty and fills at its first step."""
+    initial = tmp_path / "initial"
+    (initial / HARNESS).mkdir(parents=True)
+    (initial / HARNESS / f"{HARNESS}.txt").write_text("harness seed", encoding="utf-8")
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        base = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert base.components is not None and base.components.names == (WEIGHTS, HARNESS)
+        assert TextFileTree().read_files(base.component(WEIGHTS)) is None
+        for record in _records(1):
+            scenario.records.append(record)
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        scenario.commit(weights, component=WEIGHTS)
+        assert _component_files(scenario, scenario.current_artifact_ref()) == {
+            WEIGHTS: "weights step 1",
+            HARNESS: "harness seed",
+        }
     finally:
         dispatcher.close()
 

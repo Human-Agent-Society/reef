@@ -145,10 +145,14 @@ class Artifact:
         if materialized.local_path is None:
             raise ArtifactMaterializationError(f"release {self.ref.release_id!r} has no local component directories")
         entry = manifest.entries[name]
+        directory = materialized.local_path / manifest.relative_path(name)
+        # A component the base seeded nothing for has no directory in the
+        # release (git keeps none for an empty tree); it is empty, not missing.
+        directory.mkdir(parents=True, exist_ok=True)
         return Artifact(
             ArtifactRef(entry.content_id, self.ref.release_id, self.ref.parent_release_id),
             None,
-            local_path=materialized.local_path / manifest.relative_path(name),
+            local_path=directory,
             metadata=entry.metadata,
         )
 

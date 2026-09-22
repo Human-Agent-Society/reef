@@ -43,6 +43,7 @@ from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 from reef.surface.base import Surface
+from reef.surface.files import REPOSITORY_FILES
 from reef.train.trainer import ComponentTrainer
 
 
@@ -181,10 +182,10 @@ class ScenarioFactory:
 
         A flat release is its one component. A composed base keeps its own
         manifest, which must bind every component the surface serves. A base
-        without one must keep one directory per component the runtime loads or
-        a client pulls: laid out flat, a model snapshot at the root say, that
-        component would be carried forward as an empty directory while its
-        manifest entry still named the base content.
+        without one keeps one directory per component; a component the base
+        seeds nothing for starts empty. Files outside every component
+        directory, a model snapshot laid out at the root say, belong to no
+        component and would be carried forward by none: such a base is refused.
         """
         if surface.single:
             return ReleaseComponents({name: ComponentEntry(selected.content_id) for name in surface.names})
@@ -198,16 +199,19 @@ class ScenarioFactory:
                     f"the recipe also serves {missing}"
                 )
             return manifest
-        served = [
-            name
-            for name, component in surface.components.items()
-            if component.loader is not None or component.files is not None
-        ]
         local_path = base.local_path
-        missing = [name for name in served if local_path is None or not (local_path / name).is_dir()]
-        if missing:
+        stray = (
+            []
+            if local_path is None
+            else sorted(
+                entry.name
+                for entry in local_path.iterdir()
+                if entry.name not in surface.names and entry.name not in REPOSITORY_FILES and entry.name != ".git"
+            )
+        )
+        if stray:
             raise ReefError(
-                f"base release {selected.release_id!r} keeps no directory for components {missing}: "
+                f"base release {selected.release_id!r} keeps {stray} outside its components {list(surface.names)}: "
                 "a release serving several components keeps one directory per component"
             )
         return ReleaseComponents({name: ComponentEntry(f"{selected.content_id}:{name}") for name in surface.names})
