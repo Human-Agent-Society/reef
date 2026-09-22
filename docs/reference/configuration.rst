@@ -320,24 +320,17 @@ serving a training stack also needs Reef's version connector selected in its
 ``--kv-transfer-config`` so every token carries its version; a local release
 without it serves under its release id.
 
-The recorded ``rollout_log_probs`` must mean the same thing on every engine
-as in the trainer. An engine samples through this pipeline::
+``rollout_log_probs`` must mean the same thing on every engine as in the
+trainer. Sampling runs through::
 
    raw logits -> penalties, logit_bias -> / temperature -> [A] -> top-k, top-p, min-p -> [B] -> sample
 
-SGLang reads its log probabilities at [A], over the full vocabulary. Slime's
-trainer recomputes the same quantity from the actor weights (logits divided by
-``rollout_temperature``, full vocabulary) and applies neither penalties nor
-truncation. The two agree whenever a recipe uses no penalties and no
-``logit_bias``; truncation sits after [A], so both ignore it the same way.
-vLLM ``--logprobs-mode processed_logprobs`` reads at [B], the distribution the
-token was drawn from, so it matches [A] only when top-k, top-p and min-p are
-off; vLLM ``raw_logprobs`` reads before temperature and matches neither when
-the temperature is not 1. A recipe that trains on importance ratios through
-vLLM therefore either samples without penalties and truncation, or has the
-trainer replay vLLM's sampling mask. Check either choice with Slime's
-``train_rollout_logprob_abs_diff`` on identical weights and the recipe's real
-sampling settings before training.
+SGLang and Slime's trainer both read at [A] (full vocabulary, trainer with
+``rollout_temperature``, no penalties), so they agree as long as a recipe uses
+no penalties or ``logit_bias``. vLLM ``--logprobs-mode processed_logprobs``
+reads at [B], so it matches only with top-k, top-p and min-p off; otherwise
+the trainer must replay vLLM's sampling mask. Verify with Slime's
+``train_rollout_logprob_abs_diff`` on identical weights before training.
 
 For both handlers, set ``inference.handler-config.force_reasoning`` to
 ``true`` if the chat template pre-opens ``<think>``, or ``false`` if it does
