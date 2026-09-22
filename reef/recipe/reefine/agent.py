@@ -4,16 +4,17 @@ The text proposer (:mod:`reef.recipe.reefine.evolution`) writes a request's
 entries in a few model calls and never runs them. This proposer gives the
 request to a coding agent instead: pi, the harness being evolved, with the
 tree laid out as one file per entry in its working directory, the network, and
-two tools of its own. ``harness_check`` runs the workspace through Reef's
-admission; ``harness_trial`` runs the changed harness for real, online, so an
-extension that calls ``/v1/audio/speech`` does call it and the agent reads what
-came back. When the agent stops, its workspace is read back into mutations and
-reviewed like the text proposer's answer.
+three tools of its own. ``harness_check`` runs the workspace through Reef's
+admission; ``harness_trial`` runs an online task or scripted session checks;
+``harness_progress`` saves findings that stay available after compaction.
+When the agent stops, its workspace is read back into mutations and reviewed
+like the text proposer's answer.
 
-The agent holds no credential. Everything it and its trials reach goes through
+The agent holds no credential. Online model and provider calls go through
 a loopback gateway (:mod:`reef.recipe.reefine.agent_gateway`) that spends from
 the step's model-call budget and records into ``proposer.json``. Its isolation
 is the executor the deployment built for it (``evolution.proposer_agent.sandbox``).
+Scripted trials use a fixed local model in that same executor.
 
 A step without a request, or a deployment without ``proposer_agent``, is
 answered by the text proposer as before.
@@ -21,6 +22,7 @@ answered by the text proposer as before.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -36,6 +38,7 @@ from typing import Any
 from reef.harness.episodes.e2b import E2BExecutor, E2BSession, template_alias
 from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.requests import REQUESTS_SKILL_ID, request_entries
 from reef.harness.episodes.trajectory import reader_for
 from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
@@ -59,6 +62,7 @@ WORKSPACE_KINDS = {
 TOOLS_ENTRY_ID = "reef-proposer-tools"
 AGENT_RULES = Path(__file__).with_name("agent_rules.md")
 AGENT_TOOLS = Path(__file__).with_name("agent_tools.ts")
+TRIAL_DRIVER = Path(__file__).with_name("trial_driver.mjs")
 #: The session state pi writes beside its rendered config, writable in a sandbox.
 AGENT_STATE_PATHS = ("sessions", "pi-agent")
 #: How much of a trial the agent reads back: enough to see what happened, never a whole transcript.
@@ -235,6 +239,7 @@ def launch_pi(
     *,
     root: Path,
     timeout: float,
+    script: dict[str, object] | None = None,
 ) -> tuple[Any, list[Mapping[str, Any]]]:
     """Run pi online over ``files`` in ``root``: the process outcome and the session log it wrote."""
     for relative, text in files.items():
@@ -251,8 +256,13 @@ def launch_pi(
     }
     session_env["HOME"] = str(root)
     # The harness's own binary first, so a nested `pi -p` finds the pinned one.
-    session_env["PATH"] = os.pathsep.join([str(Path(host.binary).resolve().parent), os.environ.get("PATH", "")])
+    session_env["PATH"] = os.pathsep.join([str(Path(host.binary).absolute().parent), os.environ.get("PATH", "")])
     argv = [host.binary, *(token.replace("{prompt}", prompt) for token in host.descriptor.argv)]
+    if script is not None:
+        (root / "trial-script.json").write_text(json.dumps(script), encoding="utf-8")
+        driver = root / "trial-driver.mjs"
+        shutil.copyfile(TRIAL_DRIVER, driver)
+        argv = ["node", str(driver)]
     outcome = executor.launch(
         argv,
         root=root,
@@ -308,6 +318,39 @@ class AgentRun(WorkspaceTools):
         #: pull replaces the workspace directory, so one call at a time reads it.
         self.workspace_lock = threading.Lock()
         self.trials = 0
+        self.deadline = time.monotonic() + host.timeout_s
+        self.finish_seconds = min(60.0, host.timeout_s * 0.1)
+
+    def remaining_seconds(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
+
+    def record_check(self, kind: str, result: dict[str, object]) -> dict[str, object]:
+        """Keep runner observations outside the model's compacted conversation."""
+        result["remaining_seconds"] = round(self.remaining_seconds(), 1)
+        if self.host.step_dir is not None:
+            with (
+                self.workspace_lock,
+                (self.host.step_dir / "agent-checks.jsonl").open("a", encoding="utf-8") as stream,
+            ):
+                stream.write(json.dumps({"kind": kind, **result}, ensure_ascii=False) + "\n")
+        return result
+
+    def keep_workspace(self) -> None:
+        """Keep candidate files and progress for diagnosis; this never publishes them."""
+        if self.host.step_dir is None:
+            return
+        target = self.host.step_dir / "agent-workspace"
+        target.mkdir(exist_ok=True)
+        harness = target / "harness"
+        if harness.exists():
+            shutil.rmtree(harness)
+        shutil.copytree(self.workspace / "harness", harness)
+        for name in ("design.md", "progress.md"):
+            source = self.workspace / name
+            if source.is_file():
+                shutil.copyfile(source, target / name)
+            else:
+                (target / name).unlink(missing_ok=True)
 
     def executor(self) -> EpisodeExecutor:
         """The run's sandbox session, or the host's executor with the gateway's port forwarded into an isolated
@@ -327,6 +370,7 @@ class AgentRun(WorkspaceTools):
                 # The agent edits its copy in the sandbox; the check reads that copy as it stands now.
                 self.session.pull(self.workspace.parent, self.workspace.name)
             mutations, problems = workspace_mutations(self.workspace, self.entries, self.nodes)
+            self.keep_workspace()
         admitted, refusal = admit_mutations(self.entries, mutations, self.host.descriptor)
         return mutations, (None if refusal is not None else [dict(entry) for entry in admitted]), problems, refusal
 
@@ -336,6 +380,7 @@ class AgentRun(WorkspaceTools):
             "admitted": admitted is not None,
             "mutations": [{"op": m.op, "id": m.id, "kind": (m.options or {}).get("name")} for m in mutations],
         }
+        result["candidate"] = candidate_checksum(admitted) if admitted is not None else None
         if refusal is not None:
             result["refusal"] = refusal
             self.host.calls.note("check", f"admission refused the workspace: {refusal}", failed=True)
@@ -344,23 +389,29 @@ class AgentRun(WorkspaceTools):
             self.host.calls.note("check", f"admission passed: {changed}")
         if problems:
             result["unread"] = problems
-        return result
+        return self.record_check("check", result)
 
-    def trial(self, task: str) -> dict[str, Any]:
+    def trial(self, task: str, script: dict[str, object] | None = None) -> dict[str, Any]:
         if self.gateway is None:
             raise RuntimeError("the agent gateway is not running")
         mutations, admitted, problems, refusal = self.admitted()
         if admitted is None:
             self.host.calls.note("trial", f"not run, admission refused the workspace: {refusal}", failed=True)
-            return {"ran": False, "refusal": refusal, "unread": problems}
+            return self.record_check("trial", {"ran": False, "refusal": refusal, "unread": problems})
+        timeout = min(self.host.trial_timeout_s, self.remaining_seconds() - self.finish_seconds)
+        if timeout <= 0:
+            return self.record_check(
+                "trial", {"ran": False, "refusal": "finish the current candidate; trial budget exhausted"}
+            )
         self.trials += 1
-        self.host.calls.note("trial", f"trial {self.trials} running the changed harness: {task}")
+        self.host.calls.note("trial", f"trial {self.trials} running the changed harness: {task or 'scripted session'}")
         nodes = tuple((str(entry["name"]), entry.get("config")) for entry in admitted if not entry.get("disabled"))
         binding = ModelBinding(base_url=self.gateway.base_url, model=self.served.model, api=self.served.api)
         files = rendered_files(nodes, binding, self.host)
         before = self.gateway.provider_call_count()
         root = Path(tempfile.mkdtemp(prefix="reef-proposer-trial-"))
         started = time.monotonic()
+        candidate = candidate_checksum(admitted)
         try:
             outcome, trajectory = launch_pi(
                 self.host,
@@ -369,15 +420,47 @@ class AgentRun(WorkspaceTools):
                 task,
                 trial_env(self.gateway.base_url),
                 root=root,
-                timeout=self.host.trial_timeout_s,
+                timeout=timeout,
+                script=script,
             )
+            if script is not None:
+                report_path = root / "sessions" / "trial-result.json"
+                if not report_path.is_file():
+                    return self.record_check(
+                        "trial",
+                        {
+                            "ran": True,
+                            "passed": False,
+                            "candidate": candidate,
+                            "error": "scripted driver produced no result",
+                            "stderr_tail": outcome.stderr[-MAX_STDERR_CHARS:],
+                        },
+                    )
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                result = {"ran": True, "mode": "scripted", **report, "exit_code": outcome.exit_code}
+                self.host.calls.note(
+                    "trial",
+                    f"trial {self.trials}: scripted assertions {'passed' if report['passed'] else 'failed'}",
+                    failed=not report["passed"],
+                )
+                return self.record_check(
+                    "trial", {**result, "candidate": candidate, "seconds": round(time.monotonic() - started, 1)}
+                )
         except EpisodeTimeout:
-            limit = f"the trial ran past its {self.host.trial_timeout_s:g} s limit"
+            limit = f"the trial ran past its {timeout:g} s limit"
             self.host.calls.note("trial", f"trial {self.trials}: {limit}", failed=True)
-            return {"ran": True, "timed_out": limit, "provider_calls": self.gateway.provider_calls_since(before)}
+            return self.record_check(
+                "trial",
+                {
+                    "ran": True,
+                    "candidate": candidate,
+                    "timed_out": limit,
+                    "provider_calls": self.gateway.provider_calls_since(before),
+                },
+            )
         except EpisodeLaunchError as error:
             self.host.calls.note("trial", f"trial {self.trials} could not start: {error}", failed=True)
-            return {"ran": False, "error": str(error)}
+            return self.record_check("trial", {"ran": False, "candidate": candidate, "error": str(error)})
         finally:
             shutil.rmtree(root, ignore_errors=True)
         final = evolution.final_assistant_text(trajectory) or ""
@@ -388,16 +471,20 @@ class AgentRun(WorkspaceTools):
             summary += f", {len(made)} multimodal call{'s' if len(made) != 1 else ''}"
             summary += f" ({len(refused)} refused)" if refused else " (all answered)"
         self.host.calls.note("trial", summary, failed=outcome.exit_code != 0 or bool(refused))
-        return {
-            "ran": True,
-            "seconds": round(time.monotonic() - started, 1),
-            "exit_code": outcome.exit_code,
-            "final_text": final[:MAX_TRIAL_TEXT],
-            "tool_calls": tool_calls(trajectory),
-            "provider_calls": made,
-            "stderr_tail": outcome.stderr[-MAX_STDERR_CHARS:],
-            "changed_entries": [m.id for m in mutations],
-        }
+        return self.record_check(
+            "trial",
+            {
+                "ran": True,
+                "candidate": candidate,
+                "seconds": round(time.monotonic() - started, 1),
+                "exit_code": outcome.exit_code,
+                "final_text": final[:MAX_TRIAL_TEXT],
+                "tool_calls": tool_calls(trajectory),
+                "provider_calls": made,
+                "stderr_tail": outcome.stderr[-MAX_STDERR_CHARS:],
+                "changed_entries": [m.id for m in mutations],
+            },
+        )
 
 
 class AgentProposer(Proposer):
@@ -449,6 +536,10 @@ def answer_with_agent(
     try:
         workspace = root / "workspace"
         write_workspace(workspace, entries)
+        # Recovered releases retain their original reserved entries. The proposer needs the corrected
+        # reference for this deployment's pinned pi; this workspace copy never mutates the release.
+        reference = request_entries(host.descriptor.name)[1]
+        (workspace / "reserved" / f"{REQUESTS_SKILL_ID}.md").write_text(reference["config"]["text"], encoding="utf-8")
         served = models.served
         run = AgentRun(host, entries, nodes, workspace, served)
         gateway = AgentGateway(served, host.calls, run, provider)
@@ -470,6 +561,9 @@ def answer_with_agent(
             )
             env = {"REEF_PROPOSER_URL": gateway.base_url, **trial_env(gateway.base_url)}
             run.session = open_session(host, gateway.port)
+            run.deadline = time.monotonic() + host.timeout_s
+            env["REEF_PROPOSER_DEADLINE_MS"] = str(int((time.time() + host.timeout_s) * 1000))
+            env["REEF_PROPOSER_FINISH_SECONDS"] = str(run.finish_seconds)
             host.calls.note("proposer", f"the coding agent started on the request (at most {host.timeout_s:g} s)")
             outcome, trajectory = launch_pi(
                 host,
@@ -507,6 +601,8 @@ def answer_with_agent(
             if run.session is not None:
                 run.session.close()
             gateway.stop()
+            # Executor.launch copies the remote workspace back even after a timeout.
+            run.keep_workspace()
             agent["seconds"] = round(time.monotonic() - started, 1)
             agent["trials"] = run.trials
             keep_session(root / host.descriptor.trajectory_path, host.step_dir)
@@ -519,6 +615,11 @@ def answer_with_agent(
         return read_answer(workspace, request, models, nodes, entries, agent)
     finally:
         shutil.rmtree(root, ignore_errors=True)
+
+
+def candidate_checksum(entries: Sequence[Mapping[str, object]]) -> str:
+    """Identify exactly the candidate whose check or trial produced a result."""
+    return hashlib.sha256(json.dumps(entries, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
 def open_session(host: AgentHost, port: int) -> E2BSession | None:

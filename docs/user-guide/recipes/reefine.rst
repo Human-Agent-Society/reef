@@ -130,8 +130,17 @@ change. The agent proposer runs the served model as a pi coding agent
 instead. Its working directory holds the tree as one file per entry
 (``harness/skills``, ``rules``, ``commands`` and ``extensions``, plus
 ``requires.json`` and ``design.md``), with Reef's own entries, the
-extension API reference among them, read-only beside it. It may read
-documentation on the network, and two tools of its own:
+extension API reference among them, read-only beside it. The agent starts
+with this deployment's corrected reference, even when the base release
+contains an older copy; the release itself stays unchanged. When the
+reference omits an interface or leaves behavior unclear,
+the agent may read the installed pi package's documentation, type definitions
+and relevant source files. It checks the installed version first; if source
+is missing locally, it may consult that exact upstream version. The package
+is read-only, and delivered entries must use supported public interfaces.
+A behavior that requires changes to pi itself is recorded as a limitation
+in the design. The agent may also read provider documentation on the network
+and has three tools of its own:
 
 * ``harness_check`` runs the working directory through Reef's admission, as
   the step will.
@@ -139,6 +148,19 @@ documentation on the network, and two tools of its own:
   agent writes, and returns the session's final text, the tools it called,
   every image, speech, embedding or decision call it made with the
   provider's error when one failed, and the end of its stderr.
+  Alternatively, its ``script`` input runs literal prompts and slash commands
+  in one pi SDK session, using a fixed local OpenAI-compatible model. Steps
+  can start a fresh session, force a tool attempt, and assert the actual
+  outgoing tool set, system prompt, messages, and recorded fixture tool
+  execution. A missing model request cannot satisfy an assertion about its
+  payload. Fixture tools cannot replace built-in or candidate tools.
+  Scripted trials check session behavior; an online task trial is still
+  needed for behavior specific to the configured provider or model, and
+  neither mode verifies an interactive dropdown.
+* ``harness_progress`` saves short working notes in ``progress.md``: confirmed
+  API behavior and source locations, implementation status, and unresolved
+  checks. Before each model call, Reef restores these notes, the latest
+  check/trial observations and the remaining execution time into context.
 
 While it runs, the request page's Activity lists each tool the agent calls,
 each check and trial with its result, and each image or speech call with the
@@ -149,6 +171,11 @@ When the agent stops, its files are read back into the step's mutations,
 ``requires`` items and design, and the review runs as for the text
 proposer. The agent's session log lands in the step record as
 ``agent-session.jsonl``.
+Check and trial observations also land in ``agent-checks.jsonl``, identified
+by the candidate's SHA-256 checksum. Candidate files, design and progress
+notes are retained in ``agent-workspace/`` after checks and at exit, including
+timeouts. These are diagnostic files, not published changes or an automatic
+resume mechanism. They follow the deployment's step-record retention.
 
 The agent holds no credential. It and its trials reach models through a
 loopback gateway whose address carries a random token: the served model
@@ -204,7 +231,11 @@ Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
   proposer answers; the service logs why.
 
 ``timeout_s`` (1800) bounds the whole agent run and ``trial_timeout_s`` (300)
-each trial. A run past its limit hands back no change. Set
+each trial. Trials also respect the remaining run budget, reserving the
+last 10 percent (at most 60 seconds) for saving files and finishing. The
+agent receives a reminder to finish during this interval; it is still
+subject to the outer hard timeout. A run past its limit hands back no change.
+Set
 ``evolution.max_model_calls_per_step`` to bound what one request may spend:
 an agent run makes a model call per turn and may probe several provider
 models before it settles on one.

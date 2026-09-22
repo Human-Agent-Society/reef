@@ -282,6 +282,10 @@ function clarifyMessage(text, conversation) {
       "mean the same thing; the user can always type their own;",
     "- when one option is clearly the better choice, name it as recommended: it is shown first, marked, and the " +
       "user can take it in one keystroke;",
+    "- when the person's own machine can do what the request asks and a model the deployment pays for can do " +
+      "it too, which one runs is a decision, not a setup detail: ask it, and let the options say what each " +
+      "side gives up, the machine's being free, offline and only as good as what is installed, the model's " +
+      "being billed for every use and better at it;",
     "- never ask for a value or a setup detail the user provides when the change is installed: a phone number, " +
       "a credential, an account, a permission, or which app or service to use when the request already names " +
       "one; reef-pi setup collects those once, after the install;",

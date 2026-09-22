@@ -44,7 +44,7 @@ jobs:
           smoke=false
           while IFS= read -r file; do
             case "$file" in
-              reef/harness/*|reef/train/cordis_backend/*|tests/smoke/*|.github/workflows/harness-smoke.yml)
+              reef/harness/*|reef/recipe/reefine/*|reef/train/cordis_backend/*|tests/smoke/*|.github/workflows/harness-smoke.yml)
                 smoke=true ;;
             esac
           done <<< "$files"
@@ -69,7 +69,7 @@ jobs:
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
       - run: npm install --prefix "$RUNNER_TEMP/pi" @earendil-works/pi-coding-agent@0.84.2
-      - run: python -m pytest tests/smoke/test_real_pi.py
+      - run: python -m pytest tests/smoke/test_real_pi.py tests/smoke/test_reefine_scripted_trial.py
         env:
           REEF_REAL_PI_BINARY: ${{ runner.temp }}/pi/node_modules/.bin/pi
           REEF_REAL_PI_SESSION_OUT: ${{ runner.temp }}/real-pi-session.jsonl
