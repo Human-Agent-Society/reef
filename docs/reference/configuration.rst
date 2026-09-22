@@ -745,12 +745,15 @@ A composite recipe serves and evolves several release components in one
 scenario, one recipe per component. Its ``components`` object carries one
 recipe config per component name; each inherits the deployment's ``model``
 unless it names its own, and every component shares the deployment's
-runtime and training runtime. The repository base keeps one directory per
-component: the recipes' seeds are written there, a bootstrap model snapshot
-goes under the weight-training component's directory, and a component whose
-recipe seeds nothing starts empty. Each component's trainer runs as its own
-worker and commits into the same release chain, so every step checkpoints
-and the components share one ``training_mode``:
+runtime and training runtime. A composite whose component trains weights is
+deployed the way that recipe is: ``training.backend`` selects the training
+backend, the component's own ``data`` section sets its fields, and the
+runtime pair reaches every component. The repository base keeps one
+directory per component: the recipes' seeds are written there, a bootstrap
+model snapshot goes under the weight-training component's directory, and a
+component whose recipe seeds nothing starts empty. Each component's trainer
+runs as its own worker and commits into the same release chain, so every
+step checkpoints and the components share one ``training_mode``:
 
 .. code:: yaml
 

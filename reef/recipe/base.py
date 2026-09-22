@@ -119,6 +119,18 @@ class Recipe:
         """Recipe-specific keyword arguments resolved from config sections."""
         return {}
 
+    @classmethod
+    def select_weight_training(
+        cls, config: Mapping[str, Any]
+    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
+        """The weight training recipe class a deployment of this class trains with, and that recipe's own config.
+
+        Read from ``config`` alone, before anything is constructed: the service
+        decides from it whether to connect a training runtime and launch a
+        training backend. ``None`` for a recipe that trains no weights.
+        """
+        return None
+
     @property
     def report_type(self) -> type[ReportBase] | None:
         """The typed external-report contract this recipe accepts.
@@ -332,6 +344,12 @@ class WeightTrainingRecipe(Recipe):
         if not isinstance(runtime, TrainingRuntime):
             raise TypeError(f"{cls.__name__} requires a TrainingRuntime, got {type(runtime).__name__}")
         return runtime
+
+    @classmethod
+    def select_weight_training(
+        cls, config: Mapping[str, Any]
+    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
+        return cls, config
 
     @classmethod
     def service_config(cls, settings: Mapping[str, Any], *, model_path: str) -> dict[str, Any]:

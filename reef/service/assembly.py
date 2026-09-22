@@ -138,15 +138,50 @@ def _training_recipe(
         raise
 
 
+def _composed_training_recipe(
+    selected: str,
+    config: dict[str, Any],
+    weight_type: type[WeightTrainingRecipe],
+    weight_config: Mapping[str, Any],
+    settings: ServiceConfig,
+    env: Mapping[str, str],
+    connector: Any,
+) -> Recipe:
+    """Build a recipe that trains weights through one of its components, on the selected backend runtime.
+
+    The component's own data resolves the staleness window the runtime is
+    connected with, and the pair reaches every component of the recipe.
+    """
+    model_path = _require_non_empty(settings.model_path, "reef.model_path")
+    if config.get("runtime"):
+        raise ValueError("weight training selects its runtime through training.backend; remove recipe.runtime")
+    resolved_weight_data = resolve_config_field_values(weight_type, weight_config.get("data", {}), env)
+    training_runtime, runtime = _connect_training_runtime(
+        settings,
+        model_path=model_path,
+        max_staleness=resolved_weight_data["max_staleness"],
+        connector=connector,
+    )
+    config = {**config, "model": {"path": model_path, **dict(config.get("model", {}))}}
+    try:
+        return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
+    except BaseException:
+        for component in (training_runtime, runtime):
+            with suppress(Exception):
+                component.shutdown()
+        raise
+
+
 def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str], connector: Any) -> Recipe:
     """Build the one recipe ``reef.recipe`` names.
 
     The spellings differ only in where config and runtime come from: a dotted
     weight-training class reads the flat ``reef.*`` section and connects the
-    Ray runtime; another dotted class is built from the environment on the
-    upstream proxy; a bare name is ``recipe`` or a YAML preset under
-    ``REEF_RECIPE_CONFIG_DIR``, whose own ``runtime`` section wins over the
-    upstream proxy.
+    Ray runtime; a dotted class that trains weights through one of its
+    components connects the same runtime from that component's data; another
+    dotted class is built from the environment on the upstream proxy; a bare
+    name is ``recipe`` or a YAML preset under ``REEF_RECIPE_CONFIG_DIR``,
+    whose own ``runtime`` section wins over the upstream proxy.
     """
     training_recipe_type = _training_recipe_type(selected)
     if training_recipe_type is not None:
@@ -163,6 +198,11 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
                     if key in settings.preset_config
                 }
             )
+        recipe_type = recipe_class_for(selected)
+        weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
+        if weight_training is not None:
+            weight_type, weight_config = weight_training
+            return _composed_training_recipe(selected, config, weight_type, weight_config, settings, env, connector)
         runtime_config = config.get("runtime")
         runtime = (
             RuntimeRegistry().build(

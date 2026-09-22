@@ -119,6 +119,26 @@ class CompositeRecipe(Recipe):
         except ValueError as exc:
             raise RecipeConfigError(f"invalid {cls.__name__} configuration: {exc}") from exc
 
+    @classmethod
+    def select_weight_training(
+        cls, config: Mapping[str, Any]
+    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
+        """The first component that trains weights, so the deployment connects its training runtime."""
+        components = config.get("components")
+        if not isinstance(components, Mapping):
+            return None
+        for component_config in components.values():
+            if not isinstance(component_config, Mapping):
+                continue
+            implementation = component_config.get("implementation")
+            recipe_type = recipe_class_for(implementation) if isinstance(implementation, str) else None
+            if recipe_type is None:
+                continue
+            selected = recipe_type.select_weight_training(component_config)
+            if selected is not None:
+                return selected
+        return None
+
     @staticmethod
     def _refuse_checkpoint_cadence(config: Mapping[str, Any], section: str) -> None:
         artifact = config.get("artifact", {})

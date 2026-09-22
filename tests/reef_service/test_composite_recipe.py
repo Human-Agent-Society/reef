@@ -188,6 +188,75 @@ def test_composite_recipe_builds_from_config() -> None:
         )
 
 
+_WEIGHTS_AND_HARNESS = {
+    "weights": {"implementation": "recipes.sao.recipe:SAORecipe"},
+    "harness": {"implementation": "reef_service.test_composite_recipe:_TreeRecipe"},
+}
+_LOCAL_TRAINING = "reef_service._training_deployment:LocalDeployment"
+
+
+@pytest.mark.unit
+def test_composite_recipe_names_its_weight_training_component() -> None:
+    from recipes.sao.recipe import SAORecipe
+
+    selected = CompositeRecipe.select_weight_training({"components": _WEIGHTS_AND_HARNESS})
+    assert selected is not None
+    assert selected[0] is SAORecipe and selected[1] is _WEIGHTS_AND_HARNESS["weights"]
+    assert CompositeRecipe.select_weight_training({"components": {"harness": _WEIGHTS_AND_HARNESS["harness"]}}) is None
+    assert _TreeRecipe.select_weight_training({}) is None
+    assert SAORecipe.select_weight_training({"data": {}}) == (SAORecipe, {"data": {}})
+
+
+@pytest.mark.unit
+def test_service_connects_the_training_runtime_of_a_composite_weight_component() -> None:
+    from reef_service._training_deployment import LocalRuntime
+
+    from reef.service.assembly import _serving_recipe
+    from reef.service.deploy.service_config import service_config_from_mapping
+
+    settings = service_config_from_mapping(
+        {
+            "reef": {
+                "recipe": "reef.recipe.composite:CompositeRecipe",
+                "model_path": "demo-model",
+                "training_backend": _LOCAL_TRAINING,
+                "components": _WEIGHTS_AND_HARNESS,
+            }
+        }
+    )
+    recipe = _serving_recipe("reef.recipe.composite:CompositeRecipe", settings, {}, None)
+    assert isinstance(recipe, CompositeRecipe)
+    assert isinstance(recipe.training_runtime, LocalRuntime)
+    assert recipe.training_runtime.received_model_path == "demo-model"
+    assert all(component.training_runtime is recipe.training_runtime for component in recipe.components.values())
+    assert all(component.runtime is recipe.runtime for component in recipe.components.values())
+
+
+@pytest.mark.unit
+def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_path: Path) -> None:
+    from reef.service.deploy.execution import validate_services
+    from reef.service.deploy.orchestrator import resolve_deployment_config
+    from reef.service.training_driver import _resolve_training_recipe
+
+    raw = {
+        "schema-version": 2,
+        "recipe": {
+            "implementation": "reef.recipe.composite:CompositeRecipe",
+            "config": {"components": _WEIGHTS_AND_HARNESS},
+        },
+        "inference": {"model-path": "demo-model"},
+        "training": {"backend": _LOCAL_TRAINING},
+    }
+    config, _ = resolve_deployment_config(raw, None, tmp_path / "serve.yaml")
+    assert config["reef"]["training_backend"] == _LOCAL_TRAINING
+    assert [process["name"] for process in validate_services(config, "test")] == ["reef"]
+    loss_family, name = _resolve_training_recipe(config)
+    assert name == "reef.recipe.composite:CompositeRecipe"
+    from recipes.sao.recipe import SAORecipe
+
+    assert loss_family == SAORecipe.training_spec().loss_family
+
+
 @pytest.mark.unit
 def test_composite_recipe_reads_components_from_the_versioned_layout() -> None:
     settings = recipe_config_from_mapping(
