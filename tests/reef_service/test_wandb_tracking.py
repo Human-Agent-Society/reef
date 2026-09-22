@@ -520,4 +520,19 @@ def test_a_component_trainers_metrics_keep_their_own_names() -> None:
     assert not any(args == ("weights/step/*",) for args, _ in run.defined)
     tracker.record(stepped)
     assert run.defined.count((("weights/step/loss",), {"step_metric": "weights/step/step"})) == 1
+    # A definition the client refuses is tried once, and the rows are logged anyway.
+    refused = dataclasses.replace(stepped, metrics={**weights.metrics, "train_steps": [{"train/reward": 0.5}]})
+    original = run.define_metric
+
+    def refuse(*args, **kwargs):
+        if args == ("weights/step/reward",):
+            raise ValueError("refused")
+        original(*args, **kwargs)
+
+    run.define_metric = refuse
+    tracker.record(refused)
+    tracker.record(refused)
+    reward_rows = [row for row, _ in run.logged if "weights/step/reward" in row]
+    assert [row["weights/step/step"] for row in reward_rows] == [2, 3]
+    assert run.summary["reef/weights/optimizer_steps"] == 4
     tracker.close()

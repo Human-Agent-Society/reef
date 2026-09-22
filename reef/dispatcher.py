@@ -495,11 +495,12 @@ class Dispatcher:
         value = current.commit(tracked_result, component=component)
         self._publication.record(scenario, value)
         # The commit may annotate the result further (a merged result names the release it landed on):
-        # the event carries what the record carries.
+        # the event carries what the record carries. The step is the one this commit took, captured in
+        # the context before it: another trainer may have moved the scenario on since.
         recorded = current.last_commit_for(component)
         metrics = (
             dict(recorded.metrics)
-            if recorded is not None and recorded.metrics is not None and recorded.step == current.scenario_step
+            if recorded is not None and recorded.metrics is not None and recorded.step == context.step
             else dict(tracked_result.metrics)
         )
         try:

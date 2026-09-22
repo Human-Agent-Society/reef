@@ -173,9 +173,9 @@ class ScenarioCommitter:
         with self._publication_lock:
             return self._releases.releases(self._step)
 
-    def creation_components(self) -> Mapping[str, str] | None:
+    def creation_components(self, scenario_step: int) -> Mapping[str, str] | None:
         """The content id of each component the creation artifact binds; ``None`` when it has no manifest."""
-        return self._releases.creation_components()
+        return self._releases.creation_components(scenario_step)
 
     def _bound_trainer(self, component: str | None) -> ComponentTrainer:
         """The trainer bound to ``component``; ``None`` selects the first, for scenario-wide operations."""
@@ -312,7 +312,8 @@ class ScenarioCommitter:
             )
         carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
         if carried is None and self._releases.creation_artifact.release_id == parent_id:
-            carried = self._releases.creation_components()
+            # A person asked for this promote: a read that failed before is tried again now.
+            carried = self._releases.creation_components(self._step, retry=True)
         if carried is None:
             raise ReleaseNotRestorable(
                 f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "

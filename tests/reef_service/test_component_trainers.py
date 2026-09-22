@@ -647,10 +647,12 @@ def test_the_harness_catalog_is_one_lineage_of_trees(tmp_path: Path) -> None:
         assert service.harness_head(headers) == h1
         assert service.harness_manifest(headers)["release_id"] == h1
         catalog = service.harness_releases(headers)["releases"]
-        # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head.
+        # The rejected row is named by the listed release it ran on, so a client's poll agrees with the head;
+        # like a flat scenario's rejected row, it lists the head's parent, not itself.
         assert [row["release_id"] for row in catalog] == [creation, h1, h1]
         assert catalog[-1]["metrics"]["selected"] is False
         assert catalog[-1]["composed_release_id"] == w1
+        assert catalog[-1]["parent_release_id"] == catalog[1]["parent_release_id"] == creation
         assert "ran on" in service.harness_release_page(headers, 2).lower()
         assert f'"release_id": "{h1}"' in service.harness_install_script(headers, adapter="pi")
 
@@ -686,6 +688,30 @@ def test_the_harness_catalog_is_one_lineage_of_trees(tmp_path: Path) -> None:
         assert catalog[-1]["composed_rollback_target_release_id"] == w1
         assert required_by(catalog, restored) == [{"name": "TOKEN", "kind": "env"}]
         assert service.harness_head(headers) == restored
+
+        # A rollback to weights held for review, which carried the restored tree, names the listed release
+        # that carried it; and the install script's fallback names a listed release.
+        for record in _records(4):
+            scenario.records.append(record)
+        backends[WEIGHTS].hold_next = True
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None and weights.pending
+        scenario.commit(weights, component=WEIGHTS)
+        held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        for record in _records(5):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        scenario.rollback(held)
+        catalog = service.harness_releases(headers)["releases"]
+        assert held not in {row["release_id"] for row in catalog}
+        assert catalog[-1]["operation"] == "rollback"
+        assert catalog[-1]["rollback_target_release_id"] == restored
+        assert catalog[-1]["composed_rollback_target_release_id"] == held
+        assert required_by(catalog, catalog[-1]["release_id"]) == [{"name": "TOKEN", "kind": "env"}]
+        script = service.harness_install_script(headers, adapter="pi")
+        assert w1 not in script and w2 not in script and held not in script
     finally:
         dispatcher.close()
 
@@ -735,10 +761,15 @@ def test_a_creation_manifest_read_that_failed_is_asked_again(tmp_path: Path, mon
             return original(self, ref)
 
         monkeypatch.setattr(ArtifactReleaseChain, "resolve", fail_once)
-        assert scenario.creation_components() is None
-        components = scenario.creation_components()
+        assert scenario.creation_components(0) is None
+        # Not asked again at the same step (a page polls every few seconds; a remote read is a fetch)...
+        assert scenario.creation_components(0) is None
+        assert calls["failed"] == 1
+        # ...but asked again after the next commit.
+        components = scenario.creation_components(1)
         assert components is not None and set(components) == {WEIGHTS, HARNESS}
         assert calls["failed"] == 1
+        assert scenario.creation_components(0) is not None
     finally:
         dispatcher.close()
 

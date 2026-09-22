@@ -122,10 +122,21 @@ class _GitWorkspace:
                 try:
                     shutil.copytree(child, destination, symlinks=False, copy_function=link_or_copy)
                 except shutil.Error as exc:
-                    # copytree collects (source, destination, why) per file; the first source names the fault.
+                    # copytree collects (source, destination, why) per file; the first names the fault.
                     failures = exc.args[0] if exc.args and isinstance(exc.args[0], list) else []
-                    first = failures[0][0] if failures and isinstance(failures[0], tuple) and failures[0] else child
-                    raise ArtifactSourceError(f"artifact contains a broken symlink: {first}") from exc
+                    first = (
+                        failures[0] if failures and isinstance(failures[0], tuple) and len(failures[0]) == 3 else None
+                    )
+                    if first is None:
+                        raise ArtifactSourceError(
+                            f"artifact contains a file that cannot be read under {child}: {exc}"
+                        ) from exc
+                    source_path, _, why = first
+                    if "No such file" in str(why):
+                        raise ArtifactSourceError(f"artifact contains a broken symlink: {source_path}") from exc
+                    raise ArtifactSourceError(
+                        f"artifact contains a file that cannot be read: {source_path}: {why}"
+                    ) from exc
             else:
                 try:
                     link_or_copy(str(child), str(destination))

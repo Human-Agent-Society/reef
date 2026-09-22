@@ -619,12 +619,13 @@ class RequestService:
         files_component = scenario.surface.files_component
         if scenario.surface.single or files_component is None:
             return rows, next((str(row["release_id"]) for row in rows if not row.get("pending")), None)
-        creation = scenario.creation_components()
+        creation = scenario.creation_components(scenario.scenario_step)
         kept: list[dict[str, Any]] = []
         kept_ids: set[str] = set()
-        carried_by: dict[str, str] = {}  # each served release, to the kept release whose tree it carried
+        carried_by: dict[str, str] = {}  # each release not kept, to the kept release whose tree it carried
         previous: dict[str, Any] | None = None  # the newest older row that is served
         lineage: str | None = None  # the newest kept release that is served
+        lineage_parent: str | None = None  # the parent that release lists
         head: str | None = None
         for row in reversed(rows):
             if row.get("operation") == "creation" and creation is not None and "components" not in row:
@@ -640,9 +641,15 @@ class RequestService:
             if changed:
                 listed = dict(row)
                 if lineage is not None and not published:
-                    listed["composed_release_id"] = release_id
-                    listed["release_id"] = lineage
-                if lineage is not None and listed.get("parent_release_id") != lineage:
+                    # A step that published nothing reads as it does in a flat scenario: the head's release
+                    # and the head's parent.
+                    if release_id != lineage:
+                        listed["composed_release_id"] = release_id
+                        listed["release_id"] = lineage
+                    if listed.get("parent_release_id") != lineage_parent:
+                        listed["composed_parent_release_id"] = listed.get("parent_release_id")
+                        listed["parent_release_id"] = lineage_parent
+                elif lineage is not None and listed.get("parent_release_id") != lineage:
                     listed["composed_parent_release_id"] = listed.get("parent_release_id")
                     listed["parent_release_id"] = lineage
                 target = listed.get("rollback_target_release_id")
@@ -654,11 +661,12 @@ class RequestService:
                     kept_ids.add(release_id)
                 elif published:
                     lineage = head = release_id
+                    lineage_parent = listed.get("parent_release_id")
                     kept_ids.add(release_id)
             if not row.get("pending"):
                 previous = row
-                if lineage is not None:
-                    carried_by[release_id] = lineage
+            if lineage is not None and release_id not in kept_ids:
+                carried_by[release_id] = lineage
         kept.reverse()
         return kept, head
 
@@ -928,8 +936,9 @@ class RequestService:
             scenario=scenario.name,
             binding_files=self._install_binding(scenario, manifest, descriptor, headers),
             requires=manifest["requires"],
+            # The release the script names for a first install must be one the catalog lists.
             fallback_release_id=ancestor_requiring_nothing(
-                list(reversed(scenario.releases())), manifest["release_id"]
+                list(reversed(self._harness_rows(scenario))), manifest["release_id"]
             ),
         )
 

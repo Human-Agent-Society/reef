@@ -41,22 +41,28 @@ class ScenarioReleases:
         self._creation_artifact = self._resolve_creation_artifact(scenario_step)
         self._creation_components: Mapping[str, str] | None = None
         self._creation_components_read = False
+        self._creation_read_failed_at: int | None = None
 
     @property
     def creation_artifact(self) -> ArtifactRef:
         return self._creation_artifact
 
-    def creation_components(self) -> Mapping[str, str] | None:
+    def creation_components(self, scenario_step: int, *, retry: bool = False) -> Mapping[str, str] | None:
         """The content id of each component the creation artifact binds; ``None`` without a manifest or when it cannot be read.
 
         The creation artifact has no commit record to carry its manifest, so
-        it is read from the release once and kept.
+        it is read from the release once and kept. A read that failed is
+        asked again after the next commit, or at once when ``retry`` says so:
+        on a remote backend a read is a fetch, which a page polled every few
+        seconds must not repeat while the remote is away.
         """
         if not self._creation_components_read:
+            if self._creation_read_failed_at == scenario_step and not retry:
+                return None
             try:
                 manifest = self._artifacts.resolve(self._creation_artifact).components
             except ArtifactError:
-                # A read that failed is asked again next time; only a read that answered is kept.
+                self._creation_read_failed_at = scenario_step
                 return None
             self._creation_components_read = True
             if manifest is not None:

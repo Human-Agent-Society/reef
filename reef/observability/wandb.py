@@ -387,11 +387,20 @@ class WandbExperimentTracker(ExperimentTracker):
                     f"{prefix}/{key.removeprefix('train/')}": value for key, value in _numeric_metrics(step).items()
                 }
                 if component is not None:
-                    # An exact definition binds the key to the component's counter ahead of any glob.
+                    # An exact definition binds the key to the component's counter ahead of any glob; a
+                    # definition the client refuses is not tried again, and the rows are logged anyway.
                     for key in values:
-                        if key not in defined:
+                        if key in defined:
+                            continue
+                        defined.add(key)
+                        try:
                             run.define_metric(key, step_metric=f"{prefix}/step")
-                            defined.add(key)
+                        except Exception as exc:
+                            logger.warning(
+                                "W&B metric definition of %s failed (%s); training will continue",
+                                key,
+                                type(exc).__name__,
+                            )
                 values[f"{prefix}/step"] = start + logged
                 values["reef/step"] = event.context.step
                 run.log(values)
