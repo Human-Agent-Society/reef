@@ -215,10 +215,10 @@ class Scenario:
         with self._committer.lock:
             self._committer.reject_pending(component, metrics)
 
-    def retry_pending(self, component: str | None = None) -> None:
-        """Keep the reserved batch and prepare it again against the release served now."""
+    def retry_pending(self, component: str | None = None, *, keep_candidate: bool = False) -> None:
+        """Keep the reserved batch, and with ``keep_candidate`` its candidate, for another try against the served release."""
         with self._committer.lock:
-            self.trainer_for(component).retry_pending()
+            self.trainer_for(component).retry_pending(keep_candidate=keep_candidate)
 
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""

@@ -35,7 +35,7 @@ from reef.core.components import validate_component_name
 from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe, WeightTrainingRecipe
+from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.errors import RecipeConfigError
@@ -174,6 +174,11 @@ class CompositeRecipe(Recipe):
         if candidates:
             where, key = candidates[0]
             raise RecipeConfigError(f"{where}.{key} has no effect: every step of a composite recipe checkpoints")
+
+    def with_served_endpoint(self, endpoint: ServedEndpoint) -> CompositeRecipe:
+        return replace(
+            self, components={name: recipe.with_served_endpoint(endpoint) for name, recipe in self.components.items()}
+        )
 
     def with_model_config(self, config: ModelConfig) -> CompositeRecipe:
         super().with_model_config(config)

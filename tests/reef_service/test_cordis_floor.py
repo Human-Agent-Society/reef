@@ -406,3 +406,30 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_s
     assert prepared.metrics["step_record"] == progress.step_record
     recorded.abort_step(prepared)
     assert recorded.step_progress is None
+
+
+@pytest.mark.unit
+def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path) -> None:
+    """Told where Reef answers inference, episodes sample the release the scenario serves through it."""
+    from reef.recipe.base import ServedEndpoint
+
+    config = {
+        "model": {"path": "qwen3-8b"},
+        "evolution": {
+            "propose": "demo_floor:propose",
+            "evaluate": "demo_floor:evaluate",
+            "tasks": ["t"],
+            "binary": str(make_binary(tmp_path)),
+            "on_stale": "reevaluate",
+        },
+    }
+    recipe = CordisRecipe.from_environment({"REEF_UPSTREAM_URL": "http://upstream.test"}, config=config)
+    assert recipe.model_binding().base_url == "http://upstream.test"
+    served = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900/", token="reef-local"))
+    binding = served.model_binding("agent")
+    assert binding.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
+    assert binding.api_key == "reef-local" and binding.model == "qwen3-8b"
+    assert served.model_binding().base_url == "http://upstream.test"
+    assert served._backend_kwargs("agent")["on_stale"] == "reevaluate"
+    with pytest.raises(RecipeConfigError, match=r"evolution\.on_stale must be one of"):
+        CordisRecipe.from_environment({}, config={**config, "evolution": {**config["evolution"], "on_stale": "later"}})

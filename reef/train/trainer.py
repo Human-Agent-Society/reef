@@ -48,6 +48,8 @@ class _PendingStep:
     consumed_ids: frozenset[str] | None = None
     #: The release served when the batch was reserved: what the step was prepared against.
     base_release_id: str | None = None
+    #: The prepared step behind ``result``; kept across a stale refusal when the candidate is evaluated again.
+    prepared: PreparedStep | None = None
 
     @property
     def batch_id(self) -> str:
@@ -322,6 +324,7 @@ class Trainer:
             if self._candidate_backend is None:
                 self._consume_data()
                 return None
+            kept: PreparedStep | None = None
             if self._pending is not None:
                 result = self._pending.result
                 if result is not None:
@@ -329,6 +332,7 @@ class Trainer:
                 if self._pending.base_release_id is None:
                     self._pending.base_release_id = base_release_id
                 batch = self._pending.batch
+                kept = self._pending.prepared
             else:
                 self._consume_data()
                 if not self._processor.ready():
@@ -338,14 +342,32 @@ class Trainer:
         # Local candidate generation and evaluation can take minutes. Keep the
         # batch reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
-            execution = self._execute_backend_step(batch, scenario_step)
+            execution = (
+                self._reevaluate(kept) if kept is not None else self._execute_backend_step(batch, scenario_step)
+            )
         if execution.outcome != "commit" or execution.result is None:
             raise RuntimeError(f"inline candidate backend returned {execution.outcome!r}")
         with self._lock:
             if self._pending is None or self._pending.batch_id != batch.batch_id:
                 raise RuntimeError("inline trainer reservation changed while its backend was executing")
             self._pending.result = execution.result
+            self._pending.prepared = execution.prepared
             return execution.result
+
+    def _reevaluate(self, prepared: PreparedStep) -> StepExecution:
+        """Evaluate a kept candidate against the release served now and settle it again."""
+        backend = self._candidate_backend
+        if backend is None:
+            raise RuntimeError("cannot evaluate a candidate without a backend")
+        candidate = prepared.candidate
+        if not isinstance(candidate, UpdateCandidate):
+            raise TypeError("a kept step must carry an UpdateCandidate")
+        try:
+            decision = self._evaluate_candidate(candidate)
+            return StepExecution("commit", backend.settle_step(prepared, decision), prepared=prepared)
+        except BaseException:
+            backend.abort_step(prepared)
+            raise
 
     def _execute_backend_step(self, batch: TrainingBatch, scenario_step: int) -> StepExecution:
         backend = self._candidate_backend
@@ -372,7 +394,7 @@ class Trainer:
             raise TypeError("candidate preparation must carry an UpdateCandidate")
         try:
             decision = self._evaluate_candidate(candidate)
-            return StepExecution("commit", backend.settle_step(prepared, decision))
+            return StepExecution("commit", backend.settle_step(prepared, decision), prepared=prepared)
         except BaseException:
             backend.abort_step(prepared)
             raise
@@ -416,18 +438,23 @@ class Trainer:
             self._pending = _PendingStep(batch=batch, result=None, base_release_id=base_release_id)
             return batch
 
-    def retry_pending(self) -> None:
+    def retry_pending(self, *, keep_candidate: bool = False) -> None:
         """Keep the reserved batch but forget its result, so the next step prepares it again.
 
         The scenario calls this when a result was prepared against a release
         that another component's commit has since replaced: the batch is still
         the right data, and the backend must evaluate it against the release
-        served now.
+        served now. ``keep_candidate`` keeps the prepared candidate too, so the
+        next step evaluates it again instead of proposing anew.
         """
         with self._lock:
             if self._pending is None:
                 return
-            self._pending = _PendingStep(batch=self._pending.batch, result=None)
+            self._pending = _PendingStep(
+                batch=self._pending.batch,
+                result=None,
+                prepared=self._pending.prepared if keep_candidate else None,
+            )
 
     def execute_reserved_step(self, scenario_step: int) -> StepExecution:
         """Run the dispatched backend for the currently reserved batch."""

@@ -77,6 +77,11 @@ class PreparedStep:
         return cls("drop", state, metrics or {})
 
 
+#: What a backend's result becomes when another component's commit replaced the release it was prepared
+#: against: merged onto the release served now, evaluated again against it, or refused and prepared again.
+STALE_RESULT_POLICIES = ("merge", "reevaluate", "refuse")
+
+
 @dataclass(frozen=True)
 class StepExecution:
     """One backend attempt returned to the dispatcher."""
@@ -85,6 +90,8 @@ class StepExecution:
     result: TrainStepResult | None = None
     storage: Mapping[str, Any] | None = None
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    #: The prepared step a committed result came from, kept so a stale result can be evaluated again.
+    prepared: PreparedStep | None = None
 
     def __post_init__(self) -> None:
         if self.outcome == "commit" and self.result is None:
@@ -129,6 +136,18 @@ class CandidateBackend(CandidateEvaluator, ABC):
     def dispatched(self) -> bool:
         """Whether the dispatcher must run this backend outside scenario locks."""
         return False
+
+    @property
+    def stale_result_policy(self) -> str:
+        """What a result prepared against a release another trainer has since replaced becomes.
+
+        One of :data:`STALE_RESULT_POLICIES`. The default refuses it: the
+        batch is kept and prepared again. A backend whose evaluation compares
+        candidate and current under the same conditions may answer ``merge``
+        or ``reevaluate`` instead. A dispatched backend is merged whatever it
+        answers, since its result is published before it reaches the commit.
+        """
+        return "refuse"
 
     def recover_pending_step(
         self,
@@ -206,4 +225,4 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["CandidateBackend", "PreparedStep", "StepExecution"]
+__all__ = ["STALE_RESULT_POLICIES", "CandidateBackend", "PreparedStep", "StepExecution"]

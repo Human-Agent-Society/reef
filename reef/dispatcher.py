@@ -750,9 +750,16 @@ class Dispatcher:
             in_a_row = self._training.stale_refusals_in_a_row.get(key, 0) + 1
             self._training.stale_refusals_in_a_row[key] = in_a_row
             self._training.stale_refusals_total[key] = self._training.stale_refusals_total.get(key, 0) + 1
-        current.retry_pending(component)
+        reevaluate = stale.policy == "reevaluate"
+        current.retry_pending(component, keep_candidate=reevaluate)
         if in_a_row < self.stale_refusal_limit:
-            logger.info("scenario %r component %r: %s; preparing the batch again", scenario, component, stale)
+            logger.info(
+                "scenario %r component %r: %s; %s",
+                scenario,
+                component,
+                stale,
+                "evaluating the candidate again" if reevaluate else "preparing the batch again",
+            )
             return True
         message = (
             f"StaleTrainingResultError: component {component!r} was refused {in_a_row} times in a row; "

@@ -33,6 +33,22 @@ from reef.train.processors.base import DataProcessor
 from reef.train.trainer import ComponentTrainer, Trainer
 
 
+@dataclass(frozen=True)
+class ServedEndpoint:
+    """Where this Reef answers inference itself: what a recipe's own evaluation calls target.
+
+    ``url`` is the service's base URL and ``token`` a bearer token it accepts.
+    """
+
+    url: str
+    token: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.url, str) or not self.url.strip():
+            raise ValueError("served endpoint requires a url")
+        object.__setattr__(self, "url", self.url.strip().rstrip("/"))
+
+
 @dataclass(frozen=True, kw_only=True)
 class Recipe:
     """Default inference recipe and base contract for update recipes.
@@ -130,6 +146,10 @@ class Recipe:
         training backend. ``None`` for a recipe that trains no weights.
         """
         return None
+
+    def with_served_endpoint(self, endpoint: ServedEndpoint) -> Recipe:
+        """This recipe told where the service answers inference; the default has no calls of its own to point there."""
+        return self
 
     @property
     def report_type(self) -> type[ReportBase] | None:

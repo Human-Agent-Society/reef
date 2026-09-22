@@ -62,7 +62,7 @@ from reef.harness.tree.nodes import (
 from reef.harness.tree.render import render_composition
 from reef.runtime.executor import Executor, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import CandidateBackend, PreparedStep
+from reef.train.backend import STALE_RESULT_POLICIES, CandidateBackend, PreparedStep
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
@@ -704,6 +704,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_executor: EpisodeExecutor | None = None,
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
+        on_stale: str = "merge",
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
@@ -756,6 +757,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         Executor.get_class(self._worker_selection.settings.backend)
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
+        if on_stale not in STALE_RESULT_POLICIES:
+            raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
+        self._on_stale = on_stale
+        # Proposals a settlement already filed; a step evaluated again settles once.
+        self._settled_proposals: set[str] = set()
         self._forbid_residue = forbid_residue
         self._max_steps = max_steps
         self._max_failure_streak = max_failure_streak
@@ -1363,9 +1369,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         else:
             metrics["mutations"] = [_mutation_record(mutation) for mutation in candidate.mutations]
 
-        if candidate.proposal_id is not None and self.proposals is not None:
+        if (
+            candidate.proposal_id is not None
+            and self.proposals is not None
+            and candidate.proposal_id not in self._settled_proposals
+        ):
             selection_result = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
             self.proposals.settle(candidate.proposal_id, selection_result)
+            self._settled_proposals.add(candidate.proposal_id)
 
         if decision.selected:
             entries = [dict(entry) for entry in candidate.candidate_entries]
@@ -1389,6 +1400,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         entries = [dict(entry) for entry in candidate.current_entries]
         self._loader.root.update([copy.deepcopy(entry) for entry in entries])
         return TrainStepResult({**state, "entries": entries}, metrics)
+
+    @property
+    def stale_result_policy(self) -> str:
+        """Episodes compare candidate and current under one set of weights, so a result survives a weights change
+        as the recipe's ``on_stale`` says: merged by default."""
+        return self._on_stale
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Discard this backend's render source after its commit is durable."""

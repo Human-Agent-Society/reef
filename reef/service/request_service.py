@@ -105,6 +105,8 @@ class PendingInference:
     deferred_prepared: PreparedInference | None = None
     path: str | None = None
     measurement: OperationMeasurement | None = None
+    #: False for an evaluation call: served like any other, kept by nobody.
+    record: bool = True
 
 
 @dataclass(frozen=True)
@@ -188,7 +190,10 @@ class RequestService:
         payload: dict[str, Any],
         path: str,
         handler: InferenceHandler | None = None,
-    ) -> tuple[dict[str, Any], AgentRecord]:
+        *,
+        record: bool = True,
+    ) -> tuple[dict[str, Any], AgentRecord | None]:
+        """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call."""
         operations = await self.inference_operations(headers)
         measurement = operations.start("serve/request")
         succeeded = False
@@ -232,12 +237,14 @@ class RequestService:
                         if prepared.surface.inference is not None:
                             prepared.surface.inference.verify_response(prepared.artifact, path, response)
                         self._stamp_durable_runtime_load_id(prepared, payload, response)
-                        item = await asyncio.to_thread(
-                            self._accept,
-                            prepared.parsed,
-                            {**payload, "response": response},
-                            artifact_ref=prepared.artifact.ref,
-                        )
+                        item = None
+                        if record:
+                            item = await asyncio.to_thread(
+                                self._accept,
+                                prepared.parsed,
+                                {**payload, "response": response},
+                                artifact_ref=prepared.artifact.ref,
+                            )
                         succeeded = True
                         return client_inference_response(response), item
                     # A handler ``abort`` finish reason makes the attempt unusable.
@@ -273,6 +280,8 @@ class RequestService:
         payload: dict[str, Any],
         path: str,
         handler: InferenceHandler | None = None,
+        *,
+        record: bool = True,
     ) -> tuple[InferenceStream, PendingInference]:
         operations = await self.inference_operations(headers)
         measurement = operations.start("serve/request")
@@ -326,6 +335,7 @@ class RequestService:
                 lease=lease,
                 deferred_prepared=prepared if record_response_pending else None,
                 path=path if record_response_pending else None,
+                record=record,
             )
             return stream, pending
         except BaseException as exc:
@@ -377,9 +387,9 @@ class RequestService:
                 pending.item,
                 payload={**payload, "response": dict(response)},
             )
-            stored = self._dispatcher.accept_record(
-                item,
-                release_id=pending.release_id,
+            # An evaluation call is served like any other and kept by nobody.
+            stored = (
+                item if not pending.record else self._dispatcher.accept_record(item, release_id=pending.release_id)
             )
             delivery = response.get("stream_delivery", response)
             succeeded = (

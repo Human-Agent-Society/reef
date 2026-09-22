@@ -138,13 +138,16 @@ recipe builds one trainer per component runs those trainers as separate
 workers that meet at this commit boundary, where the scenario lock
 serializes their commits. Local workers of one scenario take turns for a
 whole cycle, prepare and commit together, so they never overtake each
-other. A local result whose base a dispatched commit has replaced is
-refused (``StaleTrainingResultError``) instead of being attached to a
-combination it was never evaluated with; the worker keeps its batch and
-prepares it again against the release served now, and after a few
-refusals in a row it reports them in ``/reef/status`` and waits for its
-next wake instead of spinning. A dispatched result is merged instead: the
-backend published its weights
+other. A local result whose base a dispatched commit has replaced goes
+the way its backend's ``stale_result_policy`` says: ``merge`` commits it
+onto the release served now (the harness backend's default, since each
+of its episode pairings compared candidate and current under one set of
+weights), ``reevaluate`` keeps the candidate and runs its evaluation again
+against the new release, and ``refuse`` (the default for a backend that
+says nothing) drops the result and prepares the batch again; a refused
+worker reports its refusals in ``/reef/status`` and after a few in a row
+waits for its next wake instead of spinning. A dispatched result is always
+merged: the backend published its weights
 before the result arrived and its job can only be finished, so the step
 lands on the release served now and the record's ``base_release_id`` shows
 what the batch was reserved against. A lone trainer is never refused: only

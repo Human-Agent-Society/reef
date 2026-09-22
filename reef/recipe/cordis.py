@@ -40,13 +40,14 @@ from reef.harness.tree.render import render_composition
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, ServedEndpoint
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
 from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
+from reef.train.backend import STALE_RESULT_POLICIES
 from reef.train.cordis_backend.backend import (
     CordisBackend,
     FloorPluginFactory,
@@ -295,6 +296,11 @@ class CordisRecipe(Recipe):
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
+    #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
+    served_endpoint: ServedEndpoint | None = None
+    #: What a result becomes when another component's commit replaced its base while it was evaluated:
+    #: merged onto the release served now, evaluated again, or refused and proposed again.
+    on_stale: str = "merge"
     candidate_plugin: CandidatePluginFactory = field(default_factory=ScoreComparisonPluginFactory, repr=False)
     episode_workers: int | None = None  # Deprecated Python compatibility alias.
     #: Default proposal inbox root, with one directory per scenario.
@@ -342,6 +348,8 @@ class CordisRecipe(Recipe):
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
+        if self.on_stale not in STALE_RESULT_POLICIES:
+            raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
@@ -425,6 +433,9 @@ class CordisRecipe(Recipe):
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+        on_stale = evolution.get("on_stale", "merge")
+        if on_stale not in STALE_RESULT_POLICIES:
+            raise RecipeConfigError(f"evolution.on_stale must be one of {STALE_RESULT_POLICIES}")
         forbid_residue = evolution.get("forbid_residue", False)
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
@@ -605,6 +616,7 @@ class CordisRecipe(Recipe):
             "binary": binary,
             "episode_timeout_s": float(timeout),
             "episode_repeats": repeats,
+            "on_stale": on_stale,
             "forbid_residue": forbid_residue,
             **budgets,
             "floor_score": float(floor_score),
@@ -623,26 +635,42 @@ class CordisRecipe(Recipe):
             "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
         }
 
-    def model_binding(self) -> ModelBinding:
-        """The served model's endpoint, derived from the recipe's runtime."""
+    def with_served_endpoint(self, endpoint: ServedEndpoint) -> CordisRecipe:
+        return replace(self, served_endpoint=endpoint)
+
+    def model_binding(self, scenario: str | None = None) -> ModelBinding:
+        """The served model's endpoint.
+
+        With the service known and a scenario named, this Reef's own
+        evaluation route for that scenario: an episode then samples the
+        release the scenario serves, weights, request defaults and all, and
+        its calls are kept by nobody. Otherwise the runtime's own endpoint.
+        """
         if self.runtime is None:
             raise RecipeConfigError(
                 "harness evolution requires an inference runtime: set reef.upstream_url (and reef.upstream_model) "
                 "in the deployment config"
             )
         try:
-            return ModelBinding.from_runtime(self.runtime, model=self.model_name)
+            binding = ModelBinding.from_runtime(self.runtime, model=self.model_name)
         except ValueError as exc:
             raise RecipeConfigError(str(exc)) from exc
+        if self.served_endpoint is None or scenario is None:
+            return binding
+        return replace(
+            binding,
+            base_url=f"{self.served_endpoint.url}/reef/scenarios/{scenario}/evaluation",
+            api_key=self.served_endpoint.token,
+        )
 
-    def default_model_bindings(self) -> ModelBindings:
-        return ModelBindings(served=self.model_binding(), named=dict(self.models))
+    def default_model_bindings(self, scenario: str | None = None) -> ModelBindings:
+        return ModelBindings(served=self.model_binding(scenario), named=dict(self.models))
 
-    def model_bindings(self) -> ModelBindings:
+    def model_bindings(self, scenario: str | None = None) -> ModelBindings:
         """The scenario's model override, or the recipe's served and named models."""
         if self.scenario_model is not None:
             return _ScenarioModels(self.scenario_model, self).resolve()
-        return self.default_model_bindings()
+        return self.default_model_bindings(scenario)
 
     def build_surface(self, scenario: str) -> Surface:
         model = self.model_name or getattr(self.runtime, "model_path", None)
@@ -688,7 +716,7 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        kwargs = self._backend_kwargs()
+        kwargs = self._backend_kwargs(scenario)
         if self.scenario_model is not None:
             kwargs["model_resolver"] = _ScenarioModels(self.scenario_model, self)
         # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
@@ -704,14 +732,15 @@ class CordisRecipe(Recipe):
             experiment_logger=experiment_logger,
         )
 
-    def _backend_kwargs(self) -> dict[str, Any]:
+    def _backend_kwargs(self, scenario: str | None = None) -> dict[str, Any]:
         """Arguments shared by the stock backend and recipe specializations."""
         return {
             "descriptor": get_adapter(self.adapter),
             "propose": self.propose,
             "score_episode": self.score_episode,
             "tasks": self.tasks,
-            "models": self.model_bindings(),
+            "models": self.model_bindings(scenario),
+            "on_stale": self.on_stale,
             "binary": self.binary,
             "episode_timeout_s": self.episode_timeout_s,
             "episode_repeats": self.episode_repeats,

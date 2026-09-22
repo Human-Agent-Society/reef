@@ -20,6 +20,7 @@ from reef.dispatcher import Dispatcher
 from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
+from reef.recipe.base import ServedEndpoint
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry, runtime_pair
@@ -261,6 +262,11 @@ def build_dispatcher(
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
+    # A recipe's own evaluation calls come back to this Reef, so they sample the release it serves.
+    host = "127.0.0.1" if settings.host.strip() in ("", "0.0.0.0", "::") else settings.host.strip()
+    recipe = recipe.with_served_endpoint(
+        ServedEndpoint(url=f"http://{host}:{settings.port}", token=settings.tokens[0] if settings.tokens else None)
+    )
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
     try:

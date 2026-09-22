@@ -41,11 +41,17 @@ HARNESS = "harness"
 class _ComponentBackend(CandidateBackend):
     """A local candidate cycle publishing one file for its component per step."""
 
-    def __init__(self, component: str, artifact_dir: Path) -> None:
+    def __init__(self, component: str, artifact_dir: Path, *, stale_policy: str = "refuse") -> None:
         self.component = component
         self.artifact_dir = artifact_dir
+        self.stale_policy = stale_policy
         self.prepared = 0
+        self.evaluated = 0
         self.result: TrainStepResult | None = None
+
+    @property
+    def stale_result_policy(self) -> str:
+        return self.stale_policy
 
     def initial_state(self) -> Mapping[str, Any]:
         return {"steps": 0}
@@ -62,6 +68,7 @@ class _ComponentBackend(CandidateBackend):
         return PreparedStep.with_candidate(UpdateCandidate(batch.batch_id), state={"steps": step})
 
     def evaluate(self, candidate):
+        self.evaluated += 1
         return EvaluationResult("test", "1", {})
 
     def settle_step(self, prepared, decision):
@@ -450,6 +457,63 @@ def test_dispatched_result_overtaken_by_another_trainer_is_merged(tmp_path: Path
         records = scenario.store.history()
         assert (records[-1].component, records[-1].base_release_id) == (WEIGHTS, base)
         assert scenario.committed_training_job_id == "job-1"
+    finally:
+        dispatcher.close()
+
+
+def _both_prepared(tmp_path: Path, harness_policy: str):
+    """Both trainers prepared against the base, then the weights step moves the head."""
+    backends = {
+        WEIGHTS: _ComponentBackend(WEIGHTS, tmp_path / "candidates"),
+        HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates", stale_policy=harness_policy),
+    }
+    dispatcher, backends = _dispatcher(tmp_path, backends=backends)
+    scenario = dispatcher.get_or_create_scenario("agent")
+    assert scenario is not None
+    base = scenario.current_artifact_ref().release_id
+    for record in _records(1):
+        scenario.records.append(record)
+    harness = scenario.prepare_training_step(HARNESS)
+    weights = scenario.prepare_training_step(WEIGHTS)
+    assert harness is not None and weights is not None
+    scenario.commit(weights, component=WEIGHTS)
+    return dispatcher, backends, scenario, harness, base
+
+
+@pytest.mark.unit
+def test_a_local_result_its_backend_calls_mergeable_lands_on_the_release_served_now(tmp_path: Path) -> None:
+    dispatcher, backends, scenario, harness, base = _both_prepared(tmp_path, "merge")
+    try:
+        scenario.commit(harness, component=HARNESS)
+        assert _component_files(scenario, scenario.current_artifact_ref()) == {
+            WEIGHTS: "weights step 1",
+            HARNESS: "harness step 1",
+        }
+        record = scenario.store.history()[-1]
+        assert (record.component, record.base_release_id) == (HARNESS, base)
+        assert backends[HARNESS].prepared == 1 and backends[HARNESS].evaluated == 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_local_result_its_backend_reevaluates_keeps_its_candidate(tmp_path: Path) -> None:
+    """The proposer is not asked again; the kept candidate is evaluated against the release served now."""
+    dispatcher, backends, scenario, harness, base = _both_prepared(tmp_path, "reevaluate")
+    try:
+        with pytest.raises(StaleTrainingResultError) as refused:
+            scenario.commit(harness, component=HARNESS)
+        assert refused.value.policy == "reevaluate"
+        scenario.retry_pending(HARNESS, keep_candidate=True)
+        again = scenario.prepare_training_step(HARNESS)
+        assert again is not None
+        assert backends[HARNESS].prepared == 1 and backends[HARNESS].evaluated == 2
+        scenario.commit(again, component=HARNESS)
+        assert _component_files(scenario, scenario.current_artifact_ref()) == {
+            WEIGHTS: "weights step 1",
+            HARNESS: "harness step 1",
+        }
+        assert scenario.store.history()[-1].base_release_id != base
     finally:
         dispatcher.close()
 

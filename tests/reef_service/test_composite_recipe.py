@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.composite import compose_release
@@ -19,6 +21,8 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
+from reef.runtime.interfaces import InferenceHandler
+from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, TextFileTree, create_config_surface, create_harness_surface
@@ -544,6 +548,69 @@ def test_config_validator_requires_a_json_object(tmp_path: Path) -> None:
     (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": {"/v1/responses": 3}}), encoding="utf-8")
     with pytest.raises(ReefError, match="/v1/responses must be an object"):
         ConfigValidator().validate(Artifact.local(root))
+
+
+class _EchoHandler(InferenceHandler):
+    """Answer every chat completion with one word, so a test can tell served from recorded."""
+
+    async def inference(self, artifact, path, payload):
+        return {
+            "id": "chat-1",
+            "object": "chat.completion",
+            "choices": [{"index": 0, "message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}],
+        }
+
+    async def inference_stream(self, artifact, path, payload):
+        raise NotImplementedError
+
+
+@pytest.mark.unit
+def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None:
+    dispatcher = _serve(_composite(tmp_path), tmp_path)
+    try:
+        service = RequestService(dispatcher)
+        headers = {"x-reef-scenario": "agent"}
+
+        async def run() -> None:
+            response, item = await service.infer_with_data(
+                headers, {"messages": []}, "/v1/chat/completions", _EchoHandler(), record=False
+            )
+            assert item is None and response["choices"][0]["message"]["content"] == "ok"
+            _, item = await service.infer_with_data(headers, {"messages": []}, "/v1/chat/completions", _EchoHandler())
+            assert item is not None
+
+        asyncio.run(run())
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None and scenario.records.count("agent") == 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> None:
+    dispatcher = _serve(_composite(tmp_path), tmp_path)
+    try:
+
+        async def run() -> None:
+            client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoHandler())))
+            await client.start_server()
+            try:
+                response = await client.post(
+                    "/reef/scenarios/agent/evaluation/v1/chat/completions", json={"messages": []}
+                )
+                assert response.status == 200
+                assert "x-reef-agent-record-id" not in response.headers
+                assert (await response.json())["choices"][0]["message"]["content"] == "ok"
+                missing = await client.post("/reef/scenarios/agent/evaluation/v1/nothing", json={})
+                assert missing.status == 404
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None and scenario.records.count("agent") == 0
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit

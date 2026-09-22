@@ -57,11 +57,17 @@ class _ArtifactHeadSync:
 class StaleTrainingResultError(ReefError):
     """A local result was prepared against a release that another component's commit has since replaced.
 
-    The result is not attached to the newer combination. The caller keeps
-    the batch, drops the result, and prepares it again against the release
-    served now. A dispatched result is never refused this way: see
+    The result is not attached to the newer combination. ``policy`` says what
+    the caller does with the batch: ``reevaluate`` keeps the prepared
+    candidate and evaluates it again against the release served now,
+    ``refuse`` keeps the batch alone and prepares it again. A backend whose
+    policy is ``merge``, and every dispatched backend, is never refused: see
     :meth:`ScenarioCommitter.commit`.
     """
+
+    def __init__(self, message: str, *, policy: str = "refuse") -> None:
+        super().__init__(message)
+        self.policy = policy
 
 
 class ScenarioCommitter:
@@ -427,15 +433,16 @@ class ScenarioCommitter:
         """Commit ``component``'s pending training result as one atomic version record.
 
         Several trainers of one scenario meet here: the scenario lock serializes
-        their commits. A local result whose batch was reserved against a
-        release that another trainer has since replaced is refused as
-        :class:`StaleTrainingResultError` rather than attached to a combination
-        it was never evaluated with. A dispatched result is merged instead:
-        the backend published its weights before the result arrived and its
-        job marker only moves forward, so refusing it would leave that job
-        unfinished and inference admission paused for good. The step lands on
-        the release served now and the record's ``base_release_id`` names the
-        release the batch was reserved against.
+        their commits. A result whose batch was reserved against a release
+        that another trainer has since replaced goes the way its backend's
+        ``stale_result_policy`` says: merged onto the release served now, with
+        the record's ``base_release_id`` naming the release the batch was
+        reserved against, or refused as :class:`StaleTrainingResultError` so
+        the caller evaluates the candidate again or prepares the batch again.
+        A dispatched result is always merged: the backend published its
+        weights before the result arrived and its job marker only moves
+        forward, so refusing it would leave that job unfinished and inference
+        admission paused for good.
         """
         with self._lock, self._publication_lock:
             next_step = self._step + 1
@@ -453,13 +460,15 @@ class ScenarioCommitter:
             served = self._artifacts.current.release_id
             if not retrying and len(self._trainers) > 1 and base is not None and base != served:
                 backend = trainer.candidate_backend
-                if backend is None or not backend.dispatched:
+                policy = "merge" if backend is None or backend.dispatched else backend.stale_result_policy
+                if policy != "merge":
                     raise StaleTrainingResultError(
                         f"scenario {self._name!r} component {component!r} prepared its result against release "
-                        f"{base!r} but {served!r} is served now"
+                        f"{base!r} but {served!r} is served now",
+                        policy=policy,
                     )
                 logger.info(
-                    "scenario %r component %r: merging a dispatched result reserved against release %r onto %r",
+                    "scenario %r component %r: merging a result reserved against release %r onto %r",
                     self._name,
                     component,
                     base,
