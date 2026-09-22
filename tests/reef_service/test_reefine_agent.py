@@ -17,13 +17,14 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.e2b import E2BSession, pack
-from reef.harness.episodes.executor import LocalExecutor
+from reef.harness.episodes.executor import EpisodeTimeout, LocalExecutor, ProcessOutcome
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.recipe.reefine import agent as reefine_agent
 from reef.recipe.reefine.agent import AgentProposer, AgentRun, workspace_mutations, write_workspace
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools, reply_tool_calls, tool_summary
 from reef.recipe.reefine.multimodal import PRESETS, MultimodalProvider
+from reef.recipe.reefine.trial import trial_script
 from reef.train.cordis_backend.backend import _budgeted_bindings, _StepCalls
 from reef.train.cordis_backend.strategies import AgentHost, StepProposal
 
@@ -122,8 +123,8 @@ class NoTools(WorkspaceTools):
     def check(self) -> dict:
         return {"admitted": True}
 
-    def trial(self, task: str) -> dict:
-        return {"task": task}
+    def trial(self, task: str, script: dict[str, object] | None = None) -> dict:
+        return {"task": task} if script is None else {"script": script}
 
 
 @pytest.mark.unit
@@ -571,3 +572,118 @@ def test_the_gateway_notes_each_tool_the_agent_calls_and_what_it_says(upstream) 
         ("agent", "edit x.md"),
         ("agent", "Done: the extension speaks."),
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "script",
+    [
+        {},
+        {"steps": []},
+        {"steps": [{"prompt": "hello"}]},
+        {"steps": [{"new_session": True, "prompt": "hello"}]},
+        {"steps": [{"prompt": "hello", "expect": {"unknown": True}}]},
+        {"steps": [{"prompt": "hello", "expect": {"model_called": "yes"}}]},
+        {"steps": [{"prompt": "hello", "expect": {"tools": "read"}}]},
+        {"steps": [{"prompt": "hello", "expect": {"executed_tools": ["read"]}}]},
+        {"fixture_tools": ["read"], "steps": [{"prompt": "hello", "expect": {"model_called": True}}]},
+        {"fixture_tools": ["x", "x"], "steps": [{"prompt": "hello", "expect": {"model_called": True}}]},
+        {
+            "steps": [
+                {"prompt": "hello", "tool_call": {"name": "x", "arguments": []}, "expect": {"model_called": True}}
+            ]
+        },
+    ],
+)
+def test_script_rejects_ambiguous_or_unobservable_checks(script) -> None:
+    with pytest.raises(ValueError):
+        trial_script(script)
+
+
+@pytest.mark.unit
+def test_gateway_validates_scripted_trials_and_preserves_online_tasks(upstream) -> None:
+    gateway = AgentGateway(ModelBinding(base_url=upstream.url, model="m"), _StepCalls(0, []), NoTools(), None)
+    gateway.start()
+    try:
+        script = {"steps": [{"prompt": "hello", "expect": {"model_called": True}}]}
+        status, body = post(f"{gateway.base_url}/trial", {"script": script})
+        assert status == 200 and json.loads(body)["script"] == {**script, "fixture_tools": []}
+        assert post(f"{gateway.base_url}/trial", {"script": script, "task": "hello"})[0] == 400
+        assert post(f"{gateway.base_url}/trial", {"script": {"steps": []}})[0] == 400
+        assert post(f"{gateway.base_url}/trial", {"task": "hello"}) == (200, b'{"task": "hello"}')
+    finally:
+        gateway.stop()
+
+
+@pytest.mark.unit
+def test_trial_reserves_finish_time_and_records_the_exact_candidate(tmp_path, monkeypatch) -> None:
+    host = agent_host(tmp_path, [], timeout_s=100)
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace, ENTRIES)
+    run = AgentRun(host, ENTRIES, NODES, workspace, ModelBinding(base_url="http://unused", model="m"))
+    gateway = AgentGateway(run.served, host.calls, run, None)
+    run.gateway = gateway
+    gateway.start()
+    timeouts = []
+
+    def launch(*args, timeout, **kwargs):
+        timeouts.append(timeout)
+        raise EpisodeTimeout("trial deadline")
+
+    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
+    try:
+        run.deadline = time.monotonic() + 15
+        first = run.trial("hello")
+        assert first["ran"] and "timed_out" in first and 0 < timeouts[0] <= 5
+        assert first["candidate"] == run.check()["candidate"]
+        (workspace / "harness/rules/tone.md").write_text("A changed rule.")
+        assert first["candidate"] != run.check()["candidate"]
+        run.deadline = time.monotonic() + 9
+        refused = run.trial("another trial")
+        assert not refused["ran"] and len(timeouts) == 1
+        records = [json.loads(line) for line in (host.step_dir / "agent-checks.jsonl").read_text().splitlines()]
+        assert records[0]["candidate"] == first["candidate"] and records[-1]["ran"] is False
+    finally:
+        gateway.stop()
+
+
+@pytest.mark.unit
+def test_timeout_keeps_candidate_and_progress_without_publishing(tmp_path, upstream, monkeypatch) -> None:
+    host = agent_host(tmp_path, [])
+
+    def launch(*args, root, **kwargs):
+        reference = (root / "workspace/reserved/reef-pi-extension-api.md").read_text()
+        assert "pi.getActiveTools()" in reference and "**replaces**" in reference
+        (root / "workspace/harness/rules/tone.md").write_text("Unfinished candidate")
+        (root / "workspace/progress.md").write_text("API confirmed; tool isolation remains unchecked.")
+        raise EpisodeTimeout("deadline")
+
+    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
+    proposal = AgentProposer()(
+        NODES, (), served_models(upstream, [], host), requests=[{"text": "x"}], entries=ENTRIES, agent_host=host
+    )
+    assert proposal.mutations == () and "past its" in proposal.notes["failure"]
+    saved = host.step_dir / "agent-workspace"
+    assert (saved / "harness/rules/tone.md").read_text() == "Unfinished candidate"
+    assert "remains unchecked" in (saved / "progress.md").read_text()
+
+
+@pytest.mark.unit
+def test_script_driver_failure_is_returned_to_the_agent(tmp_path, monkeypatch) -> None:
+    host = agent_host(tmp_path, [])
+    workspace = tmp_path / "workspace"
+    write_workspace(workspace, ENTRIES)
+    run = AgentRun(host, ENTRIES, NODES, workspace, ModelBinding(base_url="http://unused", model="m"))
+    gateway = AgentGateway(run.served, host.calls, run, None)
+    run.gateway = gateway
+    gateway.start()
+
+    def launch(*args, **kwargs):
+        return ProcessOutcome(1, "", "node could not load pi"), []
+
+    monkeypatch.setattr(reefine_agent, "launch_pi", launch)
+    try:
+        result = run.trial("", trial_script({"steps": [{"prompt": "hello", "expect": {"model_called": True}}]}))
+        assert not result["passed"] and result["stderr_tail"] == "node could not load pi"
+    finally:
+        gateway.stop()

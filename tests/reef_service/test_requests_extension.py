@@ -884,6 +884,8 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
     # The model asks only what a default cannot settle, and may recommend an option.
     assert "a clear request needs no question, so file it at once" in prompt["content"]
     assert "- as few as the request needs, often none; one decision per question" in prompt["content"]
+    # A capability the machine and a paid model both serve is asked about, not settled by a default.
+    assert "which one runs is a decision, not a setup detail" in prompt["content"]
     assert "name it as recommended: it is shown first, marked" in prompt["content"]
     assert prompt["content"].endswith("Do not write the change yourself: reef's service writes it.")
     # The second call carries the answers back as the first call's tool result.

@@ -33,6 +33,7 @@ from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, usage_of
 from reef.recipe.reefine.multimodal import MultimodalProvider
+from reef.recipe.reefine.trial import trial_script
 from reef.runtime.interfaces import MULTIMODAL_ROUTES
 from reef.train.cordis_backend.strategies import ProposerCalls
 
@@ -54,8 +55,8 @@ class WorkspaceTools(ABC):
         """The workspace through admission, as the step would admit it."""
 
     @abstractmethod
-    def trial(self, task: str) -> dict[str, Any]:
-        """One real run of the candidate harness on ``task``."""
+    def trial(self, task: str, script: dict[str, object] | None = None) -> dict[str, Any]:
+        """One online task or deterministic scripted run of the candidate harness."""
 
 
 class AgentGateway:
@@ -141,10 +142,22 @@ class AgentGateway:
                     self._answer(200, gateway._tools.check())
                 elif route == "/trial":
                     task = payload.get("task")
-                    if not isinstance(task, str) or not task.strip():
-                        self._answer(400, {"error": "a trial needs a task"})
+                    script = payload.get("script")
+                    if script is not None:
+                        if task is not None:
+                            self._answer(400, {"error": "choose task or script, not both"})
+                            return
+                        try:
+                            validated = trial_script(script)
+                        except ValueError as error:
+                            self._answer(400, {"error": str(error)})
+                            return
+                        self._answer(200, gateway._tools.trial("", validated))
+                    elif isinstance(task, str) and task.strip():
+                        self._answer(200, gateway._tools.trial(task.strip()))
+                    else:
+                        self._answer(400, {"error": "a trial needs a task or script"})
                         return
-                    self._answer(200, gateway._tools.trial(task.strip()))
                 else:
                     self._answer(404, {"error": f"the gateway serves no {route}"})
 
