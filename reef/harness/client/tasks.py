@@ -4,7 +4,9 @@ The agent's model calls go through Reef's capture proxy, so every inference is a
 and its receipt comes back here. When the verifier scores the episode, one report goes to
 ``/reef/report``: the reward as the score, the receipts as the references, and the task's name, path
 and digest under ``metadata.task``. A recipe's reported processor turns those records into training
-samples the way it does for any report. The agent is the caller's choice: any name Harbor knows
+samples the way it does for any report. A play made with ``is_reporting`` off is held: it keeps its
+receipts and labels, and ``report_play`` posts it later, extra metadata beside the task and the episode.
+The agent is the caller's choice: any name Harbor knows
 (``terminus-2`` unless told otherwise) or an import path, with the served model and the proxy filled
 into the ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders of its configuration. The proxy
 listens on the host's loopback, which an agent running in the host process reaches; an agent that runs
@@ -25,7 +27,7 @@ import sys
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Iterable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -191,6 +193,7 @@ class TaskPlay:
     failed_calls: int
     report_agent_record_ids: tuple[str, ...]
     trial_uri: str | None
+    labels: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def is_reported(self) -> bool:
@@ -312,15 +315,7 @@ class TaskPlayer:
         failed_calls = len(turns) - len(receipts)
         error = row.error or ("" if receipts else call_failure(turns))
         reward = episode_reward(row.rewards)
-        report_ids: tuple[str, ...] = ()
-        if self.is_reporting and reward is not None and receipts:
-            try:
-                report_ids = self.report(task_path, episode_id, reward, row, receipts)
-            except TaskPlayError as exc:
-                # A refused report is this episode's failure, not the caller's: the play comes back unreported
-                # with the reason, and the other episodes in flight go on.
-                error = str(exc)
-        return TaskPlay(
+        play = TaskPlay(
             task_path=task_path,
             name=task_path.name,
             episode_id=episode_id,
@@ -329,39 +324,73 @@ class TaskPlayer:
             error=error,
             receipts=receipts,
             failed_calls=failed_calls,
-            report_agent_record_ids=report_ids,
+            report_agent_record_ids=(),
             trial_uri=row.trial_uri,
+            labels=dict(self.labels),
         )
+        if self.is_reporting and reward is not None and receipts:
+            try:
+                play = replace(play, report_agent_record_ids=self.report_play(play, score=reward))
+            except TaskPlayError as exc:
+                # A refused report is this episode's failure, not the caller's: the play comes back unreported
+                # with the reason, and the other episodes in flight go on.
+                play = replace(play, error=str(exc))
+        return play
 
     def report(
         self, task_path: Path, episode_id: str, reward: float, row: EpisodeRow, receipts: Sequence[str]
     ) -> tuple[str, ...]:
         """Post the episode's reward against its receipts; one report, or one per receipt; the record ids."""
+        play = TaskPlay(
+            task_path=task_path,
+            name=task_path.name,
+            episode_id=episode_id,
+            reward=reward,
+            rewards=dict(row.rewards),
+            error=row.error,
+            receipts=tuple(receipts),
+            failed_calls=0,
+            report_agent_record_ids=(),
+            trial_uri=row.trial_uri,
+            labels=dict(self.labels),
+        )
+        return self.report_play(play, score=reward)
+
+    def report_play(
+        self, play: TaskPlay, *, score: float, metadata: Mapping[str, object] | None = None
+    ) -> tuple[str, ...]:
+        """Post a played episode's score against its receipts, now or later; one report, or one per receipt.
+
+        Extra ``metadata`` keys ride beside the task and the episode; they never replace those two.
+        """
+        if not play.receipts:
+            raise TaskPlayError(f"the episode {play.episode_id} of {play.name} holds no receipt to report against")
         payload: dict[str, object] = {
-            "score": reward,
-            "feedback": f"verifier reward {reward} on {task_path.name}",
+            "score": score,
+            "feedback": f"verifier reward {score} on {play.name}",
             "metadata": {
-                "task": task_identity(task_path),
+                **dict(metadata or {}),
+                "task": task_identity(play.task_path),
                 "episode": {
-                    "id": episode_id,
+                    "id": play.episode_id,
                     "agent": self.agent_name,
-                    "labels": dict(self.labels),
-                    "rewards": dict(row.rewards),
-                    "trial_uri": row.trial_uri,
+                    "labels": dict(play.labels),
+                    "rewards": dict(play.rewards),
+                    "trial_uri": play.trial_uri,
                 },
             },
         }
-        groups = [[receipt] for receipt in receipts] if self.per_receipt else [list(receipts)]
+        groups = [[receipt] for receipt in play.receipts] if self.per_receipt else [list(play.receipts)]
         record_ids = []
         for references in groups:
             try:
                 answer = self.client.report(self.scenario, payload, references=references)
             except ReefClientError as exc:
                 raise TaskPlayError(
-                    f"the report for {task_path.name} was refused ({exc.status}): {exc.body[:300]}"
+                    f"the report for {play.name} was refused ({exc.status}): {exc.body[:300]}"
                 ) from exc
             except OSError as exc:
-                raise TaskPlayError(f"the report for {task_path.name} did not reach {self.reef_url}: {exc}") from exc
+                raise TaskPlayError(f"the report for {play.name} did not reach {self.reef_url}: {exc}") from exc
             record_ids.append(str(answer.get("agent_record_id", "")))
         return tuple(record_ids)
 

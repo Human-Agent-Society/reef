@@ -6,12 +6,18 @@ them run here, in a process ``reef serve`` starts beside the HTTP service (see `
 
 - ``POST /proposals``: ask the designer's model for one task (a job): the service's designer model when it
   has one, else the model the request names; the reply parsed and held to the task contract, the
-  designer's record id beside the task or the refusal.
-- ``POST /proposals/{record_id}/report``: report a score against the designer's receipt.
+  designer's record id beside the task or the refusal. A generation's first proposal waits for the
+  Designer's deployment to take the last generation's reports in (``DesignerTurn``) before the prompt pull.
+- ``POST /proposals/{record_id}/report``: report a score against the designer's receipt, with the method's
+  metadata and feedback (text or an object) passed through to the report.
+- Both go to the service's designer scenario when the deployment names one, else to the scenario the
+  request names, so a Designer on its own Reef service keeps its own scenario.
 - ``POST /tasks``: write a task under the tasks root, refusing a duplicate (by content hash) or a
   different task under a taken name; ``DELETE /tasks/{name}`` removes one.
 - ``POST /checks``: Harbor's oracle and nop agents on a written task (a job).
 - ``POST /plays``: an agent plays a written task through the task player, episodes reported to Reef (a job).
+- ``POST /plays/report``: held episodes reported after the fact, each against its receipts with the score
+  the caller names (a direct call, so it never waits behind a play in flight).
 - ``POST /manifests``: the split manifest of one generation's tasks under the tasks root.
 - ``GET /jobs/{id}``: a job's state and result.
 - ``GET /healthz``: ok once reef-eval imports, the harbor command line resolves and Docker answers; until
@@ -36,6 +42,7 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from aiohttp import web
@@ -49,12 +56,15 @@ from reef.core.tasks import (
     write_split_manifest,
 )
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.harness.client.tasks import TaskPlay, TaskPlayer
+from reef.harness.client.tasks import TaskPlay, TaskPlayer, TaskPlayError
 from reef.record2dataset.designer import (
     Designer,
     DesignerError,
     DesignerReplyError,
     DesignerRequest,
+    DesignerTurn,
+    FixedPrompt,
+    PromptSource,
     designer_messages,
     parse_harbor_reply,
 )
@@ -73,6 +83,7 @@ from reef.record2dataset.wire import (
     checked_string,
     oracle_document,
     play_document,
+    play_from_document,
     task_document,
     task_from_document,
 )
@@ -199,9 +210,21 @@ class TaskPlays(ABC):
         tags: Mapping[str, str],
     ) -> tuple[TaskPlay, ...]: ...
 
+    @abstractmethod
+    def report(
+        self,
+        plays: Sequence[TaskPlay],
+        *,
+        scenario: str,
+        model: str,
+        score_of: Mapping[str, float],
+        metadata: Mapping[str, object],
+    ) -> tuple[TaskPlay, ...]:
+        """Report held episodes after the fact, each with the score ``score_of`` names by episode id; the plays with their report ids."""
+
 
 class ReefTaskPlays(TaskPlays):
-    """A task player per call, its episodes tagged with the arm."""
+    """A task player per call, its episodes tagged with the arm; a held play is reported by a player with its labels."""
 
     def __init__(
         self,
@@ -234,7 +257,56 @@ class ReefTaskPlays(TaskPlays):
     ) -> tuple[TaskPlay, ...]:
         if plays < 1:
             return ()
-        player = TaskPlayer(
+        player = self.player(
+            scenario=scenario,
+            model=model,
+            labels={**tags, "arm": arm},
+            extra_instruction_paths=extra_instruction_paths,
+            is_reporting=is_reporting,
+        )
+        return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
+
+    def report(
+        self,
+        plays: Sequence[TaskPlay],
+        *,
+        scenario: str,
+        model: str,
+        score_of: Mapping[str, float],
+        metadata: Mapping[str, object],
+    ) -> tuple[TaskPlay, ...]:
+        # One player per distinct label set: the labels a play carries are the ones its episode block names.
+        players: dict[tuple[tuple[str, str], ...], TaskPlayer] = {}
+        reported = []
+        for play in plays:
+            score = score_of.get(play.episode_id)
+            if score is None or not play.receipts:
+                reported.append(play)
+                continue
+            key = tuple(sorted(play.labels.items()))
+            if key not in players:
+                players[key] = self.player(
+                    scenario=scenario, model=model, labels=play.labels, extra_instruction_paths=(), is_reporting=True
+                )
+            try:
+                report_ids = players[key].report_play(play, score=score, metadata=metadata)
+            except TaskPlayError as exc:
+                # A refused report is this play's failure; the others still go out.
+                reported.append(replace(play, error=str(exc)))
+                continue
+            reported.append(replace(play, report_agent_record_ids=report_ids))
+        return tuple(reported)
+
+    def player(
+        self,
+        *,
+        scenario: str,
+        model: str,
+        labels: Mapping[str, str],
+        extra_instruction_paths: Sequence[Path],
+        is_reporting: bool,
+    ) -> TaskPlayer:
+        return TaskPlayer(
             reef_url=self.reef_url,
             scenario=scenario,
             model=model,
@@ -242,11 +314,10 @@ class ReefTaskPlays(TaskPlays):
             token=self.token,
             agent=self.agent,
             agent_host=self.agent_host,
-            labels={**tags, "arm": arm},
+            labels=labels,
             extra_instruction_paths=extra_instruction_paths,
             is_reporting=is_reporting,
         )
-        return player.play_concurrently([task_path] * plays, concurrency=min(self.concurrency, plays))
 
 
 # ------------------------------------------------------------------ the jobs
@@ -271,7 +342,7 @@ class Job(ABC):
 
 
 class ProposalJob(Job):
-    """One designer call: the reply parsed and held to the task contract; the record id beside the task or the refusal."""
+    """One designer call with the prompt its generation gets; the reply parsed and held to the task contract."""
 
     kind = "proposal"
 
@@ -280,25 +351,35 @@ class ProposalJob(Job):
         designer: Designer,
         request: DesignerRequest,
         *,
+        prompts: PromptSource,
         scenario: str,
         model: str,
         generation: int,
         index: int,
         tags: Mapping[str, str],
+        turn: DesignerTurn | None = None,
     ) -> None:
         super().__init__()
         self.designer = designer
         self.request = request
+        self.prompts = prompts
         self.scenario = scenario
         self.model = model
         self.generation = generation
         self.index = index
         self.tags = dict(tags)
+        self.turn = turn
 
     def run(self) -> dict[str, object]:
+        # On the job thread: the turn's wait and a harness source's pull go over HTTP, which the event loop must not wait on.
+        if self.turn is not None:
+            self.turn.begin(self.generation, self.scenario)
+        prompt = self.prompts.prompt(self.generation)
         answer = self.designer.answer(
-            designer_messages(self.request), scenario=self.scenario, model=self.model, tags=self.tags
+            designer_messages(self.request, prompt), scenario=self.scenario, model=self.model, tags=self.tags
         )
+        if self.turn is not None:
+            self.turn.proposed(self.generation, answer.record_id)
         try:
             reply = parse_harbor_reply(answer.text)
             task = harbor_task(
@@ -445,6 +526,15 @@ def checked_count(value: object, label: str, *, minimum: int = 0) -> int:
     return value
 
 
+def checked_scores(value: object) -> dict[str, float]:
+    scores: dict[str, float] = {}
+    for episode_id, score in checked_object(value if value is not None else {}, "scores").items():
+        if isinstance(score, bool) or not isinstance(score, (int, float)):
+            raise WireError("scores must map episode ids to numbers")
+        scores[episode_id] = float(score)
+    return scores
+
+
 class GeneratorService:
     """Writes, checks and plays Harbor tasks under one tasks root, for whoever asks over HTTP."""
 
@@ -457,6 +547,9 @@ class GeneratorService:
         plays: TaskPlays,
         default_model: str | None = None,
         designer_model: str | None = None,
+        designer_scenario: str | None = None,
+        prompts: PromptSource | None = None,
+        turn: DesignerTurn | None = None,
         jobs: JobRunner | None = None,
         probes: Sequence[ReadinessProbe] | None = None,
     ) -> None:
@@ -465,8 +558,11 @@ class GeneratorService:
         self.checks = checks
         self.plays = plays
         self.default_model = default_model
-        # The deployment's generator section owns the Designer's model; a proposal's own model is the fallback.
+        # The deployment's generator section owns the Designer's model and scenario; the request's own are the fallback.
         self.designer_model = designer_model
+        self.designer_scenario = designer_scenario
+        self.prompts = prompts if prompts is not None else FixedPrompt()
+        self.turn = turn
         self.jobs = jobs if jobs is not None else JobRunner()
         self.probes = tuple(probes) if probes is not None else readiness_probes()
         self.reported_missing: tuple[str, ...] = ()
@@ -482,6 +578,7 @@ class GeneratorService:
                 web.delete("/tasks/{name}", self.delete_task),
                 web.post("/checks", self.check),
                 web.post("/plays", self.play),
+                web.post("/plays/report", self.report_plays),
                 web.post("/manifests", self.write_manifest),
                 web.get("/jobs/{job_id}", self.job),
             ]
@@ -577,11 +674,13 @@ class GeneratorService:
             job = ProposalJob(
                 self.designer,
                 designer_request,
-                scenario=checked_string(body, "scenario", label="a proposal"),
+                prompts=self.prompts,
+                scenario=self.designer_scenario or checked_string(body, "scenario", label="a proposal"),
                 model=self.designer_model or self.model_for(body),
                 generation=checked_count(body.get("generation", 0), "generation"),
                 index=checked_count(body.get("index", 0), "index"),
                 tags=checked_tags(body.get("tags")),
+                turn=self.turn,
             )
         except (WireError, ValueError) as exc:
             return error_response(400, str(exc))
@@ -591,19 +690,29 @@ class GeneratorService:
         record_id = request.match_info["record_id"]
         try:
             body = await self.body_of(request)
-            scenario = checked_string(body, "scenario", label="a report")
+            scenario = self.designer_scenario or checked_string(body, "scenario", label="a report")
             score = body.get("score")
             if isinstance(score, bool) or not isinstance(score, (int, float)):
                 raise WireError("score must be a number")
             metadata = checked_object(body.get("metadata", {}), "metadata")
+            feedback = body.get("feedback")
+            if feedback is not None and not isinstance(feedback, (str, Mapping)):
+                raise WireError("feedback must be a string or an object")
         except WireError as exc:
             return error_response(400, str(exc))
         try:
             report_id = await asyncio.to_thread(
-                self.designer.report, record_id, scenario=scenario, score=float(score), metadata=metadata
+                self.designer.report,
+                record_id,
+                scenario=scenario,
+                score=float(score),
+                metadata=metadata,
+                feedback=dict(feedback) if isinstance(feedback, Mapping) else feedback,
             )
         except (DesignerError, ReefClientError, OSError) as exc:
             return error_response(502, str(exc))
+        if self.turn is not None:
+            await asyncio.to_thread(self.turn.reported, record_id, scenario)
         return web.json_response({"agent_record_id": report_id})
 
     async def write_task(self, request: web.Request) -> web.Response:
@@ -666,6 +775,24 @@ class GeneratorService:
         except WireError as exc:
             return error_response(400, str(exc))
         return self.submitted(job)
+
+    async def report_plays(self, request: web.Request) -> web.Response:
+        try:
+            body = await self.body_of(request)
+            scenario = checked_string(body, "scenario", label="a play report")
+            model = self.model_for(body)
+            rows = body.get("plays")
+            if not isinstance(rows, list):
+                raise WireError("plays must be a list of played episodes")
+            plays = tuple(play_from_document(row) for row in rows)
+            score_of = checked_scores(body.get("scores"))
+            metadata = checked_object(body.get("metadata", {}), "metadata")
+        except WireError as exc:
+            return error_response(400, str(exc))
+        reported = await asyncio.to_thread(
+            self.plays.report, plays, scenario=scenario, model=model, score_of=score_of, metadata=metadata
+        )
+        return web.json_response({"plays": [play_document(play) for play in reported]})
 
     async def write_manifest(self, request: web.Request) -> web.Response:
         try:

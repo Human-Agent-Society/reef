@@ -133,6 +133,7 @@ def play_document(play: TaskPlay) -> dict[str, object]:
         "failed_calls": play.failed_calls,
         "report_agent_record_ids": list(play.report_agent_record_ids),
         "trial_uri": play.trial_uri,
+        "labels": dict(play.labels),
     }
 
 
@@ -141,6 +142,11 @@ def play_from_document(document: object) -> TaskPlay:
     rewards = fields.get("rewards", {})
     if not isinstance(rewards, Mapping):
         raise WireError("a played episode's rewards must be an object")
+    labels = fields.get("labels", {})
+    if not isinstance(labels, Mapping) or any(
+        not isinstance(name, str) or not isinstance(value, str) for name, value in labels.items()
+    ):
+        raise WireError("a played episode's labels must map names to text")
     receipts = checked_string_list(fields, "receipts", label="a played episode")
     reports = checked_string_list(fields, "report_agent_record_ids", label="a played episode")
     failed_calls = fields.get("failed_calls", 0)
@@ -161,4 +167,5 @@ def play_from_document(document: object) -> TaskPlay:
         failed_calls=failed_calls,
         report_agent_record_ids=tuple(reports),
         trial_uri=trial_uri,
+        labels={str(name): str(value) for name, value in labels.items()},
     )
