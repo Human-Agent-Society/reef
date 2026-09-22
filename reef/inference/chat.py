@@ -110,7 +110,7 @@ class NativeGenerateClient(ABC):
         """
 
 
-async def _sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
+async def sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[str, Any]]:
     """Decode arbitrarily chunked SSE bytes into JSON data events."""
 
     decoder = codecs.getincrementaldecoder("utf-8")()
@@ -154,7 +154,7 @@ async def _sse_json_events(chunks: AsyncIterator[bytes]) -> AsyncIterator[dict[s
         yield decode_event(payload)
 
 
-class _ReasoningStreamSplitter:
+class ReasoningStreamSplitter:
     """Split sampled thinking tags without waiting for the full completion."""
 
     _OPEN = "<think>"
@@ -390,7 +390,7 @@ class _AnthropicEventWriter(_StreamWriter):
         ]
 
 
-class _ChatStreamRelay:
+class ChatStreamRelay:
     """Turn one request's sampled deltas into client frames and remember what was sent.
 
     Tool markers are parsed out of the visible text as it streams; at the end
@@ -491,7 +491,7 @@ class ChatCall:
     tool_parser: Any
 
 
-def _stream_ids() -> tuple[str, str, int]:
+def stream_ids() -> tuple[str, str, int]:
     """The chat id, message id and timestamp one streamed response shares across its frames."""
     return f"chatcmpl-{uuid.uuid4().hex}", f"msg_{uuid.uuid4().hex}", int(time.time())
 
@@ -697,7 +697,7 @@ class TokenNativeChatHandler(HttpInferenceHandler):
     def _finish_frames(
         self,
         call: ChatCall,
-        relay: _ChatStreamRelay,
+        relay: ChatStreamRelay,
         response: dict[str, Any],
         chat_id: str,
         message_id: str,
@@ -726,8 +726,8 @@ class TokenNativeChatHandler(HttpInferenceHandler):
         self._validate_stream_path(path)
         call = self._chat_call(path, payload)
         response, _ = await self._complete(artifact, call)
-        chat_id, message_id, created = _stream_ids()
-        relay = _ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), None)
+        chat_id, message_id, created = stream_ids()
+        relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), None)
         frames = list(relay.writer.start())
         if not call.anthropic and call.request.get("logprobs") is True:
             logprobs = response["choices"][0].get("logprobs")
@@ -1310,10 +1310,14 @@ __all__ = [
     "NATIVE_REQUEST_KEYS",
     "CapturedGeneration",
     "ChatCall",
+    "ChatStreamRelay",
     "NativeGenerateClient",
+    "ReasoningStreamSplitter",
     "TokenNativeChatHandler",
     "finite_log_prob",
     "integer_tokens",
     "normalize_finish_reason",
     "positive_max_tokens",
+    "sse_json_events",
+    "stream_ids",
 ]

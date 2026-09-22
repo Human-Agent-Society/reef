@@ -16,15 +16,15 @@ from reef.artifact.artifact import Artifact, is_local_release
 from reef.inference.chat import (
     CapturedGeneration,
     ChatCall,
+    ChatStreamRelay,
     NativeGenerateClient,
+    ReasoningStreamSplitter,
     TokenNativeChatHandler,
-    _ChatStreamRelay,
-    _ReasoningStreamSplitter,
-    _sse_json_events,
-    _stream_ids,
     finite_log_prob,
     normalize_finish_reason,
     positive_max_tokens,
+    sse_json_events,
+    stream_ids,
 )
 from reef.inference.http import HttpInferenceHandler
 from reef.runtime.interfaces import InferenceStream
@@ -211,7 +211,7 @@ def captured_topk(
     return indices, log_probs
 
 
-class _NativeStreamCapture:
+class NativeStreamCapture:
     """Accumulate Reef's required disjoint SGLang stream events."""
 
     _LIST_META_KEYS = (
@@ -318,14 +318,14 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         call = self._chat_call(path, payload)
         # Force the scheduler to flush every available decode step. This is a
         # request-local knob; deployments using SGLang's disjoint incremental
-        # output mode are supported by _NativeStreamCapture as well.
+        # output mode are supported by NativeStreamCapture as well.
         call.sampling_params.setdefault("stream_interval", 1)
         native_payload = self.client.payload(
             call.request, call.prompt_ids, call.sampling_params, capture_topk=self.capture_topk, stream=True
         )
         upstream = await HttpInferenceHandler.inference_stream(self, artifact, SGLANG_GENERATE_PATH, native_payload)
-        chat_id, message_id, created = _stream_ids()
-        relay = _ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), call.tool_parser)
+        chat_id, message_id, created = stream_ids()
+        relay = ChatStreamRelay(self._stream_writer(call, chat_id, message_id, created), call.tool_parser)
 
         async def chunks() -> AsyncIterator[bytes]:
             # ``stream`` is bound below, before the first chunk is pulled; the
@@ -348,7 +348,7 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         self,
         stream: InferenceStream,
         upstream: InferenceStream,
-        relay: _ChatStreamRelay,
+        relay: ChatStreamRelay,
         artifact: Artifact,
         call: ChatCall,
         chat_id: str,
@@ -356,15 +356,15 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
         created: int,
     ) -> AsyncIterator[bytes]:
         """Forward SGLang's incremental events as client frames, then record the exact sample."""
-        capture = _NativeStreamCapture()
-        reasoning = _ReasoningStreamSplitter(
+        capture = NativeStreamCapture()
+        reasoning = ReasoningStreamSplitter(
             enabled=self.SPLIT_REASONING, force_reasoning=self.reasoning_is_pre_opened()
         )
         wants_logprobs = not call.anthropic and call.request.get("logprobs") is True
         try:
             for frame in relay.writer.start():
                 yield frame
-            async for native_event in _sse_json_events(upstream.chunks):
+            async for native_event in sse_json_events(upstream.chunks):
                 for kind, value in reasoning.feed(capture.accept(native_event)):
                     for frame in relay.piece(kind, value):
                         yield frame
@@ -388,4 +388,4 @@ class SGLangInferenceHandler(TokenNativeChatHandler):
             await upstream.close()
 
 
-__all__ = ["SGLangGenerateClient", "SGLangInferenceHandler"]
+__all__ = ["NativeStreamCapture", "SGLangGenerateClient", "SGLangInferenceHandler"]
