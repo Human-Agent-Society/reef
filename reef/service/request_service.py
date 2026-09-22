@@ -156,6 +156,8 @@ class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
         self._retry_policy = retry_policy or InferenceRetryPolicy()
+        # A release's content never changes, so the tree it binds is read once.
+        self._files_content_ids: dict[tuple[str, str], str] = {}
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -588,22 +590,58 @@ class RequestService:
             manifest["components"] = {name: entry.content_id for name, entry in components.entries.items()}
         return manifest
 
-    @staticmethod
-    def _harness_release_id(scenario: Scenario) -> str:
-        """The newest release that changed what a client pulls.
+    def _files_content_id(self, scenario: Scenario, release_id: str, files_component: str) -> str | None:
+        """The content id of the tree a release binds; ``None`` when its manifest cannot be read."""
+        key = (scenario.name, release_id)
+        cached = self._files_content_ids.get(key)
+        if cached is not None:
+            return cached
+        try:
+            manifest = scenario.artifact_for_version(release_id).components
+        except (ArtifactError, ValueError):
+            return None
+        entry = None if manifest is None else manifest.entries.get(files_component)
+        if entry is None:
+            return None
+        self._files_content_ids[key] = entry.content_id
+        return entry.content_id
+
+    def _harness_rows(self, scenario: Scenario) -> list[dict[str, Any]]:
+        """The catalog rows a client pulls, newest first: the releases that changed the tree.
 
         Another component's step carries the tree forward unchanged, so it is
-        no new harness head: a client that compared release ids would pull the
-        same tree again and a person would be asked to install nothing. A
-        rollback or promote may change the tree and counts; a release held for
-        review is not served and does not.
+        no harness release: a client that compared release ids would pull the
+        same tree again and a person would be asked to install nothing. Nor
+        is a rollback or promote that restored other weights under the tree
+        served already. Each release is compared with the one served before
+        it by the content id of its files component. A row that published no
+        release (a rejected or skipped step) or whose manifest cannot be read
+        counts when it names no other component. A flat scenario lists every
+        row.
         """
+        rows = list(scenario.releases())
         files_component = scenario.surface.files_component
-        for row in scenario.releases():
-            if row.get("pending"):
-                continue
-            component = row.get("component")
-            if component is None or component == files_component:
+        if scenario.surface.single or files_component is None:
+            return rows
+        kept: list[dict[str, Any]] = []
+        for index, row in enumerate(rows):
+            previous = next((older for older in rows[index + 1 :] if not older.get("pending")), None)
+            release_id = str(row["release_id"])
+            changed: bool | None = None
+            if previous is not None and previous["release_id"] != release_id:
+                own = self._files_content_id(scenario, release_id, files_component)
+                before = self._files_content_id(scenario, str(previous["release_id"]), files_component)
+                changed = None if own is None or before is None else own != before
+            if changed is None:
+                changed = row.get("component") in (None, files_component)
+            if changed:
+                kept.append(row)
+        return kept
+
+    def _harness_release_id(self, scenario: Scenario) -> str:
+        """The newest served release that changed what a client pulls; a release held for review is not served."""
+        for row in self._harness_rows(scenario):
+            if not row.get("pending"):
                 return str(row["release_id"])
         return scenario.repository.require_current_artifact().release_id
 
@@ -668,18 +706,15 @@ class RequestService:
         read-only rules as ``harness_manifest``.
         """
         scenario = self._file_scenario(headers)
-        files_component = scenario.surface.files_component
-        # Another component's step is not a harness release: the tree it carries is the one already listed.
-        rows = [row for row in scenario.releases() if row.get("component") in (None, files_component)]
         return {
             "scenario": scenario.name,
-            "releases": list(reversed(rows)),
+            "releases": list(reversed(self._harness_rows(scenario))),
         }
 
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
         """Raw retained files for a catalog row; presentation belongs to the caller."""
         scenario = self._file_scenario(headers)
-        rows = list(reversed(scenario.releases()))
+        rows = list(reversed(self._harness_rows(scenario)))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
@@ -708,9 +743,7 @@ class RequestService:
         An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
-        files_component = scenario.surface.files_component
-        # The page walks harness releases; another component's step is not one of them.
-        rows = [row for row in reversed(scenario.releases()) if row.get("component") in (None, files_component)]
+        rows = list(reversed(self._harness_rows(scenario)))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
@@ -759,7 +792,8 @@ class RequestService:
         record = self._dispatcher.read_record(scenario.name, record_id)
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
-        rows = list(reversed(scenario.releases()))
+        # The step a request settled as counts the catalog rows, the ones the release page opens.
+        rows = list(reversed(self._harness_rows(scenario)))
         backend = self._files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
         reserved = self._files_trainer(scenario).pending_batch
@@ -781,7 +815,7 @@ class RequestService:
         record = self._dispatcher.read_record(scenario.name, record_id)
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
-        rows = list(reversed(scenario.releases()))
+        rows = list(reversed(self._harness_rows(scenario)))
         step = settled_step(rows, record_id)
         if step is not None:
             return {

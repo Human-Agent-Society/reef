@@ -384,6 +384,14 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert surface.files.read_files(after_weights) == {"AGENTS.md": "evolved"}
         assert activator.activated[0] == base_weights
         assert set(activator.activated[1:]) == {trained.ref.content_id}
+        # The record names the harness trainer, but the tree did not change: no new harness head.
+        service = RequestService(dispatcher)
+        headers = {"x-reef-scenario": "agent"}
+        assert service.harness_head(headers) == after_harness.ref.release_id
+        assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [
+            base.ref.release_id,
+            after_harness.ref.release_id,
+        ]
 
         # A publication naming no component replaces the committing trainer's own; unknown names are refused,
         # and live weights cannot carry the harness.
@@ -426,5 +434,61 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         assert promoted.components is not None
         assert promoted.components.entries[WEIGHTS].content_id == later.ref.content_id
         assert surface.files.read_files(promoted) == {"AGENTS.md": "held"}
+        promote_release = scenario.current_artifact_ref().release_id
+        assert service.harness_head(headers) == promote_release
+
+        # Weights held for review by the harness trainer are promoted as weights, onto the tree served by then.
+        held_weights = Artifact.local(
+            _tree(tmp_path / "w3", {"adapter_config.json": '{"r": 32}'}), metadata={"runtime_load_id": "inc:3"}
+        )
+        scenario.commit(TrainStepResult(state={}, artifact=held_weights, component=WEIGHTS, pending=True))
+        held_weights_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        newest = Artifact.local(_tree(tmp_path / "h4", {"AGENTS.md": "newest"}))
+        scenario.commit(TrainStepResult(state={}, artifact=newest, component=HARNESS))
+        newest_release = scenario.current_artifact_ref().release_id
+        scenario.rollback(held_weights_release, operation="promote")
+        promoted_weights = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert promoted_weights.components is not None
+        assert promoted_weights.components.entries[WEIGHTS].content_id == held_weights.ref.content_id
+        assert surface.files.read_files(promoted_weights) == {"AGENTS.md": "newest"}
+        assert activator.loaded[-1] == held_weights.ref.content_id
+        # That promote changed no tree: the harness head and catalog stay at the newest harness step.
+        assert service.harness_head(headers) == newest_release
+        assert service.harness_manifest(headers)["release_id"] == newest_release
+        catalog = service.harness_releases(headers)["releases"]
+        assert catalog[-1]["release_id"] == newest_release
+        assert held_weights_release not in {row["release_id"] for row in catalog}
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_promote_refused_by_validation_leaves_no_staged_release(tmp_path: Path, monkeypatch: Any) -> None:
+    initial = tmp_path / "initial"
+    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
+    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
+    staged_root = tmp_path / "staged"
+    dispatcher = Dispatcher(
+        _TwoComponentRecipe(),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=staged_root,
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        held = Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "held"}))
+        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
+        held_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        before = {path for path in staged_root.rglob("*") if path.is_dir()}
+
+        def refuse(self: Surface, artifact: Artifact) -> None:
+            raise ReefError("refused by the validator")
+
+        monkeypatch.setattr(Surface, "validate", refuse)
+        with pytest.raises(ReefError, match="refused by the validator"):
+            scenario.rollback(held_release, operation="promote")
+        assert {path for path in staged_root.rglob("*") if path.is_dir()} == before
+        assert scenario.scenario_step == 1
     finally:
         dispatcher.close()

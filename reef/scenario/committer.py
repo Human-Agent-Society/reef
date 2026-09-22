@@ -278,13 +278,34 @@ class ScenarioCommitter:
                 f"{artifact.ref.release_id!r} binds {list(manifest.names)}"
             )
 
-    def _held_component(self, release_id: str) -> str | None:
-        """The component a release held for review publishes; ``None`` when it is not such a release."""
+    def _held_component(self, release_id: str, held: Artifact) -> str | None:
+        """The component a release held for review changed; ``None`` when it is not such a release.
+
+        The record names the trainer that made the release, and a trainer may
+        publish another component's content, so the component is read off the
+        manifests: the one entry that differs from the release it was carried
+        from. The record's name answers when the manifests cannot be compared.
+        """
         records = self._store.history() if self._store.durable else ()
-        for record in reversed(records):
-            if record.artifact_ref.release_id == release_id:
-                return record.component if record.pending else None
-        return None
+        record = next((row for row in reversed(records) if row.artifact_ref.release_id == release_id), None)
+        if record is None or not record.pending:
+            return None
+        if self._binding.surface.single:
+            return record.component
+        parent_id = record.artifact_ref.parent_release_id
+        parent = None if parent_id is None else self._releases.find_release(parent_id)
+        manifest = held.components
+        if parent is None or manifest is None:
+            return record.component
+        carried = self._artifacts.resolve(parent[0]).components
+        if carried is None:
+            return record.component
+        changed = [
+            name
+            for name, entry in manifest.entries.items()
+            if name not in carried.entries or carried.entries[name].content_id != entry.content_id
+        ]
+        return changed[0] if len(changed) == 1 else record.component
 
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
@@ -326,9 +347,9 @@ class ScenarioCommitter:
                 self._require_components(source)
             except ReefError as exc:
                 raise ReleaseNotRestorable(str(exc)) from exc
-            promoted = self._held_component(release_id) if operation == "promote" else None
-            composed = promoted is not None and not surface.single
-            if composed:
+            promoted = self._held_component(release_id, source) if operation == "promote" else None
+            staged: Artifact | None = None
+            if promoted is not None and not surface.single:
                 # A held release carries the other components as they were when it
                 # was minted; promoting it publishes its own component on the
                 # combination served now, not the combination of that day.
@@ -336,22 +357,26 @@ class ScenarioCommitter:
                 components = {name: served_now.component(name) for name in surface.names}
                 components[promoted] = source.component(promoted)
                 source = artifacts.stage_composed(next_step, components, parent=checkpoint)
-            surface.validate(source)
-            # The runtime-loaded component is restored only when the engine serves other content.
-            loaded_component = surface.loader_component
-            served = Artifact(current_ref, artifacts.repository)
-            restore_weights = loaded_component is not None and surface.component_changed(
-                source, served, loaded_component
-            )
-            if self._binding.training_runtime is not None and loaded_component is not None and restore_weights:
-                if self._binding.runtime is None:
-                    raise ReefError("training checkpoint restore requires an inference runtime")
-                self._binding.runtime.pause_admission()
-                self._binding.training_runtime.restore_checkpoint(surface.component_artifact(source, loaded_component))
-            if restore_weights:
-                surface.load(source, self._binding.runtime)
-            staged = source if composed else artifacts.stage(next_step, source, parent=checkpoint)
+                staged = source
             try:
+                surface.validate(source)
+                # The runtime-loaded component is restored only when the engine serves other content.
+                loaded_component = surface.loader_component
+                served = Artifact(current_ref, artifacts.repository)
+                restore_weights = loaded_component is not None and surface.component_changed(
+                    source, served, loaded_component
+                )
+                if self._binding.training_runtime is not None and loaded_component is not None and restore_weights:
+                    if self._binding.runtime is None:
+                        raise ReefError("training checkpoint restore requires an inference runtime")
+                    self._binding.runtime.pause_admission()
+                    self._binding.training_runtime.restore_checkpoint(
+                        surface.component_artifact(source, loaded_component)
+                    )
+                if restore_weights:
+                    surface.load(source, self._binding.runtime)
+                if staged is None:
+                    staged = artifacts.stage(next_step, source, parent=checkpoint)
                 commit_metadata = scenario_metadata_for(
                     name=self._name,
                     base_artifact=artifacts.base,
@@ -397,7 +422,8 @@ class ScenarioCommitter:
                         published_ref, expected=current_ref, expected_checkpoint=checkpoint
                     )
             except Exception:
-                artifacts.discard(staged)
+                if staged is not None:
+                    artifacts.discard(staged)
                 raise
             self._settle_trainer_commit(prepared, record, next_step, self._trainer)
             self._resume_restored_weights()

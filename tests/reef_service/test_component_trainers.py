@@ -550,6 +550,53 @@ def test_a_weights_step_is_no_new_harness_head(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_a_rollback_under_the_same_tree_is_no_new_harness_head(tmp_path: Path) -> None:
+    """A rollback or promote that changed only the weights is not announced or listed as a harness release."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        service = RequestService(dispatcher)
+        headers = {"x-reef-scenario": "agent"}
+        base = scenario.current_artifact_ref().release_id
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        harness_release = scenario.current_artifact_ref().release_id
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        scenario.commit(weights, component=WEIGHTS)
+        first_weights = scenario.current_artifact_ref().release_id
+        for record in _records(2):
+            scenario.records.append(record)
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        scenario.commit(weights, component=WEIGHTS)
+
+        # Back to the first weights under the same tree: nothing to pull.
+        scenario.rollback(first_weights)
+        assert _component_files(scenario, scenario.current_artifact_ref())[WEIGHTS] == "weights step 1"
+        assert service.harness_head(headers) == harness_release
+        assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [base, harness_release]
+
+        # Back to the base: the seed tree is served again, and that is a harness release.
+        scenario.rollback(base)
+        restored = scenario.current_artifact_ref().release_id
+        assert service.harness_head(headers) == restored
+        assert service.harness_manifest(headers)["release_id"] == restored
+        assert service.harness_manifest(headers)["files"] == {"harness.txt": "harness seed"}
+        assert [row["release_id"] for row in service.harness_releases(headers)["releases"]] == [
+            base,
+            harness_release,
+            restored,
+        ]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_committed_job_id_outlives_another_trainers_commit(tmp_path: Path) -> None:
     """The backend must finish the weights job even after the harness moved the scenario step."""
     dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path))
