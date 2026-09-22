@@ -421,3 +421,50 @@ def test_the_first_sandbox_stops_only_the_ones_its_own_deployment_left(tmp_path:
     # No owner, no deployment to speak for: nothing is listed or stopped.
     E2BExecutor(api_key="k").reap_once()
     assert E2BExecutor(api_key="k").reap() == 0 and len(queries) == 1
+
+
+def test_a_run_longer_than_e2bs_ceiling_opens_within_it_and_keeps_its_sandbox_alive(monkeypatch) -> None:
+    """E2B refuses a sandbox asked to live past its ceiling, so a long agent run opens within it and the session
+    extends the deadline while it works, instead of losing the sandbox mid-run."""
+    e2b = pytest.importorskip("e2b")
+
+    import reef.harness.episodes.e2b as e2b_executor
+    from reef.harness.episodes.e2b import SANDBOX_MAX_TIMEOUT_S, E2BExecutor, E2BSession
+
+    asked: list[int] = []
+    extended: list[int] = []
+
+    class Sandbox:
+        def set_timeout(self, seconds):
+            extended.append(seconds)
+
+        def kill(self):
+            return True
+
+    def create(**options):
+        asked.append(options["timeout"])
+        return Sandbox()
+
+    monkeypatch.setattr(e2b.Sandbox, "create", staticmethod(create))
+    monkeypatch.setattr(e2b_executor, "REAPED_OWNERS", set())
+
+    # Four hours of agent run: the sandbox is still created within what E2B grants.
+    session = E2BExecutor(api_key="k", template="reef-pi", timeout_s=14400).open()
+    try:
+        assert asked == [SANDBOX_MAX_TIMEOUT_S]
+        # The keeper asks for the ceiling again rather than waiting out its own period.
+        session.keeper.sandbox.set_timeout(SANDBOX_MAX_TIMEOUT_S)
+        assert extended == [SANDBOX_MAX_TIMEOUT_S]
+        assert session.keeper.is_alive() and not session.keeper.stopped.is_set()
+    finally:
+        session.close()
+    assert session.keeper.stopped.is_set()
+
+    # A short run asks for what it needs and no more.
+    E2BExecutor(api_key="k", template="reef-pi", timeout_s=60).open().close()
+    assert asked[-1] == 660
+
+    # A session closed twice stops its keeper once and stays closed.
+    plain = E2BSession(Sandbox())
+    plain.close()
+    assert plain.keeper.stopped.is_set()
