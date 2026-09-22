@@ -272,9 +272,32 @@ def test_training_mode_switches_every_trainer_or_none(tmp_path: Path) -> None:
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
-        with pytest.raises(NotImplementedError, match=r"\['harness'\]"):
+        with pytest.raises(NotImplementedError, match=r"harness \(ThresholdProcessor\)"):
             scenario.set_training_mode("hybrid")
         assert [bound.trainer.training_mode for bound in scenario.component_trainers] == ["auto", "auto"]
+        with pytest.raises(ValueError, match="training_mode must be"):
+            scenario.set_training_mode("bogus")
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_rejected_batch_retires_rows_from_every_trainer(tmp_path: Path) -> None:
+    """Rows a rejection retires leave the other trainers' memory too, as after a commit."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        assert scenario.trainer_for(HARNESS).releasable_agent_record_ids() == frozenset({"i1", "r1"})
+        assert scenario.prepare_training_step(WEIGHTS) is not None
+        scenario.reject_pending(component=WEIGHTS)
+        assert scenario.records.count("agent") == 0
+        assert scenario.trainer_for(HARNESS).releasable_agent_record_ids() == frozenset()
     finally:
         dispatcher.close()
 
@@ -302,6 +325,21 @@ def test_composite_registration_refuses_a_flat_base(tmp_path: Path) -> None:
     dispatcher, _ = _dispatcher(tmp_path)
     try:
         with pytest.raises(ReefError, match=r"keeps \['harness.txt'\] outside its components"):
+            dispatcher.get_or_create_scenario("agent")
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_composite_registration_refuses_a_file_named_like_a_component(tmp_path: Path) -> None:
+    """A component keeps a directory; a file of that name would fail on every component view."""
+    initial = tmp_path / "initial"
+    (initial / HARNESS).mkdir(parents=True)
+    (initial / HARNESS / f"{HARNESS}.txt").write_text("harness seed", encoding="utf-8")
+    (initial / WEIGHTS).write_text("not a directory", encoding="utf-8")
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        with pytest.raises(ReefError, match=r"keeps \['weights'\] outside its components"):
             dispatcher.get_or_create_scenario("agent")
     finally:
         dispatcher.close()

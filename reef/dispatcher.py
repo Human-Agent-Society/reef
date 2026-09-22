@@ -237,7 +237,7 @@ class Dispatcher:
         with self._registry.lock_for(scenario):
             current = self._registry.set_training_mode(scenario, training_mode)
             self._wake_training(current)
-            return {"scenario": scenario, "training_mode": current.trainer.training_mode}
+            return {"scenario": scenario, "training_mode": current.training_mode}
 
     def _wake_training(self, current: Scenario) -> None:
         if current.training_runtime is not None:
@@ -406,7 +406,7 @@ class Dispatcher:
                 if (existing := current.records.existing_receipt(item)) is not None:
                     current.operations.increment("ingest/duplicates_total")
                     return existing
-                if current.trainer.training_mode == "auto":
+                if current.training_mode == "auto":
                     raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
                 if all(bound.trainer.candidate_backend is None for bound in current.component_trainers):
                     raise ValueError("explicit training requests require a training backend")

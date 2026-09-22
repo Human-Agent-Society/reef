@@ -209,7 +209,11 @@ class ScenarioCommitter:
         """Drop ``component``'s reserved batch, retiring only rows every trainer has released."""
         with self._lock:
             bound = self._bound_trainer(component)
-            bound.trainer.reject_pending(metrics, compactable=self._compactable_for(bound.component))
+            compacted = bound.trainer.reject_pending(metrics, compactable=self._compactable_for(bound.component))
+            # Retired rows leave every trainer's memory, as after a commit.
+            for other in self._trainers:
+                if other is not bound:
+                    other.trainer.compaction_applied(compacted)
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""

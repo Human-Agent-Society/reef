@@ -45,6 +45,9 @@ from reef.storage.records import RecordStore
 from reef.surface.base import ComponentSurface, HarnessInfo, Surface
 from reef.train.trainer import ComponentTrainer
 
+#: The checkpoint cadence key a composite refuses: every one of its steps checkpoints.
+CHECKPOINT_CADENCE_KEY = "checkpoint_every_n_versions"
+
 
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
@@ -70,6 +73,11 @@ class CompositeRecipe(Recipe):
                     f"component {component!r} runs training_mode {recipe.training_mode!r}, "
                     f"the composite recipe {self.training_mode!r}: every component shares one mode"
                 )
+        weight_components = [
+            name for name, recipe in self.components.items() if isinstance(recipe, WeightTrainingRecipe)
+        ]
+        if len(weight_components) > 1:
+            raise RecipeConfigError(f"components {weight_components} all train weights; a release loads one component")
         object.__setattr__(self, "components", dict(self.components))
         # A composed release names every component, so every step checkpoints.
         object.__setattr__(self, "checkpoint_strategy", EveryNVersions(1))
@@ -88,14 +96,14 @@ class CompositeRecipe(Recipe):
         if not isinstance(raw, Mapping) or not raw:
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
         # Every step of a composed scenario checkpoints, so a cadence setting is a mistake, not a choice.
-        cls._refuse_checkpoint_cadence(config, "artifact")
+        cls._refuse_checkpoint_cadence(config, "recipe")
         # Resolve the deployment's runtime once, so the composite and every component share it.
         runtime = cls._resolve_runtime(environ, runtime)
         components: dict[str, Recipe] = {}
         for component, component_config in raw.items():
             if not isinstance(component_config, Mapping):
                 raise RecipeConfigError(f"components.{component} must be an object")
-            cls._refuse_checkpoint_cadence(component_config, f"components.{component}.artifact")
+            cls._refuse_checkpoint_cadence(component_config, f"components.{component}")
             merged = dict(component_config)
             merged.setdefault("model", dict(config.get("model", {})))
             settings = recipe_config_from_mapping(merged)
@@ -123,29 +131,49 @@ class CompositeRecipe(Recipe):
     def select_weight_training(
         cls, config: Mapping[str, Any]
     ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
-        """The first component that trains weights, so the deployment connects its training runtime."""
+        """The one component that trains weights, so the deployment connects its training runtime.
+
+        A release loads one component into a runtime, so two weight training
+        components are refused here, before any runtime is connected.
+        """
         components = config.get("components")
         if not isinstance(components, Mapping):
             return None
-        for component_config in components.values():
+        selected: list[tuple[str, tuple[type[WeightTrainingRecipe], Mapping[str, Any]]]] = []
+        for name, component_config in components.items():
             if not isinstance(component_config, Mapping):
                 continue
             implementation = component_config.get("implementation")
             recipe_type = recipe_class_for(implementation) if isinstance(implementation, str) else None
             if recipe_type is None:
                 continue
-            selected = recipe_type.select_weight_training(component_config)
-            if selected is not None:
-                return selected
-        return None
+            weight_training = recipe_type.select_weight_training(component_config)
+            if weight_training is not None:
+                selected.append((str(name), weight_training))
+        if len(selected) > 1:
+            raise RecipeConfigError(
+                f"components {[name for name, _ in selected]} all train weights; a release loads one component"
+            )
+        return selected[0][1] if selected else None
 
     @staticmethod
     def _refuse_checkpoint_cadence(config: Mapping[str, Any], section: str) -> None:
+        """Refuse the cadence key in every spelling it is written in: flat, under artifact, hyphenated."""
         artifact = config.get("artifact", {})
-        if isinstance(artifact, Mapping) and "checkpoint_every_n_versions" in artifact:
-            raise RecipeConfigError(
-                f"{section}.checkpoint_every_n_versions has no effect: every step of a composite recipe checkpoints"
+        candidates = [
+            (section, key)
+            for key in config
+            if isinstance(key, str) and key.replace("-", "_") == CHECKPOINT_CADENCE_KEY
+        ]
+        if isinstance(artifact, Mapping):
+            candidates.extend(
+                (f"{section}.artifact", key)
+                for key in artifact
+                if isinstance(key, str) and key.replace("-", "_") == CHECKPOINT_CADENCE_KEY
             )
+        if candidates:
+            where, key = candidates[0]
+            raise RecipeConfigError(f"{where}.{key} has no effect: every step of a composite recipe checkpoints")
 
     def with_model_config(self, config: ModelConfig) -> CompositeRecipe:
         super().with_model_config(config)

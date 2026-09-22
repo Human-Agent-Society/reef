@@ -200,14 +200,15 @@ class ScenarioFactory:
                 )
             return manifest
         local_path = base.local_path
-        stray = (
-            []
-            if local_path is None
-            else sorted(
-                entry.name
-                for entry in local_path.iterdir()
-                if entry.name not in surface.names and entry.name not in REPOSITORY_FILES and entry.name != ".git"
-            )
+        if local_path is None:
+            raise ReefError(f"base release {selected.release_id!r} has no local tree to name components in")
+        # A component directory, or nothing at all, is what a component may keep at the root.
+        stray = sorted(
+            entry.name
+            for entry in local_path.iterdir()
+            if (entry.name not in surface.names or not entry.is_dir())
+            and entry.name not in REPOSITORY_FILES
+            and entry.name != ".git"
         )
         if stray:
             raise ReefError(

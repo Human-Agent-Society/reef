@@ -148,7 +148,10 @@ class Artifact:
         directory = materialized.local_path / manifest.relative_path(name)
         # A component the base seeded nothing for has no directory in the
         # release (git keeps none for an empty tree); it is empty, not missing.
-        directory.mkdir(parents=True, exist_ok=True)
+        # Only the leaf is created, and only inside a release tree that is
+        # there: a release directory that is gone must not come back empty.
+        if materialized.local_path.is_dir() and not directory.exists():
+            directory.mkdir()
         return Artifact(
             ArtifactRef(entry.content_id, self.ref.release_id, self.ref.parent_release_id),
             None,

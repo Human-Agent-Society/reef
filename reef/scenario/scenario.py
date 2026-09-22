@@ -161,19 +161,35 @@ class Scenario:
         """The serving surface built for this scenario."""
         return self._surface
 
+    @property
+    def training_mode(self) -> str:
+        """The mode the scenario's stepping trainers run in; a trainer that runs no step keeps none."""
+        return self._stepping_trainers()[0].trainer.training_mode
+
+    def _stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
+        """The trainers with a candidate backend; the first trainer when none has one."""
+        stepping = tuple(bound for bound in self._trainers if bound.trainer.candidate_backend is not None)
+        return stepping or self._trainers[:1]
+
     def set_training_mode(self, training_mode: str) -> None:
         """Select future batches without waiting for a running backend step.
 
-        Every trainer switches or none does: a scenario whose components run
-        in different modes would accept instructions for some and drop them
-        for others.
+        Every trainer that runs a step switches or none does: a scenario whose
+        components run in different modes would accept instructions for some
+        and drop them for others. A trainer without a step builds no batch,
+        so it has no mode to switch.
         """
+        if training_mode not in ("auto", "manual", "hybrid"):
+            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        stepping = self._stepping_trainers()
         unsupported = [
-            bound.component for bound in self._trainers if not bound.trainer.supports_training_mode(training_mode)
+            f"{bound.component} ({type(bound.trainer.processor).__name__})"
+            for bound in stepping
+            if not bound.trainer.supports_training_mode(training_mode)
         ]
         if unsupported:
-            raise NotImplementedError(f"components {unsupported} do not implement training_mode={training_mode!r}")
-        for bound in self._trainers:
+            raise NotImplementedError(f"{', '.join(unsupported)} does not implement training_mode={training_mode!r}")
+        for bound in stepping:
             bound.trainer.set_training_mode(training_mode)
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:

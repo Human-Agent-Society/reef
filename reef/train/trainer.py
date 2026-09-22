@@ -556,10 +556,11 @@ class Trainer:
 
     def reject_pending(
         self, metrics: Mapping[str, Any] | None = None, *, compactable: frozenset[str] | None = None
-    ) -> None:
+    ) -> frozenset[str]:
+        """Drop the reserved batch; returns the rows retired with it."""
         with self._lock:
             if self._pending is None:
-                return
+                return frozenset()
             batch_id = self._pending.batch_id
             self._processor.dropped(batch_id)
             self._processor.acknowledge(batch_id)
@@ -575,6 +576,7 @@ class Trainer:
             self._processor.compaction_applied(compacted)
             self._released_stored_ids -= compacted
             self._pending = None
+            return compacted
 
     def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
         """Retire rows and notify the processor for standalone trainer callers.

@@ -219,7 +219,7 @@ class ScenarioRegistry:
             )
             with self._lock:
                 training_mode = self._training_modes.get(scenario)
-            if training_mode is not None and recovered.trainer.training_mode != training_mode:
+            if training_mode is not None and recovered.training_mode != training_mode:
                 try:
                     recovered.set_training_mode(training_mode)
                 except Exception:
