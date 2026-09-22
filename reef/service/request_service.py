@@ -511,8 +511,8 @@ class RequestService:
         surface = scenario.surface
         # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
         # loaded component, never a composed release whose root holds only component directories.
-        loader = surface.loader_component
-        served = artifact if loader is None else surface.component_artifact(artifact, loader)
+        loaded_component = surface.loader_component
+        served = artifact if loaded_component is None else surface.component_artifact(artifact, loaded_component)
         return PreparedInference(
             parsed=parsed,
             artifact=artifact,

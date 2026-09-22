@@ -192,9 +192,9 @@ def _resolve_training_recipe(config: Mapping[str, Any]) -> tuple[str, str]:
         raise RuntimeError("REEF_CONFIG must define reef.recipe")
     try:
         recipe_class = recipe_class_for(recipe)
+        weight_type = None if recipe_class is None else selected_weight_training(recipe_class, config)
     except RecipeConfigError as exc:
         raise RuntimeError(f"cannot load reef.recipe {recipe!r}: {exc}") from exc
-    weight_type = None if recipe_class is None else selected_weight_training(recipe_class, config)
     if weight_type is None:
         raise RuntimeError(
             f"model driver requires reef.recipe to name a WeightTrainingRecipe class or a recipe with a "

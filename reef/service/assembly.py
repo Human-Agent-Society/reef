@@ -138,8 +138,13 @@ def _training_recipe(
         raise
 
 
+#: The keys a recipe that trains weights through a component reads at the top of its config.
+COMPOSED_RECIPE_KEYS = frozenset({"components", "model", "artifact", "data", "execution", "executors"})
+
+
 def _composed_training_recipe(
     selected: str,
+    recipe_type: type[Recipe],
     config: dict[str, Any],
     weight_type: type[WeightTrainingRecipe],
     weight_config: Mapping[str, Any],
@@ -150,11 +155,21 @@ def _composed_training_recipe(
     """Build a recipe that trains weights through one of its components, on the selected backend runtime.
 
     The component's own data resolves the staleness window the runtime is
-    connected with, and the pair reaches every component of the recipe.
+    connected with, and the pair reaches every component of the recipe. The
+    deployment's model path is every component's model, and a top level
+    evaluation section belongs to the component that trains.
     """
     model_path = _require_non_empty(settings.model_path, "reef.model_path")
     if config.get("runtime"):
         raise ValueError("weight training selects its runtime through training.backend; remove recipe.runtime")
+    unknown = sorted(
+        key for key in config if key not in COMPOSED_RECIPE_KEYS and key not in recipe_type.config_sections
+    )
+    if unknown:
+        raise ValueError(
+            f"reef.{unknown[0]} is not a setting of {recipe_type.__name__}; a component's settings go under "
+            "components.<name>.data"
+        )
     resolved_weight_data = resolve_config_field_values(weight_type, weight_config.get("data", {}), env)
     training_runtime, runtime = _connect_training_runtime(
         settings,
@@ -162,7 +177,13 @@ def _composed_training_recipe(
         max_staleness=resolved_weight_data["max_staleness"],
         connector=connector,
     )
-    config = {**config, "model": {"path": model_path, **dict(config.get("model", {}))}}
+    config = {**config, "model": {**dict(config.get("model", {})), "path": model_path}}
+    if settings.evaluation_settings is not None:
+        components = dict(config["components"])
+        for name, component_config in components.items():
+            if component_config is weight_config:
+                components[name] = {**component_config, "evaluation": dict(settings.evaluation_settings)}
+        config = {**config, "components": components}
     try:
         return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
     except BaseException:
@@ -186,8 +207,6 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
     training_recipe_type = _training_recipe_type(selected)
     if training_recipe_type is not None:
         return _training_recipe(training_recipe_type, settings, env, connector)
-    if settings.evaluation_settings is not None:
-        raise ValueError("the top-level evaluation section requires a weight-training recipe")
     if ":" in selected:
         config = _recipe_owned_settings(settings)
         if settings.preset_config is not None:
@@ -200,9 +219,13 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
             )
         recipe_type = recipe_class_for(selected)
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
-        if weight_training is not None:
+        if weight_training is not None and recipe_type is not None:
             weight_type, weight_config = weight_training
-            return _composed_training_recipe(selected, config, weight_type, weight_config, settings, env, connector)
+            return _composed_training_recipe(
+                selected, recipe_type, config, weight_type, weight_config, settings, env, connector
+            )
+        if settings.evaluation_settings is not None:
+            raise ValueError("the top-level evaluation section requires a weight-training recipe")
         runtime_config = config.get("runtime")
         runtime = (
             RuntimeRegistry().build(
@@ -225,6 +248,8 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
                     with suppress(Exception):
                         component.shutdown()
             raise
+    if settings.evaluation_settings is not None:
+        raise ValueError("the top-level evaluation section requires a weight-training recipe")
     return build_named_recipe(
         selected, env, default_runtime=_upstream_runtime(settings), preset_config=settings.preset_config
     )

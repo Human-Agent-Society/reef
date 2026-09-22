@@ -411,7 +411,6 @@ def resolve_deployment_config(
     try:
         arguments = component_config_arguments(selected)
         recipe_type = recipe_class_for(config_value(selected, "reef", "recipe") or "recipe")
-        training = recipe_type is not None and selected_weight_training(recipe_type, selected) is not None
         if versioned:
             config = normalize_component_layout(config, arguments)
         if versioned or standard:
@@ -427,6 +426,8 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
+        # A component named through ${VAR} is only known once the environment is applied.
+        training = recipe_type is not None and selected_weight_training(recipe_type, config) is not None
         if versioned or standard:
             reject_null_settings(config, arguments)
         if standard:

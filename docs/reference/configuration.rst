@@ -771,6 +771,28 @@ step checkpoints and the components share one ``training_mode``:
      config:
        implementation: my_pkg.config:ConfigRecipe
 
+The same composite with a weight-training component is a deployment file:
+the composite is selected by its dotted class, ``training.backend`` picks the
+backend, and the weight component's fields live under its ``data``:
+
+.. code:: yaml
+
+   schema-version: 2
+   recipe:
+     implementation: reef.recipe.composite:CompositeRecipe
+     config:
+       components:
+         weights:
+           implementation: recipes.sao.recipe:SAORecipe
+           data: {batch_size: 8}
+         harness:
+           implementation: reef.recipe.cordis:CordisRecipe
+           evolution: {adapter: pi, propose: methods.mine:propose, evaluate: methods.mine:evaluate, tasks: ["..."]}
+   inference:
+     model-path: Qwen/Qwen3-8B
+   training:
+     backend: slime
+
 A preset's ``runtime.type: executor_training`` selects an executor-backed
 training coordinator. Its ``executor`` mapping accepts ``backend`` (default
 ``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend

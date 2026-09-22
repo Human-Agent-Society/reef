@@ -85,6 +85,28 @@ class _TreeRecipe(Recipe):
         )
 
 
+class _HybridThresholdProcessor(ThresholdProcessor):
+    """The same processor, taking instructions too."""
+
+    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
+
+
+@dataclass(frozen=True)
+class _HybridTreeRecipe(_TreeRecipe):
+    """The tree recipe with a processor that runs in every mode."""
+
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+        return Trainer.build(
+            scenario,
+            records,
+            processor_factory=lambda context: _HybridThresholdProcessor(context.with_config({"batch_size": 1})),
+            candidate_backend=_FileBackend(self.label, self.artifact_dir),
+            algorithm_state=algorithm_state,
+            experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
+        )
+
+
 @dataclass(frozen=True)
 class _ScoredTreeRecipe(_TreeRecipe):
     """The same tree recipe, consuming scored rollout reports."""
@@ -205,6 +227,11 @@ def test_composite_recipe_names_its_weight_training_component() -> None:
     assert CompositeRecipe.select_weight_training({"components": {"harness": _WEIGHTS_AND_HARNESS["harness"]}}) is None
     assert _TreeRecipe.select_weight_training({}) is None
     assert SAORecipe.select_weight_training({"data": {}}) == (SAORecipe, {"data": {}})
+    # A release loads one component, so two weight components are refused before any runtime is connected.
+    with pytest.raises(RecipeConfigError, match=r"\['weights', 'weights2'\] all train weights"):
+        CompositeRecipe.select_weight_training(
+            {"components": {**_WEIGHTS_AND_HARNESS, "weights2": _WEIGHTS_AND_HARNESS["weights"]}}
+        )
 
 
 @pytest.mark.unit
@@ -231,9 +258,39 @@ def test_service_connects_the_training_runtime_of_a_composite_weight_component()
     assert all(component.training_runtime is recipe.training_runtime for component in recipe.components.values())
     assert all(component.runtime is recipe.runtime for component in recipe.components.values())
 
+    # A flat weight recipe setting has no place at the top of a composite.
+    stray = service_config_from_mapping(
+        {
+            "reef": {
+                "recipe": "reef.recipe.composite:CompositeRecipe",
+                "model_path": "demo-model",
+                "training_backend": _LOCAL_TRAINING,
+                "max_staleness": 2,
+                "components": _WEIGHTS_AND_HARNESS,
+            }
+        }
+    )
+    with pytest.raises(ValueError, match=r"reef\.max_staleness is not a setting of CompositeRecipe"):
+        _serving_recipe("reef.recipe.composite:CompositeRecipe", stray, {}, None)
+
+    # A top level evaluation section reaches the component that trains: it is that component which parses it.
+    evaluated = service_config_from_mapping(
+        {
+            "reef": {
+                "recipe": "reef.recipe.composite:CompositeRecipe",
+                "model_path": "demo-model",
+                "training_backend": _LOCAL_TRAINING,
+                "components": _WEIGHTS_AND_HARNESS,
+            },
+            "evaluation": {"module": "no.such.module:Factory"},
+        }
+    )
+    with pytest.raises(RecipeConfigError, match=r"candidate evaluation plugin factory 'no\.such\.module:Factory'"):
+        _serving_recipe("reef.recipe.composite:CompositeRecipe", evaluated, {}, None)
+
 
 @pytest.mark.unit
-def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_path: Path) -> None:
+def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_path: Path, monkeypatch) -> None:
     from reef.service.deploy.execution import validate_services
     from reef.service.deploy.orchestrator import resolve_deployment_config
     from reef.service.training_driver import _resolve_training_recipe
@@ -255,6 +312,28 @@ def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_p
     from recipes.sao.recipe import SAORecipe
 
     assert loss_family == SAORecipe.training_spec().loss_family
+
+    # A component named through the environment is classified once the environment is applied.
+    monkeypatch.setenv("PROBE_WEIGHTS", "recipes.sao.recipe:SAORecipe")
+    interpolated = {
+        **raw,
+        "recipe": {
+            "implementation": "reef.recipe.composite:CompositeRecipe",
+            "config": {"components": {**_WEIGHTS_AND_HARNESS, "weights": {"implementation": "${PROBE_WEIGHTS}"}}},
+        },
+    }
+    config, _ = resolve_deployment_config(interpolated, None, tmp_path / "serve.yaml")
+    assert config["reef"]["training_backend"] == _LOCAL_TRAINING
+
+    # The driver reports an unimportable component the way it reports an unimportable recipe.
+    broken = {
+        "reef": {
+            "recipe": "reef.recipe.composite:CompositeRecipe",
+            "components": {"weights": {"implementation": "no.such.module:Recipe"}},
+        }
+    }
+    with pytest.raises(RuntimeError, match=r"cannot load reef\.recipe"):
+        _resolve_training_recipe(broken)
 
 
 @pytest.mark.unit
@@ -301,6 +380,23 @@ def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
                 "components": {
                     **components,
                     "harness": {**components["harness"], "artifact": {"checkpoint_every_n_versions": 5}},
+                },
+            },
+        )
+    # The flat deployment spelling and the hyphenated one are refused too.
+    with pytest.raises(RecipeConfigError, match=r"recipe\.checkpoint_every_n_versions has no effect"):
+        build_recipe(
+            base["implementation"], {}, config={**base, "checkpoint_every_n_versions": 5, "components": components}
+        )
+    with pytest.raises(RecipeConfigError, match=r"components\.harness\.artifact\.checkpoint-every-n-versions"):
+        build_recipe(
+            base["implementation"],
+            {},
+            config={
+                **base,
+                "components": {
+                    **components,
+                    "harness": {**components["harness"], "artifact": {"checkpoint-every-n-versions": 5}},
                 },
             },
         )
@@ -448,6 +544,27 @@ def test_config_validator_requires_a_json_object(tmp_path: Path) -> None:
     (root / CONFIG_FILE).write_text(json.dumps({"request_defaults": {"/v1/responses": 3}}), encoding="utf-8")
     with pytest.raises(ReefError, match="/v1/responses must be an object"):
         ConfigValidator().validate(Artifact.local(root))
+
+
+@pytest.mark.unit
+def test_a_component_without_a_step_does_not_hold_the_training_mode(tmp_path: Path) -> None:
+    """The config component builds no batch, so the harness alone decides whether instructions are taken."""
+    recipe = CompositeRecipe(
+        components={
+            "harness": _HybridTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+            "config": _ConfigRecipe(),
+        }
+    )
+    dispatcher = _serve(recipe, tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        assert dispatcher.set_training_mode("agent", "hybrid") == {"scenario": "agent", "training_mode": "hybrid"}
+        assert scenario.training_mode == "hybrid"
+        assert scenario.trainer_for("harness").training_mode == "hybrid"
+        assert scenario.trainer_for("config").training_mode == "auto"
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit
