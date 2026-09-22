@@ -40,13 +40,7 @@ from reef.record2dataset import (
     readiness_probes,
 )
 from reef.record2dataset.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
-from reef.record2dataset.wire import (
-    WireError,
-    play_document,
-    play_from_document,
-    task_document,
-    task_from_document,
-)
+from reef.record2dataset.wire import WireError, play_document, play_from_document, task_document, task_from_document
 from reef.service.deploy.generator import generator_settings
 
 pytestmark = pytest.mark.unit
