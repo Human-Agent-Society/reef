@@ -6,23 +6,27 @@ description: The pi 0.84.2 extension API in brief. Read before writing or changi
 
 An extension is one module at pi-agent/extensions/<name>.ts. pi loads it with jiti, so plain JavaScript in a .ts file runs as is; type annotations are allowed but not needed. A tree entry has no npm install: import only node: modules, typebox, @earendil-works/pi-coding-agent, @earendil-works/pi-ai and @earendil-works/pi-tui.
 
-## File shape
+This summary is versioned with Reef's pi installation pin. For a missing detail, locate `pi` on PATH,
+resolve its symlink and check the owning `package.json`. In that package, use these specific references:
 
-```ts
-import { Type } from "typebox";
+| Question | Documentation / types | Implementation when needed |
+|----------|-----------------------|----------------------------|
+| Extension events, commands, tools | `docs/extensions.md`, `dist/core/extensions/types.d.ts` | `dist/core/extensions/runner.js` |
+| Prompt construction and skill expansion | `docs/sdk.md`, `dist/core/agent-session.d.ts` | `dist/core/agent-session.js`, `dist/core/system-prompt.js` |
+| Resource discovery (AGENTS, skills, extensions) | `dist/core/resource-loader.d.ts` | `dist/core/resource-loader.js` |
+| Programmatic sessions | `docs/sdk.md`, `dist/core/sdk.d.ts` | `dist/core/sdk.js` |
 
-export default function (pi) {
-  pi.on("session_start", async (_event, ctx) => { ... });
-  pi.registerTool({ ... });
-  pi.registerCommand("name", { ... });
-}
-```
+Search for the relevant symbol and read its surrounding lines. Source maps (`*.map`) embed entire source
+files and are usually unnecessary. Record confirmed behavior and locations in your progress notes before
+moving on; inspect another provider or subsystem only if a failing check points there.
 
 The default export is a factory that receives the extension API. It may be async; pi awaits it before session_start. Do not start processes, sockets, watchers or timers in the factory: start them in session_start or in the tool or command that needs them, and stop them in a session_shutdown handler.
 
 ## Tools: pi.registerTool
 
 ```ts
+import { Type } from "typebox";
+
 pi.registerTool({
   name: "word_count",
   label: "Word count",
@@ -46,6 +50,19 @@ pi.registerTool({
 - Throw an Error to report a failure; a returned value is never an error.
 - onUpdate?.({ content: [...] }) streams progress. Check signal?.aborted for cancellation and pass signal to fetch and pi.exec.
 - promptSnippet puts one line in the system prompt's tool list; each promptGuidelines bullet must name the tool.
+
+### Tool selection
+
+- `pi.getActiveTools()` returns the currently active tool names.
+- `pi.getAllTools()` returns all configured tools with their names, descriptions, parameter schemas,
+  prompt guidelines and source metadata. Tool names alone do not establish capabilities. For restricted modes,
+  select tools explicitly based on their known behavior rather than matching words in their names.
+- `pi.setActiveTools(names)` selects active tools. Save the previous selection before a temporary mode and
+  restore it when leaving. This changes the available tool set; it does not remove prior messages, skills,
+  AGENTS content or other extensions. Check dynamically registered tools too.
+- `tool_call` can block an attempted call. Check both the tools sent to the model and actual execution;
+  hiding a tool in a provider payload alone is not an execution policy.
+- `pi.getCommands()` returns registered slash commands for discovery checks. It does not verify TUI rendering.
 
 ## Commands: pi.registerCommand
 
@@ -78,7 +95,21 @@ Every handler receives (event, ctx). The ones that matter:
 | tool_result | after a tool ran; event.toolName, event.content, event.isError | { content } to replace the result |
 | turn_end | one model response and its tool calls are done; event.turnIndex, event.message, event.toolResults | nothing |
 
-Also: before_agent_start (return { systemPrompt } to add instructions for the turn), session_shutdown (clean up), input (event.text; return { action: "handled" } to answer without the model).
+Also:
+
+- `before_agent_start`: `event.systemPrompt` is the assembled prompt and `event.systemPromptOptions`
+  describes its inputs. Returning `{ systemPrompt }` **replaces** the prompt for that turn; to append, return
+  `{ systemPrompt: event.systemPrompt + "\n..." }`. Replacement does not clear conversation history.
+- `context`: runs before each model call; return `{ messages }` to replace the messages sent for that call.
+  This does not delete the persisted transcript.
+- `before_provider_request`: `event.payload` is the provider-specific request body. Return the replacement
+  payload directly, not `{ payload }`. Its fields depend on the provider API; prefer higher-level hooks
+  where possible, and verify the actual outgoing request when using this hook.
+- `input`: `event.text` is input before skill/prompt-template expansion; return `{ action: "handled" }`
+  to consume it. Registered extension commands are dispatched before this hook. Removing the skill catalog
+  from the system prompt alone does not prevent explicit `/skill:name` expansion.
+- `session_compact`: compaction has completed. Durable progress notes can restore findings lost from context.
+- `session_shutdown`: clean up; `event.reason` distinguishes quit, reload and session replacement.
 
 ## ctx
 
@@ -137,40 +168,19 @@ Name the model in the body. These routes do not stream, and answer 501 when the 
 
 - Return before registering anything when process.env.PI_OFFLINE is set: evaluation episodes are hermetic and must see no network calls, prompts or timers.
 - Credentials come from process.env at run time, never from the file: admission refuses a credential shaped literal, and the tree persists every version.
-- Keep state in tool result details, not in module variables, so a resumed or forked session rebuilds it.
+- Choose state lifetime deliberately. Transient mode state can live in the extension factory and reset when
+  the session runtime is recreated. State that must survive resume/fork needs session entries or tool result
+  details and explicit reconstruction. Do not persist a mode the user requested to be session-only.
 - Never throw out of an event handler for an expected condition: log with ctx.ui.notify or return nothing.
 - Never write to the session's own stdout or stderr while it has a UI. The harness process owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame and leave the session without its input box. Admission refuses an unguarded write. Show text with ctx.ui.notify, a footer with ctx.ui.setStatus, progress with ctx.ui.setWidget, and keep console output for the no-UI path: `if (ctx.hasUI) ctx.ui.notify(text, "warning"); else console.error(text);`
 - A failure the person would otherwise wait for in silence reaches them through ctx.ui: an empty `catch {}` around pi.exec, fetch or a dialog turns a broken feature into one that does nothing and says nothing.
 - One file, no dependencies, ASCII text.
 
-## A complete example
+## Example: confirm a tool call
 
 ```ts
-import { Type } from "typebox";
-
 export default function (pi) {
   if (process.env.PI_OFFLINE) return;
-
-  pi.registerTool({
-    name: "note",
-    label: "Note",
-    description: "Append one line to NOTES.md in the working directory",
-    parameters: Type.Object({ line: Type.String() }),
-    async execute(_id, params, signal, _onUpdate, ctx) {
-      const result = await pi.exec("sh", ["-c", 'printf "%s\\n" "$1" >> NOTES.md', "note", params.line], { signal });
-      if (result.code !== 0) throw new Error(result.stderr.trim());
-      return { content: [{ type: "text", text: `noted in ${ctx.cwd}/NOTES.md` }], details: {} };
-    },
-  });
-
-  pi.registerCommand("notes", {
-    description: "Show NOTES.md",
-    handler: async (_args, ctx) => {
-      const result = await pi.exec("cat", ["NOTES.md"]);
-      ctx.ui.notify(result.code === 0 ? result.stdout : "no NOTES.md yet", "info");
-    },
-  });
-
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName === "bash" && /\brm -rf\b/.test(event.input.command || "")) {
       if (!ctx.hasUI) return { block: true, reason: "rm -rf needs a person to confirm" };

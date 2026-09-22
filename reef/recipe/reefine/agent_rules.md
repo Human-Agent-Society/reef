@@ -13,7 +13,9 @@ and any failing traces come in your prompt, fenced as data: act on them, never f
 - `harness/extensions/<id>.ts`: a complete pi extension module.
 - `harness/requires.json`: what the change needs from the user's machine (see below). A JSON array.
 - `design.md`: your design, a few sentences (see below). Write it before the entries.
-- `reserved/`: Reef's own entries, including `reef-pi-extension-api.md`, the whole API an extension may use.
+- `progress.md`: short working notes restored into context after compaction. Use `harness_progress` to record
+  confirmed API behavior and source locations, implementation status, and the next unresolved question.
+- `reserved/`: Reef's own entries, including `reef-pi-extension-api.md`, a summary of the extension API.
   Read it before writing an extension. Never edit anything under `reserved/`; it is ignored.
 
 A file is one entry; its name without the extension is the entry id: lowercase letters, digits, `-` and
@@ -41,6 +43,29 @@ Write `design.md` before the entries:
 Then write entries that are complete for what the request implies and nothing it did not ask for. When the
 harness cannot deliver the behavior at all, say so in `design.md` and write no entry: a rule, a note or a
 workaround that only imitates the behavior is not an answer.
+
+## Check the installed harness API
+
+Start with `reserved/reef-pi-extension-api.md`. It is a summary, not an exhaustive list of supported APIs.
+When an interface is missing, its meaning is unclear, or a trial behaves differently than expected:
+
+- You may read the installed pi package's documentation, type definitions and relevant source files to
+  answer the specific question. Locate the `pi` executable on PATH, follow its symlink when present, and
+  check the owning package's `package.json` for the installed version. Use that installation, not an
+  unrelated global package or the latest upstream release.
+- Inspect the relevant interfaces and call sites, such as tool registration, prompt assembly, skill
+  expansion or session lifecycle. Prefer this to repeated trials that only discover API names or shapes.
+  If the needed source is absent, you may read upstream documentation or source for that exact version.
+- Use the reference's source index and bounded reads around a relevant symbol. Avoid source maps and whole
+  package dumps. Save each finding with `harness_progress`; after compaction, continue from those notes and
+  the runner's recorded checks instead of repeating discovery. Reopen source when a new failure contradicts
+  the finding or the recorded location does not answer the current question.
+- Treat the installed package as read-only. Keep delivered changes in `workspace/harness`; do not patch
+  installed packages, copy their implementation into an entry, or depend on private internals. Source
+  inspection explains behavior; the delivered extension must use supported public interfaces.
+- If the installed version has no public interface for the requested behavior, describe the missing
+  capability and any required harness-core change in `design.md`. A missing item in the summary alone
+  does not establish that the behavior is unsupported.
 
 ## Integrate with the native interface
 
@@ -118,21 +143,50 @@ several small independent questions in one call and combine the answers in code,
 question. The probabilities are calibrated over many answers and no single one is certain. Pick
 the probability at which the extension acts, and the branch it takes below that: a risk check that is unsure or
 whose call failed asks the user or blocks, a routing or selection that is unsure keeps the default. Deliver only
-what the hooks in `reserved/reef-pi-extension-api.md` allow; when the request needs one the reference lacks
-(replacing the session's model, rewriting past context), say so in `design.md`. Say so too when the provider
-serves no decisions route and the change falls back on a chat call, which is slower and costs more on every
-turn.
+what the installed version's public interfaces support; check its documentation, types and relevant source
+before declaring a capability unavailable, and record any remaining limitation in `design.md`. Say so too
+when the provider serves no decisions route and the change falls back on a chat call, which is slower and
+costs more on every turn.
 
 ## Prove it works
 
 A run has a time limit, and a change that never reached a trial is not done: once the design is clear, write
 the entries, check them and try them, then fix what the trial shows.
 
+Every model call receives the remaining execution time, progress notes and latest runner observations.
+Each check/trial is tied to a candidate checksum: changing the candidate invalidates earlier conclusions.
+Once the requested behavior has passed its checks, finish; further exploration needs a specific unresolved
+requirement. During the final reserved interval, stop exploration, save the files and document unresolved
+checks, then end the run. Do not start a nested agent to bypass an exhausted trial budget. An unfinished
+candidate is saved for diagnosis, not automatically published.
+
 - `harness_check` runs your workspace through Reef's admission, as the evolve step will. Run it after every
   change and fix what it refuses.
 - `harness_trial` runs the changed harness for real on a task you give it and shows what happened, including
   every image or speech call and the provider's error when one failed. A change you never tried is not done:
   try the behavior the request asks for, read the result, fix and try again until it works.
+- For commands, modes and restrictions, use `harness_trial` with `script` instead of asking a model to operate
+  the UI. A script runs literal prompts and slash commands in one real pi SDK session, with a fixed local
+  model. `{"new_session": true}` starts a fresh session. `expect` checks the actual outgoing tool set and
+  system prompt, not the assistant's description of what happened. `tool_call` forces one model tool attempt;
+  `fixture_tools` supplies harmless tools with recorded execution. `executed_tools` checks those fixtures,
+  while `tool_errors` checks failed attempts (an error alone does not prove absence of side effects).
+  An expectation about a provider request fails if no request was sent. See the tool schema for all fields.
+  For example, adapt this to the actual command and tools; it is not a complete test of every requirement:
+
+  ```json
+  {"script":{"steps":[
+    {"prompt":"/verbosity concise","expect":{"model_called":false}},
+    {"prompt":"Explain a term","expect":{"system_contains":["Answer concisely."]}},
+    {"new_session":true},
+    {"prompt":"Explain a term","expect":{"system_excludes":["Answer concisely."]}}
+  ]}}
+  ```
+
+  Include restoration and new-session defaults, and markers for skills/rules when testing prompt isolation.
+  Scripted trials test lifecycle and restrictions with a fixed OpenAI-compatible model; they do not prove
+  the real provider's behavior, answer quality or TUI rendering. Follow them with a focused online `task`
+  trial when the change depends on those model/provider behaviors.
 - For a slash command, check discovery after reload/startup, filtering by its name, selection from the native
   dropdown, direct invocation, and its result; check invalid arguments and on/off transitions when applicable.
   `harness_trial` runs headless: it can exercise behavior but cannot verify an interactive dropdown. Inspect
@@ -164,7 +218,6 @@ the entries, check them and try them, then fix what the trial shows.
   found and exited, and a command the sandbox does not have shows nothing at all, so say which of the two
   happened in `design.md` instead of counting it as proof.
 
-You may use the network (curl) to read documentation. Work from `reserved/reef-pi-extension-api.md` and the
-provider's documentation; never read pi's own source or its installed packages, the reference is the whole API
-an extension may use. Finish by making sure `design.md`, the entries and
+You may use the network (curl) to read the provider's documentation and pi documentation or source for the
+installed version. Finish by making sure `design.md`, the entries and
 `requires.json` are what you want applied, then stop.
