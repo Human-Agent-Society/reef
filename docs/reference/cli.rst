@@ -16,6 +16,10 @@ service's ``ready`` probe must pass before the next one starts; when they are
 all up, Reef blocks, and a watchdog tears the stack down if any process exits
 unexpectedly.
 
+Once the stack is running, Ctrl-C requests graceful shutdown. Pressing it
+again during shutdown skips the remaining 30-second grace period and proceeds
+to forced cleanup of the managed service processes.
+
 .. config::
 
    -c, --config | optional config file. No file is loaded unless explicitly selected.
