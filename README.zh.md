@@ -12,6 +12,8 @@
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
+<a href="https://trendshift.io/repositories/204783?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-204783" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/204783/daily?language=Python" alt="Human-Agent-Society%2Freef | Trendshift" width="250" height="55"/></a>
+
 [English](README.md) | 中文
 
 <div align="left">
@@ -200,26 +202,24 @@ reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b
 ```
-
-该示例连接本地 Ollama 服务。使用其他 provider 时，修改
+使用其他 provider 时，修改
 `--inference.upstream-url` 和 `--inference.upstream-model`；需要认证时设置
-`REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，token 为 `reef-local`，状态保存在
+`REEF_UPSTREAM_API_KEY`。使用此配置时，Reef 监听 `127.0.0.1:8901`，不启用认证（启动前设置 `REEF_TOKEN` 即要求该 token），状态保存在
 `.reef/reefine/`（`--recipe harness-evolve` 是旧名称，启动的是同一个配置）。
 需要修改其他内容时，复制[该部署配置](reef/service/profiles/reefine.yaml) 并用 `-c` 传入你的副本。
 
 在另一个已激活同一 Python 环境的终端中（安装会把该终端的 `python3` 写入 `reef-pi`），创建 scenario、安装 harness 并提出修改请求：
 
 ```bash
-export REEF_TOKEN=reef-local
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+curl -fsS -H "Content-Type: application/json" \
   -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: my-harness" \
+curl -fsS -H "x-reef-scenario: my-harness" \
   'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
-reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
+reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-在 `reef-pi` 会话内，`/reef-harness <text>` 提交同样的请求。所服务的模型把修改写成一个 skill、一条 rules 条目、一个 agent 命令或一个 pi extension，下一个会话启动时的更新提示会提供安装；用 `/reef-versions` 查看各版本，extension 需要先用 `/reef-versions <step> promote` 提升后才会被提供安装。要更换模型，用另一个 `--inference.upstream-model` 重启 `reef serve` 并重新执行安装命令：安装过程会将模型 ID 写入本地 harness 配置。脚本化的 bug 修复与研究演示见 [Reefine 教程](tutorials/reefine/README.md)，配置说明见 [Reefine 指南](docs/user-guide/recipes/reefine.rst)。
+在 `reef-pi` 会话内，`/evolve <text>` 提交同样的请求。所服务的模型把修改写成一个 skill、一条 rules 条目、一个 agent 命令或一个 pi extension。主机能隔离它时（Linux，装有 `bwrap` 和 `pasta`，以非 root 用户运行），或在你信任的机器上设置 `REEF_PROPOSER_SANDBOX=none` 时，它以 coding agent 的方式工作，先真实运行改过的 harness 再交回修改。下一个会话启动时的更新提示会提供安装；若某个步骤在你两轮对话之间完成，会立即询问是否安装。用 `/versions` 查看各版本（会打开该步骤的页面），用 `/versions <version> install` 安装。要更换模型，用另一个 `--inference.upstream-model` 重启 `reef serve` 并重新执行安装命令：安装过程会将模型 ID 写入本地 harness 配置。脚本化的 bug 修复与研究演示见 [Reefine 教程](tutorials/reefine/README.md)，配置说明见 [Reefine 指南](docs/user-guide/recipes/reefine.rst)。
 
 ## 📚 Recipes 与示例
 
@@ -285,6 +285,7 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 
 [Wenhao Chai](https://github.com/wenhaochai),
 [Shuangrui Ding](https://github.com/Mark12Ding),
+[Shiyi Zoe Du](https://github.com/zoedsy),
 [Hao He](https://github.com/hehaodele),
 [Haoze He](https://github.com/HectorHHZ),
 [Chonghe Jiang](https://github.com/Chonghe-Jiang),
@@ -307,7 +308,8 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 [Kaichen Zhou](https://github.com/kaichen-z),
 [Zijian Zhou](https://github.com/BobbyZhouZijian),
 [Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
-[Dingyi Zhuang](https://github.com/ZhuangDingyi).
+[Dingyi Zhuang](https://github.com/ZhuangDingyi),
+[Xinkai Zou](https://github.com/jayzou3773).
 
 
 ## ⭐ Star History

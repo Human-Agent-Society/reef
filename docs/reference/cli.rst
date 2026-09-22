@@ -16,6 +16,10 @@ service's ``ready`` probe must pass before the next one starts; when they are
 all up, Reef blocks, and a watchdog tears the stack down if any process exits
 unexpectedly.
 
+Once the stack is running, Ctrl-C requests graceful shutdown. Pressing it
+again during shutdown skips the remaining 30-second grace period and proceeds
+to forced cleanup of the managed service processes.
+
 .. config::
 
    -c, --config | optional config file. No file is loaded unless explicitly selected.
@@ -50,7 +54,7 @@ and bare values are model IDs and need an upstream URL.
 An explicit ``--inference.upstream-url`` or ``--inference.upstream-api-key`` override wins over
 the prefix. The ``reefine`` profile ships its proposer and evaluator in the
 wheel, so it runs from an installed package; it listens on
-``127.0.0.1:8901`` with token ``reef-local`` and keeps its state under
+``127.0.0.1:8901`` without authentication unless ``REEF_TOKEN`` is set, and keeps its state under
 ``.reef/reefine/``. To change anything else, copy
 ``reef/service/profiles/reefine.yaml`` and pass the copy with ``-c``.
 ``--recipe harness-evolve``, the former name of the profile folded into it,
@@ -89,8 +93,35 @@ and the Git-backed release chain, to the ``reef.*_dir`` paths in the config.
 Connect to the API platform
 --------------------------
 
-With Reef already serving, open another terminal in your Reef project directory.
-This example connects the runtime on port 9000 to a local API platform on port 3000:
+The connector can start Reef for you. Run it from your Reef project directory
+and put ``--serve`` last, followed by the ``reef serve`` options. This example
+starts the Reefine profile on port 9000 and connects it to a local API platform
+on port 3000:
+
+.. code:: bash
+
+   uv run reef connect \
+     --url http://127.0.0.1:9000 \
+     --platform http://localhost:3000 \
+     --name workstation \
+     --no-browser \
+     --serve --recipe reefine --model ollama/qwen3
+
+``--serve`` passes the host and port from ``--url`` to ``reef serve``, so the
+two cannot disagree; ``--url`` must be a loopback ``http`` address with a port,
+and the options after ``--serve`` must not set ``--reef.host`` or
+``--reef.port``. The connector refuses to start if another service already
+answers at that address. Reef starts after you approve the connection, in the
+directory where you ran the command, with the same environment. Its output goes
+to ``serve.log`` in the connection's state directory. If ``REEF_TOKEN`` (or
+the ``--reef-token-env`` variable) is set, Reef receives it as its
+``REEF_TOKEN``. The console shows Reef as starting until it first answers,
+and reports its exit code if it stops; the connector does not restart it.
+Stopping the connector stops this Reef service too.
+
+To connect a Reef service that is already running, for example one managed by
+systemd or Docker, omit ``--serve``. This example connects the runtime on port
+9000 to a local API platform on port 3000:
 
 .. code:: bash
 
@@ -102,7 +133,9 @@ This example connects the runtime on port 9000 to a local API platform on port 3
 
 Set ``--url`` to your running Reef service's address and ``--platform`` to
 your API platform's address. Replace both example addresses to match your setup.
-``--name`` sets the label shown in the console.
+``--name`` sets the label shown in the console. Before pairing, the connector
+checks the address once and prints a warning if Reef does not answer; pairing
+still completes, and the console shows the runtime once Reef answers.
 
 Open the printed sign-in link, sign in, and paste the device code from your
 terminal into the page. The code is required and expires after ten minutes.
@@ -124,7 +157,8 @@ a token, set ``REEF_TOKEN`` in the connector's environment; use
 Do not put tokens in URLs or command-line arguments.
 
 The platform receives scenario names, serving release identifiers, training
-modes and selected numeric evaluation results. It can create a scenario,
+modes, selected numeric evaluation results, the Reef URL the connector checks
+and, with ``--serve``, whether Reef is starting, running or exited. It can create a scenario,
 request training, change training mode, promote or roll back a release.
 Local provider credentials, artifact files, and recorded prompts are not
 uploaded. Instructions you submit through the dashboard are stored on the
@@ -135,21 +169,34 @@ Lifecycle and local state
 
 Use the same ``--url`` and ``--platform`` options with ``--status`` to
 inspect the connector or ``--stop`` to stop it. Rerun the connection command
-above to restart it. Stopping the connector leaves Reef
-serving and retains authorization. **Revoke connection** in the console
+above to restart it. Stopping the connector retains authorization. It leaves
+Reef serving, unless the connector started Reef with ``--serve``. **Revoke connection** in the console
 disables the credential; a revoked connector exits and requires a new login.
 
 By default, each platform/runtime URL pair has a private directory under
 ``~/.reef/connections/``. It stores an instance UUID, service and connector
 credentials, a SQLite command record, a process lock, and a background log.
+With ``--serve``, it also stores the ``reef serve`` options and directory, and
+``serve.log``.
 The directory is mode 0700 and credential files are mode 0600 on POSIX systems.
 ``--state-dir PATH`` selects an explicit directory. Preserve it to keep the
 same identity; do not share or copy it between running machines.
 
+Connected runtime cards in the console support deletion after confirmation.
+The connector sends ``DELETE /reef/scenarios/{scenario}`` to Reef, which
+removes that scenario and archives its own saved state. Other scenarios and
+the connection remain available. Update and restart older connectors before
+using this action; they reject the new ``delete_scenario`` command.
+
 The connector reconnects after network failures. It does not install an OS
 startup service; use ``--foreground`` with your process supervisor for restart
-after a machine reboot. It reports heartbeats every three seconds and scenario
-summaries about every fifteen seconds. The console marks it offline after
+after a machine reboot. It polls every three seconds while idle or running a
+slow operation. Completed commands are reported immediately, so queued commands
+do not each wait for another heartbeat. For thirty seconds after activity, it
+checks for follow-up commands every second. It reports scenario summaries about
+every fifteen seconds, or every five seconds while Reef does not answer. When Reef does not answer, the summary names the address it
+checked and the reason: nothing listening, a rejected service token, a
+timeout, or a service that is not Reef. The console marks it offline after
 45 seconds without a heartbeat and retains its last scenario summary.
 
 Commands are delivered once. An interrupted operation is marked **unknown**,

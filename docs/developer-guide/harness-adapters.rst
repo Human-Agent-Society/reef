@@ -500,6 +500,7 @@ agent.
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
+   client_state | the sessions and settings the ``reef-<adapter>`` wrapper keeps in the installed tree, as ``{path, kind}`` below the relocated composition. The wrapper runs the binary on a temp copy of links that it removes afterwards, so state the binary creates there itself is lost. ``directory`` and ``sqlite`` (an empty database) are created before the run and linked; ``file`` is copied back with its mode after the run when the binary created it, or renamed a new file over its link
    cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations
 
@@ -566,24 +567,38 @@ API reference the service proposer reads before it writes an extension).
 The extension registers nothing under ``PI_OFFLINE``; otherwise it registers
 two commands, two tools and two event handlers:
 
-- ``/reef-harness <request>``: with a UI, sends the session model one user
-  message that asks it to think the request through (when it triggers, what
-  state the harness must know and how it learns it, what the person must
-  set up, what is ambiguous), to ask about an open point with
-  ``reef_ask_user`` and to file with ``reef_file_request``, and notifies
-  ``reef: clarifying, then filing``. With ``--direct`` as the first word, or
+- ``/evolve <request>``: with a UI, clarifies the request in the
+  background instead of in the session. The command returns at once and a
+  loop calls the session's model through ``ctx.modelRegistry.complete`` with
+  the last six user and assistant messages of the session as background, the
+  request, and the same two tools. The model thinks the request through
+  (when it triggers, what state the harness must know and how it learns it,
+  what the person must set up, what is ambiguous), asks about an open point
+  with ``reef_ask_user`` and files with ``reef_file_request``. The filing,
+  a cancel, a reply without a tool call, a failed model call or eight model
+  calls end it. While it runs, a widget above the input shows the phase, and
+  ``ctrl+q``, or ``/evolve`` with no argument, opens its latest
+  steps. When it ends, the chat keeps one
+  custom entry (``pi.appendEntry``, type ``reef-harness-clarify``) whose
+  line says what happened and whose expanded view (``ctrl+o``) holds the
+  whole clarification. The entry stays out of the session model's context.
+  Only one clarification runs at a time, and a session without a model is
+  told to pick one or use ``--direct``. With ``--direct`` as the first word, or
   without a UI, it files the request as is with ``POST /reef/train`` (the
   scenario runs in ``manual`` or ``hybrid``), leaving captured receipts
   available for feedback. Either way the ``.reef-harness-release`` file
   beside the tree names the release the request runs on; without it nothing
   is sent.
-- ``reef_ask_user``, a tool: up to four questions, each with two to four
-  options offered through ``ctx.ui.select`` plus ``Other (type an answer)``,
-  which opens ``ctx.ui.input``, and ``Cancel this request``. Escape is the
+- ``reef_ask_user``, a tool: the questions a reasonable default cannot
+  settle, often none and at most four, each with two to four options
+  offered through ``ctx.ui.select`` plus ``Other (type an answer)``, which
+  opens ``ctx.ui.input``, and ``Cancel this request``. A question may name
+  one option as ``recommended``: it is listed first with ``(recommended)``
+  after it, and the answer filed is the option alone. Escape is the
   way out of the whole request, not a skipped question: no choice on a
   question, the cancel option, or no text in the free text answer all stop
   the dialogs there, notify ``reef: request cancelled; nothing was filed``
-  and return ``the user cancelled this harness request: do not file it, do
+  (the background clarification records it in its entry instead) and return ``the user cancelled this harness request: do not file it, do
   not ask again, and say it was cancelled``, so the model stops instead of
   filing a request the person backed out of. The dialogs carry the turn's
   abort signal, so an aborted turn dismisses them. Otherwise it returns the
@@ -603,16 +618,24 @@ two commands, two tools and two event handlers:
   the input box, an animated frame, the phase in the person's words
   (``queued, waiting for a step``, ``writing the change``, ``checking the
   harness``, ``running the step``, ``saving the result``), the time in the
-  step and ``ctrl+r to look in``. The frames turn every 250 ms, so the step
-  reads as alive between polls. ``ctrl+r``
+  step, the request's page as a terminal hyperlink (OSC 8, which pi's TUI
+  measures around, so a click opens the page where the terminal offers one)
+  and ``ctrl+q or /evolve to look in``. The frames turn every
+  250 ms, so the step reads as alive between polls. ``ctrl+q``
   (``pi.registerShortcut``) expands the same widget in place with the
   request asked, its id, the evaluation's episode count and step record when
   the service reports them, the request page link for the full detail, and a
-  line saying the step runs in the background; ``ctrl+r`` again closes it. pi
-  offers no click target for a widget, so the key the spinner names is how a
-  person opens it. Expanding costs no request: it redraws what the last poll
-  read. The widget is cleared when the step settles, and a headless session
-  draws none.
+  line saying the step runs in the background; ``ctrl+q`` again closes
+  it. pi offers extensions no click event for a widget, so the line names
+  three ways in: the hyperlink, the key and the command. The key is a plain
+  ``ctrl+<letter>`` pi leaves free: a terminal without the Kitty keyboard
+  protocol or xterm's modifyOtherKeys (Apple Terminal among them) sends
+  ``ctrl+shift+<letter>`` as the bare control byte, so a shifted key would
+  reach pi as its own binding, and ``ctrl+r`` alone renames a session.
+  ``/evolve`` with no argument prints the same detail and needs
+  neither the key nor a click. Expanding costs no request: it redraws what
+  the last poll read. The widget is cleared when the step settles, and a
+  headless session draws none.
 - The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
   <id> queued`` and, once the request's record (``GET
   /reef/scenarios/<scenario>/records/<id>``, read each poll until then)
@@ -632,29 +655,30 @@ two commands, two tools and two event handlers:
   abort signal with a 10 s deadline (``REEF_HARNESS_FETCH_MS`` shortens it),
   so a hung read costs one poll, not every later tick. When the row appears,
   the report quotes the request's first 60 characters and names the next
-  action by result: a selected release names ``/reef-versions <step> install``;
-  a pending one says ``This release changes an
-  extension, so it is not installed until you promote it: /reef-versions
-  <step> promote. Page: <link>``; a rejected step quotes
+  action by result: a selected release names ``/versions <version> install``;
+  a pending one says ``This release changes an extension, so read it before it
+  runs: /versions <version> opens the page, /versions <version> install
+  serves it.``; a rejected step quotes
   ``selection.reason`` and says to rephrase or split the request; a skipped
   step quotes ``metrics.skipped`` and, when the step recorded one,
   ``proposal_notes.failure``, why the proposer produced nothing. The
-  selected, rejected and skipped lines end with ``Details: /reef-versions
+  selected, rejected and skipped lines end with ``Details: /versions
   <step>.``; ``Not covered: ...`` follows when the step's
   ``proposal_notes.review.uncovered`` lists items. The report is delivered
   twice on purpose: as a custom message (``pi.sendMessage`` with
   ``customType: "reef-harness"`` and ``triggerTurn: false``), which the chat
   renders and the session file keeps, and as a notice, which the next
-  status line may overwrite. Past the cap the watch says ``/reef-versions``
+  status line may overwrite. Past the cap the watch says ``/versions``
   shows the result when it settles.
-- A background result opens no confirmation, selection or input dialog,
-  whether the agent is busy or idle. The report names the next command,
-  leaving the person free to keep chatting. ``/reef-versions <step> install``
-  explicitly starts the install of a published step after a confirmation
-  linking its page. Pending, rejected and skipped steps cannot be installed
-  through that action; use ``/reef-versions <step> promote`` to review and
-  promote a pending release first. The automatic update notice at session
-  start remains a separate entry point.
+- A settled step offers its install, so a win reaches the person who asked
+  without them going looking. The dialog waits for a turn to end
+  (``ctx.isIdle()``): a busy session keeps the report's commands instead, and
+  the next session start offers the same release. ``/versions <version>
+  install`` starts the same install on demand after a confirmation linking the
+  step's page. A release still held back from the served head is promoted as
+  part of installing it, so installing is the one decision; only a rejected or
+  skipped step, which published no tree of its own, is refused. The automatic
+  update notice at session start remains a separate entry point.
 - The install, through the ``reef-pi`` wrapper (``REEF_HARNESS_WRAPPER``,
   which ``run_agent`` exports, else ``reef-pi`` beside the release file;
   with neither on disk the notice is ``reef: no reef-pi wrapper found;
@@ -671,7 +695,7 @@ two commands, two tools and two event handlers:
   update. Commands targeting a different install directory use its own configuration.
   Setup values and checks are pinned to the release being installed. If that
   release is absent, the error identifies the queried service and scenario;
-  refresh ``/reef-versions`` before choosing a release again.
+  refresh ``/versions`` before choosing a release again.
 - The setup loop: ``reef-pi setup --json --release <id>`` lists the
   release's items with ``met``; each unmet item is asked once, an ``env``
   item through ``ctx.ui.input`` titled with its ``prompt`` (else ``Value
@@ -694,34 +718,58 @@ two commands, two tools and two event handlers:
   catalog does not hold yet gets the watch again. So a restarted pi, or a
   report the person missed, still gets the result in the chat.
 - ``session_start``: with a UI, one info line says the two commands exist,
-  and a second line counts the pending releases no promote has named yet
-  and says how to see and promote them: ``N release(s) await your review:
-  /reef-versions <step>[, <step>] (promote with /reef-versions <step>
-  promote)``.
-- ``/reef-versions [step] [promote|install]``: lists the release chain with each
-  step's result and request. With a step it prints ``design:`` (the
-  proposer's plan, first 200 characters) and ``not covered:`` when the row
-  carries ``proposal_notes``, then the step's page link (``GET
+  and a second line counts the releases held back from the served head and
+  says how to install them: ``N release(s) ready to install: /versions
+  <version>[, <version>] (install with /versions <version> install)``.
+- ``/versions [version] [install]``: lists the release chain oldest first in
+  aligned version (``v0``, ``v1``, ...), release id, result and status columns.
+  Status distinguishes the locally installed version from the served head;
+  request summaries appear below their rows, with whitespace collapsed.
+  The footer explains the statuses and shows details and install commands. With a version,
+  ``v3`` or ``3``, it offers the step's page (``GET
   /reef/harness/releases/{step}/page`` with the scenario and the token as
-  query parameters) and a curl that fetches the page with the headers into
-  a file, and, for a pending release, the promote action and a trial
-  install command; ``/reef-versions <step> promote`` runs the promote after
-  a confirmation, then offers the install of the head the promote made.
+  query parameters), which holds the design, the review and the numbers;
+  taking the offer opens it through the platform's launcher (``open``,
+  ``xdg-open``, ``rundll32``), and declining prints the URL. Headless prints
+  the summary and the URL instead. ``/versions <version> install`` installs
+  the step after a confirmation, promoting a release still held back from the
+  served head first.
 
 The writing happens on the service, where the evolve step hands the request
 to the recipe's ``propose`` and the commit records it under
 ``training_request``, the merged ``requires`` list included. The harness
 requests RFC (#310) kept the agent side free of tools so that it only asks;
 the two tools above change that rule on purpose (issue #435): a request is
-clarified in the session where the person asked it, while they are still
+clarified from the session where the person asked it, while they are still
 there to answer, and the tools still write no mutation and start no step of
 their own beyond the filing. Asking needs no extension:
+Admission also refuses a ``code_extension`` that writes to the harness
+process's own stdout or stderr without a ``ctx.hasUI`` guard
+(``console.log``, ``console.error``, ``process.stdout.write``). An extension
+runs inside the harness process, which owns the terminal in a session with a
+UI, so a raw write lands in a drawn frame and leaves the session without its
+input box until the next full redraw; console output stays the fallback for a
+session without a UI, and the guard, on the write's own line or the one above
+it, is what separates the two. Text for a session with a UI belongs in
+``ctx.ui.notify``, ``ctx.ui.setStatus`` or ``ctx.ui.setWidget``.
+
 ``reef-<adapter> harness "<request>"`` is a wrapper subcommand on every
 adapter. The ids ``reef-version-check``,
 ``reef-requests`` and ``reef-pi-extension-api`` are ``RESERVED_ENTRY_IDS`` in
 `reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__: the seed
 and a recovered state carry them, and admission refuses a mutation that
-creates, updates or removes one, the way native tool names are reserved. An
+creates, updates or removes one, the way native tool names are reserved.
+Because no step changes them, a scenario would keep the copy it was created
+with; instead, whenever the service opens a scenario (at startup or on
+creation), ``CordisBackend.shipped_content_update`` renders each reserved
+entry of the running Reef's seed and compares its files with the served
+release. When one differs or is missing, the service replaces it in the
+recorded entries (appending a missing one), renders the whole tree again and
+commits it as a training release whose metrics are
+``{"shipped_content_update": {"entries": [<ids>]}}``. That release consumes
+no records, runs no evaluation and is not held for review, since its
+content is Reef's own; the update notice then offers it to installed trees
+like any other head. An
 evolved extension runs in pi's process with the person's privileges, and
 admission screens its text for credential shaped literals only, so the
 tutorial's pi deployment

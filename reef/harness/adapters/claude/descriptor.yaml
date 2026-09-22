@@ -25,6 +25,15 @@ env:
   DISABLE_AUTOUPDATER: "1"
   DISABLE_TELEMETRY: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+# --resume and --continue read the transcripts under projects/, which
+# reef-claude would otherwise leave in the temp copy it removes. .claude.json
+# records the finished onboarding, the approved API key and the trusted
+# folders; without it every run starts at the theme picker again.
+client_state:
+  - path: "claude/projects"
+    kind: directory
+  - path: "claude/.claude.json"
+    kind: file
 files:
   config:
     primary:

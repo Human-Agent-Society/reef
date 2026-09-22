@@ -1,8 +1,10 @@
 """Shared readers and sample builders both engines use.
 
-The report reader ``report_score`` reads the reported reward; the sample builders turn one inference record — or an ordered
-multi-call episode — into a ``TrajectoryItem`` with the tensors the training
-bridge requires.
+The report reader ``report_score`` reads the reported reward;
+``recorded_request`` and ``recorded_response`` read the messages, tools and
+answer text of a recorded inference; the sample builders turn one inference
+record — or an ordered multi-call episode — into a ``TrajectoryItem`` with the
+tensors the training bridge requires.
 """
 
 from __future__ import annotations
@@ -47,6 +49,51 @@ def report_score(report: AgentRecord) -> float | None:
     if not isinstance(score, (int, float)) or isinstance(score, bool):
         return None
     return float(score)
+
+
+def recorded_request(payload: Mapping[str, Any]) -> tuple[list[Any], list[Any] | None]:
+    """The messages and tools of a recorded inference request.
+
+    The rollout backend retains its provider-neutral copy under
+    ``response.training``; a record without it carries the request body.
+    """
+    response = payload.get("response")
+    training = response.get("training") if isinstance(response, Mapping) else None
+    if isinstance(training, Mapping) and isinstance(training.get("request_messages"), list):
+        messages = list(training["request_messages"])
+        tools = training.get("request_tools", payload.get("tools"))
+    else:
+        messages = list(payload.get("messages") or [])
+        tools = payload.get("tools")
+    return messages, list(tools) if isinstance(tools, list) and tools else None
+
+
+def recorded_response(payload: Mapping[str, Any]) -> str:
+    """The text of a recorded inference's response: the final assistant message, or empty when it has none."""
+    response = payload.get("response")
+    if not isinstance(response, Mapping):
+        return ""
+    training = response.get("training")
+    message = training.get("response_message") if isinstance(training, Mapping) else None
+    if isinstance(message, Mapping):
+        return flatten_content(message.get("content"))
+    choices = response.get("choices")
+    if isinstance(choices, list) and choices and isinstance(choices[0], Mapping):
+        message = choices[0].get("message")
+        if isinstance(message, Mapping):
+            return flatten_content(message.get("content"))
+        return flatten_content(choices[0].get("text"))
+    return ""
+
+
+def flatten_content(content: Any) -> str:
+    """The plain text of an OpenAI-style message content field."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [item.get("text", "") for item in content if isinstance(item, Mapping) and item.get("type") == "text"]
+        return " ".join(parts) if parts else ""
+    return str(content) if content is not None else ""
 
 
 def _common_prefix_length(left: list[int], right: list[int]) -> int:

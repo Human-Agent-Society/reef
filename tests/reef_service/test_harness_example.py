@@ -20,6 +20,7 @@ import yaml
 from reef_service._trajectories import recorded_trajectory
 from reef_service.config_helpers import load_harness_deployment as load_config
 
+from reef.core.requirements import REQUIRE_KINDS
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
@@ -482,7 +483,8 @@ ENTRIES = (
 
 DESIGN = "The user wants the tests run before every answer. Trigger: every task; no state. Nothing to set up."
 
-REVIEW = {"result": "partial", "covered": ["the tests run first"], "uncovered": ["no second reviewer"]}
+#: A complete review, so a case answers once; the retry after a short review has cases of its own.
+REVIEW = {"result": "complete", "covered": ["the tests run first"], "uncovered": []}
 
 
 def designed(*entries: dict, design: str = DESIGN, requires: list | None = None) -> str:
@@ -516,7 +518,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     # the explicit toggle rule, what the user must provide, then the entries, complete and nothing more.
     assert "1. Restate the request in one sentence." in request_prompt
     assert "turn it on and off" in request_prompt and "never a rule that assumes the state holds" in request_prompt
-    assert "4. Then write the entries: complete for what the request implies" in request_prompt
+    assert "5. Then write the entries: complete for what the request implies" in request_prompt
     assert "nothing the request did not ask for" in request_prompt and "smallest change" not in request_prompt
     # What only the user can provide is declared, with a prompt for setup: the extension never asks for it,
     # stores it or hardcodes it, and reads an env item's value from the environment at run time.
@@ -554,26 +556,34 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     ]
     # A design longer than the record keeps is cut, and a fenced review still reads.
     fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
-    model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
+    model = Model(designed(skill("run-tests"), design="x" * 5000), fenced)
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
-    assert proposal.notes["design"] == "x" * 1500 and proposal.notes["review"] == REVIEW
+    assert proposal.notes["design"] == "x" * 4000 and proposal.notes["review"] == REVIEW
     # Without a design object the notes carry the review alone, and the review prompt says none was written.
     model = Model(request_reply(skill("run-tests")), json.dumps(REVIEW))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
     assert proposal.notes == {"review": REVIEW} and "(none written)" in model.prompts[2]
 
 
-def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stand(evolution) -> None:
-    for review in (
-        "no json here",
-        json.dumps({"result": "done", "covered": []}),
-        json.dumps(["complete"]),
-        ModelBindingError("model endpoint unreachable: connection refused"),
+def test_a_review_that_fails_says_so_in_the_notes_and_the_mutations_stand(evolution) -> None:
+    """A step whose review did not run publishes with nothing checking that it delivers the request, so the notes
+    carry the reason and the page shows it, rather than reading as a step that had no review to give."""
+    for review, reason in (
+        ("no json here", "carried no result object"),
+        (json.dumps({"result": "done", "covered": []}), "carried no result object"),
+        (json.dumps(["complete"]), "carried no result object"),
+        (ModelBindingError("model endpoint unreachable: connection refused"), "connection refused"),
     ):
         model = Model(designed(skill("run-tests")), review)
         proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
         assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
-        assert proposal.notes == {"design": DESIGN} and model.calls == 3
+        assert set(proposal.notes) == {"design", "review_failure"} and model.calls == 3
+        assert proposal.notes["design"] == DESIGN and reason in proposal.notes["review_failure"]
+    # A reply the model's reasoning ate is asked once more with room for both, and the second answer is the review.
+    model = Model(designed(skill("run-tests")), ModelBindingError("model endpoint returned non-text content"))
+    model.replies.append(json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes["review"] == REVIEW and "review_failure" not in proposal.notes and model.calls == 4
     # The verdict's case and the lists are read leniently: strings only, trimmed, anything else dropped.
     lenient = {"result": "Complete", "covered": ["a", 1, " b ", ""], "uncovered": "none"}
     model = Model(designed(skill("run-tests")), json.dumps(lenient))
@@ -701,7 +711,7 @@ def test_propose_keeps_the_prompt_of_a_requires_item_for_setup(evolution) -> Non
     model = Model(designed(skill("sms"), requires=refused), json.dumps(REVIEW))
     proposal = evolution.propose(NODES, (), model, requests=(dict(REQUEST),), entries=ENTRIES)
     assert proposal.notes["refused_requires"] == [
-        {"item": refused[0], "reason": "requires[0].kind must be one of ('permission', 'env', 'service')"}
+        {"item": refused[0], "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"}
     ]
 
 
@@ -735,7 +745,7 @@ def test_propose_records_the_requires_items_it_could_not_honor_with_the_reason(e
     assert proposal.notes["refused_requires"] == [
         {
             "item": {"name": "phone", "kind": "sms"},
-            "reason": "requires[0].kind must be one of ('permission', 'env', 'service')",
+            "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}",
         },
         {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
         {
@@ -1446,3 +1456,73 @@ def test_replay_collects_a_run_and_renders_one_self_contained_page(tmp_path: Pat
     empty = replay.collect(tmp_path / "nothing")
     assert empty == {"releases": [], "sessions": [], "process": [], "seed_entries": []}
     assert '<script id="data" type="application/json">' in replay.render(empty)
+
+
+# -- propose: a request whose review finds the answer short is answered again ------
+
+SHORT = {"result": "partial", "delivers": True, "covered": ["the tests run first"], "uncovered": ["no retry"]}
+SUBSTITUTE = {
+    "result": "partial",
+    "delivers": False,
+    "covered": [],
+    "uncovered": ["a rule tells the model about the session instead of opening it"],
+}
+
+
+def test_a_short_review_sends_the_request_back_with_its_findings_and_keeps_the_complete_answer(evolution) -> None:
+    model = Model(
+        designed(skill("run-tests")),
+        json.dumps(SHORT),
+        designed(skill("run-tests", "# improved\n\nretry once"), design="Second design."),
+        json.dumps(REVIEW),
+    )
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
+    assert proposal.mutations[0].options["config"]["text"].endswith("retry once")
+    assert proposal.notes == {"design": "Second design.", "review": REVIEW, "attempts": 2}
+    # plan, answer, review, answer again, review: a complete review ends the loop.
+    assert model.calls == 5
+    retry_prompt = model.prompts[3]
+    assert retry_prompt.startswith(model.prompts[1])
+    assert "An earlier answer to this request was reviewed and fell short." in retry_prompt
+    assert f"Its design was:\n{DESIGN}\n" in retry_prompt and "- no retry\n" in retry_prompt
+    assert "It did not deliver the behavior at all" not in retry_prompt
+    # The prompts say what delivering means: no substitute in place of the behavior.
+    assert "a rule, a note or a workaround that only imitates the behavior is not an answer" in model.prompts[1]
+    assert '"delivers": true or false' in model.prompts[2]
+
+
+def test_answers_that_never_deliver_skip_the_step_after_the_last_attempt_saying_why(evolution) -> None:
+    answer = designed(rules("resume", "Resume the last session."))
+    model = Model(answer, json.dumps(SUBSTITUTE), answer, json.dumps(SUBSTITUTE), answer, json.dumps(SUBSTITUTE))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.mutations == ()
+    assert proposal.notes["failure"] == (
+        "the change does not deliver the request: a rule tells the model about the session instead of opening it"
+    )
+    assert proposal.notes["attempts"] == 3
+    assert model.calls == 1 + 2 * 3
+    assert "It did not deliver the behavior at all" in model.prompts[-2]
+    # A failed call after a substitute reports the substitute, which says more than the failed call.
+    model = Model(answer, json.dumps(SUBSTITUTE), ModelBindingError("endpoint down"))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.mutations == () and proposal.notes["failure"].startswith("the change does not deliver")
+
+
+def test_the_kept_answer_is_the_delivering_one_with_the_fewest_uncovered_points(evolution) -> None:
+    two_gaps = {**SHORT, "uncovered": ["no retry", "no log"]}
+    model = Model(
+        designed(skill("first")),
+        json.dumps(two_gaps),
+        designed(rules("second", "A substitute.")),
+        json.dumps(SUBSTITUTE),
+        designed(skill("third")),
+        json.dumps(SHORT),
+    )
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [m.id for m in proposal.mutations] == ["third"]
+    assert proposal.notes["review"] == SHORT and proposal.notes["attempts"] == 3
+    # A failed call after a delivering answer keeps that answer rather than skipping the step.
+    model = Model(designed(skill("first")), json.dumps(two_gaps), ModelBindingError("endpoint down"))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert [m.id for m in proposal.mutations] == ["first"] and proposal.notes["attempts"] == 2

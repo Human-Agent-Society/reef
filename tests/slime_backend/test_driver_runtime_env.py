@@ -90,6 +90,7 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
         colocate="colocate" in mode,
         rollout_external=mode == "external",
         keep_lora_base_resident=mode == "lora-colocate-keep-base",
+        disjoint_prefix_sharing=False,
     )
 
     class Algorithm:

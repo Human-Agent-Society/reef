@@ -3997,6 +3997,10 @@ dev = [
     { name = "pytest-cov" },
     { name = "ruff" },
 ]
+e2b = [
+    { name = "connectrpc" },
+    { name = "e2b" },
+]
 postgres = [
     { name = "psycopg", extra = ["binary"] },
 ]
@@ -4043,6 +4047,8 @@ runtime = [
 requires-dist = [
     { name = "aiohttp" },
     { name = "alembic", specifier = ">=1.13,<2" },
+    { name = "connectrpc", marker = "extra == 'e2b'", specifier = ">=0.11.1,<0.12" },
+    { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },
     { name = "e2b", marker = "extra == 'slime'" },
     { name = "httpx", marker = "extra == 'sglang'" },
     { name = "httpx", extras = ["http2"], marker = "extra == 'slime'" },
@@ -4081,7 +4087,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'slime'", specifier = ">=0.29.0" },
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.29.0" },
 ]
-provides-extras = ["sglang", "tinker", "postgres", "wandb", "slime", "dev"]
+provides-extras = ["sglang", "tinker", "postgres", "e2b", "wandb", "slime", "dev"]
 
 [package.metadata.requires-dev]
 runtime = [{ name = "slime", git = "https://github.com/THUDM/slime.git?rev=41014d1f29e201137fdffce737bb8bac65bc5219" }]

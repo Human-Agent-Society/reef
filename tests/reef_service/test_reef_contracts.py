@@ -90,7 +90,7 @@ def test_provider_native_generation_stays_behind_inference_backend() -> None:
     with closing(build_default_dispatcher(scenario_storage=SQLiteScenarioStorage())) as dispatcher:
         routes = {route.resource.canonical for route in create_app(dispatcher).router.routes()}
 
-    assert "/v1/chat/completions" in routes
+    assert {"/v1/chat/completions", "/v1/responses", "/v1/messages"} <= routes
     assert "/generate" not in routes
 
 
@@ -547,6 +547,57 @@ def test_anthropic_stream_attaches_receipt_only_after_record_is_stored(tmp_path)
             assert record.payload["response"]["complete"] is True
         finally:
             release_stop.set()
+            await client.close()
+            await upstream_server.close()
+
+    import asyncio
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_responses_stream_is_forwarded_and_attaches_its_receipt_to_response_completed(tmp_path) -> None:
+    async def run() -> None:
+        from aiohttp import web
+
+        delta = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+        completed = b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1"}}\n\n'
+        received = {}
+
+        async def upstream(request):
+            received["payload"] = await request.json()
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(delta)
+            await response.write(completed)
+            return response
+
+        upstream_app = web.Application()
+        upstream_app.router.add_post("/v1/responses", upstream)
+        upstream_server = TestServer(upstream_app)
+        await upstream_server.start_server()
+        dispatcher = build_default_dispatcher(
+            local_artifact_dir=tmp_path / "local", scenario_storage=SQLiteScenarioStorage()
+        )
+        backend = HttpInferenceHandler(str(upstream_server.make_url("")).rstrip("/"))
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=backend)))
+        await client.start_server()
+        try:
+            payload = {"model": "gpt-4o", "input": [{"role": "user", "content": "hi"}], "stream": True}
+            response = await client.post("/v1/responses", headers={"x-reef-scenario": "chat"}, json=payload)
+            assert response.status == 200
+            body = await response.read()
+            assert body.startswith(delta)
+            terminal = body[len(delta) :].decode()
+            assert terminal.startswith("event: response.completed\n")
+            metadata = json.loads(terminal.split("data: ", 1)[1])
+            assert metadata["response"] == {"id": "resp_1"}
+            [record] = dispatcher.get_or_create_scenario("chat").records.replay("chat")
+            assert metadata["reef"]["agent_record_id"] == record.agent_record_id
+            assert record.payload["response"]["complete"] is True
+            assert record.payload["response"]["message"] == {"role": "assistant", "content": "hi"}
+            assert received["payload"] == payload
+        finally:
             await client.close()
             await upstream_server.close()
 

@@ -134,6 +134,8 @@ class HarnessInfo:
 
     seed_entries: tuple[Mapping[str, Any], ...] = ()
     served_model: str | None = None
+    #: The served model's API dialect: Reef forwards calls unchanged, so an installed client must speak it.
+    served_api: str = "openai"
     #: Further models the installed client may pick from; the served one stays the default.
     client_models: tuple[str, ...] = ()
 

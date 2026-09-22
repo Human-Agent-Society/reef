@@ -36,6 +36,21 @@ Requests
 
 **The provider's error came back as 400.** Provider 4xx responses are relayed with the provider's message; read it, the request body is usually the problem. A provider 5xx becomes 502.
 
+**503 inference retry deadline exceeded (300s).** Buffered inference exhausted
+``inference.retry-timeout-s``. It follows ``inference.timeout-s`` when not set
+separately, and both default to 300 seconds. If one valid generation can take
+longer—for example, a Designer call against a slow local model—raise the
+request timeout:
+
+.. code:: bash
+
+   reef serve ... --inference.timeout-s 1800
+
+If ``inference.retry-timeout-s`` is explicitly configured, make sure it is
+also long enough. ``inference.retry-initial-s`` and
+``inference.retry-max-s`` control only the delay between attempts; increasing
+them does not give one generation more time.
+
 Reports and training
 --------------------
 

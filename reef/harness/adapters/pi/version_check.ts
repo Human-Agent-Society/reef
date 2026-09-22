@@ -10,6 +10,8 @@
 // wrapper on disk, or headless, the setup list replaces the update: the install would refuse. The update itself
 // runs through the wrapper when one is on disk and through the install pipeline otherwise.
 // Before that, an env variable the installed release requires and this shell lacks gets one warning line.
+// A release held back from the served head is offered like any other: selecting the update moves the head to it
+// first, so installing is the one decision a person makes about it.
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
@@ -105,6 +107,35 @@ function requiredBy(releases, releaseId) {
   return [...merged.values()];
 }
 
+// Whether a row published a tree of its own. A rejected or skipped step commits no tree and its row carries the
+// head's release id, so offering it would offer the version already installed.
+function publishedTree(row) {
+  const metrics = row.metrics || {};
+  return metrics.selected !== false && !metrics.skipped;
+}
+
+// Move the served head to a release held back from it, so the update installs that tree and later sessions are
+// offered the same version. Answers the new head's id, or null when reef refused or could not be reached.
+async function promoteRelease(serviceUrl, scenario, token, releaseId) {
+  let response;
+  try {
+    response = await fetch(`${serviceUrl}/reef/scenarios/${encodeURIComponent(scenario)}/promote`, {
+      method: "POST",
+      headers: {
+        "x-reef-scenario": scenario,
+        "content-type": "application/json",
+        ...(token ? { authorization: `Bearer ${token}` } : {}),
+      },
+      body: JSON.stringify({ release_id: releaseId }),
+    });
+  } catch {
+    return null;
+  }
+  if (!response.ok) return null;
+  const answer = await response.json();
+  return typeof answer.release_id === "string" && answer.release_id ? answer.release_id : null;
+}
+
 export default function versionCheck(pi) {
   let checked = false;
 
@@ -144,8 +175,6 @@ export default function versionCheck(pi) {
     if (!Array.isArray(releases)) return;
     // What the installed release needs from this shell, one line per unset variable: a check off records that
     // the variable was set once, and says nothing about the shell that started this session.
-    // A release held for review gets its notice from the requests extension's session-start line, which names
-    // the command that promotes it.
     for (const item of requiredBy(releases, pinned)) {
       if (item.kind !== "env") continue;
       const variable = typeof item.check === "string" && item.check ? item.check : item.name;
@@ -154,12 +183,10 @@ export default function versionCheck(pi) {
       if (ctx.hasUI) ctx.ui.notify(warning, "warning");
       else console.error(warning);
     }
-    // A release held for review is served to no session, so it is never the head this offers.
-    const head = [...releases].reverse().find((row) => row && !row.pending);
+    // The newest release with a tree of its own, whether or not it is held back from the served head: installing
+    // one is the person's decision, and a held-back release is promoted below as part of installing it.
+    const head = [...releases].reverse().find((row) => row && row.release_id && publishedTree(row));
     if (!head || head.release_id === pinned) return;
-    const pinnedRow = releases.find((row) => row && row.release_id === pinned);
-    // A trial install of a pending release is the person's choice: no offer until a promote republishes it.
-    if (pinnedRow && pinnedRow.pending && !releases.some((row) => row && row.rollback_target_release_id === pinned)) return;
 
     const checkedOff = new Map();
     for (const item of Array.isArray(releaseInfo.setup) ? releaseInfo.setup : []) {
@@ -213,6 +240,19 @@ export default function versionCheck(pi) {
     const choice = await ctx.ui.select(title, [updateOption, "Skip"]);
     if (choice !== updateOption) return;
 
+    // The install routes serve the scenario's head, so a release held back from it must move there first;
+    // installing it is the person saying it may run, which the selection above just recorded.
+    let installed = head.release_id;
+    if (head.pending) {
+      ctx.ui.notify(`Serving release ${id8}...`, "info");
+      const promoted = await promoteRelease(serviceUrl, scenario, token, head.release_id);
+      if (!promoted) {
+        ctx.ui.notify(`Reef harness update failed: reef refused to serve release ${id8}.`, "error");
+        return;
+      }
+      installed = promoted;
+    }
+
     ctx.ui.notify("Updating Reef harness...", "info");
     let result;
     try {
@@ -241,6 +281,6 @@ export default function versionCheck(pi) {
       return;
     }
     // pi's /reload re-runs session_start on the installed tree; only the person can type it.
-    ctx.ui.notify(`Installed release ${id8}. Type /reload to load it now.`, "info");
+    ctx.ui.notify(`Installed release ${installed.slice(0, 8)}. Type /reload to load it now.`, "info");
   });
 }

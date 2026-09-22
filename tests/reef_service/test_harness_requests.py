@@ -721,3 +721,57 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
         asyncio.run(run())
     finally:
         dispatcher.close()
+
+
+def test_a_request_carries_the_clients_machine_and_drops_what_does_not_fit() -> None:
+    report = {
+        "platform": "darwin",
+        "arch": "arm64",
+        "release": "24.6.0",
+        "commands": {"afplay": True, "ffplay": False},
+        "hostname": "not asked for",
+    }
+    request = TrainingRequest.from_dict({"text": "speak", "session": "s", "release_id": "r", "client": report})
+    assert request.client == {k: v for k, v in report.items() if k != "hostname"}
+    assert request.to_dict()["client"] == request.client
+    # Advisory data never refuses a request: what does not fit is dropped, and none is none.
+    odd = {"platform": "linux", "release": "#1 SMP; rm -rf", "commands": {"ok": True, "bad name": True, "x": "yes"}}
+    assert TrainingRequest.from_dict({"text": "t", "session": "s", "release_id": "r", "client": odd}).client == {
+        "platform": "linux",
+        "commands": {"ok": True},
+    }
+    plain = TrainingRequest.from_dict({"text": "t", "session": "s", "release_id": "r", "client": "darwin"})
+    assert plain.client == {} and "client" not in plain.to_dict()
+
+
+def test_both_proposers_are_told_the_machine_the_change_runs_on() -> None:
+    from reef.recipe.reefine.evolution import client_text
+
+    told = client_text(
+        {"client": {"platform": "darwin", "release": "24.6.0", "commands": {"afplay": True, "mpv": False}}}
+    )
+    assert "platform: darwin 24.6.0" in told and "on its PATH: afplay" in told and "not on its PATH: mpv" in told
+    assert "requires item" in told
+    assert "unknown" in client_text({}) and "WSL 2" in client_text({})
+
+
+def test_a_binary_item_names_the_program_and_its_check_stays_optional() -> None:
+    """``binary`` is a kind the route admits: the name is the program to look for, the check is optional, and
+    the entry name pattern, which admits no separator, is the whole of what a program name has to satisfy."""
+    from reef.core.requirements import parse_requires
+
+    assert "binary" in REQUIRE_KINDS
+    items = [
+        {"name": "pdftotext", "kind": "binary", "prompt": "  Install poppler  "},
+        {"name": "wkhtmltopdf", "kind": "binary", "check": "wkhtmltopdf --version"},
+    ]
+    assert parse_requires(items) == [
+        {"name": "pdftotext", "kind": "binary", "prompt": "Install poppler"},
+        {"name": "wkhtmltopdf", "kind": "binary", "check": "wkhtmltopdf --version"},
+    ]
+    # A path is not a program name, so the name pattern refuses it before any kind specific rule could.
+    with pytest.raises(ValueError, match=r"requires\[0\]\.name"):
+        parse_requires([{"name": "/usr/local/bin/pdftotext", "kind": "binary"}])
+    # An empty check is refused for a binary as for any other kind.
+    with pytest.raises(ValueError, match=r"requires\[0\]\.check"):
+        parse_requires([{"name": "pdftotext", "kind": "binary", "check": "   "}])

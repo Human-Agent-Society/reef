@@ -23,6 +23,13 @@ argv:
   - "{prompt}"
 env:
   CODEX_HOME: "{root}/codex"
+# resume finds a session by scanning the rollouts under sessions/. The state
+# database stays out: it records each rollout's absolute path in the temp
+# copy reef-codex removes, and a thread whose recorded path is gone does not
+# resume.
+client_state:
+  - path: "codex/sessions"
+    kind: directory
 files:
   config:
     primary:

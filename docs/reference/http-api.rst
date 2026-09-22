@@ -1,8 +1,9 @@
 HTTP API: inference, feedback, and releases
 ===========================================
 
-Reef serves the provider's own inference routes: OpenAI at
-``/v1/chat/completions`` and Anthropic at ``/v1/messages``. It forwards each
+Reef serves the provider's own inference routes: OpenAI Chat Completions at
+``/v1/chat/completions``, OpenAI Responses at ``/v1/responses``, and Anthropic
+at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
@@ -27,9 +28,14 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/chat/completions``                          | OpenAI-format inference                           |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/responses``                                 | OpenAI Responses-format inference                 |
++--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages``                                  | Anthropic-format inference                        |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /v1/messages/count_tokens``                     | count request tokens; recorded like any inference |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/images``, ``/v1/embeddings``,               | multimodal call, relayed by the recipe to its     |
+| ``/v1/audio/speech``, ``/v1/decisions``                | gateway; not recorded, 501 when it offers none    |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                  | submit feedback about one or more receipts        |
 +--------------------------------------------------------+---------------------------------------------------+
@@ -223,6 +229,15 @@ variables a written extension reads through ``process.env`` that no
 A request step that produced nothing records ``failure``, why: the model
 call failed (how long it took, the reply budget and the endpoint's error)
 or the reply held no usable entry. Other methods may write other keys.
+
+An optional ``client`` reports the requesting machine, so a proposer builds
+for it rather than for the sandbox it tries changes in: ``platform``,
+``arch`` and ``release`` (short words) and ``commands``, a map of command
+names to whether each is on the machine's PATH (at most 64). ``reef-pi`` and
+pi's ``/evolve`` send one, reading the PATH without running anything.
+It only informs the proposer: what does not fit that shape is dropped, never
+a reason to refuse the request, and ``training_request.client`` carries what
+was kept.
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
 without another step, including after record compaction; reusing the id with
@@ -530,6 +545,17 @@ generated ``harness-`` name and embeds that assignment in the wrapper script;
 when exactly one configured recipe serves harness files, it selects that recipe
 automatically.
 
+Creating that scenario takes a few seconds, and ``curl ... | bash`` shows
+nothing until the first bytes arrive. So when the script is not ready within
+half a second, the response starts at once with a short preamble that shows
+``reef: preparing the harness install`` (a spinner on a terminal). The script
+follows inside one ``{ ... }`` group that first stops the spinner, so a
+connection that drops mid-script runs none of it. In that case the HTTP
+status is already 200: a failure while preparing arrives as a script that
+prints ``reef: the harness install failed (HTTP <status>): <message>`` and
+exits 1. A script ready within the half second is sent as before, with the
+failure's own HTTP status.
+
 ``files`` is the rendered tree, path to text. An adapter whose descriptor
 declares ``files.tree`` (``native`` does: ``native/tree.json``) adds one more
 file: the release's entries list, the same ``{id, name, config}`` objects the
@@ -627,7 +653,7 @@ directories.
 Harness requests
 ~~~~~~~~~~~~~~~~
 
-``reef-<adapter> harness "<request>"`` and pi's ``/reef-harness <request>``
+``reef-<adapter> harness "<request>"`` and pi's ``/evolve <request>``
 submit the user's instruction through ``POST /reef/train``, described under
 `Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
 (the deployment keeps learning from failures) or ``manual``, or switch an
@@ -737,10 +763,10 @@ than nine digits, is HTTP 404 too. The row itself rides in a
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: code-repair" \
      "$REEF_URL/reef/harness/releases/3/page" > harness-step-3.html
 
-On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
-``/reef-versions 3`` prints this URL with the promote command, the trial
-install (which replaces the installed tree) and the head's reinstall beside
-it when the release is pending; a promoted release gets none of them.
+On pi, ``/versions`` in a ``reef-pi`` session lists the chain, and
+``/versions v3`` offers to open this page in the browser, printing the URL
+when the offer is declined. ``/versions v3 install`` installs that release,
+promoting it first when it is still held back from the served head.
 
 Request page
 ~~~~~~~~~~~~
@@ -748,7 +774,7 @@ Request page
 ``GET /reef/harness/requests/{record_id}/page`` answers one self contained
 HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
 harness request, ``record_id`` being the ``agent_record_id`` that
-``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/reef-harness``
+``POST /reef/train`` answered; ``reef-pi evolve`` and pi's ``/evolve``
 print the link. Until the step settles the page reloads itself every five
 seconds. A four-stage progress strip and a status badge summarize the
 request. The responsive layout places Request beside Progress on desktop
@@ -763,13 +789,20 @@ the request, ``proposing`` while the served model writes the change,
 step record directory when the backend reports them, and the time into the
 step), ``running`` while the trainer holds the request and the backend
 reports no phase, and ``settling`` while the row that consumed the record
-lands. The catalog row whose ``metrics.training_request.id`` is the record
+lands. While a step holds the request, Activity lists what the proposer has
+done so far, newest first, each line at its time into the step and the
+newest with how long ago it happened: every model call as it starts and
+as it answers (its seconds and tokens, or its error), and for the agent
+proposer each tool the agent calls, each admission check, each trial with
+its exit and multimodal calls, and each multimodal call with its status;
+failed lines are marked. The page lists the latest 80; the step record
+keeps every call. The catalog row whose ``metrics.training_request.id`` is the record
 id settles the page: the reload stops and Progress gives way to Result
 (the result as the version page words it, what it means and the next
 action, a failed instruction's ``error``, ``proposal_notes.failure`` as
 ``proposer failure``, the release id and a link to the version page), What
 changed (each mutation's op, id and kind; labeled Proposed changes for
-pending, rejected or skipped steps) and, when the step recorded a review,
+pending, rejected, skipped or failed steps) and, when the step recorded a review,
 Review (its result and the points it left uncovered). Published and pending
 results show the session command to install or promote when the person is
 ready, alongside a link to the version page. An unknown
@@ -780,11 +813,16 @@ as JSON (``Cache-Control: no-store``), for a client that polls rather than a
 browser that renders: ``request_id``, ``settled``, ``step`` (the step the
 row landed as once it settles, else null), ``state`` (the page's own
 ``queued``, ``proposing``, ``evaluating``, ``running`` or ``settling``, and
-the settled row's result once a row answers the request), ``meaning`` (the
+the settled row's result once a row answers the request, including ``failed``
+when a skipped step records a proposer failure or execution error), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
-step holds this request, ``started_at``, ``episodes_total`` and
-``step_record`` from the backend's progress. The phase is what the pi
-extension's spinner names while the step runs. Unlike the two pages this is
+step holds this request, ``started_at``, ``episodes_total``,
+``step_record`` and ``activity`` (the Activity lines oldest first, each
+``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
+``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
+empty otherwise) from the backend's progress. The phase is what the pi
+extension's spinner names while the step runs, and opening the spinner lists
+the latest four activity lines. Unlike the two pages this is
 an ordinary route: it reads the headers alone, and a ``?token=`` is HTTP
 401. An unknown id, or one that is not a training instruction, is HTTP 404
 naming it.

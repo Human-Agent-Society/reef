@@ -254,6 +254,9 @@ class ScenarioFactory:
                 consumed = _consumed_by_committed_steps(store, head_record)
                 scenario.reingest(up_to_sequence=high_water[0], consumed_ids=consumed)
                 scenario.restore_record_progress(after_sequence=high_water[0], offset=high_water[1])
+            # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
+            # requests extension, for one) until it is republished; every later step builds on what it serves.
+            scenario.publish_shipped_content()
             return scenario
         except BaseException:
             if scenario is not None:

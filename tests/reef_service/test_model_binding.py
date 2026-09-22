@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -173,10 +174,10 @@ def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monke
 
 
 def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import _BudgetedBinding
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     record: list[dict[str, Any]] = []
-    budgeted = _BudgetedBinding(ModelBinding("http://up", "m"), [0], 0, record)
+    budgeted = _BudgetedBinding(ModelBinding("http://up", "m"), _StepCalls(0, record))
     _capture(
         monkeypatch,
         {
@@ -191,7 +192,7 @@ def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch)
 
 
 def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, _BudgetedBinding
+    from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, _BudgetedBinding, _StepCalls
 
     response = {
         "id": "response-1",
@@ -208,7 +209,7 @@ def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -
     }
     record: list[dict[str, Any]] = []
     inner = ModelBinding("http://up", "m")
-    budgeted = _BudgetedBinding(inner, [0], 0, record)
+    budgeted = _BudgetedBinding(inner, _StepCalls(0, record))
     _capture(monkeypatch, response)
     assert budgeted.chat([]) == "the answer"
     assert record[0]["reply"] == "the answer"
@@ -305,7 +306,7 @@ def test_responses_stream_keeps_reasoning_output_items(monkeypatch) -> None:
 
 
 def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import _BudgetedBinding
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     class CustomChat(ModelBinding):
         def chat(self, messages, **params):
@@ -316,7 +317,7 @@ def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text
     inner.complete({"messages": []})
     assert inner.last_response() is not None
     record: list[dict[str, Any]] = []
-    assert _BudgetedBinding(inner, [0], 0, record).chat([]) == "custom text"
+    assert _BudgetedBinding(inner, _StepCalls(0, record)).chat([]) == "custom text"
     assert "response" not in record[0]
 
 
@@ -334,7 +335,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
 
 def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(monkeypatch) -> None:
     from reef.harness.episodes.model_binding import ModelBindingError
-    from reef.train.cordis_backend.backend import _BudgetedBinding
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     record: list[dict[str, Any]] = []
     response = {
@@ -348,7 +349,7 @@ def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(mo
     }
     _capture(monkeypatch, response)
     with pytest.raises(ModelBindingError, match="non-text"):
-        _BudgetedBinding(ModelBinding("http://up", "m"), [0], 0, record).chat([])
+        _BudgetedBinding(ModelBinding("http://up", "m"), _StepCalls(0, record)).chat([])
     assert "error" in record[0] and "reply" not in record[0]
     assert record[0]["response"] == response
     assert record[0]["usage"] == {"input_tokens": 3, "output_tokens": 20}
@@ -455,12 +456,15 @@ def test_unknown_api_is_refused() -> None:
 def test_episode_templates_follow_the_dialect() -> None:
     pi = get_adapter("pi")
     openai = render_composition(ModelBinding("http://up", "m", api_key="k").compose_nodes(pi), pi)
+    responses = render_composition(ModelBinding("http://up", "m", api_key="k", api="responses").compose_nodes(pi), pi)
     anthropic = render_composition(ModelBinding("http://up", "m", api_key="k", api="anthropic").compose_nodes(pi), pi)
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["api"] == "openai-completions"
     assert json.loads(openai["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up/v1"
+    assert json.loads(responses["pi-agent/models.json"])["providers"]["reef"]["api"] == "openai-responses"
+    assert json.loads(responses["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up/v1"
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["api"] == "anthropic-messages"
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up"
-    for files in (openai, anthropic):
+    for files in (openai, responses, anthropic):
         assert json.loads(files["pi-agent/settings.json"])["defaultModel"] == "reef/m"
 
 
@@ -559,3 +563,28 @@ def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("demo_models", None)
+
+
+def _models_node(binding: ModelBinding) -> dict:
+    """The ``models`` config node a pi tree gets from ``binding``."""
+    return next(node for _, node in binding.compose_nodes(get_adapter("pi")) if node["target"] == "models")
+
+
+@pytest.mark.unit
+def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
+    """pi falls back to 16384 tokens for a model its config does not size, which a reasoning model spends on its
+    reasoning alone; Reef writes the binding's budget instead, and JSON needs it to stay a number."""
+    binding = ModelBinding(base_url="http://127.0.0.1:8901", model="anthropic/claude-sonnet-5", api_key="tok")
+    models = _models_node(binding)
+    assert models["data"]["providers"]["reef"]["models"][0] == {
+        "id": "anthropic/claude-sonnet-5",
+        "maxTokens": 32000,
+    }
+    assert binding.max_output_tokens == 32000
+
+    smaller = _models_node(replace(binding, max_output_tokens=8000))
+    assert smaller["data"]["providers"]["reef"]["models"][0]["maxTokens"] == 8000
+
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError, match="max_output_tokens"):
+            replace(binding, max_output_tokens=bad)

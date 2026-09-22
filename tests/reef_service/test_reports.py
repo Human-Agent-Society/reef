@@ -13,7 +13,7 @@ import pytest
 from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport
+from reef.core.reports import ReportBase, ReportValidationError, ScoredRolloutReport, TeacherContextReport
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
 from reef.storage.sqlite import SQLiteScenarioStorage
@@ -57,6 +57,20 @@ def test_scored_rollout_round_trip() -> None:
     body = schema.to_dict(references=["receipt-1"])
     assert body == {"score": 0.83, "references": ["receipt-1"]}
     assert ScoredRolloutReport.from_dict(body) == schema
+
+
+def test_teacher_context_round_trip() -> None:
+    # The distilling recipes' contract: the teacher context rides metadata, the score is optional.
+    schema = TeacherContextReport(teacher_context="100 degrees Celsius.")
+    body = schema.to_dict(references=["receipt-1"])
+    assert body == {"metadata": {"teacher_context": "100 degrees Celsius."}, "references": ["receipt-1"]}
+    assert TeacherContextReport.from_dict(body) == schema
+    scored = TeacherContextReport.from_dict({"score": 0.5, "metadata": {"teacher_context": "demo"}})
+    assert scored == TeacherContextReport(teacher_context="demo", score=0.5)
+    # A teacher that reads no privileged text (on-policy distillation) leaves the teacher context empty,
+    # and a field at its default is not serialized.
+    assert TeacherContextReport.from_dict({"metadata": {}}) == TeacherContextReport()
+    assert TeacherContextReport().to_dict(references=["receipt-1"]) == {"references": ["receipt-1"]}
 
 
 def test_grouped_rollout_round_trip() -> None:
@@ -113,6 +127,7 @@ def test_minimal_score_only_report_is_a_valid_task_outcome() -> None:
             "metadata.algorithm",
         ),
         (TaskOutcome, {"score": 1.0, "metadata": {"resolved": "yes"}}, "resolved must be a boolean"),
+        (TeacherContextReport, {"metadata": {"teacher_context": 3}}, "metadata.teacher_context must be a string"),
     ],
 )
 def test_violations_name_the_broken_field(report_type: type[ReportBase], payload: dict, fragment: str) -> None:

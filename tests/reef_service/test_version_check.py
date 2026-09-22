@@ -217,7 +217,14 @@ versionCheck({
 });
 const confirms = JSON.parse(process.env.TEST_CONFIRM || "[]");
 const inputs = JSON.parse(process.env.TEST_INPUT || "[]");
-globalThis.fetch = async () => ({ ok: true, json: async () => JSON.parse(process.env.TEST_RELEASES) });
+globalThis.fetch = async (url, init = {}) => {
+  if ((init.method || "GET") === "POST") {
+    events.push({ kind: "fetch", method: "POST", url, body: init.body ? JSON.parse(init.body) : null });
+    const answer = JSON.parse(process.env.TEST_PROMOTE || '{"ok": true, "release_id": "promoted"}');
+    return { ok: answer.ok !== false, status: answer.ok === false ? 409 : 200, json: async () => answer, text: async () => JSON.stringify(answer) };
+  }
+  return { ok: true, json: async () => JSON.parse(process.env.TEST_RELEASES) };
+};
 await sessionStart(
   { type: "session_start", reason: "startup" },
   {
@@ -260,6 +267,7 @@ console.log(JSON.stringify(events));
         "TEST_CONFIRM",
         "TEST_INPUT",
         "TEST_EXEC",
+        "TEST_PROMOTE",
     ):
         if name not in env:
             full_env.pop(name, None)
@@ -279,18 +287,17 @@ def test_the_notice_prints_the_setup_list_instead_of_the_update_while_an_item_is
             "pending": False,
             "metrics": {"training_request": {"text": "text me", "requires": requires}},
         },
-        # A pending tail row is not the head: its items stay out of the setup list and the offer names v2.
+        # A step that published no tree carries the head's id, so the list and the offer stay with v2.
         {
-            "release_id": "v3",
-            "pending": True,
-            "metrics": {"training_request": {"requires": [{"name": "later", "kind": "env"}]}},
+            "release_id": "v2",
+            "metrics": {"selected": False, "training_request": {"requires": [{"name": "later", "kind": "env"}]}},
         },
     ]
     # One item checked off, one not: the setup list through the UI, no prompt.
     events, stderr = _notice(
         tmp_path, releases, {"release_id": "v1", "setup": [{"name": "TWILIO_SID", "checked_at": 1.0}]}
     )
-    # The pending tail's review notice belongs to the requests extension's session-start line, not to this one.
+    # A row that published no tree adds nothing to the list: the items are the head's own.
     assert [event["kind"] for event in events] == ["notify"] and stderr == ""
     assert events[0]["type"] == "warning"
     assert events[0]["message"] == (
@@ -372,38 +379,66 @@ def test_the_notice_reads_the_chains_union_and_tolerates_a_bad_requires_or_setup
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
-def test_the_notice_never_offers_a_pending_release(tmp_path: Path) -> None:
-    """A release held for review is served to no session, so the head the notice
-    offers is the newest row that is not pending: a pending tail behind the
-    pinned head is silence here (the requests extension's session-start line
-    names it), a newer row that is not pending is still offered, and a trial
-    install of the pending release gets no offer until its promote."""
+def test_the_notice_offers_a_release_held_back_from_the_head_and_serves_it_before_installing(
+    tmp_path: Path,
+) -> None:
+    """A release held back from the served head is offered like any other, because installing one is the person's
+    decision. Taking the offer moves the head to it first, so the install route serves that tree, and the line
+    names the head the promote minted. A step that published no tree of its own is never the offer."""
     release_info = {"release_id": "v1"}
     pending_tail = [{"release_id": "v1"}, {"release_id": "v2", "pending": True}]
-    assert _notice(tmp_path, pending_tail, release_info) == ([], "")
-    assert _notice(tmp_path, pending_tail, release_info, headless=True) == ([], "")
-    # A catalog whose every row is pending has no head to offer.
-    assert _notice(tmp_path, [{"release_id": "v2", "pending": True}], release_info) == ([], "")
-    promoted_then_pending = [{"release_id": "v1"}, {"release_id": "v2"}, {"release_id": "v3", "pending": True}]
-    events, stderr = _notice(tmp_path, promoted_then_pending, release_info)
+    events, stderr = _notice(tmp_path, pending_tail, release_info)
     assert [event["kind"] for event in events] == ["select"] and stderr == ""
     assert "Current: v1" in events[0]["title"] and "Latest:  v2" in events[0]["title"]
-    assert "v3" not in events[0]["title"]
-    events, stderr = _notice(tmp_path, promoted_then_pending, release_info, headless=True)
-    assert events == [] and "Latest:  v2" in stderr and "v3" not in stderr
-    # A trial install of the pending release by id (?release_id=v3) is the person's choice: no offer to move back.
-    trial = {"release_id": "v3"}
-    assert _notice(tmp_path, promoted_then_pending, trial) == ([], "")
-    assert _notice(tmp_path, promoted_then_pending, trial, headless=True) == ([], "")
-    # Once a promote republishes the trial tree, the promoted head is offered to it.
-    promoted = [*promoted_then_pending, {"release_id": "v4", "rollback_target_release_id": "v3"}]
-    events, _ = _notice(tmp_path, promoted, trial)
-    assert [event["kind"] for event in events] == ["select"]
-    assert "Current: v3" in events[0]["title"] and "Latest:  v4" in events[0]["title"]
+    # Headless says the same thing on stderr, so a scripted session sees the release too.
+    events, stderr = _notice(tmp_path, pending_tail, release_info, headless=True)
+    assert events == [] and "Latest:  v2" in stderr
+    # Taking the offer promotes first: the head moves to the release, and the install serves what it minted.
+    events, _ = _notice(
+        tmp_path,
+        pending_tail,
+        release_info,
+        TEST_CHOOSE_UPDATE="1",
+        TEST_PROMOTE=json.dumps({"ok": True, "release_id": "v2-head"}),
+    )
+    assert [event["kind"] for event in events] == ["select", "notify", "fetch", "notify", "exec", "notify"]
+    promote = events[2]
+    assert promote["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
+    assert promote["body"] == {"release_id": "v2"}
+    assert events[-1]["message"] == "Installed release v2-head. Type /reload to load it now."
+    # A refused promote installs nothing and says so.
+    events, _ = _notice(
+        tmp_path,
+        pending_tail,
+        release_info,
+        TEST_CHOOSE_UPDATE="1",
+        TEST_PROMOTE=json.dumps({"ok": False}),
+    )
+    assert [event["kind"] for event in events] == ["select", "notify", "fetch", "notify"]
+    assert events[-1] == {
+        "kind": "notify",
+        "message": "Reef harness update failed: reef refused to serve release v2.",
+        "type": "error",
+    }
+    # A release already at the head needs no promote: the install runs straight through.
+    events, _ = _notice(tmp_path, [{"release_id": "v1"}, {"release_id": "v2"}], release_info, TEST_CHOOSE_UPDATE="1")
+    assert [event["kind"] for event in events] == ["select", "notify", "exec", "notify"]
+    assert events[-1]["message"] == "Installed release v2. Type /reload to load it now."
+    # A step that published no tree carries the head's id, so it is never the offer.
+    no_tree = [
+        {"release_id": "v1"},
+        {"release_id": "v2", "pending": True},
+        {"release_id": "v2", "metrics": {"selected": False}},
+        {"release_id": "v2", "metrics": {"skipped": "no proposal"}},
+    ]
+    events, _ = _notice(tmp_path, no_tree, release_info)
+    assert [event["kind"] for event in events] == ["select"] and "Latest:  v2" in events[0]["title"]
+    # The tree that is already installed is never offered back to itself.
+    assert _notice(tmp_path, pending_tail, {"release_id": "v2"}) == ([], "")
     # A null row is skipped, never an error; a release file that is not a record is silence.
     events, _ = _notice(tmp_path, [{"release_id": "v1"}, None, {"release_id": "v2"}], release_info)
     assert [event["kind"] for event in events] == ["select"] and "Latest:  v2" in events[0]["title"]
-    assert _notice(tmp_path, promoted_then_pending, None) == ([], "")
+    assert _notice(tmp_path, pending_tail, None) == ([], "")
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")

@@ -26,6 +26,12 @@ client_env:
   PI_SKIP_VERSION_CHECK: "1"
 # pi wants these on PATH at first start and otherwise downloads them from
 # GitHub releases, which rate-limits unauthenticated clients.
+# pi saves sessions under its agent dir, which reef-pi points at a temp copy
+# of the installed tree; kept in the installed tree, --resume and --continue
+# find them in a later run.
+client_state:
+  - path: "pi-agent/sessions"
+    kind: directory
 client_tools:
   - command: rg
     package: ripgrep
@@ -56,7 +62,9 @@ cleanup_whitelist:
 quirks: reef.harness.adapters.pi.quirks
 # How to point pi at a model endpoint, per API dialect. Reef renders the set
 # matching its model binding's api into evaluation episodes; the served tree
-# never carries a provider.
+# never carries a provider. maxTokens is Reef's reply budget rather than pi's
+# own default of 16384: a reasoning model spends that on its reasoning and
+# answers with no text, which ends the turn with nothing written.
 model_binding:
   openai:
     - target: models
@@ -68,6 +76,22 @@ model_binding:
             baseUrl: "{base_url}/v1"
             models:
               - id: "{model}"
+                maxTokens: "{max_output_tokens}"
+    - target: primary
+      data:
+        defaultModel: "reef/{model}"
+        defaultProvider: reef
+  responses:
+    - target: models
+      data:
+        providers:
+          reef:
+            api: openai-responses
+            apiKey: "{api_key}"
+            baseUrl: "{base_url}/v1"
+            models:
+              - id: "{model}"
+                maxTokens: "{max_output_tokens}"
     - target: primary
       data:
         defaultModel: "reef/{model}"
@@ -82,6 +106,7 @@ model_binding:
             baseUrl: "{base_url}"
             models:
               - id: "{model}"
+                maxTokens: "{max_output_tokens}"
     - target: primary
       data:
         defaultModel: "reef/{model}"

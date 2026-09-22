@@ -22,6 +22,8 @@ everything the shared engines need to drive one harness binary:
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
+- ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
+  keeps in the installed tree, so a later run finds them.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
@@ -94,6 +96,10 @@ class ConfigTarget:
     defaults: Mapping[str, Any] = field(default_factory=dict)
 
 
+#: The ``{api_key}`` an installed binding carries when the client has no Reef token (a Reef without auth): a
+#: harness such as pi refuses an empty key, and the ``reef-<adapter>`` wrapper reads this one back as no token.
+NO_TOKEN_API_KEY = "reef-no-token"
+
 #: Vendor install kinds the install-script generator can render: an npm
 #: package at a version, or a git checkout at a ref installed editable into
 #: a venv (the channel of a Python agent that publishes no wheel).
@@ -106,6 +112,27 @@ INSTALL_KINDS = ("npm", "git")
 _INSTALL_PACKAGE_PATTERN = re.compile(r"^[@A-Za-z0-9._/-]+$")
 _INSTALL_VERSION_PATTERN = re.compile(r"^[A-Za-z0-9._-]+$")
 _INSTALL_REPOSITORY_PATTERN = re.compile(r"^https://[A-Za-z0-9._/-]+$")
+
+
+#: How a ``client_state`` entry is kept. ``directory`` and ``sqlite`` are created in the installed tree
+#: before the run: an empty directory, or an empty SQLite database (a zero-length file is not one, and a
+#: binary may set it aside and start a new one in its place). ``file`` is copied back after the run when
+#: the binary wrote it as a new file, or renamed a new file over the link, so its mode is kept too.
+CLIENT_STATE_KINDS = ("directory", "sqlite", "file")
+
+
+@dataclass(frozen=True)
+class ClientState:
+    """A path below the relocated composition that an interactive run keeps.
+
+    The wrapper runs the binary on a temp copy of links to the installed
+    composition and removes the copy afterwards, so what the binary creates
+    there is lost; a path that already exists in the installed tree is
+    linked, and what the binary writes through the link stays.
+    """
+
+    path: str
+    kind: str
 
 
 @dataclass(frozen=True)
@@ -171,6 +198,9 @@ class AdapterDescriptor:
     #: Commands the binary expects on PATH at first start and otherwise fetches
     #: itself, as ``(command, package)``; the install script names the missing ones.
     client_tools: tuple[tuple[str, str], ...] = ()
+    #: Root-relative sessions and settings below the composition that a ``reef-<adapter>`` run
+    #: keeps in the installed tree, so a later run resumes its sessions and skips its first-run setup.
+    client_state: tuple[ClientState, ...] = ()
 
     def compose_relocation(self) -> tuple[str, str]:
         """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
@@ -250,8 +280,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     ):
         raise DescriptorError(f"{where} 'client_env' must map strings to strings")
     client_tools = _parse_client_tools(data.get("client_tools"), where)
+    client_state = _parse_client_state(data.get("client_state"), where)
     finalize, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
-    return AdapterDescriptor(
+    descriptor = AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
         argv=_str_list(data.get("argv"), f"{where} 'argv'"),
@@ -271,7 +302,14 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         validate_execution=validate_execution,
         client_env=dict(client_env),
         client_tools=client_tools,
+        client_state=client_state,
     )
+    if client_state:
+        _, compose_dir = descriptor.compose_relocation()
+        for state in client_state:
+            if PurePosixPath(compose_dir) not in PurePosixPath(state.path).parents:
+                raise DescriptorError(f"{where} 'client_state' path {state.path!r} is not below {compose_dir!r}")
+    return descriptor
 
 
 def _parse_tree_path(files: Mapping[str, Any], where: str) -> str | None:
@@ -395,6 +433,21 @@ def _parse_client_tools(value: Any, where: str) -> tuple[tuple[str, str], ...]:
             raise DescriptorError(f"{where} 'client_tools' 'package' must be a non-empty string")
         tools.append((entry["command"], package))
     return tuple(tools)
+
+
+def _parse_client_state(value: Any, where: str) -> tuple[ClientState, ...]:
+    """``client_state``: a list of ``{path, kind}`` an interactive run keeps in the installed tree."""
+    if value is None:
+        return ()
+    if not isinstance(value, list):
+        raise DescriptorError(f"{where} 'client_state' must be a list")
+    states: list[ClientState] = []
+    for entry in value:
+        if not isinstance(entry, Mapping) or entry.get("kind") not in CLIENT_STATE_KINDS:
+            raise DescriptorError(f"{where} 'client_state' entries need a 'kind' in {CLIENT_STATE_KINDS}")
+        (path,) = _relative_paths([entry.get("path")], f"{where} 'client_state' 'path'")
+        states.append(ClientState(path=path, kind=entry["kind"]))
+    return tuple(states)
 
 
 def _load_quirks(

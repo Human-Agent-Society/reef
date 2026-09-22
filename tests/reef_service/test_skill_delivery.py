@@ -141,6 +141,32 @@ def test_sse_frame_decoder_preserves_multiple_frames_and_unfinished_bytes() -> N
     assert decoder.finish() == b""
 
 
+def test_responses_receipt_is_attached_to_the_terminal_event() -> None:
+    delta = b'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n'
+    terminal = b'event: response.completed\ndata: {"type":"response.completed","response":{"id":"r1"}}\n\n'
+    assert not is_terminal_sse_event("/v1/responses", delta)
+    assert is_terminal_sse_event("/v1/responses", terminal)
+    assert is_terminal_sse_event("/v1/responses", b'data: {"type":"response.incomplete"}\n\n')
+    assert not is_terminal_sse_event("/v1/responses", b'data: {"type":"response.failed"}\n\n')
+    (with_receipt,) = receipt_sse_events("/v1/responses", {}, terminal, "record-3")
+    assert with_receipt == (
+        b"event: response.completed\n"
+        b'data: {"type":"response.completed","response":{"id":"r1"},"reef":{"agent_record_id":"record-3"}}\n\n'
+    )
+
+
+def test_responses_stream_text_is_aggregated_unless_the_turn_calls_a_tool() -> None:
+    text = (
+        'data: {"type":"response.output_item.added","item":{"type":"message"}}\n\n'
+        'data: {"type":"response.output_text.delta","delta":"hel"}\n\n'
+        'data: {"type":"response.output_text.delta","delta":"lo"}\n\n'
+        'data: {"type":"response.completed"}\n\n'
+    )
+    assert aggregate_sse_text(text) == "hello"
+    tool = 'data: {"type":"response.output_item.added","item":{"type":"function_call","name":"read"}}\n\n'
+    assert aggregate_sse_text(text + tool) is None
+
+
 def test_anthropic_receipt_is_attached_to_message_stop() -> None:
     terminal = b'event: message_stop\ndata: {"type":"message_stop"}\n\n'
     assert is_terminal_sse_event("/v1/messages", terminal)

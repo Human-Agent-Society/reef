@@ -127,8 +127,10 @@ package's own submodules and third-party libraries):
      - Imports
    * - ``core``
      - None
-   * - ``storage``, ``artifact``, ``observability``
+   * - ``storage``, ``artifact``
      - ``core``
+   * - ``observability``
+     - ``storage``, ``core``
    * - ``surface``
      - ``artifact``, ``core``
    * - ``runtime``

@@ -92,6 +92,10 @@ class ModelBinding:
     api_key: str | None = None
     api: str = "openai"
     timeout_s: float = 600.0
+    #: The reply budget a harness bound to this endpoint asks for, in tokens. A reasoning model spends it on its
+    #: reasoning first and answers with no text when it runs out, which reads to the harness as a turn that ended:
+    #: the default leaves room for both. A harness that sets none of its own picks a smaller one (pi takes 16384).
+    max_output_tokens: int = 32000
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -102,6 +106,8 @@ class ModelBinding:
             raise ValueError(f"model binding api must be one of {MODEL_APIS}, got {self.api!r}")
         if self.timeout_s <= 0:
             raise ValueError("model binding timeout_s must be positive")
+        if isinstance(self.max_output_tokens, bool) or self.max_output_tokens <= 0:
+            raise ValueError("model binding max_output_tokens must be a positive number of tokens")
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
 
     @classmethod
@@ -308,7 +314,12 @@ class ModelBinding:
                 f"adapter {descriptor.name!r} declares no model_binding for the {self.api!r} api "
                 f"(declared: {known}); episodes cannot reach a model"
             )
-        values = {"base_url": self.base_url, "api_key": self.api_key or NO_KEY_PLACEHOLDER, "model": self.model}
+        values: dict[str, Any] = {
+            "base_url": self.base_url,
+            "api_key": self.api_key or NO_KEY_PLACEHOLDER,
+            "model": self.model,
+            "max_output_tokens": self.max_output_tokens,
+        }
         choices = [self.model]
         for name in models:
             if isinstance(name, str) and name and name not in choices:
@@ -367,11 +378,18 @@ def _mentions_model(value: Any) -> bool:
     return False
 
 
-def _substitute(value: Any, values: Mapping[str, str], models: Sequence[str] = ()) -> Any:
-    """Fill ``{placeholders}``; with ``models``, a mapping key or list item naming ``{model}`` is repeated per model."""
+def _substitute(value: Any, values: Mapping[str, Any], models: Sequence[str] = ()) -> Any:
+    """Fill ``{placeholders}``; with ``models``, a mapping key or list item naming ``{model}`` is repeated per model.
+
+    A string that is one placeholder and nothing else becomes the value itself, so a number stays a number in the
+    rendered config; a placeholder among other text is filled as written.
+    """
     if isinstance(value, str):
+        whole = values.get(value[1:-1]) if value[:1] == "{" and value[-1:] == "}" else None
+        if whole is not None and not isinstance(whole, str):
+            return whole
         for key, replacement in values.items():
-            value = value.replace("{" + key + "}", replacement)
+            value = value.replace("{" + key + "}", str(replacement))
         return value
     if isinstance(value, Mapping):
         out: dict[Any, Any] = {}

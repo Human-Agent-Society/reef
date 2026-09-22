@@ -5,6 +5,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Literal
 
 from reef.core.evaluation import CandidateEvaluator, EvaluationResult, SelectionDecision, UpdateCandidate
@@ -151,6 +152,18 @@ class CandidateBackend(CandidateEvaluator, ABC):
         speculative prepare/evaluate work escape Reef's commit boundary.
         """
         return
+
+    def shipped_content_update(self, state: Mapping[str, Any], published_tree: Path) -> TrainStepResult | None:
+        """A result that republishes the content this Reef ships, when the served tree no longer carries it.
+
+        Content a backend ships with Reef itself (the harness backend's reef-owned
+        entries) is fixed when a scenario is created and carried unchanged by every
+        later step, so a scenario opened by an upgraded Reef compares it against
+        ``published_tree``, the served release's files. The result carries the
+        refreshed ``state`` and a durable ``artifact``; it is committed without an
+        evaluation. The default ships nothing.
+        """
+        return None
 
     def experiment_config(self) -> Mapping[str, Any]:
         """Non-secret backend identity/config attached to experiment runs."""

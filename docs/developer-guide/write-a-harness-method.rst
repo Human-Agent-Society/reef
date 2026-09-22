@@ -43,6 +43,32 @@ already refused, and can read the refused content rather than only its id.
 An optional keyword-only ``entries`` argument receives the tree as entry
 options, ``{"id", "name", "config"}`` mappings in tree order, so an ``update``
 or ``remove`` can name the entry it targets instead of creating a second one.
+An optional keyword-only ``agent_host`` argument receives an ``AgentHost``
+when the deployment configured ``evolution.proposer_agent``, else ``None``:
+the adapter descriptor and its installed binary, the executor built for the
+agent (its isolation, not the episodes'), the step's record directory, the
+two timeouts, and ``calls``, the step's model-call budget and record
+(``spend()`` and ``record(entry)``) for traffic the agent's own process makes
+outside ``models``. ``reef.recipe.reefine.agent`` is the reference user.
+
+An optional keyword-only ``requests`` argument carries a training request in
+``training_mode`` ``manual`` and ``hybrid`` (see `Manual training
+<../reference/http-api.rst#manual-training>`__ for the route that queues
+one). It holds exactly one request mapping, with ``id``, ``text``,
+``session``, ``release_id``, ``requires`` and ``untrusted=True``. The parameter
+must be declared by name; a ``**kwargs`` catch-all does not count, so a
+method never takes a request without being written for it. A deployment in
+either mode whose ``propose`` declares no such parameter fails at startup
+with ``RecipeConfigError``, so a failure-only method must grow a
+``requests`` branch before it runs there.
+``samples`` is empty in ``manual``; in ``hybrid`` it carries what an
+automatic batch would take next, up to ``batch_size`` and possibly none
+(scored traces, or records under ``data.batch_policy: records``), so the
+method can answer the request with the failures beside it. A request's
+mutations pass through the same evaluation and ``evolution.publish`` policy
+as any other step's, and pending agent proposals and periodic rollback
+rechecks cannot take the step a request owns.
+
 Reef passes each keyword only to a signature that names it.
 
 ``evaluate`` grades one finished episode. Reef calls it for both sides of every

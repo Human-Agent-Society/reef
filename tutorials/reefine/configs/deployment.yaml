@@ -20,7 +20,7 @@ recipe:
       # The built-in proposer answers a request with any kind pi renders.
       propose: reef.recipe.reefine.evolution:propose
       evaluate: reef.recipe.reefine.evolution:evaluate
-      # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
+      # The seed carries the /evolve command and the pi extension API skill the proposer reads.
       requests: true
       # The notice at session start offers the update once the head moved.
       version_check: true

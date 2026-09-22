@@ -125,12 +125,13 @@ def test_the_reefine_profile_loads_and_boots_its_recipe(monkeypatch, tmp_path) -
         "REEF_PYTHON": sys.executable,
     }.items():
         monkeypatch.setenv(key, value)
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
     path = profile_path("reefine")
     config = resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]
     validate_services(config, path)
     assert [service["name"] for service in config["services"]] == ["reef"]
     assert config["reef"]["recipe"] == "reef.recipe.reefine:ReefineRecipe"
-    assert (config["reef"]["port"], config["reef"]["token"]) == (8901, "reef-local")
+    assert (config["reef"]["port"], config["reef"]["token"]) == (8901, "")  # no REEF_TOKEN: no authentication
     for key in ("agent_record_dir", "artifact_repository", "artifact_work_dir", "artifact_cache_dir"):
         assert config["reef"][key].startswith(".reef/reefine/")
     assert config["run_dir"].startswith(".reef/reefine/")

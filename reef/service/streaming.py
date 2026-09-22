@@ -82,18 +82,26 @@ def _sse_data(frame: bytes) -> str:
     return "\n".join(line[len("data:") :].removeprefix(" ") for line in lines if line.startswith("data:"))
 
 
+#: Responses events that end a stream the model finished; ``incomplete`` is a normal stop at a token limit.
+RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete"})
+
+
 def is_terminal_sse_event(path: str, frame: bytes) -> bool:
     """Whether ``frame`` is the provider protocol's successful terminator."""
 
     data = _sse_data(frame)
     if path == "/v1/chat/completions":
         return data == "[DONE]"
-    if path == "/v1/messages":
+    if path in ("/v1/messages", "/v1/responses"):
         try:
             payload = json.loads(data)
         except json.JSONDecodeError:
             return False
-        return isinstance(payload, dict) and payload.get("type") == "message_stop"
+        if not isinstance(payload, dict):
+            return False
+        if path == "/v1/messages":
+            return payload.get("type") == "message_stop"
+        return payload.get("type") in RESPONSES_TERMINAL_EVENTS
     return False
 
 
@@ -123,7 +131,8 @@ def receipt_sse_events(
 
     Chat Completions gets an empty-choice metadata chunk immediately before
     ``[DONE]``, following the same placement as OpenAI's final usage chunk.
-    Anthropic's existing ``message_stop`` event carries the metadata directly.
+    Anthropic's existing ``message_stop`` event and the Responses terminal
+    event (``response.completed``) carry the metadata directly.
     """
 
     reef = {"agent_record_id": agent_record_id}
@@ -142,6 +151,19 @@ def receipt_sse_events(
         payload["reef"] = reef
         return (
             b"event: message_stop\n"
+            + f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode(),
+        )
+
+    if path == "/v1/responses":
+        try:
+            payload = json.loads(_sse_data(terminal))
+        except json.JSONDecodeError:
+            return (terminal,)
+        if not isinstance(payload, dict):
+            return (terminal,)
+        payload["reef"] = reef
+        return (
+            f"event: {payload.get('type')}\n".encode()
             + f"data: {json.dumps(payload, ensure_ascii=False, separators=(',', ':'))}\n\n".encode(),
         )
 
@@ -201,8 +223,9 @@ def sse_events(body: str):
 
 
 def aggregate_sse_text(body: str) -> str | None:
-    """Concatenate the primary choice's text deltas from an SSE body (OpenAI and
-    Anthropic shapes); None for tool-using turns or when no text is recognized."""
+    """Concatenate the primary choice's text deltas from an SSE body (Chat
+    Completions, Responses and Anthropic shapes); None for tool-using turns or
+    when no text is recognized."""
 
     parts: list[str] = []
     for data in sse_events(body):
@@ -227,7 +250,14 @@ def aggregate_sse_text(body: str) -> str | None:
                     parts.append(delta["content"])
             continue
         kind = event.get("type")
-        if kind == "content_block_start":
+        if kind == "response.output_item.added":
+            item = event.get("item")
+            if isinstance(item, dict) and item.get("type") not in ("message", "reasoning"):
+                return None
+        elif kind == "response.output_text.delta":
+            if isinstance(event.get("delta"), str):
+                parts.append(event["delta"])
+        elif kind == "content_block_start":
             block = event.get("content_block")
             if isinstance(block, dict) and block.get("type") == "tool_use":
                 return None

@@ -19,6 +19,11 @@ def inference_config(args: Any) -> dict[str, Any]:
     if "SLIME_HOST_IP" in env:
         env["REEF_INFERENCE_HOST"] = env.pop("SLIME_HOST_IP")
     colocate = bool(getattr(args, "colocate", False))
+    # Colocated engines retract already, because their KV allocation must
+    # leave the GPU during training. A disjoint engine preserves in-flight KV
+    # unless --disjoint-prefix-sharing trades a re-prefill at each publication
+    # for prefix reuse between publications.
+    retracts_at_publication = colocate or bool(args.disjoint_prefix_sharing)
     return {
         "model_path": args.hf_checkpoint,
         "num_gpus": args.rollout_num_gpus,
@@ -38,7 +43,7 @@ def inference_config(args: Any) -> dict[str, Any]:
         "offload": bool(getattr(args, "offload_rollout", False)),
         "shared_gpus": args.actor_num_nodes * args.actor_num_gpus_per_node if colocate else 0,
         "check_weights": bool(getattr(args, "check_weight_update_equal", False)),
-        "pause_mode": "retract" if colocate else "in_place",
+        "pause_mode": "retract" if retracts_at_publication else "in_place",
         "health_enabled": bool(getattr(args, "use_fault_tolerance", False)),
         "health_interval": getattr(args, "rollout_health_check_interval", 30),
         "health_timeout": getattr(args, "rollout_health_check_timeout", 30),
@@ -64,12 +69,13 @@ def engine_options(args: SlimeArguments) -> dict[str, Any]:
         enable_draft_weights_cpu_backup=True,
         skip_server_warmup=True,
         enable_metrics=True,
-        # Reef serving relies on both (per-request training tensors, no
-        # prefix reuse across adapter versions); Slime's parser defaults the
-        # radix flag to off, so the translation sets them itself.
-        disable_radix_cache=True,
         incremental_streaming_output=True,
     )
+    # Slime's parser defaults the radix flag to off, which cannot express a
+    # choice. Leave it unset unless the launch opts out, so the inference
+    # config shares prefixes exactly where publication clears them.
+    if options.get("disable_radix_cache") is not True:
+        options.pop("disable_radix_cache", None)
     if args.fp16:
         options["dtype"] = "float16"
     if args.use_rollout_routing_replay:

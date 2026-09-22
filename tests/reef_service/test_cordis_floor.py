@@ -14,6 +14,7 @@ import pytest
 from reef_service.test_harness_recipe import MODEL, backend, batch, evaluate, make_binary, run_backend_step
 
 import reef.train.cordis_backend.backend as reef_cordis_backend
+from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters import get_adapter
 from reef.recipe import RecipeConfigError
@@ -297,7 +298,7 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
     # A prompt rides with its item, and meets the screens a check meets.
     assert recorded["requires"] == [*person, added[0], added[3]]
     assert recorded["refused_requires"][:2] == [
-        {"item": added[1], "reason": "requires[0].kind must be one of ('permission', 'env', 'service')"},
+        {"item": added[1], "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"},
         {"item": added[2], "reason": "carries an instruction override phrasing"},
     ]
     (leak,) = recorded["refused_requires"][2:]
@@ -313,6 +314,36 @@ def test_refused_requires_are_recorded_beside_the_kept_ones(tmp_path: Path, capl
 
 def _instruction(text: str = "add a rule", request_id: str = "req-1") -> TrainingBatch:
     return replace(batch(), request=TrainingRequest(text=text, session="s", release_id="rel-0", id=request_id))
+
+
+def test_step_progress_carries_the_proposers_activity_as_it_happens(tmp_path: Path, monkeypatch) -> None:
+    """Each model call shows while it waits and once it answers, so the request page can tell a long call."""
+    from reef.harness.episodes.model_binding import ModelBinding
+
+    seen: list[tuple] = []
+    held: dict[str, CordisBackend] = {}
+
+    def answer(self, messages, **params):
+        seen.append(held["backend"].step_progress.activity)  # mid-call: the wait is already on the page
+        return "ok"
+
+    monkeypatch.setattr(ModelBinding, "chat", answer)
+
+    def propose(nodes, samples, models, *, requests=()):
+        models.served.chat([{"role": "user", "content": "design"}])
+        seen.append(held["backend"].step_progress.activity)
+        return MARKER
+
+    b = held["backend"] = backend(tmp_path, propose)
+    prepared = b.prepare_step(_instruction(), b.initial_state(), 0)
+    waiting, answered = seen
+    assert [line["text"] for line in waiting] == [f"asking {MODEL.model}"]
+    assert [line["kind"] for line in answered] == ["model", "model"]
+    assert answered[1]["text"].startswith(f"{MODEL.model} answered in") and "failed" not in answered[1]
+    # The evaluation phase keeps the proposer's lines; a step with no proposer call has none.
+    assert b.step_progress.activity == answered
+    b.abort_step(prepared)
+    assert b.step_progress is None
 
 
 def test_step_progress_names_the_phase_while_a_step_runs_and_clears_when_it_settles(tmp_path: Path) -> None:

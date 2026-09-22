@@ -214,9 +214,9 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
     try:
         rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
         page = _page(dispatcher, 1)
-        assert page.startswith("<!doctype html>") and "<title>Harness step 1</title>" in page
+        assert page.startswith("<!doctype html>") and "<title>Harness v1</title>" in page
         assert '<meta name="viewport" content="width=device-width, initial-scale=1">' in page
-        assert "<h1>Harness step 1</h1>" in page
+        assert "<h1>Harness v1</h1>" in page
         assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
         assert FIRST in _section(page, "Why") and "3f1c2a9d0b7e" in _section(page, "Why")
         changed = _section(page, "What changed")
@@ -234,7 +234,7 @@ def test_the_page_for_a_published_step_carries_the_request_the_result_and_the_ch
         chain = _section(page, "Chain")
         assert rows[0]["release_id"] in chain and rows[1]["release_id"] in chain
         # The pending extension update was evaluated against this head, so it is this release's child.
-        assert f">Step 4</a><span class=\"id\">{rows[4]['release_id']}</span>" in chain
+        assert f">v4</a><span class=\"id\">{rows[4]['release_id']}</span>" in chain
         data = _data(page)
         assert data["release_id"] == rows[1]["release_id"] and data["metrics"]["training_request"]["text"] == FIRST
         assert data["metrics"]["training_request"]["requires"] == []
@@ -247,7 +247,7 @@ def test_the_page_for_a_pending_extension_step_diffs_the_file_against_the_head(t
     try:
         rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
         page = _page(dispatcher, 4)
-        assert "<title>Harness step 4</title>" in page
+        assert "<title>Harness v4</title>" in page
         assert FOURTH.replace("<", "&lt;") in _section(page, "Why")
         changed = _section(page, "What changed")
         assert '<span class="tag operation-update">update</span><span class="node-id">ext</span>' in changed
@@ -311,26 +311,25 @@ def test_the_chain_lists_the_steps_evaluated_against_a_release_as_its_children(t
     try:
         rows = list(reversed(dispatcher.get_or_create_scenario(SCENARIO).releases()))
         page = _page(dispatcher, 0)
-        assert "<title>Harness step 0</title>" in page
+        assert "<title>Harness v0</title>" in page
         assert "no step made it" in _section(page, "Why")
         assert "the seed as the recipe rendered it" in _section(page, "What changed")
         assert '<span class="creation">Starting point</span>' in _section(page, "Result")
         chain = _section(page, "Chain")
         # Only the win ran on the seed; the two rejected candidates ran on the win, whose id their rows carry.
-        assert chain.count(">Step ") == 1
+        assert chain.count('class="step-name"') == 1
         assert (
-            f'>Step 1</a><span class="id">{rows[1]["release_id"]}</span><span class="selected">Published</span>'
-            in chain
+            f'>v1</a><span class="id">{rows[1]["release_id"]}</span><span class="selected">Published</span>' in chain
         )
         assert '<span class="rejected">' not in chain
         # Each child links the page of its own step, opened the way this one was.
         assert 'href="/reef/harness/releases/1/page"' in chain
         head = _section(_page(dispatcher, 1), "Chain")
-        assert head.count(">Step ") == 3 and ">Step 1</a>" not in head
+        assert head.count('class="step-name"') == 3 and ">v1</a>" not in head
         for step in (2, 3):
-            assert f'>Step {step}</a><span class="id">{rows[1]["release_id"]}</span><span class="rejected"' in head
+            assert f'>v{step}</a><span class="id">{rows[1]["release_id"]}</span><span class="rejected"' in head
         assert (
-            f'>Step 4</a><span class="id">{rows[4]["release_id"]}</span><span class="pending">Ready for review</span>'
+            f'>v4</a><span class="id">{rows[4]["release_id"]}</span><span class="pending">Ready for review</span>'
             in head
         )
     finally:
@@ -388,10 +387,10 @@ def test_the_top_bar_and_the_step_walk_lead_to_the_pages_a_browser_can_open() ->
     assert f'<a href="{html.escape(head)}">Harness</a>' in middle
     walk = middle.partition('<nav class="steps"')[2].partition("</nav>")[0]
     assert f'href="/reef/harness/releases/1/page?{html.escape(urlencode(query))}" rel="prev"' in walk
-    assert "Step 2 of 2" in walk and 'rel="next"' not in walk
+    assert "v2 of v2" in walk and 'rel="next"' not in walk
     # The catalog's ends have no neighbour that way, so the arrow is text, not a dead link.
     first = build_release_page(0, rows, link_query=query).partition('<nav class="steps"')[2].partition("</nav>")[0]
-    assert 'rel="prev"' not in first and "<span>&#8592; Step</span>" in first
+    assert 'rel="prev"' not in first and "<span>&#8592;</span>" in first
     assert f'href="/reef/harness/releases/1/page?{html.escape(urlencode(query))}" rel="next"' in first
     # On the served head's own page the crumb has nowhere to go, so it stays text.
     served = build_release_page(1, rows, link_query=query)
@@ -657,16 +656,15 @@ def test_a_promoted_pending_step_reads_promoted_at_the_promote_step(tmp_path: Pa
         rows = list(reversed(scenario.releases()))
         assert rows[5]["operation"] == "promote" and rows[5]["rollback_target_release_id"] == pending_id
         assert rows[4]["pending"] is True and result_of(rows[4]) == "pending"
-        assert result_of(rows[4], rows) == "promoted at step 5"
+        assert result_of(rows[4], rows) == "promoted at v5"
         assert served_step(rows) == 5
         page = _page(dispatcher, 4)
-        assert '<span class="promoted">Promoted at step 5</span>' in _hero(page)
+        assert '<span class="promoted">Promoted at v5</span>' in _hero(page)
         assert "Currently served" not in _sub(page)
         selection_result = _section(page, "Result")
-        assert '<span class="promoted">Promoted at step 5</span>' in selection_result
+        assert '<span class="promoted">Promoted at v5</span>' in selection_result
         assert (
-            "Passed the checks and was promoted at step 5; the release that step published serves it"
-            in selection_result
+            "Passed the checks and was promoted at v5; the release that step published serves it" in selection_result
         )
         assert "waits for a promote" not in selection_result
         # The step still diffs against the head it was evaluated on; the promote's own page names it as the target.
@@ -675,10 +673,10 @@ def test_a_promoted_pending_step_reads_promoted_at_the_promote_step(tmp_path: Pa
         assert '<span class="chip">Currently served</span>' in _sub(promoted)
         assert f"A person promoted release {pending_id} after reading it" in _section(promoted, "Why")
         head = _section(_page(dispatcher, 1), "Chain")
-        assert '<span class="promoted">Promoted at step 5</span>' in head
+        assert '<span class="promoted">Promoted at v5</span>' in head
         # The promote was made on the head, so it is the head's child too.
         assert (
-            f'>Step 5</a><span class="id">{rows[5]["release_id"]}</span>'
+            f'>v5</a><span class="id">{rows[5]["release_id"]}</span>'
             '<span class="promote">Promoted by a person</span>' in head
         )
     finally:
@@ -709,9 +707,9 @@ def test_a_step_that_published_nothing_chains_to_the_head_it_ran_on() -> None:
     assert '<dt>Parent</dt><dd class="id">rel-0</dd>' in published
     assert '<dt>This release</dt><dd class="id">rel-1</dd>' in published
     # The skipped step ran on rel-1, so it is rel-1's child and not rel-0's, though its row names rel-0 as parent.
-    assert '>Step 2</a><span class="id">rel-1</span><span class="skipped">No changes</span></li>' in published
+    assert '>v2</a><span class="id">rel-1</span><span class="skipped">No changes</span></li>' in published
     seed = _section(build_release_page(0, rows), "Chain")
-    assert seed.count(">Step ") == 1 and ">Step 1</a>" in seed
+    assert seed.count('class="step-name"') == 1 and ">v1</a>" in seed
 
 
 def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition() -> None:
@@ -734,6 +732,22 @@ def test_the_diff_colours_lines_by_position_so_a_plus_plus_line_is_an_addition()
     assert '<span class="hunk">--- pi-agent/extensions/hello.ts (rel-0)</span>' in changed
     assert '<span class="hunk">+++ pi-agent/extensions/hello.ts (rel-1)</span>' in changed
     assert '<span class="del">---n;</span>' in changed and '<span class="add">+++n;</span>' in changed
+
+
+def test_a_review_that_did_not_run_is_named_on_the_version_page() -> None:
+    """A published step with no review is a step nothing checked; the page says why instead of omitting it."""
+    creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation"}
+    notes = {"design": "Add /away.", "review_failure": "the review reply carried no result object"}
+    row = {
+        "release_id": "rel-1",
+        "parent_release_id": "rel-0",
+        "operation": "training",
+        "metrics": {"selected": True, "training_request": {"id": "q-1", "text": "away"}, "proposal_notes": notes},
+    }
+    page = build_release_page(1, [creation, row])
+    review = _section(page, "Review")
+    assert "did not run, so nothing checked whether they deliver it" in review
+    assert "carried no result object" in review
 
 
 @pytest.mark.parametrize("review_key", ["result", "verdict"])
@@ -759,6 +773,14 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_
     assert _sections(page) == ["Why", "Design", "What changed", "Review", "Result", "Setup", "Chain"]
     design = _section(page, "Design")
     assert '<p class="text">Add an &lt;away&gt; command.\n\nA rule alone would assume the state holds.</p>' in design
+    # A design that ends with a How to use section shows it as the card after the design.
+    with_usage = dict(
+        row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\n## How to use\n/away on"}}
+    )
+    usage_page = build_release_page(1, [creation, with_usage])
+    assert _sections(usage_page)[:3] == ["Why", "Design", "How to use"]
+    assert '<p class="text">Add /away.</p>' in _section(usage_page, "Design")
+    assert '<p class="text">/away on</p>' in _section(usage_page, "How to use")
     review = _section(page, "Review")
     assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
     assert (
@@ -808,6 +830,10 @@ def test_the_result_names_why_the_proposer_produced_nothing_when_the_step_record
     page = build_release_page(1, [creation, row])
     page.encode("ascii")
     # A failure alone adds no Design or Review section; the Result section names it after the skip, escaped.
+    assert result_of(row) == "failed"
+    assert served_step([creation, row]) == 0
+    assert before_release_id(row) == "rel-0"
+    assert '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Why", "What changed", "Result", "Setup", "Chain"]
     selection_result = _section(page, "Result")
     assert "<dt>Skipped</dt><dd>no proposal</dd>" in selection_result
@@ -819,6 +845,7 @@ def test_the_result_names_why_the_proposer_produced_nothing_when_the_step_record
     # Without the note, or with one that is not text, there is no such row.
     for notes in ({}, {"failure": "  "}, {"failure": 3}):
         without = {**row, "metrics": {**row["metrics"], "proposal_notes": notes}}
+        assert result_of(without) == "skipped"
         assert "Proposer failure" not in build_release_page(1, [creation, without])
     # A design written before the reply came to nothing keeps its section beside the row.
     designed = {**row, "metrics": {**row["metrics"], "proposal_notes": {"design": "A tool.", "failure": failure}}}

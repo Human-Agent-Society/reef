@@ -833,6 +833,8 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
+   evolution.multimodal | | reefine only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; the profile reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
+   evolution.proposer_agent | | off unless set (the reefine recipe sets it); a proposer that takes ``agent_host`` runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; ``e2b`` runs it in an E2B cloud sandbox that reaches the gateway through a tunnel, with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>``, built on first use), and needs the ``e2b`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See the reefine recipe guide
    evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
    execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
@@ -848,7 +850,7 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
-   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reef-harness <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``data.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; ``pi`` only, other adapters refuse boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
+   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/evolve <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``data.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; ``pi`` only, other adapters refuse boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``data.training_mode: manual``
    evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
@@ -879,6 +881,20 @@ string commands retain their current ``shlex`` parsing.
    services[].depends_on | services that must be ready first
    services[].cuda | optional ``CUDA_VISIBLE_DEVICES`` for local services; Ray services must declare ``resources.num_gpus`` instead
    services[].env | extra environment variables
+
+The ``inference`` section
+-------------------------
+
+Read by every serving mode. ``inference.timeout-s`` limits one inference
+request. Buffered inference attempts share ``inference.retry-timeout-s``;
+when it is omitted, it follows ``inference.timeout-s``.
+
+.. config::
+
+   inference.timeout-s | 300.0 | maximum time for one inference request
+   inference.retry-timeout-s | ``inference.timeout-s`` (300.0 by default) | total deadline shared by inference attempts and retry delays
+   inference.retry-initial-s | 0.05 | delay before the first retry
+   inference.retry-max-s | 1.0 | maximum delay between retries
 
 The ``training`` section
 ------------------------
@@ -1162,3 +1178,74 @@ Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.
+
+Record tracing
+--------------
+
+Record tracing exports every accepted record and every committed training
+step as OpenTelemetry spans, so a tracing backend shows what an agent did in a
+scenario and which version it trained. It is optional, off by default, and
+independent of experiment tracking. Reef speaks OTLP over HTTP and names no
+vendor: point it at Langfuse, Arize Phoenix, Jaeger, Grafana Tempo or an
+OpenTelemetry Collector. Install ``reef-infra[opentelemetry]``.
+
+.. code:: yaml
+
+   observability:
+     tracing:
+       enabled: true
+       endpoint: https://cloud.langfuse.com/api/public/otel/v1/traces  # full OTLP/HTTP traces URL
+       authorization: ${LANGFUSE_AUTH}  # the backend credential, sent as the Authorization header
+       service_name: reef              # optional resource service.name
+
+``endpoint`` is the complete traces URL. ``authorization`` is the credential
+the backend expects in its ``Authorization`` header: ``Basic <base64
+public:secret>`` for Langfuse, ``Bearer <token>`` for most others. It is
+handled like ``inference.upstream_api_key``: write it as an environment
+reference in the YAML, or omit it and export ``REEF_TRACING_AUTHORIZATION``;
+the startup report masks it and it never appears in a span or a log line. A
+backend that expects its credential under another header name, such as
+``x-api-key``, takes it in the ``headers`` mapping; the startup report masks
+every header value, and ``Authorization`` itself is rejected there so the
+credential has one place. When no endpoint, credential or header is configured the
+exporter reads the standard ``OTEL_EXPORTER_OTLP_ENDPOINT`` and
+``OTEL_EXPORTER_OTLP_HEADERS`` environment variables instead.
+
+Each accepted inference record becomes the root span of its own trace, named
+``chat <model>``. Its trace and span ids derive from the scenario and record
+id, so a restart or a second Reef host produces the same ids. The span carries:
+
+* ``session.id`` and ``reef.scenario``: the scenario.
+* ``reef.agent_record_id`` and ``reef.request_type``: the receipt and record kind.
+* ``gen_ai.request.model``, ``gen_ai.response.model``, ``gen_ai.response.id``,
+  ``gen_ai.usage.input_tokens``, ``gen_ai.usage.output_tokens`` and
+  ``gen_ai.response.finish_reasons`` from the provider request and response,
+  following the OpenTelemetry GenAI semantic conventions.
+* ``reef.release_id``, ``reef.content_id`` and ``reef.runtime_load_id``: the
+  version that served the request, when the record names one.
+* ``reef.tags``: the ``x-reef-tag-*`` request tags.
+
+A feedback record becomes a ``feedback`` span inside the trace of the first
+inference it references, with ``reef.score`` and ``reef.references``; further
+references are span links. A training instruction becomes a
+``training request`` span. A committed step adds a ``training step N`` span
+with the commit's step, release, job id, consumed and compacted record counts
+and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
+child span below every record the step consumed, linked back to the commit
+span. Records carry one timestamp, so their spans have zero duration and start
+at the record's creation time.
+
+For streamed provider responses, token usage is read from the captured SSE
+events, including Chat Completions usage chunks, Responses terminal events
+and Anthropic message usage. Cumulative counts are not summed across chunks.
+If the provider sends no usage, token counts remain absent; for Chat
+Completions, request ``stream_options: {include_usage: true}`` when supported.
+The stored response and the forwarded stream remain unchanged.
+
+Spans carry the exchange itself: the request messages and the reply as JSON
+in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, feedback text in
+``reef.feedback`` and instruction text in ``reef.instruction``. The backend
+therefore sees the scenario's traffic; point tracing only at one trusted with
+it. Export failures are reported in the service log and never
+fail record acceptance or a commit; the exporter batches spans in a background
+thread and flushes them during graceful shutdown.

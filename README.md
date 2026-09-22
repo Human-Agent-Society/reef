@@ -12,6 +12,8 @@
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
 
+<a href="https://trendshift.io/repositories/204783?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-204783" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/204783/daily?language=Python" alt="Human-Agent-Society%2Freef | Trendshift" width="250" height="55"/></a>
+
 English | [中文](README.zh.md)
 
 <div align="left">
@@ -210,11 +212,11 @@ reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b
 ```
-
-The example connects to a local Ollama server. For another provider, change
+For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
 `REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
-listens on `127.0.0.1:8901` with token `reef-local` and keeps its state under
+listens on `127.0.0.1:8901` without authentication (set `REEF_TOKEN` before
+starting it to require that token) and keeps its state under
 `.reef/reefine/` (`--recipe harness-evolve`, the former name, starts the same
 configuration). To change anything else, copy
 [the deployment configuration](reef/service/profiles/reefine.yaml) and pass
@@ -225,20 +227,23 @@ bakes that terminal's `python3` into `reef-pi`), create a scenario, install the
 harness, and ask for a change:
 
 ```bash
-export REEF_TOKEN=reef-local
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "Content-Type: application/json" \
+curl -fsS -H "Content-Type: application/json" \
   -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
-curl -fsS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: my-harness" \
+curl -fsS -H "x-reef-scenario: my-harness" \
   'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
-reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
+reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-Inside a `reef-pi` session, `/reef-harness <text>` files the same ask. The served
+Inside a `reef-pi` session, `/evolve <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
-extension, and the next session's update notice offers the install; review the
-versions with `/reef-versions`, and promote an extension with
-`/reef-versions <step> promote` before it is offered. To change the model, restart
+extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
+non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it
+works as a coding agent that runs the changed harness before handing the change
+back. The next session's update notice offers the install; a step that
+settles while you are between turns offers its install right away. Review the
+versions with `/versions`, which opens a step's page, and install one with
+`/versions <version> install`. To change the model, restart
 `reef serve` with another `--inference.upstream-model` and rerun the install
 command: installation writes the model ID into the local harness configuration.
 See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and
@@ -315,6 +320,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 
 [Wenhao Chai](https://github.com/wenhaochai),
 [Shuangrui Ding](https://github.com/Mark12Ding),
+[Shiyi Zoe Du](https://github.com/zoedsy),
 [Hao He](https://github.com/hehaodele),
 [Haoze He](https://github.com/HectorHHZ),
 [Chonghe Jiang](https://github.com/Chonghe-Jiang),
@@ -337,7 +343,8 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Kaichen Zhou](https://github.com/kaichen-z),
 [Zijian Zhou](https://github.com/BobbyZhouZijian),
 [Jiacheng Zhu](https://github.com/Jiacheng-Zhu-AIML),
-[Dingyi Zhuang](https://github.com/ZhuangDingyi).
+[Dingyi Zhuang](https://github.com/ZhuangDingyi),
+[Xinkai Zou](https://github.com/jayzou3773).
 
 
 ## ⭐ Star History

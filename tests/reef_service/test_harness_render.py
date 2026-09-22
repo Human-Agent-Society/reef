@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 import yaml
 
+import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.render import RenderError, render_composition
 
@@ -391,6 +393,41 @@ def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:
     assert descriptor.client_env == {"PI_SKIP_VERSION_CHECK": "1"}
     assert "PI_OFFLINE" not in descriptor.client_env  # an interactive run talks to reef
     assert descriptor.client_tools == (("rg", "ripgrep"), ("fd", "fd"))
+
+
+def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:
+    """A reef-<adapter> run keeps what the binary's resume and first-run setup read in the installed tree."""
+    kept = {name: get_adapter(name).client_state for name in ("pi", "claude", "codex", "hermes", "dsh")}
+    assert kept == {
+        "pi": (ClientState("pi-agent/sessions", "directory"),),
+        "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
+        "codex": (ClientState("codex/sessions", "directory"),),
+        "hermes": (ClientState("hermes/state.db", "sqlite"),),
+        "dsh": (
+            ClientState("dsh/.credentials.yaml", "file"),
+            ClientState("dsh/settings.yaml", "file"),
+            ClientState("dsh/.agent-presets", "directory"),
+        ),
+    }
+
+
+@pytest.mark.parametrize(
+    ("entry", "message"),
+    [
+        ({"path": "pi-agent/sessions", "kind": "link"}, "'kind'"),
+        ({"kind": "directory"}, "'path'"),
+        ({"path": "sessions", "kind": "directory"}, "not below 'pi-agent'"),
+        ({"path": "pi-agent", "kind": "directory"}, "not below 'pi-agent'"),
+    ],
+)
+def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path, entry, message: str) -> None:
+    """The wrapper links only the composition into its temp copy, so state elsewhere would never reach the binary."""
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
+    data["client_state"] = [entry]
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=message):
+        load_descriptor(target)
 
 
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:

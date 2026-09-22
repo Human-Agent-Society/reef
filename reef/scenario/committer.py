@@ -12,7 +12,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from contextlib import suppress
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from threading import RLock
 from typing import Any, Literal
@@ -244,6 +244,36 @@ class ScenarioCommitter:
             self._settle_trainer_commit(prepared, record, next_step)
             self._resume_restored_weights()
             return published_ref
+
+    def publish_shipped_content(self) -> ArtifactRef | None:
+        """Commit the backend's update of the content this Reef ships, when the served release is stale.
+
+        The update is a training commit with no batch behind it: it consumes no
+        records and runs no evaluation, since its content is Reef's own. It is
+        served at once rather than held for review for the same reason. Returns the
+        new head, or ``None`` when the served release already carries the content.
+        """
+        with self._lock, self._publication_lock:
+            current_ref = self._artifacts.current
+            if isinstance(current_ref, LiveWeightArtifactRef):
+                return None
+            if self._store.durable:
+                self._synchronize_checkpoint()
+            published_tree = self._artifacts.resolve(current_ref).local_path
+            if published_tree is None:
+                return None
+            result = self._trainer.shipped_content_update(published_tree)
+            if result is None:
+                return None
+            publication = result.publication
+            if not isinstance(publication, SavedArtifactPublication) or result.pending or result.state is None:
+                raise ReefError("a shipped content update must publish durable bytes at once, with its state")
+            prepared = replace(
+                self._trainer.prepare_commit(None), algorithm_state=dict(result.state), metrics=dict(result.metrics)
+            )
+            self._commit_saved_artifact(result, publication, prepared)
+            self._trainer.apply_committed_state(result.state)
+            return self._artifacts.current
 
     def _resume_restored_weights(self) -> None:
         if self._binding.training_runtime is not None and self._binding.runtime is not None:

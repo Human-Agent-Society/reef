@@ -1,10 +1,11 @@
 # The stack `run.sh` starts: one Reef service on port 8900, state under
 # the example's ./work directory.
 #
-# This file also carries the harness_evolve recipe sections (implementation, model,
-# evolution, data). The recipe registry reads named recipe configs from
-# REEF_RECIPE_CONFIG_DIR, so run.sh copies those four sections into
-# work/recipes/harness_evolve.yaml, together with optional execution/executors sections.
+# This file also carries the harness_evolve recipe (the `recipe` section) and the
+# model binding it shares with the service (the `inference` section). The recipe
+# registry reads named recipe configs from REEF_RECIPE_CONFIG_DIR, so run.sh copies
+# those sections into work/recipes/harness_evolve.yaml, together with optional
+# execution/executors sections.
 
 schema-version: 2
 reef:

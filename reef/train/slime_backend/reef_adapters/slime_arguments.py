@@ -51,6 +51,16 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
             "per-step base copy for holding that memory for the whole run."
         ),
     )
+    parser.add_argument(
+        "--disjoint-prefix-sharing",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Share prefix-cache entries across requests on a regular disjoint engine (not PD). "
+            "Publication then retracts in-flight requests and clears the cache instead of "
+            "preserving their KV, so no entry outlives the weights that built it."
+        ),
+    )
     parser.add_argument("--check-lora-weight-equal", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--verify-lora-base-weights", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument(
