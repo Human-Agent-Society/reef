@@ -381,3 +381,17 @@ def test_bootstrap_snapshot_goes_under_its_component_beside_the_seed_files(
             cache_dir=tmp_path / "c2",
             bootstrap_subdirectory="../x",
         )("agent")
+
+
+@pytest.mark.integration
+def test_a_published_file_is_linked_into_the_work_tree_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
+    """Released files are immutable, so a publish links them into the clone instead of copying a checkpoint per step."""
+    remote = tmp_path / "artifacts.git"
+    backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    head = backend.fork()
+    source = tmp_path / "release"
+    source.mkdir()
+    (source / "weights.bin").write_bytes(b"\x00" * 64)
+    backend.publish(Artifact.local(source), expected_parent=head)
+    assert (source / "weights.bin").stat().st_nlink == 2
+    assert (tmp_path / "work" / "repository" / "weights.bin").read_bytes() == b"\x00" * 64

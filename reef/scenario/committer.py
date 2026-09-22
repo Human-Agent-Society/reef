@@ -278,6 +278,14 @@ class ScenarioCommitter:
                 f"{artifact.ref.release_id!r} binds {list(manifest.names)}"
             )
 
+    def _held_component(self, release_id: str) -> str | None:
+        """The component a release held for review publishes; ``None`` when it is not such a release."""
+        records = self._store.history() if self._store.durable else ()
+        for record in reversed(records):
+            if record.artifact_ref.release_id == release_id:
+                return record.component if record.pending else None
+        return None
+
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         """Publish a durable copy of an older version as a new fenced commit; promote uses the same path."""
         if not isinstance(release_id, str) or not release_id.strip():
@@ -318,6 +326,16 @@ class ScenarioCommitter:
                 self._require_components(source)
             except ReefError as exc:
                 raise ReleaseNotRestorable(str(exc)) from exc
+            promoted = self._held_component(release_id) if operation == "promote" else None
+            composed = promoted is not None and not surface.single
+            if composed:
+                # A held release carries the other components as they were when it
+                # was minted; promoting it publishes its own component on the
+                # combination served now, not the combination of that day.
+                served_now = artifacts.resolve(current_ref)
+                components = {name: served_now.component(name) for name in surface.names}
+                components[promoted] = source.component(promoted)
+                source = artifacts.stage_composed(next_step, components, parent=checkpoint)
             surface.validate(source)
             # The runtime-loaded component is restored only when the engine serves other content.
             loaded_component = surface.loader_component
@@ -332,7 +350,7 @@ class ScenarioCommitter:
                 self._binding.training_runtime.restore_checkpoint(surface.component_artifact(source, loaded_component))
             if restore_weights:
                 surface.load(source, self._binding.runtime)
-            staged = artifacts.stage(next_step, source, parent=checkpoint)
+            staged = source if composed else artifacts.stage(next_step, source, parent=checkpoint)
             try:
                 commit_metadata = scenario_metadata_for(
                     name=self._name,

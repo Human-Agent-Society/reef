@@ -474,3 +474,19 @@ def test_operation_measurements_remain_readable_and_preserve_failures() -> None:
     assert recovered["weight_sync/failed_total"] == 1
     assert recovered["weight_sync/completed_total"] == 1
     assert recovered["weight_sync/duration_seconds_total"] >= failed["weight_sync/duration_seconds_total"]
+
+
+@pytest.mark.unit
+def test_a_component_trainers_metrics_keep_their_own_names() -> None:
+    """Two trainers of one scenario log into one run; a step says whose it is and its metrics carry the name."""
+    client = _StubClient()
+    tracker = _tracker(client)
+    event = _event()
+    event = dataclasses.replace(event, context=dataclasses.replace(event.context, component="harness"))
+    tracker.record(event)
+    logged, _ = client.runs[0].logged[0]
+    assert logged["harness/train/loss"] == pytest.approx(0.25)
+    assert "train/loss" not in logged
+    assert logged["reef/component"] == "harness"
+    assert logged["train/step"] == 0 and logged["reef/step"] == 7
+    tracker.close()

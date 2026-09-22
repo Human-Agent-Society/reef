@@ -19,6 +19,7 @@ from reef.artifact.artifact import (
     ArtifactRef,
     ArtifactSourceError,
 )
+from reef.artifact.composite import link_or_copy
 from reef.artifact.git_client import GitClient
 from reef.artifact.repository import CachedRepositoryBackendFactory, StagedReleaseRepositoryBackend
 from reef.artifact.sources import GitVersionSource, download_huggingface_snapshot, parse_artifact_source
@@ -109,13 +110,14 @@ class _GitWorkspace:
                 child.unlink()
         target = self.clone_dir if subdirectory is None else self.clone_dir / subdirectory
         target.mkdir(parents=True, exist_ok=True)
+        # Released files are immutable, so the work tree links them rather than copying a checkpoint per step.
         for child in source.iterdir():
             destination = target / child.name
             if child.is_dir():
-                shutil.copytree(child, destination, symlinks=False)
+                shutil.copytree(child, destination, symlinks=False, copy_function=link_or_copy)
             else:
                 try:
-                    shutil.copy2(child, destination, follow_symlinks=True)
+                    link_or_copy(str(child), str(destination))
                 except FileNotFoundError as exc:
                     raise ArtifactSourceError(f"artifact contains a broken symlink: {child}") from exc
 

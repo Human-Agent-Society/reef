@@ -545,7 +545,7 @@ class RequestService:
         Read-only: never creates a scenario.
         """
         scenario = self._file_scenario(headers)
-        return self._harness_manifest_for_scenario(scenario, release_id)
+        return self._harness_manifest_for_scenario(scenario, release_id or self._harness_release_id(scenario))
 
     @staticmethod
     def _files_trainer(scenario: Scenario) -> Trainer:
@@ -588,13 +588,32 @@ class RequestService:
             manifest["components"] = {name: entry.content_id for name, entry in components.entries.items()}
         return manifest
 
+    @staticmethod
+    def _harness_release_id(scenario: Scenario) -> str:
+        """The newest release that changed what a client pulls.
+
+        Another component's step carries the tree forward unchanged, so it is
+        no new harness head: a client that compared release ids would pull the
+        same tree again and a person would be asked to install nothing. A
+        rollback or promote may change the tree and counts; a release held for
+        review is not served and does not.
+        """
+        files_component = scenario.surface.files_component
+        for row in scenario.releases():
+            if row.get("pending"):
+                continue
+            component = row.get("component")
+            if component is None or component == files_component:
+                return str(row["release_id"])
+        return scenario.repository.require_current_artifact().release_id
+
     def harness_head(self, headers: Mapping[str, str]) -> str | None:
         """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
         try:
             scenario = self._file_scenario(headers)
         except ArtifactNotFound:
             return None
-        return scenario.repository.require_current_artifact().release_id
+        return self._harness_release_id(scenario)
 
     def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
         """Admit one agent proposal against the head release's entries and hold it for the next evolve step.
@@ -613,7 +632,7 @@ class RequestService:
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
                 "evolution recipe with a proposal inbox"
             )
-        head = scenario.repository.require_current_artifact().release_id
+        head = self._harness_release_id(scenario)
         proposal_id = ProposalInbox.new_id()
         # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
         if self._files_trainer(scenario).training_mode == "manual":
@@ -649,9 +668,12 @@ class RequestService:
         read-only rules as ``harness_manifest``.
         """
         scenario = self._file_scenario(headers)
+        files_component = scenario.surface.files_component
+        # Another component's step is not a harness release: the tree it carries is the one already listed.
+        rows = [row for row in scenario.releases() if row.get("component") in (None, files_component)]
         return {
             "scenario": scenario.name,
-            "releases": list(reversed(scenario.releases())),
+            "releases": list(reversed(rows)),
         }
 
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
@@ -686,7 +708,9 @@ class RequestService:
         An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(scenario.releases()))
+        files_component = scenario.surface.files_component
+        # The page walks harness releases; another component's step is not one of them.
+        rows = [row for row in reversed(scenario.releases()) if row.get("component") in (None, files_component)]
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"

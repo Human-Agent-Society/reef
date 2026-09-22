@@ -12,8 +12,8 @@ from reef.artifact.artifact import LOCAL_RELEASE_PREFIX, Artifact, ArtifactPubli
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents
 
 
-def _link_or_copy(source: str, destination: str) -> None:
-    """Hard-link an immutable released file into the composed tree; copy when the filesystem refuses."""
+def link_or_copy(source: str, destination: str) -> None:
+    """Hard-link an immutable released file into another tree; copy when the filesystem refuses."""
     try:
         os.link(source, destination)
     except OSError:
@@ -45,7 +45,7 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
         entries[name] = ComponentEntry(content_id=source.ref.content_id, metadata=metadata)
         try:
             if source.local_path.is_dir():
-                shutil.copytree(source.local_path, directory / name, copy_function=_link_or_copy)
+                shutil.copytree(source.local_path, directory / name, copy_function=link_or_copy)
             else:
                 (directory / name).mkdir()
         except OSError as exc:
@@ -66,4 +66,4 @@ def compose_release(components: Mapping[str, Artifact], *, directory: Path) -> A
     )
 
 
-__all__ = ["compose_release"]
+__all__ = ["compose_release", "link_or_copy"]

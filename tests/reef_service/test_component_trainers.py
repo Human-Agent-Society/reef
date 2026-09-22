@@ -19,6 +19,7 @@ from reef.dispatcher import Dispatcher
 from reef.recipe import Recipe
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
+from reef.service.request_service import RequestService
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
     CommitLogError,
@@ -514,6 +515,36 @@ def test_a_local_result_its_backend_reevaluates_keeps_its_candidate(tmp_path: Pa
             HARNESS: "harness step 1",
         }
         assert scenario.store.history()[-1].base_release_id != base
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_weights_step_is_no_new_harness_head(tmp_path: Path) -> None:
+    """Clients pull the tree: a step that carried it forward unchanged is not announced or listed as a release."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        service = RequestService(dispatcher)
+        headers = {"x-reef-scenario": "agent"}
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        harness_release = scenario.current_artifact_ref().release_id
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        scenario.commit(weights, component=WEIGHTS)
+        assert scenario.current_artifact_ref().release_id != harness_release
+        assert service.harness_head(headers) == harness_release
+        manifest = service.harness_manifest(headers)
+        assert manifest["release_id"] == harness_release
+        assert manifest["files"] == {"harness.txt": "harness step 1"}
+        catalog = service.harness_releases(headers)["releases"]
+        assert [row.get("component") for row in catalog] == [None, HARNESS]
+        assert dispatcher._experiment_context(scenario, WEIGHTS).component == WEIGHTS
     finally:
         dispatcher.close()
 

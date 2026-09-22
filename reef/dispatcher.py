@@ -527,6 +527,8 @@ class Dispatcher:
             run_step=run_step,
             backend=None if backend is None else type(backend).__name__,
             backend_config=backend_config,
+            # One trainer's events need no name; several trainers' events say whose they are.
+            component=component if len(current.component_trainers) > 1 else None,
         )
 
     # -- Preload ---------------------------------------------------------

@@ -298,8 +298,14 @@ class WandbExperimentTracker(ExperimentTracker):
         # (Slime's accumulated_step_id, which is not monotonic across jobs of
         # varying length); list the authoritative context counters last so
         # they win the dict merge and the train/* step axis stays monotonic.
+        numeric = _numeric_metrics(event.metrics)
+        component = event.context.component
+        if component is not None:
+            # Two trainers of one scenario log into one run; each one's metrics keep their own names.
+            numeric = {f"{component}/{key}": value for key, value in numeric.items()}
+            metadata = {**metadata, "component": component}
         values: dict[str, Any] = {
-            **_numeric_metrics(event.metrics),
+            **numeric,
             **{f"reef/{key}": value for key, value in metadata.items() if value is not None and key != "step"},
             "train/step": event.context.run_step,
             "reef/step": event.context.step,

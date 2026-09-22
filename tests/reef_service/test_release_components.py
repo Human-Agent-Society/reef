@@ -409,5 +409,22 @@ def test_multi_component_scenario_commits_one_component_and_carries_the_rest(tmp
         seed = scenario.repository.materialize(scenario.current_artifact_ref())
         assert activator.loaded == [base_weights]
         assert surface.files.read_files(seed) == {"AGENTS.md": "seed"}
+
+        # A harness step held for review is promoted onto the weights served by then, not the weights of its day.
+        held = Artifact.local(_tree(tmp_path / "h3", {"AGENTS.md": "held"}))
+        scenario.commit(TrainStepResult(state={}, artifact=held, component=HARNESS, pending=True))
+        assert surface.files.read_files(scenario.repository.materialize(scenario.current_artifact_ref())) == {
+            "AGENTS.md": "seed"
+        }
+        held_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        later = Artifact.local(
+            _tree(tmp_path / "w2", {"adapter_config.json": '{"r": 16}'}), metadata={"runtime_load_id": "inc:2"}
+        )
+        scenario.commit(TrainStepResult(state={}, artifact=later, component=WEIGHTS))
+        scenario.rollback(held_release, operation="promote")
+        promoted = scenario.repository.materialize(scenario.current_artifact_ref())
+        assert promoted.components is not None
+        assert promoted.components.entries[WEIGHTS].content_id == later.ref.content_id
+        assert surface.files.read_files(promoted) == {"AGENTS.md": "held"}
     finally:
         dispatcher.close()
