@@ -12,10 +12,14 @@ import pytest
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactPublicationError, InMemoryRepositoryBackend, Repository
 from reef.artifact.artifact import ArtifactRef, ArtifactValidator
 from reef.artifact.composite import compose_release
+from reef.core import RequestType
 from reef.core.components import COMPONENTS_METADATA_KEY, ComponentEntry, ReleaseComponents, release_components
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
 from reef.recipe.base import Recipe
+from reef.runtime.interfaces import InferenceHandler
+from reef.service.request_service import RequestService
+from reef.service.wire import parse_request_headers
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import (
     ArtifactActivator,
@@ -292,6 +296,42 @@ class _TwoComponentRecipe(Recipe):
                 ),
             ),
         )
+
+
+@pytest.mark.unit
+def test_inference_hands_the_handler_the_loaded_component(tmp_path: Path) -> None:
+    """A handler that reads the tree must see the weights, not a release root of component directories."""
+    initial = tmp_path / "initial"
+    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
+    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
+    dispatcher = Dispatcher(
+        _TwoComponentRecipe(),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "x"}))))
+        service = RequestService(dispatcher)
+        prepared = service._prepare_inference(
+            parse_request_headers({"x-reef-scenario": "agent"}, RequestType.INFERENCE), _NullHandler(), None
+        )
+        release = prepared.artifact.materialize()
+        assert prepared.served.ref.release_id == release.ref.release_id
+        assert prepared.served.local_path == (release.local_path or Path()) / WEIGHTS
+        assert TextFileTree().read_files(prepared.served) == {"adapter_config.json": "{}"}
+    finally:
+        dispatcher.close()
+
+
+class _NullHandler(InferenceHandler):
+    async def inference(self, artifact, path, payload):
+        raise NotImplementedError
+
+    async def inference_stream(self, artifact, path, payload):
+        raise NotImplementedError
 
 
 @pytest.mark.unit

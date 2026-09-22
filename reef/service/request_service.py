@@ -113,6 +113,9 @@ class PreparedInference:
 
     parsed: RequestHeaders
     artifact: Artifact
+    #: What the handler serves: the runtime-loaded component's view of the
+    #: release, or the release itself when nothing is loaded or it is flat.
+    served: Artifact
     handler: InferenceHandler
     surface: Surface
     #: True when a training runtime serves the scenario: the recorded payload
@@ -209,7 +212,7 @@ class RequestService:
                     started = loop.time()
                     try:
                         response = await asyncio.wait_for(
-                            prepared.handler.inference(prepared.artifact, path, payload),
+                            prepared.handler.inference(prepared.served, path, payload),
                             timeout=remaining_budget,
                         )
                     except TimeoutError as exc:
@@ -278,7 +281,7 @@ class RequestService:
             admission = prepared.admission
             lease = prepared.lease
             try:
-                stream = await prepared.handler.inference_stream(prepared.artifact, path, payload)
+                stream = await prepared.handler.inference_stream(prepared.served, path, payload)
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
                 if record_response is not None:
@@ -504,11 +507,18 @@ class RequestService:
         if selected_handler is None:
             raise RecipeConfigError("the served recipe has no inference handler")
         ref = scenario.current_artifact_ref()
+        artifact = Artifact(ref, scenario.repository)
+        surface = scenario.surface
+        # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
+        # loaded component, never a composed release whose root holds only component directories.
+        loader = surface.loader_component
+        served = artifact if loader is None else surface.component_artifact(artifact, loader)
         return PreparedInference(
             parsed=parsed,
-            artifact=Artifact(ref, scenario.repository),
+            artifact=artifact,
+            served=served,
             handler=selected_handler,
-            surface=scenario.surface,
+            surface=surface,
             durable=scenario.training_runtime is not None,
             admission=admission,
         )
