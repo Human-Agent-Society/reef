@@ -70,10 +70,7 @@ def request_defaults(config: Mapping[str, Any], *, path: str | None = None) -> d
             shared[key] = value
     if path is None:
         return shared
-    if path == COUNT_TOKENS_PATH:
-        fields = {}
-    else:
-        fields = dict(shared)
+    fields = {} if path == COUNT_TOKENS_PATH else dict(shared)
     fields.update(routed.get(path, {}))
     return fields
 
