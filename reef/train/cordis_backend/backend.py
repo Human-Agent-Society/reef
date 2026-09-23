@@ -1395,6 +1395,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         artifact = self._rendered_publications.pop(int(state["steps"]), None)
         if artifact is not None:
             artifact.discard()
+        # The tree follows the durable state, whatever settlement or a subclass left in it.
+        self._loader.root.update([copy.deepcopy(entry) for entry in state["entries"]])
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self._step_progress = None
