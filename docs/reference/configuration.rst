@@ -658,12 +658,12 @@ without automatically shrinking its file. Cleanup failures are logged and
 retried on the next sweep. Standalone stores need an explicit maintenance call;
 see `Python API <python-api.rst>`__.
 
-Existing stores gain a small ``record_eviction`` table for loss totals and a
-capacity-order index; PostgreSQL advances its schema version to 2. Legacy
-compacted rows retain their previous visibility and recovery semantics. New
-training commits leave ``compacted_ids`` empty and persist consumption separately.
-Already deleted bodies cannot be recovered. Do not share stores between old and
-new writers, or downgrade without restoring a compatible backup.
+Existing stores are upgraded transactionally. Older retirement markers and
+receipts become consumption records without deleting original bodies. The old
+columns, indexes and receipt table are removed; PostgreSQL advances its schema
+version to 3. Training commits store only consumption progress. Already deleted
+bodies cannot be recovered. Do not share stores between old and new writers, or
+downgrade without restoring a compatible backup.
 
 Recipe settings such as ``batch_size`` sit beside these in the same section,
 along with any others the recipe declares with ``config_field``. When
@@ -1265,7 +1265,7 @@ A feedback record becomes a ``feedback`` span inside the trace of the first
 inference it references, with ``reef.score`` and ``reef.references``; further
 references are span links. A training instruction becomes a
 ``training request`` span. A committed step adds a ``training step N`` span
-with the commit's step, release, job id, consumed and compacted record counts
+with the commit's step, release, job id, consumed record counts
 and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
 child span below every record the step consumed, linked back to the commit
 span. Records carry one timestamp, so their spans have zero duration and start

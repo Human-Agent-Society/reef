@@ -34,7 +34,7 @@ from reef.storage.commits import CommitRecord
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train import CandidateBackend, PreparedStep, RetentionDecision, Trainer, TrainStepResult
+from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.algos import StepScheduling
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -65,7 +65,7 @@ def sample_record(
         algorithm_state={"steps": step},
         high_water_sequence=step * 2,
         high_water_offset=step * 2,
-        compacted_ids=frozenset({f"i{step}"}),
+        consumed_ids=frozenset({f"i{step}"}),
         recorded_at=1000.0 + step,
         training_job_id=training_job_id,
         metrics=metrics,
@@ -88,7 +88,7 @@ def test_commit_record_round_trips_through_the_log(tmp_path) -> None:
     assert first.algorithm_state == {"steps": 1}
     assert first.high_water_sequence == 2
     assert first.high_water_offset == 2
-    assert first.compacted_ids == frozenset({"i1"})
+    assert first.consumed_ids == frozenset({"i1"})
     assert first.recorded_at == 1001.0
     # A fresh reader over the same file sees the same history.
     assert CommitLog(tmp_path / "commits.jsonl").records() == records
@@ -532,7 +532,6 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     assert first.artifact_ref.runtime_load_id == "w1"
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
-    assert first.compacted_ids == frozenset()
     assert first.consumed_ids == frozenset({"i1", "r1"})
     assert first.high_water_sequence == 2
     assert second.artifact_ref.runtime_load_id == "w2"
@@ -607,8 +606,8 @@ class ProtectAllProcessor(ThresholdProcessor):
         self._seen.add(item.agent_record_id)
         super().ingest(item)
 
-    def retention_decision(self) -> RetentionDecision:
-        return RetentionDecision(protected_agent_record_ids=frozenset(self._seen))
+    def releasable_record_ids(self) -> frozenset[str]:
+        return frozenset()
 
 
 @dataclass(frozen=True)
@@ -727,16 +726,16 @@ def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, mo
     first = build_training_dispatcher(first_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     scenario = first.get_or_create_scenario("math")
 
-    original_compact = scenario.trainer.compaction_applied
+    original_release = scenario.trainer.processor.release_records
     crash = {"armed": True}
 
-    def exploding_compaction(*args, **kwargs) -> None:
+    def exploding_release(*args, **kwargs) -> None:
         if crash["armed"]:
             crash["armed"] = False
-            raise RuntimeError("simulated crash between record append and compaction")
-        original_compact(*args, **kwargs)
+            raise RuntimeError("simulated crash between record append and buffer release")
+        original_release(*args, **kwargs)
 
-    monkeypatch.setattr(scenario.trainer, "compaction_applied", exploding_compaction)
+    monkeypatch.setattr(scenario.trainer.processor, "release_records", exploding_release)
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
@@ -806,7 +805,6 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert adopted.checkpoint is True
     assert adopted.artifact_ref == recovered.repository.require_current_artifact()
     assert adopted.high_water_sequence == 2
-    assert adopted.compacted_ids == frozenset()
     assert adopted.training_job_id == "job-0"
     assert adopted.operation == "training"
     assert adopted.operation_verified is True
@@ -840,7 +838,6 @@ def test_checkpoint_metadata_restores_a_commit_record(tmp_path) -> None:
     assert metadata["record_progress"] == {
         "high_water_sequence": 2,
         "high_water_offset": 2,
-        "compacted_ids": [],
         "consumed_ids": ["i1", "r1"],
     }
 
@@ -1220,7 +1217,7 @@ def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, mon
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("failure_point", ["commit_applied", "compaction_applied"])
+@pytest.mark.parametrize("failure_point", ["commit_applied", "release_records"])
 def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     tmp_path,
     monkeypatch,
@@ -1237,7 +1234,8 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
     assert result is not None
     pending = scenario.trainer.pending_batch
     assert pending is not None
-    original = getattr(scenario.trainer, failure_point)
+    target = scenario.trainer.processor if failure_point == "release_records" else scenario.trainer
+    original = getattr(target, failure_point)
     should_fail = True
 
     def fail_after_effect(*args, **kwargs):
@@ -1248,7 +1246,7 @@ def test_post_commit_failure_resumes_the_recorded_step_without_republication(
             raise RuntimeError(f"injected {failure_point} failure")
         return outcome
 
-    monkeypatch.setattr(scenario.trainer, failure_point, fail_after_effect)
+    monkeypatch.setattr(target, failure_point, fail_after_effect)
 
     with pytest.raises(RuntimeError, match=f"injected {failure_point} failure"):
         scenario.commit(result)
@@ -1355,14 +1353,14 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     original = dispatcher.get_or_create_scenario("skills")
     assert original is not None
     rollback_target = original.current_artifact_ref().release_id
-    compaction_failed = Event()
+    release_failed = Event()
     reload_started = Event()
     allow_reload = Event()
     reload_scenario = dispatcher._registry.reload
 
-    def fail_compaction(self, compacted_ids) -> None:
-        del self, compacted_ids
-        compaction_failed.set()
+    def fail_release(self, record_ids) -> None:
+        del self, record_ids
+        release_failed.set()
         raise RuntimeError("simulated failure after commit record append")
 
     def blocking_reload(scenario: str):
@@ -1370,12 +1368,14 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
         assert allow_reload.wait(1)
         return reload_scenario(scenario)
 
-    original.trainer.compaction_applied = fail_compaction.__get__(original.trainer, Trainer)
+    original.trainer.processor.release_records = fail_release.__get__(
+        original.trainer.processor, type(original.trainer.processor)
+    )
     dispatcher._registry.reload = blocking_reload
     dispatcher.accept_record(trace_inference("i1"))
     dispatcher.accept_record(trace_report("r1", "i1"))
 
-    assert compaction_failed.wait(1)
+    assert release_failed.wait(1)
     assert reload_started.wait(1)
     rollback_started = Event()
     rollback_returned = Event()
@@ -1461,7 +1461,6 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     assert record.artifact_ref == head  # head unchanged: no new artifact published
     assert record.algorithm_state == {"steps": 1, "entries": []}
     assert record.high_water_sequence == 2
-    assert record.compacted_ids == frozenset()
     assert record.consumed_ids == frozenset({"i1", "r1"})
     dispatcher.close()
 

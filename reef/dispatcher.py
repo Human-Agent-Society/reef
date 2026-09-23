@@ -302,7 +302,7 @@ class Dispatcher:
             return read_records(self._registry.require(scenario), after_sequence=after_sequence, limit=limit)
 
     def read_record(self, scenario: str, record_id: str) -> dict[str, Any] | None:
-        """Read a retained trace within its scenario, including compacted bodies."""
+        """Read a retained trace within its scenario, including consumed records."""
         from reef.scenario.history import read_record
 
         with self._registry.lock_for(scenario):
@@ -439,7 +439,7 @@ class Dispatcher:
             # the broken field instead of the record dying silently at training
             # time. An undeclared schema keeps open ingress.
             if item.request_type is RequestType.REPORT:
-                # An identical retry remains valid after its sources were compacted.
+                # An identical retry remains valid after capacity eviction.
                 if (existing := current.records.existing_receipt(item)) is not None:
                     return existing
                 validate_report_payload(item.payload)
@@ -495,11 +495,8 @@ class Dispatcher:
             return
         result = current.prepare_training_step()
         if result is not None:
-            # scenario.commit is the single commit point: it commits the
-            # trainer, appends the durable commit record, applies record
-            # compaction, and moves the serving head — in that order, so a
-            # crash in any gap is recovered by replaying the scenario's
-            # commit log instead of silently losing the batch.
+            # Commit consumption durably with the model update so recovery
+            # never repeats a batch whose update was already published.
             self._commit_result(current.name, result)
 
     # -- Commit & publication --------------------------------------------
@@ -766,7 +763,7 @@ class Dispatcher:
     def _drain_training(self) -> None:
         # One recovery attempt, not a retry loop: if draining fails we reload
         # the scenario from durable state and drain once more, so a crash
-        # between a commit record and its compaction is healed on the spot. A
+        # between a durable commit and processor cleanup is healed on the spot. A
         # second failure still reloads (leaving a clean scenario for the next
         # wake-up) but is not spun on; the cause is reported through
         # training_status.

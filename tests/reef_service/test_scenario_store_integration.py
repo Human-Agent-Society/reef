@@ -206,7 +206,6 @@ def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_pa
         model_content = model_path.read_bytes()
         math.records.append(trace("first"))
         code.records.append(trace("other", "code"))
-        math.records.compact("math", frozenset({"first"}))
         retention = RecordRetention(days=7, max_bytes=1)
         assert dispatcher.prune_record_archives(retention) == 2
         assert factory.prune_calls == [(retention.days, retention.max_bytes)]
@@ -214,7 +213,6 @@ def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_pa
         assert dispatcher.read_record("code", "other") is None
 
         math.records.append(trace("archived"))
-        math.records.compact("math", frozenset({"archived"}))
         result = dispatcher.delete_scenario("math")
         assert "archive://math" in result["archived"]
         assert not model_path.exists()

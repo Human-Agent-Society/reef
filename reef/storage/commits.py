@@ -15,6 +15,7 @@ from typing import Any
 
 from reef.core.artifact_ref import ArtifactRef, decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
+from reef.storage.migrations import read_consumed_ids
 
 
 @dataclass(frozen=True)
@@ -26,7 +27,6 @@ class RecordProgress:
 
     high_water_sequence: int
     high_water_offset: int
-    compacted_ids: frozenset[str] = frozenset()
     consumed_ids: frozenset[str] = frozenset()
 
 
@@ -43,17 +43,10 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
         field = value.get(name)
         if not isinstance(field, int) or isinstance(field, bool) or field < 0:
             raise ValueError(f"{context} record_progress.{name} must be a non-negative integer")
-    compacted_ids = value.get("compacted_ids")
-    if not isinstance(compacted_ids, list) or any(not isinstance(item, str) for item in compacted_ids):
-        raise ValueError(f"{context} record_progress.compacted_ids must be a list of strings")
-    consumed_ids = value.get("consumed_ids")
-    if not isinstance(consumed_ids, list) or any(not isinstance(item, str) for item in consumed_ids):
-        raise ValueError(f"{context} record_progress.consumed_ids must be a list of strings")
     return RecordProgress(
         high_water_sequence=value["high_water_sequence"],
         high_water_offset=value["high_water_offset"],
-        compacted_ids=frozenset(compacted_ids),
-        consumed_ids=frozenset(consumed_ids),
+        consumed_ids=read_consumed_ids(value, context=context),
     )
 
 
@@ -70,9 +63,8 @@ class CommitRecord:
 
     ``step``, ``artifact_ref`` and ``algorithm_state`` advance together or not
     at all; ``record_progress`` pins the record high-water mark the step
-    consumed, the rows its batch consumed, and the rows its compaction
-    retired, so the record store and processor memory can be re-derived after
-    a crash.
+    consumed and the IDs processed by the step. Recovery rebuilds processor
+    memory without changing stored records.
     """
 
     scenario: str
@@ -82,7 +74,6 @@ class CommitRecord:
     algorithm_state: Mapping[str, Any] | None
     high_water_sequence: int
     high_water_offset: int
-    compacted_ids: frozenset[str] = frozenset()
     consumed_ids: frozenset[str] = frozenset()
     recorded_at: float = field(default_factory=time.time)
     operation: str = "training"
@@ -127,14 +118,12 @@ class CommitRecord:
             self, "algorithm_state", None if self.algorithm_state is None else dict(self.algorithm_state)
         )
         object.__setattr__(self, "metrics", None if self.metrics is None else deepcopy(dict(self.metrics)))
-        object.__setattr__(self, "compacted_ids", frozenset(self.compacted_ids))
         object.__setattr__(self, "consumed_ids", frozenset(self.consumed_ids))
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {
             "high_water_sequence": self.high_water_sequence,
             "high_water_offset": self.high_water_offset,
-            "compacted_ids": sorted(self.compacted_ids),
         }
         record_progress["consumed_ids"] = sorted(self.consumed_ids)
         value = {
@@ -206,7 +195,6 @@ class CommitRecord:
             algorithm_state=algorithm_state,
             high_water_sequence=record_progress.high_water_sequence,
             high_water_offset=record_progress.high_water_offset,
-            compacted_ids=record_progress.compacted_ids,
             consumed_ids=record_progress.consumed_ids,
             recorded_at=float(recorded_at),
             operation=operation,
@@ -264,7 +252,6 @@ def scenario_metadata_for(
         metadata["record_progress"] = {
             "high_water_sequence": record_progress.high_water_sequence,
             "high_water_offset": record_progress.high_water_offset,
-            "compacted_ids": sorted(record_progress.compacted_ids),
             "consumed_ids": sorted(record_progress.consumed_ids),
         }
     if training_job_id is not None:
@@ -329,7 +316,6 @@ def parse_scenario_metadata(
         algorithm_state=algorithm_state,
         high_water_sequence=record_progress.high_water_sequence,
         high_water_offset=record_progress.high_water_offset,
-        compacted_ids=record_progress.compacted_ids,
         consumed_ids=record_progress.consumed_ids,
         training_job_id=training_job_id,
         metrics=metrics,

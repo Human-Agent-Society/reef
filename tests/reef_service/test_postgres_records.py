@@ -35,32 +35,30 @@ def test_namespaces_restart_and_receipt_isolation(postgres_config):
     original = record()
     with closing(PostgresRecordStore(url, schema=schema, name="one")) as first:
         assert first.append(original) == original
-        first.compact("math", frozenset({"first"}), receipt_id="step", receipt_metadata={"step": 1})
+        first.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
     with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
         assert other.existing_receipt(original) is None
-        assert other.compaction_receipts("math") == ()
+        assert other.consumption_receipts("math") == ()
         assert other.append_result(original).inserted
         assert other.get("math", "first") == original
-        assert other.purge_compacted("math", before=1e20) == 0
     with closing(PostgresRecordStore(url, schema=schema, name="one")) as reopened:
         assert reopened.append_result(original).inserted is False
         assert reopened.get_for_audit("math", "first").item == original
-        assert len(reopened.compaction_receipts("math")) == 1
-        assert reopened.purge_compacted("math", before=1e20) == 1
+        assert len(reopened.consumption_receipts("math")) == 1
     with closing(PostgresRecordStore(url, schema=schema, name="two")) as other:
         assert other.count("math") == 1
 
 
-def test_large_compaction_receipt_and_atomic_conflict(postgres_database):
+def test_large_consumption_receipt_and_atomic_conflict(postgres_database):
     with closing(PostgresRecordStore(postgres_database)) as store:
         store.append(record())
         ids = frozenset({"first", *(f"record-{index:06d}" for index in range(5000))})
-        store.compact("math", ids, receipt_id="large", receipt_metadata={"step": 1})
+        store.record_consumption("math", ids, receipt_id="large", metadata={"step": 1})
         store.append(record("later"))
         with pytest.raises(RecordConflict):
-            store.compact("math", ids, receipt_id="large", receipt_metadata={"step": 2})
+            store.record_consumption("math", ids, receipt_id="large", metadata={"step": 2})
         assert store.get("math", "later") is not None
-        assert store.compaction_receipts("math")[0]["compacted_ids"] == tuple(sorted(ids))
+        assert store.consumption_receipts("math")[0]["consumed_ids"] == tuple(sorted(ids))
 
 
 def test_concurrent_append_retry_and_conflict(postgres_database):
@@ -82,25 +80,25 @@ def test_concurrent_append_retry_and_conflict(postgres_database):
         assert first.count("math") == 1
 
 
-def test_concurrent_database_initialization_and_compaction(postgres_config):
+def test_concurrent_database_initialization_and_consumption(postgres_config):
     url, schema = postgres_config
     barrier = Barrier(2)
 
-    def initialize_and_compact(step):
+    def initialize_and_consume(step):
         barrier.wait(timeout=5)
         with closing(PostgresRecordStore(url, schema=schema)) as store:
             store.append(record())
             try:
-                store.compact("math", frozenset({"first"}), receipt_id="step", receipt_metadata={"step": step})
+                store.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": step})
             except RecordConflict:
                 return False
             return True
 
     with ThreadPoolExecutor(2) as pool:
-        assert sorted(pool.map(initialize_and_compact, (1, 2))) == [False, True]
+        assert sorted(pool.map(initialize_and_consume, (1, 2))) == [False, True]
     with closing(PostgresRecordStore(url, schema=schema)) as store:
-        assert store.count("math") == 0
-        assert len(store.compaction_receipts("math")) == 1
+        assert store.count("math") == 1
+        assert len(store.consumption_receipts("math")) == 1
 
 
 def test_schema_version_and_database_close(postgres_config):
@@ -162,11 +160,12 @@ def test_reader_snapshot_and_transaction_rollback(postgres_database):
     ):
         original = first.append(record())
         with first._transaction("math", write=False) as connection:
-            query = select(first._tables.records.c.compacted_at)
-            assert connection.execute(query).scalar_one() is None
-            second.compact("math", frozenset({"first"}))
-            assert connection.execute(query).scalar_one() is None
-        assert first.get("math", "first") is None
+            query = select(first._tables.consumption.c.receipt_id)
+            assert connection.execute(query).all() == []
+            second.record_consumption("math", frozenset({"first"}), receipt_id="skip", metadata={})
+            assert connection.execute(query).all() == []
+        assert len(first.consumption_receipts("math")) == 1
+        assert first.get("math", "first") == original
         assert first.get_for_audit("math", "first").item == original
         with pytest.raises(RuntimeError, match="rollback"), first._transaction("math", write=True) as connection:
             first._insert(
@@ -181,7 +180,7 @@ def test_archive_generation_retention_and_closed_sessions(postgres_database):
     old = PostgresRecordStore(postgres_database, name="math")
     try:
         old.append(record())
-        old.compact("math", frozenset({"first"}))
+        old.record_consumption("math", frozenset({"first"}), receipt_id="skip", metadata={})
         old.append(record("active"))
         archived_id = postgres_database.archive("math")
         assert archived_id == old.storage_id
@@ -189,7 +188,7 @@ def test_archive_generation_retention_and_closed_sessions(postgres_database):
             old.append(record("stale"))
         with closing(PostgresRecordStore(postgres_database, name="math")) as new:
             assert new.storage_id != old.storage_id
-            assert new.compaction_receipts("math") == ()
+            assert new.consumption_receipts("math") == ()
             assert new.append_result(record()).inserted
             assert postgres_database.prune(RecordRetention(max_bytes=1)) == 3
             assert new.count("math") == 0
@@ -209,10 +208,9 @@ def test_capacity_counts_all_records_and_preserves_retry_hashes(postgres_databas
         for name in ("expired", "oldest", "newest", "active"):
             store.append(record(name))
         for name in ("expired", "oldest", "newest"):
-            store.compact("math", frozenset({name}))
+            store.record_consumption("math", frozenset({name}), receipt_id=name, metadata={})
         with postgres_database.transaction() as connection:
             table = postgres_database.tables.records
-            connection.execute(table.update().where(table.c.agent_record_id == "expired").values(compacted_at=1))
             newest_bytes = connection.execute(
                 select(table.c.body_bytes).where(table.c.agent_record_id == "newest")
             ).scalar_one()
@@ -230,7 +228,6 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
         artifact_ref=ArtifactRef("content:1", "release:1", "base"),
         checkpoint=True,
         algorithm_state={"step": 1},
-        compacted_ids=frozenset({"first"}),
         consumed_ids=frozenset({"first"}),
         high_water_sequence=1,
         high_water_offset=1,
@@ -242,18 +239,13 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
     ):
         store.records.append(record())
 
-        def interrupted_compaction(*args, **kwargs):
-            raise RuntimeError("compaction interrupted")
-
-        monkeypatch.setattr(store.records, "compact", interrupted_compaction)
-        with pytest.raises(RuntimeError, match="compaction interrupted"):
-            store.commit_step(expected_step=0, commit=committed)
+        store.commit_step(expected_step=0, commit=committed)
     with closing(PostgresScenarioStorage(url, tmp_path, schema=schema)) as factory:
         with closing(factory.open("math")) as store:
             assert store.history() == (committed,)
             assert store.records.count("math") == 1
             assert store.recover(checkpoint=None) == committed
-            assert store.records.count("math") == 0
+            assert store.records.count("math") == 1
             assert store.records.append_result(record()).inserted is False
         archived = factory.archive("math")
         assert archived[0].startswith("postgres://")
@@ -360,3 +352,53 @@ def test_capacity_metadata_upgrade_preserves_existing_records(postgres_config):
         assert records.loss("math").record_count == 0
         assert database.prune(RecordRetention(max_bytes=1)) == 1
         assert records.loss("math").record_count == 1
+
+
+def test_legacy_schema_moves_retirement_to_consumption_and_removes_old_tables(postgres_config):
+    from sqlalchemy import inspect
+
+    url, schema = postgres_config
+    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
+        with closing(PostgresRecordStore(database, name="one")) as records:
+            records.append(record())
+            records.record_consumption(
+                "math", frozenset({"earlier"}), receipt_id="skip", metadata={"outcome": "stale"}
+            )
+        with closing(PostgresRecordStore(database, name="two")) as records:
+            records.append(record("other"))
+        with database.transaction() as connection:
+            connection.exec_driver_sql(f'ALTER TABLE "{schema}".record_consumption RENAME TO compaction_receipts')
+            connection.exec_driver_sql(
+                f'ALTER TABLE "{schema}".compaction_receipts RENAME CONSTRAINT record_consumption_pkey TO compaction_receipts_pkey'
+            )
+            connection.exec_driver_sql(
+                f'ALTER TABLE "{schema}".compaction_receipts RENAME COLUMN consumed_ids_json TO compacted_ids_json'
+            )
+            connection.exec_driver_sql(
+                f'ALTER TABLE "{schema}".compaction_receipts RENAME COLUMN consumed_ids_sha256 TO compacted_ids_sha256'
+            )
+            connection.exec_driver_sql(f'ALTER TABLE "{schema}".agent_record ADD COLUMN compacted_at DOUBLE PRECISION')
+            connection.exec_driver_sql(f'UPDATE "{schema}".agent_record SET compacted_at=1')
+            connection.exec_driver_sql(
+                f'CREATE INDEX agent_record_active_type_sequence ON "{schema}".agent_record (scenario, sequence) '
+                "WHERE compacted_at IS NULL"
+            )
+            version = database.tables.records.metadata.tables[f"{schema}.schema_version"]
+            connection.execute(version.update().values(version=2))
+    for _ in range(2):
+        with closing(PostgresRecordDatabase(url, schema=schema)) as database:
+            with closing(PostgresRecordStore(database, name="one")) as records:
+                assert records.get("math", "first") == record()
+                assert {
+                    key for receipt in records.consumption_receipts("math") for key in receipt["consumed_ids"]
+                } == {"first", "earlier"}
+                assert len(records.consumption_receipts("math")) == 2
+            with closing(PostgresRecordStore(database, name="two")) as records:
+                assert records.get("math", "other") == record("other")
+                assert records.consumption_receipts("math")[0]["consumed_ids"] == ("other",)
+            with database.transaction() as connection:
+                inspector = inspect(connection)
+                assert "compaction_receipts" not in inspector.get_table_names(schema=schema)
+                assert "compacted_at" not in {
+                    column["name"] for column in inspector.get_columns("agent_record", schema=schema)
+                }

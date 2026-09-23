@@ -143,7 +143,7 @@ def test_report_without_coral_metadata_fails_explicitly():
                 payload={"score": 1.0, "references": ["i1"]},
             )
         )
-    assert {"i1", "r-bare"} <= processor.retention_decision().protected_agent_record_ids
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r-bare"})
 
 
 def test_group_size_floor():

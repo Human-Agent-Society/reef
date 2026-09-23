@@ -12,8 +12,6 @@ new training commits never retire record bodies.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import logging
 import math
 import time
@@ -457,7 +455,6 @@ class Trainer:
                     algorithm_state=self.algorithm_state_dict(),
                     high_water_sequence=self._data_sequence,
                     high_water_offset=self._data_offset,
-                    compacted_ids=frozenset(),
                 )
             if self._pending.result is not result:
                 raise RuntimeError("training result does not match the pending step")
@@ -471,8 +468,7 @@ class Trainer:
             consumed = self._pending.consumed_ids
             if consumed is None:
                 consumed = self._processor.acknowledge(batch_id)
-            retention = self._processor.retention_decision()
-            compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
+            released = self._processor.releasable_record_ids()
             loss = self._records.loss(self.scenario)
             metrics = dict(result.metrics)
             if loss.record_count > 0:
@@ -485,9 +481,8 @@ class Trainer:
                 algorithm_state=dict(result.state),
                 high_water_sequence=self._data_sequence,
                 high_water_offset=self._data_offset,
-                compacted_ids=frozenset(),
-                consumed_ids=frozenset(consumed | compacted | self.skipped_record_ids),
-                released_ids=frozenset(compacted),
+                consumed_ids=frozenset(consumed | released | self.skipped_record_ids),
+                released_ids=released,
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
             )
@@ -516,10 +511,10 @@ class Trainer:
                 return
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
+            self._processor.release_records(prepared.released_ids)
             self._state = dict(prepared.algorithm_state)
             self.consumed_record_ids.update(prepared.consumed_ids)
             self.skipped_record_ids.difference_update(prepared.consumed_ids)
-            self._processor.compaction_applied(prepared.released_ids)
             self._pending = None
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
@@ -547,39 +542,19 @@ class Trainer:
             batch_id = self._pending.batch_id
             self._processor.dropped(batch_id)
             consumed = self._processor.acknowledge(batch_id)
-            retention = self._processor.retention_decision()
-            compacted = frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
-            self._records.compact(
+            released = self._processor.releasable_record_ids()
+            self._records.record_consumption(
                 self.scenario,
-                frozenset(),
-                receipt_id=f"{batch_id}:{hashlib.sha256(json.dumps(sorted(consumed | compacted)).encode()).hexdigest()}",
-                receipt_metadata={
+                consumed | released,
+                receipt_id=batch_id,
+                metadata={
                     "outcome": "stale",
                     "metrics": dict(metrics or {}),
-                    "consumed_ids": sorted(consumed | compacted),
                 },
             )
-            self.consumed_record_ids.update(consumed | compacted)
-            self._processor.compaction_applied(compacted)
+            self.consumed_record_ids.update(consumed | released)
+            self._processor.release_records(released)
             self._pending = None
-
-    def apply_compaction(self, compacted_ids: frozenset[str]) -> None:
-        """Retire rows and notify the processor for standalone trainer callers.
-
-        Scenario commits settle records through their store and then call
-        :meth:`compaction_applied` to update processor memory.
-        """
-        if not compacted_ids:
-            return
-        with self._lock:
-            self._records.compact(self.scenario, compacted_ids)
-            self._processor.compaction_applied(compacted_ids)
-
-    def compaction_applied(self, compacted_ids: frozenset[str]) -> None:
-        """Notify the processor after the scenario store retires committed rows."""
-        if compacted_ids:
-            with self._lock:
-                self._processor.compaction_applied(compacted_ids)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""

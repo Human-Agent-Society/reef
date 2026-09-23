@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 import time
 from abc import abstractmethod
 from collections.abc import Mapping, Sequence
@@ -24,12 +23,19 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.records import AppendResult, RecordConflict, RecordLoss, RecordStore, StoredRecord
+from reef.storage.records import (
+    AppendResult,
+    ConsumptionReceipt,
+    RecordConflict,
+    RecordLoss,
+    RecordStore,
+    StoredRecord,
+)
 
 
 @dataclass(frozen=True)
 class RecordTables:
-    """Tables with the shared record, consumed-hash, and compaction columns.
+    """Tables for record bodies, retry hashes, consumption, and capacity losses.
 
     The adapter owns schema types, constraints, indexes, and migrations. Table
     columns retain the names consumed by SQLRecordStore; backend-specific
@@ -38,7 +44,7 @@ class RecordTables:
 
     records: Table
     consumed: Table
-    compaction_receipts: Table
+    consumption: Table
     eviction: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
@@ -66,27 +72,13 @@ class EncodedRecord(NamedTuple):
 class SQLRecordRetention:
     """Shared retention queries executed inside the caller's transaction.
 
-    The caller selects databases or namespaces and owns age and byte-budget
+    The caller selects databases or namespaces and owns the byte-budget
     policy. Adapters must provide accurate row counts for single DELETEs.
     """
 
     def __init__(self, tables: RecordTables) -> None:
         self._records = tables.records
         self._tables = tables
-
-    def purge_expired(
-        self, connection: Connection, *, before: float, limit: int = 256, scenario: str | None = None
-    ) -> int:
-        """Delete a bounded oldest-first page, optionally scoped to one scenario."""
-        selected = select(self._records.c.sequence).where(
-            self._tables.condition(self._records), self._records.c.compacted_at < before
-        )
-        if scenario is not None:
-            selected = selected.where(self._records.c.scenario == scenario)
-        selected = selected.order_by(self._records.c.compacted_at, self._records.c.sequence).limit(limit)
-        return connection.execute(
-            self._records.delete().where(self._tables.condition(self._records), self._records.c.sequence.in_(selected))
-        ).rowcount
 
     def retained_bytes(self, connection: Connection) -> int:
         """Count all stored JSON bodies, independent of training consumption."""
@@ -208,12 +200,8 @@ class SQLRecordStore(RecordStore):
     order. In particular, sequence allocation alone is not commit ordering.
     """
 
-    def __init__(self, tables: RecordTables, *, id_chunk_size: int = 900) -> None:
-        if isinstance(id_chunk_size, bool) or not isinstance(id_chunk_size, int) or id_chunk_size <= 0:
-            raise ValueError("id_chunk_size must be a positive integer")
+    def __init__(self, tables: RecordTables) -> None:
         self._tables = tables
-        self._retention_queries = SQLRecordRetention(tables)
-        self._id_chunk_size = id_chunk_size
         self._live_records: WeakValueDictionary[str, AgentRecord] = WeakValueDictionary()
 
     @abstractmethod
@@ -221,7 +209,7 @@ class SQLRecordStore(RecordStore):
         """Supply one connection with the isolation and local serialization needed.
 
         Multi-query receipt reads must observe a consistent state. Write scopes
-        must serialize conflicting appends and compactions across connections,
+        must serialize conflicting appends and evictions across connections,
         including sequence allocation through commit. An adapter joining an
         outer transaction leaves its completion to that transaction's owner.
         """
@@ -362,7 +350,7 @@ class SQLRecordStore(RecordStore):
             return tuple(self.append_in_transaction(connection, item) for item in items)
 
     def append_in_transaction(self, connection: Connection, item: AgentRecord) -> AppendResult:
-        """Apply the same retry and retirement rules to single and batch writes."""
+        """Apply the same retry and capacity-eviction rules to single and batch writes."""
         encoded = self._encode(item)
         consumed = (
             connection.execute(
@@ -379,15 +367,21 @@ class SQLRecordStore(RecordStore):
                 raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
             return AppendResult(item, False)
         if item.request_type is RequestType.REPORT and item.references:
-            retired_reference = connection.execute(
+            evicted_reference = connection.execute(
                 select(self._tables.consumed.c.agent_record_id)
                 .where(
                     self._tables.condition(self._tables.consumed),
                     self._tables.consumed.c.agent_record_id.in_(item.references),
+                    ~select(self._tables.records.c.agent_record_id)
+                    .where(
+                        self._tables.condition(self._tables.records),
+                        self._tables.records.c.agent_record_id == self._tables.consumed.c.agent_record_id,
+                    )
+                    .exists(),
                 )
                 .limit(1)
             ).first()
-            if retired_reference is not None:
+            if evicted_reference is not None:
                 # A report is discarded once its references are gone, but a row
                 # already stored under this id stays canonical: check the discard
                 # against that row so a divergent retry cannot register its own
@@ -451,7 +445,6 @@ class SQLRecordStore(RecordStore):
                         self._tables.condition(self._tables.records),
                         self._tables.records.c.scenario == scenario,
                         self._tables.records.c.agent_record_id == agent_record_id,
-                        self._tables.records.c.compacted_at.is_(None),
                     )
                 )
                 .mappings()
@@ -477,7 +470,6 @@ class SQLRecordStore(RecordStore):
             .where(
                 self._tables.condition(self._tables.records),
                 self._tables.records.c.scenario == scenario,
-                self._tables.records.c.compacted_at.is_(None),
             )
             .order_by(self._tables.records.c.sequence)
             .limit(limit)
@@ -507,7 +499,6 @@ class SQLRecordStore(RecordStore):
                         self._tables.condition(self._tables.records),
                         self._tables.records.c.scenario == scenario,
                         self._tables.records.c.sequence > after_sequence,
-                        self._tables.records.c.compacted_at.is_(None),
                     )
                     .order_by(self._tables.records.c.sequence)
                     .limit(limit)
@@ -528,7 +519,6 @@ class SQLRecordStore(RecordStore):
                 self._tables.condition(self._tables.records),
                 self._tables.records.c.scenario == scenario,
                 self._tables.records.c.sequence > after_sequence,
-                self._tables.records.c.compacted_at.is_(None),
             )
         )
         if request_type is not None:
@@ -537,7 +527,7 @@ class SQLRecordStore(RecordStore):
             return int(connection.execute(statement).scalar_one())
 
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
-        """Read a retained record including its compaction state; never reactivate it."""
+        """Read a retained record with its append sequence."""
         with self._transaction(scenario, write=False) as connection:
             row = (
                 connection.execute(
@@ -559,7 +549,7 @@ class SQLRecordStore(RecordStore):
         after_sequence: int = 0,
         limit: int = 256,
     ) -> tuple[StoredRecord, ...]:
-        """Read a bounded append-order page including compacted bodies, scoped to one scenario."""
+        """Read a bounded append-order page including consumed bodies, scoped to one scenario."""
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
         if limit <= 0:
@@ -583,105 +573,47 @@ class SQLRecordStore(RecordStore):
 
     @classmethod
     def _audit_record(cls, row: RowMapping) -> StoredRecord:
-        return StoredRecord(sequence=int(row["sequence"]), item=cls._decode(row), compacted_at=row["compacted_at"])
+        return StoredRecord(sequence=int(row["sequence"]), item=cls._decode(row))
 
-    def compact(
+    def record_consumption(
         self,
         scenario: str,
         agent_record_ids: frozenset[str],
         *,
-        receipt_id: str | None = None,
-        receipt_metadata: Mapping[str, object] | None = None,
+        receipt_id: str,
+        metadata: Mapping[str, object],
     ) -> None:
-        """Retire records from training while retaining their bodies for audit.
-
-        Compacted rows no longer participate in training replay, lookup, or
-        reference availability. Durable receipts preserve append deduplication
-        and refuse reports that reference retired data. Repeated compaction
-        preserves the first retirement time. Physical deletion is separate.
-        """
-        if (receipt_id is None) != (receipt_metadata is None):
-            raise ValueError("compaction receipt_id and receipt_metadata must be provided together")
-        if receipt_id is not None and not receipt_id:
-            raise ValueError("compaction receipt_id must be non-empty")
-        if not agent_record_ids and receipt_id is None:
-            return
-        compacted_ids_json = self._json(sorted(agent_record_ids))
-        metadata_json = self._json(dict(receipt_metadata or {}))
-        compacted_at = time.time()
+        """Persist a skipped batch's consumption without modifying its records."""
+        if not receipt_id:
+            raise ValueError("consumption receipt_id must be non-empty")
+        consumed_ids_json = self._json(sorted(agent_record_ids))
+        metadata_json = self._json(dict(metadata))
+        table = self._tables.consumption
         with self._transaction(scenario, write=True) as connection:
-            if receipt_id is not None:
-                # A receipt is identified by (scenario, receipt_id, compacted ids), the
-                # primary key of compaction_receipts. One receipt_id may therefore cover
-                # several distinct id sets, so only the metadata can conflict.
-                self._insert(
-                    connection,
-                    self._tables.compaction_receipts,
-                    {
-                        "scenario": scenario,
-                        "receipt_id": receipt_id,
-                        "compacted_ids_json": compacted_ids_json,
-                        "metadata_json": metadata_json,
-                        "recorded_at": time.time(),
-                    },
+            self._insert(
+                connection,
+                table,
+                {
+                    "scenario": scenario,
+                    "receipt_id": receipt_id,
+                    "consumed_ids_json": consumed_ids_json,
+                    "metadata_json": metadata_json,
+                    "recorded_at": time.time(),
+                    "consumed_ids_sha256": hashlib.sha256(consumed_ids_json.encode()).hexdigest(),
+                },
+            )
+            existing = connection.execute(
+                select(table.c.metadata_json).where(
+                    self._tables.condition(table),
+                    table.c.scenario == scenario,
+                    table.c.receipt_id == receipt_id,
+                    table.c.consumed_ids_json == consumed_ids_json,
                 )
-                existing = (
-                    connection.execute(
-                        select(self._tables.compaction_receipts.c.metadata_json).where(
-                            self._tables.condition(self._tables.compaction_receipts),
-                            self._tables.compaction_receipts.c.scenario == scenario,
-                            self._tables.compaction_receipts.c.receipt_id == receipt_id,
-                            self._tables.compaction_receipts.c.compacted_ids_json == compacted_ids_json,
-                        )
-                    )
-                    .mappings()
-                    .first()
+            ).scalar_one_or_none()
+            if existing != metadata_json:
+                raise RecordConflict(
+                    f"consumption receipt {receipt_id!r} for scenario {scenario!r} has different content"
                 )
-                if existing is None or existing["metadata_json"] != metadata_json:
-                    raise RecordConflict(
-                        f"compaction receipt {receipt_id!r} for scenario {scenario!r} has different content"
-                    )
-            if agent_record_ids:
-                sorted_ids = sorted(agent_record_ids)
-                for start in range(0, len(sorted_ids), self._id_chunk_size):
-                    chunk = sorted_ids[start : start + self._id_chunk_size]
-                    selected = (
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.scenario == scenario,
-                        self._tables.records.c.compacted_at.is_(None),
-                        self._tables.records.c.agent_record_id.in_(chunk),
-                    )
-                    rows = connection.execute(select(self._tables.records).where(*selected)).mappings().all()
-                    if rows:
-                        self._insert(
-                            connection,
-                            self._tables.consumed,
-                            [
-                                {
-                                    "agent_record_id": row["agent_record_id"],
-                                    "content_sha256": self._content_sha256(self._row_content(row)),
-                                }
-                                for row in rows
-                            ],
-                        )
-                    connection.execute(
-                        self._tables.records.update().where(*selected).values(compacted_at=compacted_at)
-                    )
-        for agent_record_id in agent_record_ids:
-            self._live_records.pop(agent_record_id, None)
-
-    def purge_compacted(self, scenario: str, *, before: float, limit: int = 256) -> int:
-        """Delete at most ``limit`` bodies retired before a finite Unix timestamp.
-
-        This explicit operation is irreversible. Active records, retry hashes,
-        and compaction receipts are retained. This call schedules no further maintenance.
-        """
-        if not math.isfinite(before):
-            raise ValueError("before must be a finite Unix timestamp")
-        if isinstance(limit, bool) or not isinstance(limit, int) or limit <= 0:
-            raise ValueError("limit must be a positive integer")
-        with self._transaction(scenario, write=True) as connection:
-            return self._retention_queries.purge_expired(connection, before=before, limit=limit, scenario=scenario)
 
     def loss(self, scenario: str) -> RecordLoss:
         table = self._tables.eviction
@@ -697,29 +629,35 @@ class SQLRecordStore(RecordStore):
             *(int(row[name]) for name in ("record_count", "body_bytes", "first_sequence", "last_sequence"))
         )
 
-    def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
-        """Return durable, ordered metadata for explicitly recorded compactions."""
+    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
+        """Read ordered consumption metadata for this scenario."""
         with self._transaction(scenario, write=False) as connection:
             rows = (
                 connection.execute(
-                    select(self._tables.compaction_receipts)
+                    select(self._tables.consumption)
                     .where(
-                        self._tables.condition(self._tables.compaction_receipts),
-                        self._tables.compaction_receipts.c.scenario == scenario,
+                        self._tables.condition(self._tables.consumption),
+                        self._tables.consumption.c.scenario == scenario,
                     )
-                    .order_by(
-                        self._tables.compaction_receipts.c.recorded_at, self._tables.compaction_receipts.c.receipt_id
-                    )
+                    .order_by(self._tables.consumption.c.recorded_at, self._tables.consumption.c.receipt_id)
                 )
                 .mappings()
                 .all()
             )
-        return tuple(
-            {
-                "receipt_id": row["receipt_id"],
-                "compacted_ids": tuple(json.loads(row["compacted_ids_json"])),
-                "metadata": json.loads(row["metadata_json"]),
-                "recorded_at": float(row["recorded_at"]),
-            }
-            for row in rows
-        )
+        receipts: list[ConsumptionReceipt] = []
+        for row in rows:
+            consumed_ids = json.loads(row["consumed_ids_json"])
+            metadata = json.loads(row["metadata_json"])
+            if not isinstance(metadata, dict):
+                raise ValueError("consumption receipt metadata must be an object")
+            if not isinstance(consumed_ids, list) or any(not isinstance(record_id, str) for record_id in consumed_ids):
+                raise ValueError("consumption receipt IDs must be a list of strings")
+            receipts.append(
+                {
+                    "receipt_id": row["receipt_id"],
+                    "consumed_ids": tuple(consumed_ids),
+                    "metadata": metadata,
+                    "recorded_at": float(row["recorded_at"]),
+                }
+            )
+        return tuple(receipts)

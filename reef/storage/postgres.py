@@ -38,6 +38,7 @@ from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
 from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
+from reef.storage.migrations import migrate_record_storage
 from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
@@ -78,7 +79,6 @@ def _record_tables(metadata: MetaData) -> RecordTables:
         Column("payload_json", Text, nullable=False),
         Column("references_json", Text, nullable=False),
         Column("artifact_json", Text),
-        Column("compacted_at", Float(53)),
         Column("body_bytes", BigInteger, nullable=False),
         UniqueConstraint("storage_id", "agent_record_id"),
     )
@@ -90,32 +90,25 @@ def _record_tables(metadata: MetaData) -> RecordTables:
         Column("content_sha256", String(64), nullable=False),
     )
     receipts = Table(
-        "compaction_receipts",
+        "record_consumption",
         metadata,
         Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
         Column("scenario", Text, primary_key=True),
         Column("receipt_id", Text, primary_key=True),
         # Large id sets cannot be PostgreSQL btree keys. Shared SQL operations
         # still compare the complete canonical ids and metadata after insertion.
-        Column("compacted_ids_sha256", String(64), primary_key=True),
-        Column("compacted_ids_json", Text, nullable=False),
+        Column("consumed_ids_sha256", String(64), primary_key=True),
+        Column("consumed_ids_json", Text, nullable=False),
         Column("metadata_json", Text, nullable=False),
         Column("recorded_at", Float(53), nullable=False),
     )
     Index("agent_record_scenario_sequence", records.c.storage_id, records.c.scenario, records.c.sequence)
     Index(
-        "agent_record_active_type_sequence",
+        "agent_record_type_sequence",
         records.c.storage_id,
         records.c.scenario,
         records.c.request_type,
         records.c.sequence,
-        postgresql_where=records.c.compacted_at.is_(None),
-    )
-    Index(
-        "agent_record_retention",
-        records.c.compacted_at,
-        records.c.sequence,
-        postgresql_where=records.c.compacted_at.is_not(None),
     )
     eviction = Table(
         "record_eviction",
@@ -168,15 +161,16 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions = connection.execute(select(version.c.version)).scalars().all()
-                if versions and versions not in ([1], [2]):
+                if versions and versions not in ([1], [2], [3]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 metadata.create_all(connection)
+                migrate_record_storage(connection, self.tables.records, self.tables.consumption)
                 for index in self.tables.records.indexes:
                     index.create(connection, checkfirst=True)
-                if versions == [1]:
-                    connection.execute(version.update().values(version=2))
+                if versions and versions != [3]:
+                    connection.execute(version.update().values(version=3))
                 elif not versions:
-                    connection.execute(version.insert().values(version=2))
+                    connection.execute(version.insert().values(version=3))
         except BaseException:
             self._engine.dispose()
             raise
@@ -243,7 +237,7 @@ class PostgresRecordDatabase:
                 hashlib.sha256(f"reef-record-retention:{self._schema}".encode()).digest()[:8], "big", signed=True
             )
             connection.execute(select(func.pg_advisory_xact_lock(key)))
-            # Use the same namespace locks as append/compaction to protect retry hashes.
+            # Use the same namespace locks as append/eviction to protect retry hashes.
             connection.execute(
                 select(self._stores.c.storage_id).order_by(self._stores.c.storage_id).with_for_update()
             ).all()
@@ -254,10 +248,10 @@ class PostgresRecordDatabase:
                 if not page:
                     break
                 selected: list[int] = []
-                for compacted_at, sequence, size in page:
+                for created_at, sequence, size in page:
                     selected.append(sequence)
                     retained -= size
-                    after_time, after_sequence = compacted_at, sequence
+                    after_time, after_sequence = created_at, sequence
                     if retained <= retention.max_bytes:
                         break
                 batch_losses = queries.evict(connection, selected)
@@ -317,11 +311,6 @@ class PostgresRecordStore(SQLRecordStore):
         self, connection: Connection, table: Table, values: Mapping[str, object] | Sequence[Mapping[str, object]]
     ) -> bool:
         rows = [dict(values)] if isinstance(values, Mapping) else [dict(row) for row in values]
-        if table is self._tables.compaction_receipts:
-            for row in rows:
-                row["compacted_ids_sha256"] = hashlib.sha256(
-                    str(row["compacted_ids_json"]).encode("utf-8")
-                ).hexdigest()
         statement = insert(table).values(rows).on_conflict_do_nothing().returning(next(iter(table.primary_key)))
         return connection.execute(statement).first() is not None
 

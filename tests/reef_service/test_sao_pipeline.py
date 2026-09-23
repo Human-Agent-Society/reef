@@ -249,7 +249,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -262,7 +262,7 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -272,7 +272,7 @@ def test_processor_rejects_non_finite_report_scores() -> None:
     with pytest.raises(ReportValidationError, match="finite"):
         processor.ingest(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready()
-    assert processor.retention_decision().protected_agent_record_ids == {"i1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.unit
@@ -284,7 +284,7 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -308,12 +308,12 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
                 processor.ingest(item)
         else:
             processor.ingest(item)
-        processor.retention_decision()  # a read between arrivals must not latch the release
+        processor.releasable_record_ids()  # a read between arrivals must not latch the release
 
     batch = processor.build_batch()
     assert [source_record_id(sample) for sample in batch.items] == ["i1"]
     processor.acknowledge(batch.batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"retry", "i1"})
+    assert processor.releasable_record_ids() == frozenset({"retry", "i1"})
 
 
 # --- backend preparation ---------------------------------------------------

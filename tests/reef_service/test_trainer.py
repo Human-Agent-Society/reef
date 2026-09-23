@@ -169,7 +169,7 @@ def test_recipe_processor_never_becomes_ready() -> None:
 
     assert not processor.ready()
     assert processor.status() == {}
-    assert processor.retention_decision().protected_agent_record_ids == frozenset({"i1"})
+    assert processor.releasable_record_ids().isdisjoint(frozenset({"i1"}))
 
 
 @pytest.mark.unit
@@ -236,7 +236,7 @@ def test_pairing_processor_assembles_ordered_multi_reference_report() -> None:
     assert item.training["turn_count"] == 2
     assert [record["payload"] for record in item.metadata["records"]] == [first.payload, second.payload]
     processor.acknowledge(batch.batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"i1", "i2", "r1"})
+    assert processor.releasable_record_ids() == frozenset({"i1", "i2", "r1"})
 
 
 @pytest.mark.unit
@@ -293,7 +293,7 @@ def test_cookbook_processors_assemble_before_rejecting_multi_turn_reports(
         sample.training.get("turn_count", 1) == 2 and (sample.training.get("turn_count", 1) > 1)
         for sample in assembled_samples
     )
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "r1"})
 
 
 @pytest.mark.unit
@@ -304,9 +304,9 @@ def test_failed_multi_turn_assembly_preserves_inputs_and_other_live_reports() ->
     processor.ingest(report("single", "i1", 1.0))
     with pytest.raises(ValueError, match="accept_multi_turn"):
         processor.ingest(report("multi", ("i1", "i2"), 1.0))
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "single", "multi"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "single", "multi"})
     processor.acknowledge(processor.build_batch().batch_id)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "multi"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "multi"})
 
 
 @pytest.mark.unit
@@ -317,7 +317,7 @@ def test_pairing_processor_raises_for_forked_multi_turn_episode() -> None:
     with pytest.raises(ValueError, match="cannot assemble"):
         processor.ingest(report("r1", ("i1", "i2"), 1.0))
     assert not processor.ready()
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "i2", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "i2", "r1"})
 
 
 @pytest.mark.unit
@@ -327,7 +327,7 @@ def test_pairing_processor_rejects_report_eligibility_flags() -> None:
     with pytest.raises(ReportValidationError, match="eligible"):
         processor.ingest(report("r1", "i1", 0.0, training={"eligible": False}))
     assert not processor.ready()
-    assert processor.retention_decision().protected_agent_record_ids == {"i1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.unit
@@ -339,20 +339,19 @@ def test_pairing_retention_consumes_reports_exactly_and_releases_trained_inferen
 
     first = processor.build_batch()
     processor.acknowledge(first.batch_id)
-    decision = processor.retention_decision()
-    assert decision.releasable_agent_record_ids == frozenset({"r1"})
-    assert decision.protected_agent_record_ids == frozenset({"i1", "r2"})
+    decision = processor.releasable_record_ids()
+    assert decision == frozenset({"r1"})
+    assert decision.isdisjoint(frozenset({"i1", "r2"}))
 
     second = processor.build_batch()
     assert trajectory_reward(second.items[0]) == 0.5
     processor.acknowledge(second.batch_id)
-    decision = processor.retention_decision()
-    assert decision.protected_agent_record_ids == frozenset()
-    assert decision.releasable_agent_record_ids == frozenset({"i1", "r1", "r2"})
+    decision = processor.releasable_record_ids()
+    assert decision == frozenset({"i1", "r1", "r2"})
 
     processor.ingest(report("late", "i1", 0.25))
     assert not processor.ready()
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"i1", "r1", "r2", "late"})
+    assert processor.releasable_record_ids() == frozenset({"i1", "r1", "r2", "late"})
 
 
 @pytest.mark.unit
@@ -360,9 +359,9 @@ def test_pairing_retention_protects_low_score_feedback_until_consumed() -> None:
     processor = ThresholdProcessor(ProcessorContext("math"))
     processor.ingest(inference("i1"))
     processor.ingest(report("low", "i1", 0.1))
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "low"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "low"})
     processor.acknowledge(processor.build_batch().batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == {"i1", "low"}
+    assert processor.releasable_record_ids() == {"i1", "low"}
 
 
 @pytest.mark.unit
@@ -375,8 +374,8 @@ def test_pairing_retention_does_not_protect_consumed_inferences() -> None:
 
     # Consumed inferences are released and may be compacted; the processor does
     # not require them to be retained across restart.
-    decision = first.retention_decision()
-    assert decision.releasable_agent_record_ids == frozenset({"i1", "r1"})
+    decision = first.releasable_record_ids()
+    assert decision == frozenset({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -388,9 +387,8 @@ def test_grpo_retention_releases_complete_comparison_set_after_acknowledgement()
 
     batch = processor.build_batch()
     processor.acknowledge(batch.batch_id)
-    decision = processor.retention_decision()
-    assert decision.protected_agent_record_ids == frozenset()
-    assert decision.releasable_agent_record_ids == frozenset({"i1", "i2", "ri1", "ri2"})
+    decision = processor.releasable_record_ids()
+    assert decision == frozenset({"i1", "i2", "ri1", "ri2"})
 
 
 @pytest.mark.unit
@@ -434,7 +432,6 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
     assert trainer.state == {}
     prepared = trainer.prepare_commit(result)
     trainer.commit(prepared)
-    trainer.apply_compaction(prepared.compacted_ids)
     assert trainer.state == {"steps": 1}
 
 
@@ -700,7 +697,6 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     assert source_record_id(first.pending_batch.items[0]) == "i1"
     prepared = first.prepare_commit(first_result)
     first.commit(prepared)
-    first.apply_compaction(prepared.compacted_ids)
     assert first.state == {"steps": 1}
     assert first.data_offset == prepared.high_water_offset == 2
 
@@ -724,7 +720,6 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     assert source_record_id(second.pending_batch.items[0]) == "i2"
     prepared = second.prepare_commit(second_result)
     second.commit(prepared)
-    second.apply_compaction(prepared.compacted_ids)
     assert second.reserve_training_batch() is None
 
 
@@ -751,13 +746,11 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         assert first_result is not None
         prepared = first.prepare_commit(first_result)
         first.commit(prepared)
-        first.apply_compaction(prepared.compacted_ids)
 
         assert first_store.get("math", first_inference.agent_record_id) == first_inference
         assert first_store.get("math", first_report.agent_record_id) == first_report
         assert first_store.get_for_audit("math", first_inference.agent_record_id).item == first_inference
         assert first_store.get_for_audit("math", first_report.agent_record_id).item == first_report
-        assert prepared.compacted_ids == frozenset()
         assert [item.agent_record_id for item in first_store.replay("math")] == [
             first_inference.agent_record_id,
             first_report.agent_record_id,
@@ -783,11 +776,9 @@ def test_commit_retains_readable_records_and_recovery_skips_committed_consumptio
         assert source_record_id(second.pending_batch.items[0]) == second_inference.agent_record_id
         prepared = second.prepare_commit(second_result)
         second.commit(prepared)
-        second.apply_compaction(prepared.compacted_ids)
         assert second_store.count("math") == 4
         archived = second_store.audit_page("math")
         assert [entry.item for entry in archived] == [first_inference, first_report, second_inference, second_report]
-        assert all(entry.compacted_at is None for entry in archived)
         assert second.reserve_training_batch() is None
 
 
@@ -928,7 +919,7 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
     assert processor.build_batch() is batch
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp_path, caplog):
@@ -1002,4 +993,4 @@ def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
                 trainer.reject_pending({"reason": "stale"})
                 assert trainer.reserve_training_batch() is None
                 assert records.get("math", f"i{index}") is not None
-                assert len(records.compaction_receipts("math")) == index
+                assert len(records.consumption_receipts("math")) == index

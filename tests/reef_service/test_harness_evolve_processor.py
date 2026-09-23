@@ -56,8 +56,8 @@ def test_trace_processor_batches_a_failed_trace() -> None:
     assert sample.metadata.get("reward") == 0.0
     assert recorded_payload(sample)["messages"][0]["content"] == "skill"
     processor.acknowledge(batch.batch_id)
-    retention = processor.retention_decision()
-    assert "rep-1" in retention.releasable_agent_record_ids
+    retention = processor.releasable_record_ids()
+    assert "rep-1" in retention
 
 
 def test_trace_processor_batches_successful_reports() -> None:
@@ -173,13 +173,13 @@ def test_record_driven_processor_batches_every_n_inferences_unscored() -> None:
     assert [recorded_payload(s) for s in batch.items] == [first, second]
     assert {s.metadata.get("reward") for s in batch.items} == {None}
 
-    retention = processor.retention_decision()
-    assert retention.protected_agent_record_ids == frozenset({"inf-1", "inf-2"})
+    retention = processor.releasable_record_ids()
+    assert retention.isdisjoint(frozenset({"inf-1", "inf-2"}))
 
     consumed = processor.acknowledge(batch.batch_id)
     assert consumed == frozenset({"inf-1", "inf-2"})
-    retention = processor.retention_decision()
-    assert retention.releasable_agent_record_ids == frozenset({"inf-1", "inf-2"})
+    retention = processor.releasable_record_ids()
+    assert retention == frozenset({"inf-1", "inf-2"})
     assert not processor.ready()
 
 
@@ -187,8 +187,8 @@ def test_record_driven_processor_releases_reports_untouched() -> None:
     processor = _record_processor(batch_size=1)
     processor.ingest(_report("rep-1", 0.0, ["inf-0"], feedback="ignored"))
     assert not processor.ready()
-    retention = processor.retention_decision()
-    assert retention.releasable_agent_record_ids == frozenset({"rep-1"})
+    retention = processor.releasable_record_ids()
+    assert retention == frozenset({"rep-1"})
 
     processor.ingest(_inference("inf-1", {"messages": []}))
     batch = processor.build_batch()
@@ -204,6 +204,6 @@ def test_record_driven_processor_overflow_stays_pending_for_the_next_batch() -> 
     batch = processor.build_batch()
     assert [source_record_id(s) for s in batch.items] == ["inf-0", "inf-1"]
     processor.acknowledge(batch.batch_id)
-    retention = processor.retention_decision()
-    assert retention.protected_agent_record_ids == frozenset({"inf-2"})
+    retention = processor.releasable_record_ids()
+    assert retention.isdisjoint(frozenset({"inf-2"}))
     assert not processor.ready()

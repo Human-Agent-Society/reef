@@ -129,7 +129,6 @@ def test_manual_waits_for_instruction_without_automatic_batch_gates(processor, b
     assert not {"other-session", "turn-1", "turn-2"} & prepared.consumed_ids
     assert prepared.metrics["training_request"]["text"] == "request-1"
     trainer.commit(prepared)
-    trainer.apply_compaction(prepared.compacted_ids)
     assert records.get("s", "turn-1") is not None
     assert trainer.run_once() is None
     assert not records.append_result(instruction("request-1")).inserted
@@ -163,7 +162,6 @@ def test_dispatched_manual_reserves_one_instruction_and_leaves_the_next_pending(
     result = trainer.execute_reserved_step(0).result
     prepared = trainer.prepare_commit(result)
     trainer.commit(prepared)
-    trainer.apply_compaction(prepared.compacted_ids)
     second = trainer.reserve_training_batch()
     assert second.request.text == "two"
     assert second.items == ()
@@ -472,7 +470,6 @@ def test_switch_during_reserved_batch_keeps_original_acknowledgement(mode, dispa
         prepared = trainer.prepare_commit(result)
         assert prepared.consumed_ids == frozenset({"first"})
         trainer.commit(prepared)
-        trainer.apply_compaction(prepared.compacted_ids)
         records.append(instruction("next") if target == "manual" else inference("next"))
         if dispatched:
             following = trainer.reserve_training_batch()
@@ -501,14 +498,12 @@ def test_switch_preserves_incomplete_auto_batch_and_unread_manual_instructions()
         assert [source_record_id(item) for item in backend.batches[-1].items] == ["a", "b"]
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
-        trainer.apply_compaction(prepared.compacted_ids)
         assert records.get("s", "change") is not None
         trainer.set_training_mode("manual")
         result = trainer.run_once(1)
         assert backend.batches[-1].request.id == "change"
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
-        trainer.apply_compaction(prepared.compacted_ids)
         trainer.set_training_mode("auto")
         assert trainer.run_once(2) is None
     finally:
@@ -808,7 +803,6 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
         )
         # The skip row consumed the instruction alone: the unit it carried is held for the automatic step.
         assert skip.consumed_ids == frozenset({"poison"})
-        assert skip.compacted_ids == frozenset()
         assert skip.consumed_ids == frozenset({"poison"})
         assert current.records.get("s", "poison") is not None
         assert current.records.get("s", "report-a") is not None
@@ -978,7 +972,6 @@ def test_an_instruction_runs_past_the_step_budget_and_the_failure_streak(tmp_pat
             assert result is not None
             prepared = trainer.prepare_commit(result)
             trainer.commit(prepared)
-            trainer.apply_compaction(prepared.compacted_ids)
             rows.append(prepared.metrics)
         assert seen == ["one", "two"]
         assert [row["training_request"]["text"] for row in rows] == ["one", "two"]
@@ -1081,7 +1074,6 @@ def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor
         assert prepared.consumed_ids == frozenset({"alone"})
         assert prepared.metrics["training_request"]["id"] == "alone"
         trainer.commit(prepared)
-        trainer.apply_compaction(prepared.compacted_ids)
         assert records.get("s", "alone") is not None
         assert trainer.run_once() is None
         assert trainer.training_mode == "hybrid"
@@ -1105,7 +1097,6 @@ def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(process
         prepared = trainer.prepare_commit(result)
         assert {"a", "with-context"} <= prepared.consumed_ids
         trainer.commit(prepared)
-        trainer.apply_compaction(prepared.compacted_ids)
         assert records.get("s", "a") is not None
         records.append(instruction("after"))
         assert trainer.run_once() is not None
@@ -1155,7 +1146,6 @@ def test_hybrid_alternates_the_instruction_path_and_the_failure_path_without_a_m
             return None
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
-        trainer.apply_compaction(prepared.compacted_ids)
         batch = backend.batches[-1]
         request = None if batch.request is None else batch.request.id
         return request, [source_record_id(sample) for sample in batch.items]
@@ -1202,7 +1192,6 @@ def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_t
         assert [source_record_id(sample) for sample in backend.batches[-1].items] == ["a", "b"]
         prepared = trainer.prepare_commit(result)
         trainer.commit(prepared)
-        trainer.apply_compaction(prepared.compacted_ids)
         assert records.get("s", "later") is not None
         trainer.set_training_mode("hybrid")
         result = trainer.run_once(1)
@@ -1319,11 +1308,11 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
         manual = fill("manual")
     assert manual._ready_count() == 4
     assert not manual.ready()
-    retention = manual.retention_decision()
+    retention = manual.releasable_record_ids()
     shed = {f"inf-{i}" for i in range(16)} | {f"rep-{i}" for i in range(16)}
-    assert shed <= retention.releasable_agent_record_ids
+    assert shed <= retention
     kept = {f"inf-{i}" for i in range(16, 20)} | {f"rep-{i}" for i in range(16, 20)}
-    assert kept <= retention.protected_agent_record_ids
+    assert retention.isdisjoint(kept)
     assert sum("released report rep-0" in record.message for record in caplog.records) == 1
     assert len(caplog.records) == 1
     manual.ingest(instruction("do-it"))
@@ -1340,7 +1329,7 @@ def test_manual_mode_caps_held_units_at_four_batches_and_the_batching_modes_hold
         reserved = uncapped.build_batch()
         uncapped.set_training_mode("manual")
         assert uncapped._ready_count() == 4
-        assert "inf-0" in uncapped.retention_decision().protected_agent_record_ids
+        assert "inf-0" not in uncapped.releasable_record_ids()
         assert uncapped.acknowledge(reserved.batch_id) == frozenset({"inf-0", "rep-0"})
         assert uncapped._ready_count() == 3
         uncapped.close()

@@ -11,8 +11,7 @@ class PreparedCommit:
 
     ``consumed_ids`` records committed consumption and intentionally skipped
     records for recovery. ``released_ids`` only releases processor memory after
-    commit; it never retires stored records. ``compacted_ids`` remains for reading
-    older commit formats and is empty for new training steps.
+    commit; it never retires stored records.
 
     ``metrics`` is the objective's step result, carried opaquely: its schema is
     owned by the processor or backend that produced it; the trainer and commit log
@@ -25,7 +24,6 @@ class PreparedCommit:
     algorithm_state: Mapping[str, Any]
     high_water_sequence: int
     high_water_offset: int
-    compacted_ids: frozenset[str]
     consumed_ids: frozenset[str] = frozenset()
     released_ids: frozenset[str] = frozenset()
     metrics: Mapping[str, Any] | None = None

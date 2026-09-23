@@ -1,6 +1,6 @@
 """Record storage interface, results, errors, and retention limits.
 
-Record stores append, replay, and retire interaction records. They do not know
+Record stores append and replay interaction records. They do not know
 about scenario lifecycle, commits, artifact publication, or training. Concrete
 backends in this package implement this interface; importing it loads no database adapters.
 """
@@ -12,13 +12,21 @@ from abc import ABC, abstractmethod
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from typing import TypedDict
 
 from reef.core.errors import ReefError
 from reef.core.records_types import AgentRecord, RequestType
 
 
+class ConsumptionReceipt(TypedDict):
+    receipt_id: str
+    consumed_ids: tuple[str, ...]
+    metadata: dict[str, object]
+    recorded_at: float
+
+
 class RecordConflict(ReefError):
-    """A record id or compaction receipt already identifies different content."""
+    """A record id or consumption receipt already identifies different content."""
 
 
 @dataclass(frozen=True)
@@ -31,15 +39,10 @@ class AppendResult:
 
 @dataclass(frozen=True)
 class StoredRecord:
-    """A retained record and its storage state, for audit reads only.
-
-    ``compacted_at`` marks retirement from training, not proof of learning.
-    The commit log's ``consumed_ids`` identifies which records a step consumed.
-    """
+    """A retained record and its append sequence, independent of consumption."""
 
     sequence: int
     item: AgentRecord
-    compacted_at: float | None
 
 
 @dataclass(frozen=True)
@@ -77,17 +80,17 @@ class RecordRetention:
 
 
 class RecordStore(ABC):
-    """Append, replay, and retire scenario records independently of storage.
+    """Persist records and consumption receipts independently of processors.
 
-    Reads and compaction are scoped to the supplied scenario. Record ids are
+    Reads and consumption receipts are scoped to the supplied scenario. Record ids are
     unique across the store: retries with identical content are idempotent,
     while different content raises ``RecordConflict``. Retry comparison ignores
-    ``created_at`` and continues to work after compaction or body purging.
+    ``created_at`` and continues to work after capacity eviction.
 
     Append sequences increase and must never be reused, including after a
-    purge. Training reads hide compacted records; audit reads include their
-    retained bodies. Implementations serialize conflicting writes so callers
-    can append while training and compaction run in other threads.
+    capacity eviction. Reads include all retained bodies regardless of consumption.
+    Implementations serialize conflicting writes so callers
+    can append while training and eviction run in other threads.
     """
 
     @abstractmethod
@@ -96,9 +99,9 @@ class RecordStore(ABC):
 
     @abstractmethod
     def append_result(self, item: AgentRecord) -> AppendResult:
-        """Append with insertion status; retries never reactivate retired records.
+        """Append with insertion status; retries never restore evicted records.
 
-        Reports referencing retired records remain outside training reads.
+        Reports referencing evicted records remain outside training reads.
         Their content is still remembered so conflicting retries are rejected.
         """
 
@@ -106,7 +109,7 @@ class RecordStore(ABC):
         """Atomically append a bounded batch from one scenario, in input order.
 
         Any conflict rolls back the entire batch. Identical retries retain
-        the same semantics as append_result, including retired records.
+        the same semantics as append_result, including evicted records.
         Adapters without atomic batch support must reject before writing.
         """
         raise NotImplementedError("this record store does not support atomic batch append")
@@ -145,7 +148,7 @@ class RecordStore(ABC):
 
     @abstractmethod
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
-        """Read a retained record and its compaction state without reactivating it."""
+        """Read a retained record with its append sequence."""
 
     @abstractmethod
     def audit_page(
@@ -158,33 +161,23 @@ class RecordStore(ABC):
         """Read retained records with the same sequence bounds as ``replay_page``."""
 
     @abstractmethod
-    def compact(
+    def record_consumption(
         self,
         scenario: str,
         agent_record_ids: frozenset[str],
         *,
-        receipt_id: str | None = None,
-        receipt_metadata: Mapping[str, object] | None = None,
+        receipt_id: str,
+        metadata: Mapping[str, object],
     ) -> None:
-        """Retire records and atomically remember an optional compaction receipt.
+        """Persist consumption outside a training commit; leave record bodies readable.
 
-        Repeated calls preserve the first retirement time and append retry
-        protection. Receipt id and metadata must be supplied together. A receipt
-        is identified by scenario, receipt id, and the set of compacted ids;
-        reusing that identity with different metadata raises ``RecordConflict``.
+        An identical (scenario, receipt id, record IDs) retry is idempotent.
+        Different metadata for the same identity raises ``RecordConflict``.
         """
 
     @abstractmethod
-    def purge_compacted(self, scenario: str, *, before: float, limit: int = 256) -> int:
-        """Delete bounded retired bodies while retaining retry hashes and receipts.
-
-        ``before`` must be a finite Unix timestamp and ``limit`` a positive
-        integer. Return the number of removed bodies.
-        """
-
-    @abstractmethod
-    def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
-        """Read durable compaction receipts in recorded-time and receipt-id order."""
+    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
+        """Read durable consumption receipts in recorded order."""
 
     def loss(self, scenario: str) -> RecordLoss:
         """Capacity losses, including after restart; non-evicting stores return zero."""
@@ -198,6 +191,7 @@ class RecordStore(ABC):
 __all__ = [
     "AgentRecord",
     "AppendResult",
+    "ConsumptionReceipt",
     "RecordConflict",
     "RecordLoss",
     "RecordRetention",

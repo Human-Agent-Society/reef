@@ -223,11 +223,11 @@ def test_tttd_rejects_and_releases_a_step_spanning_release_ids(caplog) -> None:
             }
         ]
     }
-    retention = processor.retention_decision()
+    retention = processor.releasable_record_ids()
     expected_ids = {
         f"{prefix}-0-{group}-{rollout}" for prefix in ("i", "r") for group in range(2) for rollout in range(3)
     }
-    assert expected_ids <= retention.releasable_agent_record_ids
+    assert expected_ids <= retention
 
 
 @pytest.mark.unit
@@ -281,7 +281,6 @@ def test_tttd_invalid_single_report_does_not_wait_for_missing_inference() -> Non
     with pytest.raises(ReportValidationError):
         processor.ingest(_report(0, processor.groups_per_step, 0, 1.0))
     assert not processor.ready()
-    assert not processor.retention_decision().protected_agent_record_ids
 
 
 @pytest.mark.unit

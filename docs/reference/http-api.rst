@@ -155,7 +155,7 @@ header. Submit one record per request and use a stable ``agent_record_id``:
 The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
 "request_type":"inference"}``. HTTP 200 acknowledges record admission; it does
 not mean a training step has finished. Identical retries return the existing
-receipt, including after compaction; reusing the ID with different content
+receipt, including after capacity eviction; reusing the ID with different content
 returns HTTP 409. Authentication failures return 401 and invalid envelopes,
 report schemas or references return 400. Scenario selection comes only from
 headers; envelope fields other than the three shown above are rejected.
@@ -202,7 +202,7 @@ inference before reports that reference it, including within the same batch.
 Reef validates the entire batch and persists it in one database transaction.
 Malformed records or missing references return 400; conflicting IDs return
 409. Neither failure persists any new records from the batch. Identical retries
-are accepted, including after training compaction. Oversized requests return
+are accepted, including after training or capacity eviction. Oversized requests return
 413. The response is ``{"records": [receipt, ...]}``, in input order, with the
 same receipt fields as the single-record endpoint. A successful import wakes
 the existing consumer once after commit. Atomicity applies to one request,
@@ -368,7 +368,7 @@ a reason to refuse the request, and ``training_request.client`` carries what
 was kept.
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
-without another step, including after record compaction; reusing the id with
+without another step, including after capacity eviction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
 id. Empty text, text longer than 4000 characters, missing or non-string
 session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
@@ -615,15 +615,13 @@ conflict rather than overwriting. Reef keeps track of consumed records so
 retried reports and late reports whose references already trained are not
 counted twice.
 
-Training compaction retires records without deleting their original payloads.
-Reef's explicit Python audit reads can inspect retained requests, responses,
-references, and compaction timestamps; ordinary training reads exclude retired
-records. There is no new HTTP record-query endpoint. Separate background
-retention limits compacted bodies to 7 days and a shared 20 GiB by default;
-see `Configuration <configuration.rst>`__ for scope and `Python API <python-api.rst>`__
-for audit and purge methods. A compaction timestamp alone does not prove that a record was
-used for learning: per-step ``consumed_ids`` in the commit log identifies that
-relationship.
+Training records remain readable after consumption. Storage evicts the oldest
+bodies only when the shared capacity budget is exceeded (20 GiB by default),
+with warnings and durable loss totals. Audit endpoints expose retained requests,
+responses and references. Per-step ``consumed_ids`` records processed
+inputs, including intentional skips, rather than proving a model update.
+See `Configuration <configuration.rst>`__ and `Python API <python-api.rst>`__.
+
 
 Receiving an update
 -------------------
@@ -1003,7 +1001,7 @@ request headers, assistant messages and tool events; reconstructed inputs are
 not exact provider request bodies. They do not retain provider response IDs,
 and a compaction event may prevent complete input reconstruction. Reads neither
 copy records into another store nor change retention. Step files remain separate
-from compacted online record-body retention.
+from online record-body capacity eviction.
 
 Status
 ------
@@ -1122,10 +1120,10 @@ Record and commit history
 -------------------------
 
 ``GET /reef/scenarios/{scenario}/records`` reads retained record metadata,
-including compacted records. ``after_sequence`` defaults to 0 and ``limit``
+including consumed records. ``after_sequence`` defaults to 0 and ``limit``
 defaults to 50 (1–100). Records are oldest first; ``next_after_sequence`` is
 null at the end. Each row contains ``sequence``, ``agent_record_id``,
-``request_type``, ``created_at``, ``compacted_at``, ``references``, the recorded
+``request_type``, ``created_at``, ``references``, the recorded
 ``artifact_ref``, and the payload's ``score`` field. No record payload or
 learning classification is included.
 
@@ -1158,5 +1156,4 @@ cached commit log; the response is bounded, not a new persisted index.
 
 Reef does not join these endpoints into learning links or assign learning
 states, human-readable explanations, policy capability flags, or evaluation
-results. The console owns that interpretation. In particular, compaction
-alone is not proof of consumption, and consumption is not proof of promotion.
+results. The console owns that interpretation. Consumption is not proof of promotion.

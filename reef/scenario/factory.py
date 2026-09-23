@@ -56,18 +56,9 @@ def _consumed_by_committed_steps(
         records = (head_record,)
     consumed: set[str] = set()
     for record in records:
-        consumed |= record.consumed_ids | record.compacted_ids
-    for receipt in store.records.compaction_receipts(scenario):
-        metadata = receipt["metadata"]
-        retired = receipt["compacted_ids"]
-        if not isinstance(retired, tuple) or any(not isinstance(item, str) for item in retired):
-            raise ValueError("invalid compacted_ids in legacy receipt")
-        consumed.update(retired)
-        if isinstance(metadata, dict):
-            skipped = metadata.get("consumed_ids", [])
-            if not isinstance(skipped, list) or any(not isinstance(item, str) for item in skipped):
-                raise ValueError("invalid consumed_ids in skipped-batch receipt")
-            consumed.update(skipped)
+        consumed |= record.consumed_ids
+    for receipt in store.records.consumption_receipts(scenario):
+        consumed.update(receipt["consumed_ids"])
     return frozenset(consumed)
 
 

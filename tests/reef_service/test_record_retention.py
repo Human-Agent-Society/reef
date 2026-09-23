@@ -43,7 +43,7 @@ def test_capacity_evicts_unconsumed_and_consumed_records_across_archives(tmp_pat
             removed.append(replace(trace("archived"), created_at=15.0))
             second.append(replace(trace("middle", "code"), created_at=20.0))
             first.append(replace(trace("new"), created_at=30.0))
-            first.compact("math", frozenset({"old"}))  # legacy rows also count
+            first.record_consumption("math", frozenset({"old"}), receipt_id="skip", metadata={})
         assert store_factory.prune(days=7, max_bytes=2 * BODY_BYTES) == 2
         assert first.get_for_audit("math", "old") is None
         assert first.get("math", "new") is not None
@@ -67,9 +67,7 @@ def test_capacity_evicts_unconsumed_and_consumed_records_across_archives(tmp_pat
 def test_record_age_and_training_completion_do_not_trigger_deletion(tmp_path, store_factory):
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         records.append(replace(trace("old"), created_at=1.0))
-        records.compact("math", frozenset({"old"}))
-        with records._transaction("math", write=True) as connection:
-            connection.exec_driver_sql("UPDATE agent_record SET compacted_at=1")
+        records.record_consumption("math", frozenset({"old"}), receipt_id="skip", metadata={})
         assert store_factory.prune(days=0.01, max_bytes=BODY_BYTES) == 0
         assert records.get_for_audit("math", "old") is not None
         assert records.loss("math").record_count == 0
@@ -80,7 +78,6 @@ def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_pa
         for index in range(600):
             records.append(trace(str(index)))
         monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
-        records.compact("math", frozenset(str(index) for index in range(600)))
         assert store_factory.prune(days=7, max_bytes=3 * BODY_BYTES) == 597
         assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["597", "598", "599"]
 
@@ -90,7 +87,6 @@ def test_large_finite_retention_days_still_enforce_the_byte_budget(tmp_path, mon
         for timestamp, record_id in ((1.0, "old"), (2.0, "new")):
             records.append(replace(trace(record_id), created_at=timestamp))
             monkeypatch.setattr("reef.storage.sql_records.time.time", lambda timestamp=timestamp: timestamp)
-            records.compact("math", frozenset({record_id}))
         monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 3.0)
 
         # A finite number of days can produce an infinite cutoff in seconds.
@@ -153,9 +149,6 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
     monkeypatch.setattr(dispatcher, "prune_record_archives", flaky)
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         records.append(trace("expired"))
-        with monkeypatch.context() as clock:
-            clock.setattr("reef.storage.sql_records.time.time", lambda: 1.0)
-            records.compact("math", frozenset({"expired"}))
 
         async def run():
             app = assembly.build_app(

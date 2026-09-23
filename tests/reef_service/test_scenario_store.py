@@ -42,7 +42,6 @@ def commit(step: int = 1, *, scenario: str = "math") -> CommitRecord:
         algorithm_state={"step": step},
         high_water_sequence=step,
         high_water_offset=step,
-        compacted_ids=frozenset({f"record-{step}"}),
         consumed_ids=frozenset({f"record-{step}"}),
         recorded_at=1000.0 + step,
     )
@@ -57,16 +56,15 @@ def store(request, tmp_path):
     factory.close()
 
 
-def test_commit_is_fenced_compacts_only_its_scenario_and_preserves_audit(store):
+def test_commit_is_fenced_and_preserves_readable_records(store):
     store.records.append(record("record-1"))
     store.records.append(record("other", scenario="code"))
     accepted = store.commit_step(expected_step=0, commit=commit())
 
     assert accepted == commit()
     assert store.history() == (accepted,)
-    assert store.records.replay("math") == ()
+    assert [row.agent_record_id for row in store.records.replay("math")] == ["record-1"]
     assert store.records.get("code", "other") is not None
-    assert store.records.get_for_audit("math", "record-1").compacted_at is not None
     assert store.training_run_position() == (0, 1)
 
 
@@ -85,7 +83,6 @@ def test_retry_returns_original_timestamp_even_after_later_commits(store):
     "changed",
     [
         {"algorithm_state": {"step": 99}},
-        {"compacted_ids": frozenset({"other"})},
         {"consumed_ids": frozenset({"other"})},
         {"metrics": {"loss": 1.0}},
         {"training_job_id": "another-job"},
@@ -118,27 +115,6 @@ def test_commit_validates_expected_step(store, expected):
         store.commit_step(expected_step=expected, commit=commit())
 
 
-def test_retry_repairs_compaction_after_the_commit_point(store, monkeypatch):
-    store.records.append(record("record-1"))
-    compact = store.records.compact
-
-    def fail_compaction(*args, **kwargs):
-        raise OSError("interrupted compaction")
-
-    monkeypatch.setattr(store.records, "compact", fail_compaction)
-    with pytest.raises(OSError, match="interrupted compaction"):
-        store.commit_step(expected_step=0, commit=commit())
-    assert store.history() == (commit(),)
-    assert store.records.count("math") == 1
-
-    monkeypatch.setattr(store.records, "compact", compact)
-    store.commit_step(expected_step=0, commit=replace(commit(), recorded_at=9999.0))
-
-    assert store.history() == (commit(),)
-    assert store.records.count("math") == 0
-    assert store.training_run_position() == (0, 1)
-
-
 def test_recover_adopts_checkpoint_and_preserves_rollback_fields(store):
     store.records.append(record("record-2"))
     checkpoint = replace(commit(2), operation="rollback", rollback_target_release_id="base", metrics={"quality": 0.5})
@@ -151,9 +127,9 @@ def test_recover_adopts_checkpoint_and_preserves_rollback_fields(store):
     assert head.operation_verified is True
     assert head.rollback_target_release_id == "base"
     assert head.metrics == {"quality": 0.5}
-    assert head.compacted_ids == frozenset({"record-2"})
     assert head.consumed_ids == frozenset({"record-2"})
-    assert store.records.count("math") == 0
+    assert head.consumed_ids == frozenset({"record-2"})
+    assert store.records.count("math") == 1
     assert store.history() == (head,)
     store.commit_step(expected_step=2, commit=commit(3))
     assert store.training_run_position() == (2, 1)
@@ -217,7 +193,7 @@ def test_close_is_idempotent_and_rejects_further_use(store, monkeypatch):
         _ = store.records
 
 
-def test_recovery_replays_all_compactions_even_before_checkpoint(tmp_path):
+def test_recovery_preserves_records_from_commits_before_checkpoint(tmp_path):
     journal = CommitLog(tmp_path / "commits.jsonl")
     with closing(CommitLogScenarioStore("math", SQLiteRecordStore(tmp_path / "records.sqlite3"), journal)) as session:
         for step in range(1, 4):
@@ -227,28 +203,9 @@ def test_recovery_replays_all_compactions_even_before_checkpoint(tmp_path):
         head = session.recover(checkpoint=commit(2))
 
         assert head == commit(3)
-        assert session.records.count("math") == 0
+        assert session.records.count("math") == 3
         assert len(session.records.audit_page("math")) == 3
         session.commit_step(expected_step=3, commit=commit(4))
-
-
-def test_recovery_repairs_failed_compaction_after_reopening(tmp_path, monkeypatch):
-    factory = SQLiteScenarioStorage(tmp_path)
-    with closing(factory.open("math")) as session:
-        session.records.append(record("record-1"))
-
-        def fail_compaction(*args, **kwargs):
-            raise OSError("interrupted compaction")
-
-        monkeypatch.setattr(session.records, "compact", fail_compaction)
-        with pytest.raises(OSError):
-            session.commit_step(expected_step=0, commit=commit())
-
-    with closing(factory.open("math")) as recovered:
-        assert recovered.recover(checkpoint=None) == commit()
-        assert recovered.records.count("math") == 0
-        assert recovered.records.get_for_audit("math", "record-1") is not None
-    factory.close()
 
 
 @pytest.mark.parametrize("durable_append", [False, True])
@@ -272,7 +229,7 @@ def test_journal_failure_preserves_the_actual_commit_point(tmp_path, monkeypatch
         monkeypatch.setattr(journal, "append", append)
         session.commit_step(expected_step=0, commit=replace(commit(), recorded_at=9999.0))
         assert len(session.history()) == 1
-        assert session.records.count("math") == 0
+        assert session.records.count("math") == 1
 
 
 @pytest.mark.parametrize("steps,checkpoint_step,message", [([2], 0, "resumes at step 2"), ([1, 3], 0, "jumps")])
