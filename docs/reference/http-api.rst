@@ -208,14 +208,16 @@ same receipt fields as the single-record endpoint. A successful import wakes
 the existing consumer once after commit. Atomicity applies to one request,
 not the entire dataset or subsequent training.
 
-For a large local dataset, save one envelope per line in an immutable UTF-8
-JSONL file. Keep original record IDs and report references; the importer does
-not generate new IDs or convert arbitrary dataset schemas.
+On the user machine, install the standalone ``reef-client`` package; no Reef
+service or training dependencies are needed. For a large local dataset, save
+one envelope per line in an immutable UTF-8 JSONL file. Keep original record IDs
+and report references; the importer does not generate new IDs or convert
+arbitrary dataset schemas.
 
 .. code:: bash
 
    # Authentication is read from REEF_TOKEN when set.
-   reef import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
+   reef-client import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
 
 The CLI reads incrementally and sends batches limited by both ``--batch-size``
 (default 128 records) and ``--max-batch-bytes`` (default 524288 bytes). Only a

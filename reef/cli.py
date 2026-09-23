@@ -18,16 +18,15 @@ from __future__ import annotations
 
 import sys
 
-COMMANDS = {"serve", "connect", "import"}
+_COMMANDS = {"serve", "connect"}
 
 
-def help_text():
+def _help_text():
     return """\
 usage: reef <command> [options]
 
   serve  Start inference, connect a provider, or run a configured stack
   connect  Connect an existing Reef runtime to the API platform
-  import   Import a records JSONL file with resumable batch uploads
 
   -c CONFIG   Optional config file; omitted means configuration-free startup
   --version   Print the installed reef version
@@ -44,11 +43,11 @@ def main(argv=None):
     argv = sys.argv[1:] if argv is None else list(argv)
 
     if not argv:
-        print(help_text(), file=sys.stderr)
+        print(_help_text(), file=sys.stderr)
         sys.exit(2)
 
     if argv[0] in ("-h", "--help"):
-        print(help_text())
+        print(_help_text())
         sys.exit(0)
 
     if argv[0] in ("-V", "--version"):
@@ -60,16 +59,10 @@ def main(argv=None):
     cmd = argv[0]
     rest = argv[1:]
 
-    if cmd not in COMMANDS:
+    if cmd not in _COMMANDS:
         print(f"reef: unknown command '{cmd}'\n", file=sys.stderr)
-        print(help_text(), file=sys.stderr)
+        print(_help_text(), file=sys.stderr)
         sys.exit(2)
-
-    if cmd == "import":
-        from reef.service.record_import import main as import_main
-
-        import_main(rest)
-        return
 
     if cmd == "connect":
         from reef.service.connector import main as _connect_main
