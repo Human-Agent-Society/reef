@@ -187,12 +187,33 @@ class CodexSessionReader(TrajectoryReader):
     Codex writes rollouts below ``CODEX_HOME/sessions/YYYY/MM/DD``. Sorting
     by relative path preserves the date hierarchy and rollout id order; the
     common JSONL reader tolerates one torn final line per rollout.
+
+    A ``response_item`` event whose payload is a message also carries that
+    message under ``message``, beside the raw ``type`` and ``payload``, with
+    its ``input_text`` and ``output_text`` parts typed ``text``: the scorers
+    read a message at the top with text parts, as pi writes it.
     """
 
     format = "codex-session-jsonl"
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        return _read_jsonl_tree(path, "codex session")
+        events = []
+        for event in _read_jsonl_tree(path, "codex session"):
+            payload = event.get("payload")
+            if event.get("type") == "response_item" and isinstance(payload, dict) and payload.get("type") == "message":
+                content = payload.get("content")
+                if isinstance(content, list):
+                    content = [
+                        (
+                            {**part, "type": "text"}
+                            if isinstance(part, dict) and part.get("type") in ("input_text", "output_text")
+                            else part
+                        )
+                        for part in content
+                    ]
+                event = {**event, "message": {**payload, "content": content}}
+            events.append(event)
+        return tuple(events)
 
 
 @register_trajectory_reader

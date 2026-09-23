@@ -24,6 +24,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
 from reef.harness.tree.render import render_composition
+from reef.recipe.reefine.evolution import final_assistant_text
 
 REAL_CODEX = os.environ.get("REEF_REAL_CODEX_BINARY", "")
 
@@ -203,6 +204,8 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert "Approval policy is currently never" in body and "# Escalation Requests" not in body
     assert any(event.get("type") == "session_meta" for event in result.trajectory)
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)
+    # The grader reads the stub's reply from the rollout the real binary wrote.
+    assert final_assistant_text(result.trajectory) == "READY"
     assert result.residue == ()
     assert capture.is_file() and capture.stat().st_size > 0
 

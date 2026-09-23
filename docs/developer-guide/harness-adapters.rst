@@ -146,9 +146,18 @@ Reef. A command or skill that runs the wrapper therefore tells the model to
 ask on the first call: set ``sandbox_permissions`` to
 ``"require_escalated"`` and put the question in ``justification``, because
 the command needs the network to reach Reef. Codex's answer "Yes, and don't
-ask again" writes a rule for that command to ``rules/default.rules`` in the
-temp copy, so it holds until the session ends. Only the ``responses``
-dialect is bound.
+ask again" writes a rule to ``rules/default.rules`` in the temp copy, so it
+holds until the session ends. For a command that starts with
+``$REEF_HARNESS_WRAPPER`` the rule is the whole command text, so the same
+call with another argument asks again. For a command that starts with the
+wrapper's path or its name, the rule is the prefix the model proposes in
+``prefix_rule``, such as the path and ``page``, and it covers every later
+call with that prefix. A rule on the name also runs a ``reef-codex`` file
+that the session writes to a directory earlier on ``PATH``. Only the
+``responses`` dialect is bound. The ``codex-session-jsonl`` reader gives
+each message in a rollout a ``message`` field: the message with its
+``input_text`` and ``output_text`` parts typed ``text``, the shape a pi
+session writes, so the evaluator reads codex's final reply.
 
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which
