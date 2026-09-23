@@ -935,19 +935,35 @@ def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) 
     shutil.rmtree(temp)
     compose = _pi_tree(tmp_path / "prefix", {"providers": {"reef": {"baseUrl": "http://gw.example/reef/v1"}}})
     assert _extract_reef_url("pi", Path(compose)) == "http://gw.example/reef"
-    # The entry's API names the dialect the tree was installed with: anthropic keeps the bare origin, openai
-    # still gets /v1, and a second provider speaking anthropic beside an openai Reef entry changes nothing.
-    other = {"api": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "apiKey": "x"}
+    # The entry's API names the dialect the tree was installed with: anthropic keeps the bare origin and openai
+    # still gets /v1. Only the Reef entry names it: a second provider speaking anthropic changes nothing, whether
+    # it sorts before or after Reef or sits at Reef's own address, and neither does a mapping under another key
+    # named reef that holds no URL.
+    other = {"api": "anthropic-messages", "apiKey": "x"}
     for api, rewritten in (
         ("anthropic-messages", "http://127.0.0.1:41234"),
         ("openai-completions", "http://127.0.0.1:41234/v1"),
     ):
         reef = {"api": api, "baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}
-        compose = _pi_tree(tmp_path / api, {"providers": {"anthropic": other, "reef": reef}})
-        assert _extract_reef_url("pi", Path(compose)) == "http://127.0.0.1:8900"
-        temp = Path(_create_temp_composition("pi", compose, 41234))
-        assert json.loads((temp / "models.json").read_text())["providers"]["reef"]["baseUrl"] == rewritten
-        shutil.rmtree(temp)
+        for case, models in (
+            ("before", {"providers": {"anthropic": {**other, "baseUrl": "https://api.anthropic.com"}, "reef": reef}}),
+            ("after", {"providers": {"reef": reef, "zed": {**other, "baseUrl": "https://api.anthropic.com"}}}),
+            ("same-url", {"providers": {"reef": reef, "zed": {**other, "baseUrl": reef["baseUrl"]}}}),
+            ("no-url", {"providers": {"reef": reef}, "zed": {"reef": other}}),
+        ):
+            compose = _pi_tree(tmp_path / api / case, models)
+            assert _extract_reef_url("pi", Path(compose)) == "http://127.0.0.1:8900", case
+            temp = Path(_create_temp_composition("pi", compose, 41234))
+            assert json.loads((temp / "models.json").read_text())["providers"]["reef"]["baseUrl"] == rewritten, case
+            shutil.rmtree(temp)
+    # Quirks that emit the entry inside a list keep it under the list's key, so it is still the Reef entry.
+    reef = {"api": "anthropic-messages", "baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}
+    compose = _pi_tree(tmp_path / "listed", {"providers": {"reef": [reef]}})
+    temp = Path(_create_temp_composition("pi", compose, 41234))
+    assert (
+        json.loads((temp / "models.json").read_text())["providers"]["reef"][0]["baseUrl"] == "http://127.0.0.1:41234"
+    )
+    shutil.rmtree(temp)
 
 
 @pytest.mark.unit

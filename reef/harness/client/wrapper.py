@@ -330,9 +330,11 @@ def _suffix(binding: _Binding, file: Path, url: str) -> str:
     Dialects may share a key path but not the suffix: pi and dsh reach
     anthropic at Reef's bare address and openai under ``/v1``. The installed
     dialect is the one whose own plain values (the API name, which no other
-    dialect writes the same) sit beside ``url`` in the tree, wherever the
-    adapter's quirks nested that mapping; a tree that shows none of them
-    gets the first dialect's suffix."""
+    dialect writes the same) sit beside ``url`` in the Reef entry: the
+    mapping under the binding's parent key, wherever the adapter's quirks
+    nested it (the items of a list sit under the list's key), so a second
+    provider at any address never decides it. A tree that shows none of
+    them gets the first dialect's suffix."""
     suffixes = [template.split("{base_url}", 1)[1] for template, _ in binding.dialects]
     if len(set(suffixes)) == 1:
         return suffixes[0]
@@ -343,17 +345,18 @@ def _suffix(binding: _Binding, file: Path, url: str) -> str:
         )
         for suffix, (_, plain) in zip(suffixes, binding.dialects, strict=True)
     ]
+    parent = binding.path[-2] if len(binding.path) > 1 else None
     try:
-        stack = [_parse_binding_file(file)]
+        stack: list[tuple[str | None, Any]] = [(None, _parse_binding_file(file))]
     except (WrapperError, ValueError, yaml.YAMLError):
         return suffixes[0]
     while stack:
-        value = stack.pop()
+        under, value = stack.pop()
         if isinstance(value, list):
-            stack.extend(value)
+            stack.extend((under, item) for item in value)
         elif isinstance(value, Mapping):
-            stack.extend(value.values())
-            if value.get(binding.path[-1]) == url:
+            stack.extend((str(name), item) for name, item in value.items())
+            if under == parent and value.get(binding.path[-1]) == url:
                 for suffix, own in markers:
                     if own and all(value.get(key) == text for key, text in own.items()):
                         return suffix
