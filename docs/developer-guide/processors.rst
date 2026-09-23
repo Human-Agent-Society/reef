@@ -102,9 +102,12 @@ Recovery restores these scalar values and reads the next batch from storage;
 it does not rebuild the dataset in memory or collect all previously trained
 record IDs. Keep the epoch count and record-to-sample mapping unchanged on
 restart. A failed instruction consumes only the instruction; its samples remain
-eligible. Input records become releasable after their final pass and are
-compacted only after the commit is durable. Dropping a stale batch without a
-commit is rejected because it would lose consumption progress.
+eligible. Completing the final pass releases the batch from memory but leaves
+the input records in storage. The committed range and cursor prevent them
+from training again after restart; consumption does not depend on compaction.
+Data retention is a separate storage policy. Completed instructions still use
+the base processor's existing cleanup behavior. Dropping a stale batch without
+a commit is rejected because it would lose consumption progress.
 Use a new scenario when switching from another processor or an older dataset
 implementation whose training commits do not carry this consumption state.
 

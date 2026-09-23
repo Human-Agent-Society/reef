@@ -11,16 +11,17 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordStore
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch
 
 
 class DatasetProcessor(DataProcessor, ABC):
-    """Train each storage snapshot for K passes without retaining the dataset.
+    """Train each storage snapshot for K passes with only a batch in memory.
 
     Recipes assemble one self-contained INFERENCE record with ``make_sample``.
     The snapshot is the storage tail when consumption starts; later appends
-    form the next snapshot. Only the current batch is assembled in memory.
+    form the next snapshot. Input records remain in storage after training;
+    the committed cursor determines which records still need consumption.
     Report correlation and cross-record grouping belong to other processors.
     """
 
@@ -44,7 +45,6 @@ class DatasetProcessor(DataProcessor, ABC):
         self.samples: list[TrainDataItem] = []
         self.batch_bytes = 0
         self.batch_complete = False
-        self.released_records: set[str] = set()
         self.committed_epoch = 1
 
     @abstractmethod
@@ -120,8 +120,6 @@ class DatasetProcessor(DataProcessor, ABC):
         consumed = super().acknowledge(batch_id)
         record_ids = frozenset(record_id for sample in self.samples for record_id in sample.source_agent_record_ids)
         self.committed_epoch = self.epoch
-        if self.epoch == self.epochs:
-            self.released_records.update(record_ids)
         self.advance_cursor()
         self.samples.clear()
         self.batch_bytes = 0
@@ -144,18 +142,6 @@ class DatasetProcessor(DataProcessor, ABC):
 
     def dropped(self, batch_id: str) -> None:
         raise ValueError("dataset consumption requires a commit; a stale batch cannot be discarded")
-
-    def retention_decision(self) -> RetentionDecision:
-        # Every other input stays in storage by default: only final-pass
-        # records and completed instructions are explicitly releasable.
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(self._training_requests),
-            releasable_agent_record_ids=frozenset(self.released_records | self._consumed_requests),
-        )
-
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
-        super().compaction_applied(agent_record_ids)
-        self.released_records -= agent_record_ids
 
     def consumption_metrics(self) -> Mapping[str, object]:
         return {

@@ -99,11 +99,8 @@ def test_two_passes_tail_failure_and_durable_restart(tmp_path, restart_after):
             prepared = scenario.trainer.prepare_commit(result)
             assert scenario.trainer.prepare_commit(result) is prepared
             scenario.commit(result)
-            if step < 2:
-                assert scenario.records.get("s", "a") is not None
-            elif step == 2:
-                assert scenario.records.get("s", "a") is None
-                assert scenario.records.get("s", "c") is not None
+            for name in ("a", "b", "c"):
+                assert scenario.records.get("s", name) is not None
             if step == 0:
                 # Arrivals during training wait for a subsequent snapshot.
                 scenario.records.append(record("later"))
@@ -125,8 +122,15 @@ def test_two_passes_tail_failure_and_durable_restart(tmp_path, restart_after):
             ["later"],
         ]
         assert scenario.prepare_training_step() is None
-        assert scenario.records.count("s") == 0
+        assert scenario.records.count("s") == 4
+        assert {record_id for commit in scenario.store.history() for record_id in commit.compacted_ids} == {"fail"}
         assert not scenario.records.append_result(record("a")).inserted
+        dispatcher.close()
+        dispatcher = open_dispatcher()
+        scenario = dispatcher.get_or_create_scenario("s")
+        assert scenario.prepare_training_step() is None
+        assert len(recipe.batches) == 6
+        assert scenario.records.count("s") == 4
         incompatible = InferenceDatasetProcessor(ProcessorContext("s", config={"dataset_epochs": 3}))
         with pytest.raises(ValueError, match="must match the committed"):
             incompatible.restore_consumption(scenario.store.history())
@@ -162,13 +166,12 @@ def test_byte_budget_retry_and_trailing_non_training_records(tmp_path):
             assert len(batch.items) == 1
             seen.append(str(batch.items[0].task_path))
             processor.acknowledge(batch.batch_id)
-            compacted = processor.retention_decision().releasable_agent_record_ids
-            records.compact("s", compacted)
-            processor.compaction_applied(compacted)
+            assert not processor.retention_decision().releasable_agent_record_ids
         assert seen == ["a", "b", "c", "a", "b", "c"]
         processor.consume(records, after_sequence=watermark, offset=offset)
         assert not processor.ready()
         assert processor.samples == []
+        assert records.count("s") == 4
         assert records.get("s", "ignored") is not None
     finally:
         records.close()
