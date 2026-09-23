@@ -23,13 +23,15 @@ from typing import Any
 
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.adapters import get_adapter
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
+from reef.recipe.reefine.harness_facts import harness_facts
 from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
 from reef.train.types import TrajectoryItem
 
-Proposal = tuple[str, str, dict[str, str]]
+Proposal = tuple[str, str, dict[str, Any]]
 
 #: Expected final answers, keyed by the stable prefix each task starts with
 #: (the task lives in the reefine profile's evolution section).
@@ -47,6 +49,7 @@ REQUEST_KINDS = {
     "rules": ("text",),
     "agent_command": ("name", "text"),
     "code_extension": ("name", "code"),
+    "config": ("target", "data"),
 }
 
 #: The one adapter whose extension API this proposer knows; the others take rules, skills and commands from it.
@@ -54,30 +57,78 @@ EXTENSION_ADAPTER = "pi"
 
 
 def request_kinds(adapter: str) -> tuple[str, ...]:
-    """The kinds a request may write on ``adapter``: every kind on pi, everything but a code extension elsewhere."""
-    if adapter == EXTENSION_ADAPTER:
-        return tuple(REQUEST_KINDS)
-    return tuple(kind for kind in REQUEST_KINDS if kind != "code_extension")
+    """The kinds a request may write on ``adapter``: skills, rules and commands everywhere, a code extension on pi,
+    and a config entry where the harness's own config can enforce a behavior (``HarnessFacts.config_keys``)."""
+    facts = harness_facts(adapter)
+    extra = ("code_extension",) if adapter == EXTENSION_ADAPTER else ("config",) if facts and facts.config_keys else ()
+    return ("skill", "rules", "agent_command", *extra)
 
 
-#: One prompt line per kind a request may write, with the kind's config fields.
-KIND_LINES = {
-    "skill": (
-        '- skill: {"name": <id>, "text": <SKILL.md>}; the text must start with YAML frontmatter '
-        "(--- name: <id> / description: <one line> ---) followed by the skill's markdown\n"
-    ),
-    "rules": '- rules: {"text": <markdown appended to AGENTS.md>}\n',
-    "agent_command": '- agent_command: {"name": <id>, "text": <the prompt template of the /<id> command>}\n',
-    "code_extension": '- code_extension: {"name": <id>, "code": <a complete pi extension module>}\n',
-}
+def request_config_keys(adapter: str) -> tuple[str, ...]:
+    """The top level keys a request's config entry may set in ``adapter``'s primary config; none off the list."""
+    facts = harness_facts(adapter)
+    return () if facts is None else facts.config_keys
 
-#: What the prompt says about extensions on an adapter that takes none from this proposer.
+
+def _file_name(adapter: str, path: str) -> str:
+    return path.rsplit("/", 1)[-1] if path else f"{adapter}'s rules file"
+
+
+def kind_lines(adapter: str) -> str:
+    """One prompt line per kind a request may write on ``adapter``, with the kind's config fields and the file each
+    lands in."""
+    descriptor = get_adapter(adapter)
+    rules = _file_name(adapter, descriptor.node_paths.get("rules", ""))
+    primary = descriptor.config_targets.get("primary")
+    lines = {
+        "skill": (
+            '- skill: {"name": <id>, "text": <SKILL.md>}; the text must start with YAML frontmatter '
+            "(--- name: <id> / description: <one line> ---) followed by the skill's markdown\n"
+        ),
+        "rules": f'- rules: {{"text": <markdown appended to {rules}, which every session reads>}}\n',
+        "agent_command": (
+            '- agent_command: {"name": <id>, "text": <the prompt template of the /<id> command>}\n'
+            if adapter == EXTENSION_ADAPTER
+            else '- agent_command: {"name": <id>, "text": <the command file, as the harness notes below describe>}\n'
+        ),
+        "code_extension": '- code_extension: {"name": <id>, "code": <a complete pi extension module>}\n',
+        "config": (
+            '- config: {"target": "primary", "data": <an object merged into '
+            f"{_file_name(adapter, primary.path if primary else '')}, "
+            f"with only the top level keys {', '.join(request_config_keys(adapter))}>}}\n"
+        ),
+    }
+    return "".join(lines[kind] for kind in request_kinds(adapter))
+
+
+#: What the prompt says about an adapter this proposer writes no extension for, from its facts.
+HARNESS_SECTION = (
+    "This harness is {title}, whose extension API this step does not know: write no code_extension. "
+    "Harness notes: {command} Its own tools: {tools}. {mode}{config} "
+    "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt. When these kinds cannot "
+    "deliver the behavior the request asks for, write the design saying why and no entry. "
+)
+
+#: What the prompt says about extensions on an adapter that takes none from this proposer and has no facts.
 NO_EXTENSIONS_SECTION = (
     "This harness is {adapter}, whose extension API this step does not know: write no code_extension. "
-    "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt, which the harness "
-    "offers as the /<id> command. When these kinds cannot deliver the behavior the request asks for, write "
-    "the design saying why and no entry. "
+    "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt. When these kinds cannot "
+    "deliver the behavior the request asks for, write the design saying why and no entry. "
 )
+
+
+def harness_section(adapter: str) -> str:
+    """The request prompt's section on the harness's own surface, for an adapter other than pi."""
+    facts = harness_facts(adapter)
+    if facts is None:
+        return NO_EXTENSIONS_SECTION.format(adapter=adapter)
+    config = (
+        f" A config entry may set {', '.join(facts.config_keys)}: {facts.config_example}." if facts.config_keys else ""
+    )
+    return HARNESS_SECTION.format(
+        title=facts.title, command=facts.command, tools=facts.tools, mode=facts.mode, config=config
+    )
+
 
 #: The skill entry that carries the pi extension API reference; its text goes into a request prompt when present.
 API_SKILL_NAME = "reef-pi-extension-api"
@@ -141,7 +192,7 @@ REQUEST_PROMPT = (
     "You may write entries of these kinds, with exactly these config fields:\n"
     "{kinds}"
     "{extensions}"
-    "The user may be on macOS, Linux or Windows under WSL 2: branch on process.platform, "
+    "The user may be on macOS, Linux or Windows under WSL 2: {platform}"
     "prefer commands that exist on all three, and name anything platform specific the user "
     "must set up in requires. "
     "Never touch these reserved entries: {reserved}.\n\n"
@@ -209,10 +260,7 @@ REVIEW_PROMPT = (
     "that no entry performs, a variable an extension reads that no requires item names (PI_OFFLINE, "
     "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none), a value the user must "
     "provide that the extension asks for or stores itself instead of declaring it as a requires item. "
-    "For each new slash command, check that the entries use a native prompt template or pi.registerCommand "
-    "with a concise description so it appears in the native / autocomplete dropdown alongside built-in "
-    "commands. Treat text interception alone, a separate menu, missing registration, registration delayed "
-    "until a turn or mode activation, or a name collision visible in the supplied entries as uncovered. "
+    "{commands}"
     "Check that menu selection and direct invocation reach the same behavior, arguments and cancellation "
     "are handled, results and failures are visible, and modes expose their current state and an off path. "
     "Review the implementation shown; do not claim interactive verification from a design, a headless trial "
@@ -230,6 +278,30 @@ REVIEW_PROMPT = (
     "The result is complete only when uncovered is empty. When delivers is false, the first uncovered item "
     "says what the entries put in the behavior's place."
 )
+
+#: The review's check of new slash commands on pi, where a command is a prompt template or registered code.
+PI_REVIEW_COMMANDS = (
+    "For each new slash command, check that the entries use a native prompt template or pi.registerCommand "
+    "with a concise description so it appears in the native / autocomplete dropdown alongside built-in "
+    "commands. Treat text interception alone, a separate menu, missing registration, registration delayed "
+    "until a turn or mode activation, or a name collision visible in the supplied entries as uncovered. "
+)
+
+#: The same check on an adapter with facts: its own command surface and way of building a mode.
+HARNESS_REVIEW_COMMANDS = (
+    "This harness is {title}. {command} {mode} Check each new command against that: it is an agent_command "
+    "entry, the person is told the exact text to type, and a name collision visible in the supplied entries is "
+    "uncovered. "
+)
+
+
+def review_commands(adapter: str) -> str:
+    """The review prompt's check of new commands for ``adapter``."""
+    facts = harness_facts(adapter)
+    if adapter == EXTENSION_ADAPTER or facts is None:
+        return PI_REVIEW_COMMANDS
+    return HARNESS_REVIEW_COMMANDS.format(title=facts.title, command=facts.command, mode=facts.mode)
+
 
 #: How many answers a request may get: the first, then one more each time the review finds the last one short.
 REQUEST_ATTEMPTS = 3
@@ -260,6 +332,7 @@ PLAN_PROMPT = (
     "Request:\n{request}\n\n"
     "The harness can read and edit files, run shell commands, and call the tools these entries register:\n"
     "{entries}\n\n"
+    "{tools}"
     "List the steps the request names. For each step say whether the harness can perform it with what it has. "
     "It cannot when the step means starting a second agent, calling a service, reading the screen, sending a "
     "message, or anything else no listed tool and no shell command does.\n"
@@ -274,6 +347,14 @@ PLAN_SECTION = (
     "rules or skill entry that tells the agent when to call the tool. A reply that carries only rules or "
     "skills for this request is wrong: the agent would follow the rule up to that step and report that it "
     "has no tool.\n\n"
+)
+
+#: The same section on an adapter that takes no code extension: the harness's own tools are all there is.
+PLAN_NO_TOOL_SECTION = (
+    "These steps of the request need a tool the harness does not have:\n{steps}\n"
+    "No kind you may write adds a tool on this harness. Where one of the harness's own tools named in the "
+    "harness notes performs a step, the entries use it; otherwise the design says which step stays undone and "
+    "why, and the entries cover the rest.\n\n"
 )
 
 #: The prompt section carrying the extension API reference, filled from the tree's own skill entry.
@@ -384,7 +465,7 @@ def _answer_request(
     attempt = 0
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
-        answer = _answer_once(prompt + retry, request, models, nodes, entries, own, kinds)
+        answer = _answer_once(prompt + retry, request, models, nodes, entries, own, kinds, adapter)
         if isinstance(answer, StepProposal):
             # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
             # earlier substitute says more about the request than the failed call does.
@@ -404,9 +485,10 @@ def _answer_request(
             kept = (mutations, added, notes)
         if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
             break
+        findings = [*review["uncovered"], *notes.get("dropped", ())]
         retry = RETRY_SECTION.format(
             design=notes.get("design", "(none written)"),
-            findings="\n".join(f"- {point}" for point in review["uncovered"]) or "- (the review named no point)",
+            findings="\n".join(f"- {point}" for point in findings) or "- (the review named no point)",
             delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
         )
     if kept is None:
@@ -428,6 +510,7 @@ def _answer_once(
     entries: Sequence[Mapping[str, Any]],
     own: Sequence[Mapping[str, Any]],
     kinds: Sequence[str] = tuple(REQUEST_KINDS),
+    adapter: str = EXTENSION_ADAPTER,
 ) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal:
     """One answer and its review: the mutations, the requires items the reply added and the notes, or a
     proposal without mutations whose notes say why there is nothing to apply."""
@@ -437,9 +520,13 @@ def _answer_once(
     reply, failure = _ask(models, prompt, max_tokens=_max_tokens(65536), timeout_s=_timeout_s(600.0))
     if reply is None:
         return StepProposal((), {"failure": failure})
-    proposals = _parse_proposal(reply, kinds=tuple(kinds))
+    proposals = _parse_proposal(reply, kinds=tuple(kinds), config_keys=request_config_keys(adapter))
     if proposals is None:
-        return _nothing_to_apply(reply, "the reply holds no usable entry")
+        refusal = _provider_refusal(models)
+        return _nothing_to_apply(
+            reply,
+            "the reply holds no usable entry" if refusal is None else f"the provider refused the reply ({refusal})",
+        )
     mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
     if not mutations:
         return _nothing_to_apply(
@@ -450,7 +537,12 @@ def _answer_once(
     notes: dict[str, Any] = {}
     if design is not None:
         notes["design"] = design
-    review, review_failure = _review(models, str(request.get("text", "")), design, mutations, [*own, *added])
+    misnamed = _misnamed(reply, kinds)
+    if misnamed:
+        notes["dropped"] = misnamed
+    review, review_failure = _review(
+        models, str(request.get("text", "")), design, mutations, [*own, *added], adapter=adapter
+    )
     if review is not None:
         notes["review"] = review
     else:
@@ -530,21 +622,28 @@ def _request_prompt(
     failures = failures_text(samples) if samples else None
     request_text = untrusted_text(str(request.get("text", "")), "user request")
     entries_text = json.dumps(views, indent=2)
-    # The plan call first: the steps the harness cannot perform get a tool written beside their rule.
-    tool_steps = _tool_steps(models, request_text, entries_text)
     kinds = request_kinds(adapter)
+    extensions = "code_extension" in kinds
+    facts = harness_facts(adapter)
+    # The plan call first: the steps the harness cannot perform get a tool written beside their rule on pi, and
+    # off pi the harness's own tools, which the plan call is told about, before the step is called undone.
+    tool_steps = _tool_steps(models, request_text, entries_text, None if facts is None else facts.tools)
+    steps = "\n".join(f"- {step}" for step in tool_steps)
     return REQUEST_PROMPT.format(
         request=request_text,
         machine=client_text(request),
-        kinds="".join(KIND_LINES[kind] for kind in kinds),
-        extensions=(
-            EXTENSIONS_SECTION if "code_extension" in kinds else NO_EXTENSIONS_SECTION.format(adapter=adapter)
-        ),
+        kinds=kind_lines(adapter),
+        extensions=EXTENSIONS_SECTION if extensions else harness_section(adapter),
+        platform="branch on process.platform, " if extensions else "",
         wrapper=adapter,
         failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
         entries=entries_text,
         reserved=", ".join(sorted(RESERVED_ENTRY_IDS)),
-        plan="" if not tool_steps else PLAN_SECTION.format(steps="\n".join(f"- {step}" for step in tool_steps)),
+        plan=(
+            ""
+            if not tool_steps
+            else PLAN_SECTION.format(steps=steps) if extensions else PLAN_NO_TOOL_SECTION.format(steps=steps)
+        ),
         api="" if api is None else API_SECTION.format(text=api),
     )
 
@@ -565,7 +664,8 @@ def _request_mutations(
                     "propose: dropped %s %r: the id names another kind", kind, entry_id
                 )
                 continue
-            entry_id = _rules_id(config["text"])
+            text = config["text"] if kind == "rules" else json.dumps(config.get("data"), sort_keys=True)
+            entry_id = _rules_id(text) if kind == "rules" else _rules_id(text).replace("rules-", "config-")
             op = "update" if (kind, entry_id) in held else "create"
         mutations.append(Mutation(op, entry_id, {"name": kind, "config": config}))
     return mutations
@@ -593,10 +693,13 @@ def _review(
     design: str | None,
     mutations: Sequence[Mutation],
     requires: Sequence[Mapping[str, Any]],
+    *,
+    adapter: str = EXTENSION_ADAPTER,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """The served model's reading of its entries against the request, ``{result, covered, uncovered}``, and no
     reason; or ``None`` and the reason the step has no review, which the step records so the page says the one
-    check of whether the entries deliver the request did not run."""
+    check of whether the entries deliver the request did not run. New commands are judged by ``adapter``'s own
+    command surface."""
     written: list[dict[str, Any]] = [{"op": m.op, "id": m.id, **(m.options or {})} for m in mutations]
     if requires:
         written.append({"requires": [dict(item) for item in requires]})
@@ -604,6 +707,7 @@ def _review(
         request=untrusted_text(request_text, "user request"),
         design="(none written)" if design is None else design,
         entries=json.dumps(written, indent=2),
+        commands=review_commands(adapter),
     )
     # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live,
     # and 16384 still does on a long change, so a reply the reasoning ate is asked once more with room for both.
@@ -683,12 +787,15 @@ def _without_reefs_own(proposals: Sequence[Proposal]) -> list[Proposal]:
     return kept
 
 
-def _tool_steps(models: ModelBindings, request_text: str, entries_text: str) -> list[str]:
-    """The steps of a request the harness cannot perform, as the served model lists them in a first, short call.
+def _tool_steps(models: ModelBindings, request_text: str, entries_text: str, tools: str | None = None) -> list[str]:
+    """The steps of a request the harness cannot perform, as the served model lists them in a first, short call;
+    ``tools`` names the harness's own tools where the proposer knows them (off pi).
 
     A call that fails or answers without the JSON shape yields no steps: the request is then answered as
     before, without the plan section."""
-    prompt = PLAN_PROMPT.format(request=request_text, entries=entries_text)
+    prompt = PLAN_PROMPT.format(
+        request=request_text, entries=entries_text, tools="" if tools is None else f"Its own tools: {tools}.\n\n"
+    )
     reply, _ = _ask(models, prompt, max_tokens=_max_tokens(4096), timeout_s=_timeout_s(60.0))
     if reply is None:
         return []
@@ -768,6 +875,22 @@ def _ask(
     return reply, None
 
 
+def _provider_refusal(models: ModelBindings) -> str | None:
+    """Why the provider cut the last reply short, when its response says a filter or a refusal stopped it: an
+    OpenAI ``finish_reason``, a Responses ``incomplete_details.reason`` or an Anthropic ``stop_reason``."""
+    served = models.served
+    response = served.last_response() if isinstance(served, ModelBinding) else None
+    if not isinstance(response, Mapping):
+        return None
+    details = response.get("incomplete_details")
+    reasons = [
+        *(choice.get("finish_reason") for choice in response.get("choices") or () if isinstance(choice, Mapping)),
+        details.get("reason") if isinstance(details, Mapping) else None,
+        response.get("stop_reason"),
+    ]
+    return next((str(reason) for reason in reasons if reason in ("content_filter", "refusal")), None)
+
+
 def _entry_view(kind: str, config: Any, entry_id: Any = None) -> dict[str, Any]:
     """One entry as the request prompt shows it: its id (a named kind's name when the tree gave none), the kind,
     and the start of its body."""
@@ -794,10 +917,17 @@ def grade_text(task: str, text: str | None) -> float:
     return 1.0 if lines and lines[-1] == expected else 0.0
 
 
-def _parse_proposal(reply: str, kinds: Sequence[str] = ("skill",)) -> list[Proposal] | None:
+def _parse_proposal(
+    reply: str, kinds: Sequence[str] = ("skill",), config_keys: Sequence[str] = ()
+) -> list[Proposal] | None:
     """The strict proposal objects dug out of the model's text, as (entry id, kind, config) triples in reply
-    order; ``None`` when the reply carries no usable proposal of one of ``kinds``."""
-    proposals = [triple for triple in (_parse_entry(item, kinds) for item in _items_in(reply)) if triple is not None]
+    order; ``None`` when the reply carries no usable proposal of one of ``kinds``. A config entry is kept only
+    when it sets the primary target and no top level key outside ``config_keys``."""
+    proposals = [
+        triple
+        for triple in (_parse_entry(item, kinds, config_keys) for item in _items_in(reply))
+        if triple is not None
+    ]
     return proposals or None
 
 
@@ -901,7 +1031,23 @@ def _rules_id(text: str) -> str:
     return f"rules-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
 
 
-def _parse_entry(item: Any, kinds: Sequence[str]) -> Proposal | None:
+def _parse_config_entry(entry_id: Any, config: dict[str, Any], config_keys: Sequence[str]) -> Proposal | None:
+    """A config proposal as (entry id, "config", {target, data}), or ``None`` when it names another target or a
+    top level key outside ``config_keys``; an entry without an id takes one from its data."""
+    data = config.get("data")
+    if config.get("target", "primary") != "primary" or not isinstance(data, dict) or not data:
+        return None
+    if not set(data) <= set(config_keys):
+        logging.getLogger(__name__).warning("propose: dropped a config entry setting %s", ", ".join(sorted(data)))
+        return None
+    if entry_id is None:
+        entry_id = _rules_id(json.dumps(data, sort_keys=True)).replace("rules-", "config-")
+    if not isinstance(entry_id, str) or not _ENTRY_NAME.fullmatch(entry_id):
+        return None
+    return entry_id, "config", {"target": "primary", "data": data}
+
+
+def _parse_entry(item: Any, kinds: Sequence[str], config_keys: Sequence[str] = ()) -> Proposal | None:
     """One proposal object as (entry id, kind, config), or ``None`` when its shape is not one of ``kinds``."""
     if not isinstance(item, dict):
         return None
@@ -917,6 +1063,8 @@ def _parse_entry(item: Any, kinds: Sequence[str]) -> Proposal | None:
         config = {field: item[field] for field in fields if field in item}
     if not isinstance(config, dict):
         return None
+    if kind == "config":
+        return _parse_config_entry(entry_id, config, config_keys)
     body = config.get(fields[-1])
     if not isinstance(body, str) or not body.strip():
         return None
@@ -930,6 +1078,20 @@ def _parse_entry(item: Any, kinds: Sequence[str]) -> Proposal | None:
     if "name" in fields and config.get("name", entry_id) != entry_id:
         return None
     return entry_id, kind, {field: (entry_id if field == "name" else body) for field in fields}
+
+
+def _misnamed(reply: str, kinds: Sequence[str]) -> list[str]:
+    """The named entries in the reply that were dropped because their id is not their config name, one line each,
+    so the retry tells the model which of its entries never reached the tree."""
+    lines = []
+    for item in _items_in(reply):
+        if not isinstance(item, dict) or not isinstance(item.get("config"), dict):
+            continue
+        kind = item["kind"] if item.get("kind") in REQUEST_KINDS else item.get("name")
+        name, entry_id = item["config"].get("name"), item.get("id")
+        if kind in kinds and kind in REQUEST_KINDS and "name" in REQUEST_KINDS[kind] and name not in (None, entry_id):
+            lines.append(f"{kind} {entry_id!r} was dropped: its id must equal its config name {name!r}")
+    return lines
 
 
 def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:

@@ -601,8 +601,8 @@ the tools on PATH, the installed release against the served head) and exits
 0 when they all hold; it also lists every release that waits for your
 review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
-``evolve``, ``page``, ``doctor``, ``setup``, ``update``; anything else
-runs pi) before pi's help. Pinning,
+``evolve``, ``wait``, ``page``, ``doctor``, ``setup``, ``update``; anything
+else runs pi) before pi's help. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
@@ -649,6 +649,12 @@ reef-pi to use it.``; a pending release names ``reef-pi page <version>`` to
 read it, asks ``Promote now? [y/N]`` and, on yes, promotes it and installs
 the new head the same way. Declined, or in a script without a terminal,
 it prints the commands to run instead.
+``reef-pi wait <request id> [--timeout SECONDS]`` waits for a request that
+``evolve`` already filed and reports it the same way, with the same exit
+statuses; a harness whose shell tool stops a command after a few minutes
+files with ``evolve`` and calls ``wait`` until it stops answering 2. On an
+adapter other than pi, which has no ``/versions`` and no update notice, the
+lines name ``reef-<adapter> wait`` and ``reef-<adapter> update`` instead.
 To return to failure driven
 evolution alone, use the same update endpoint with
 ``{"training_mode": "auto"}``. The commands surface an error when the

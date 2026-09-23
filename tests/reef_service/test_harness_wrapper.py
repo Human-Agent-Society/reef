@@ -2547,6 +2547,36 @@ def test_session_setup_and_update_recover_using_the_sessions_service_and_scenari
         other.close()
 
 
+def test_session_update_without_the_token_variable_sends_the_trees_token_and_the_wrappers_interpreter(
+    tmp_path, capsys
+) -> None:
+    """dsh strips every variable named like a token from what its tools run, so a session's update can arrive
+    without REEF_TOKEN: it reaches the session's service with the token the tree's binding holds for that same
+    service, and the install script finds the wrapper's own interpreter first on PATH, whatever PATH the agent's
+    shell tool rebuilt."""
+    script = INSTALL_SCRIPT + 'printf \'%s\\n\' "${PATH%%:*}" > "$1/path-seen"\n'
+    reef = _ReleasesReef([_row("v2")], install=script)
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    env = _ask_env(
+        tmp_path / "captures",
+        compose,
+        REEF_HARNESS_DEST=str(Path(compose).parent),
+        REEF_SERVICE_URL=f"http://127.0.0.1:{reef.port}",
+        REEF_SCENARIO="setup-scenario",
+        PATH="/usr/bin:/bin",
+    )
+    try:
+        with patch.dict(os.environ, env, clear=True):
+            assert update("setup-scenario", "pi", compose, release="v2") == 0
+        assert capsys.readouterr().err == ""
+        assert json.loads(release_file.read_text())["release_id"] == "v2"
+        assert reef.seen and all(call["headers"]["authorization"] == "Bearer dummy" for call in reef.seen)
+        assert (tmp_path / "token-seen").read_text().strip() == "dummy"
+        assert (tmp_path / "path-seen").read_text().strip() == str(Path(sys.executable).parent)
+    finally:
+        reef.close()
+
+
 def test_session_recovery_does_not_substitute_another_catalog_or_release(tmp_path, capsys) -> None:
     reef = _ReleasesReef([_row("new-head")], install=INSTALL_SCRIPT)
     other = _ReleasesReef([_row("selected-release")], install=INSTALL_SCRIPT)
@@ -2641,6 +2671,8 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     assert (seen["FILE_ONLY"], seen["BOTH"]) == ("from-file", "from-shell")
     assert seen["REEF_HARNESS_WRAPPER"] == str(Path(compose).resolve().parent / "reef-pi")
     assert seen["REEF_HARNESS_DEST"] == str(Path(compose).resolve().parent)
+    # The harness binary's directory, then the install root, so reef-pi by name is this install's wrapper.
+    assert seen["PATH"].split(os.pathsep)[:2] == [str(binary.resolve().parent), str(Path(compose).resolve().parent)]
     assert capsys.readouterr().err == ""
     # Without a wrapper at the install root nothing names one, and the shell's own setting is kept.
     wrapper.unlink()

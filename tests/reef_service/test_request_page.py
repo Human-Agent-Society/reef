@@ -228,6 +228,26 @@ def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_r
     assert "What changed" in _sections(page)
 
 
+def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_session() -> None:
+    """hermes has no /versions and no reef-pi: a published release is installed with reef-hermes update, a
+    release waiting for review is served with reef-hermes wait on the request, and the version page's Setup
+    note names reef-hermes setup."""
+    selected = _row(_answered(selected=True, published=True, mutation=MUTATION))
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, selected], now=1_100.0, adapter="hermes")
+    result = _section(page, "Result")
+    assert "<code>reef-hermes update</code>" in result and "start reef-hermes again" in result
+    assert "/versions" not in page and "reef-pi" not in page
+    pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, pending], now=1_100.0, adapter="hermes")
+    assert f"<code>reef-hermes wait {RECORD_ID}</code>" in _section(page, "Result")
+    requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
+    metrics = _answered(selected=True, published=True, mutation=MUTATION)
+    metrics["training_request"]["requires"] = requires
+    step = _row(metrics)
+    version = build_release_page(1, [CREATION, step], adapter="dsh")
+    assert "reef-dsh setup lists these" in version and "reef-pi setup" not in version
+
+
 @pytest.mark.parametrize("review_key", ["result", "verdict"])
 def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_review_left_uncovered(
     review_key,

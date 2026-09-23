@@ -1538,7 +1538,7 @@ def test_a_request_on_another_adapter_asks_for_no_code_extension_and_takes_none(
     for kind in ("skill", "rules", "agent_command"):
         assert f"- {kind}:" in prompt
     assert "- code_extension:" not in prompt and "pi.registerCommand" not in prompt
-    assert "This harness is dsh" in prompt and "reef-dsh setup" in prompt
+    assert "This harness is DeepSeek Harness (dsh)" in prompt and "reef-dsh setup" in prompt
     assert [(m.op, m.id) for m in mutations] == [("create", "test-first")]
     extension = {"name": "chat-mode", "code": "export default function (pi) {}\n"}
     model = canned(request_reply({"id": "chat-mode", "name": "code_extension", "config": extension}))

@@ -124,14 +124,56 @@ Behavior and configuration
 Adapters other than pi
 ----------------------
 
-``evolution.adapter`` runs the profile on any bundled adapter. The
-``/reefine`` command and the update notice are entries pi ships, so on
-``dsh`` or ``hermes`` the profile seeds neither, says so in the log, and a
-request goes through the wrapper: ``reef-dsh evolve "<text>" --wait``.
-The agent proposer runs on pi alone; on another adapter the served model
-answers a request with rules, skills and commands and writes no
-``code_extension``, since it knows pi's extension API and no other. Its
-design says when the request needs behavior those kinds cannot give.
+``evolution.adapter`` runs the profile on any bundled adapter. The update
+notice is a pi extension, so on another adapter the profile leaves it out
+and says so in the log; ``reef-<adapter> update`` installs a new release.
+The ``/reefine`` command is one command file there (the reserved entry
+``reef-requests``): the session's model files the request with
+``reef-<adapter> evolve``, gives you the request's page link, waits for the
+step with ``reef-<adapter> wait`` in pieces its shell tool allows, tells you
+the result and, on your yes, runs ``reef-<adapter> update``. Start the new
+version by starting ``reef-<adapter>`` again.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Adapter
+     - Start a session
+     - Type
+     - Serve with
+   * - ``claude``
+     - ``reef-claude``
+     - ``/reefine <request>``
+     - ``--inference.upstream-api anthropic``
+   * - ``codex``
+     - ``reef-codex``
+     - ``$reefine <request>`` (Codex has no custom slash commands)
+     - ``--inference.upstream-api responses``
+   * - ``opencode``
+     - ``reef-opencode``
+     - ``/reefine <request>``
+     -
+   * - ``hermes``
+     - ``reef-hermes``
+     - ``/reefine <request>``
+     -
+   * - ``dsh``
+     - ``reef-dsh web``
+     - ``/reefine <request>``
+     -
+
+``terminus`` has no session to type in. The agent proposer runs on pi
+alone; on another adapter the served model answers a request with rules,
+skills and commands, and with a config entry where the harness's config
+enforces a behavior (an opencode agent with a permission map, Claude Code
+permissions, Codex's ``web_search``). It writes no ``code_extension``,
+since it knows pi's extension API and no other. The prompt tells it that
+harness's own facts from ``reef/recipe/reefine/harness_facts.py``: how you
+type a command there, which file holds the rules, which tools the harness
+has (web search among them, with what it needs: ``DEEPSEEK_API_KEY`` on
+dsh) and how the harness offers a mode. The review judges new commands by
+the same facts. Its design says when the request needs behavior these
+kinds cannot give.
 
 The agent proposer
 ------------------

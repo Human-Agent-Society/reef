@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 
+from reef.harness.episodes.version_check import ships_version_check
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import design_sections, mutations_of, result_of, served_step, step_href
 from reef.train.cordis_backend.contracts import StepProgress
@@ -245,7 +246,38 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
     return f"the step ended as {selection_result}"
 
 
-def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Mapping[str, str] | None) -> str:
+def next_action(adapter: str, step: int, selection_result: str, record_id: str) -> tuple[str, str, str] | None:
+    """The next action a settled step offers: its heading, the command and where to run it; ``None`` when a
+    rejected or skipped step offers none. pi installs from its own session (``/versions``); another adapter's
+    person runs its wrapper in a terminal."""
+    if selection_result not in ("pending", "selected"):
+        return None
+    if ships_version_check(adapter):
+        return (
+            "Read this page, then install" if selection_result == "pending" else "Install when ready",
+            f"/versions v{step} install",
+            f"Run this in your reef-{adapter} session. You can keep chatting until you are ready.",
+        )
+    if selection_result == "pending":
+        return (
+            "Read this page, then serve it",
+            f"reef-{adapter} wait {record_id}",
+            "Run this in a terminal: it asks whether to serve this release, then installs it.",
+        )
+    return (
+        "Install when ready",
+        f"reef-{adapter} update",
+        f"Run this in a terminal, then start reef-{adapter} again to use the new version.",
+    )
+
+
+def result_html(
+    step: int,
+    rows: Sequence[Mapping[str, object]],
+    link_query: Mapping[str, str] | None,
+    adapter: str = "pi",
+    record_id: str = "",
+) -> str:
     row = rows[step]
     metrics = row.get("metrics")
     metrics = metrics if isinstance(metrics, Mapping) else {}
@@ -266,19 +298,12 @@ def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Map
         parts.append(f'<div class="failure"><h3>Proposer failure</h3><p>{escape(failure)}</p></div>')
     # Carry the scenario and authentication to the version page without displaying the token.
     href = step_href(step, link_query)
-    if selection_result == "pending":
-        command = f"/versions v{step} install"
-        action = "Read this page, then install"
-    elif selection_result == "selected":
-        command = f"/versions v{step} install"
-        action = "Install when ready"
-    else:
-        command = ""
-        action = ""
-    if command:
+    offered = next_action(adapter, step, selection_result, record_id)
+    if offered is not None:
+        action, command, where = offered
         parts.append(
-            f'<div class="next-action"><h3>{action}</h3><code>{command}</code>'
-            "<p>Run this in your reef-pi session. You can keep chatting until you are ready.</p></div>"
+            f'<div class="next-action"><h3>{escape(action)}</h3><code>{escape(command)}</code>'
+            f"<p>{escape(where)}</p></div>"
         )
     parts.append(
         f'<a class="version-link" href="{escape(href)}">View v{step}<span aria-hidden="true">&#8599;</span></a>'
@@ -350,6 +375,7 @@ def build_request_page(
     consumed: bool = False,
     link_query: Mapping[str, str] | None = None,
     now: float | None = None,
+    adapter: str = "pi",
 ) -> str:
     """The page for the request stored as ``record``, against the catalog ``rows`` oldest first.
 
@@ -359,7 +385,7 @@ def build_request_page(
     running step, counted only when it names this request; ``consumed`` says
     whether the trainer's reserved batch carries the request. ``link_query``
     is carried to the version page link. ``now`` is the clock the elapsed
-    times are read against.
+    times are read against. ``adapter`` names the wrapper the next action runs.
     """
     record_id = str(record["agent_record_id"])
     now = time.time() if now is None else now
@@ -379,7 +405,7 @@ def build_request_page(
         metrics = metrics if isinstance(metrics, Mapping) else {}
         change_label = "Proposed changes" if state in ("pending", "rejected", "skipped", "failed") else "What changed"
         body = (
-            f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query)}</section>\n'
+            f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query, adapter, record_id)}</section>\n'
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
             f"{review_html(metrics)}{design_html(metrics)}"
         )

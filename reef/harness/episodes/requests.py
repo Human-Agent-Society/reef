@@ -10,7 +10,8 @@ surface gets one ``agent_command`` named ``reefine`` instead: its text tells
 the session's model to file the request with ``reef-<adapter> evolve``, wait
 for the step with ``reef-<adapter> wait`` and offer ``reef-<adapter>
 update``, through the wrapper the session was started by
-(``REEF_HARNESS_WRAPPER``). The ids are reef's own (``RESERVED_ENTRY_IDS``),
+(``REEF_HARNESS_WRAPPER``), in the form each harness's permission check
+lets through and with the timeout its shell tool takes. The ids are reef's own (``RESERVED_ENTRY_IDS``),
 so a proposal cannot rewrite or remove them; the seed and a recovered state
 carry them as they are.
 """
@@ -38,29 +39,66 @@ _COMMAND_TEXT = Path(__file__).with_name("reefine_command.md")
 
 @dataclass(frozen=True)
 class _Command:
-    """How an adapter's command file receives what the person typed after ``/reefine``.
+    """How one adapter's ``/reefine`` command file reaches the request and the wrapper.
 
-    ``request`` names it in the command text: the binary's own placeholder
-    where it substitutes one, else where the model finds it. ``frontmatter``
-    is written before the text when the binary reads one; empty, the
-    adapter's quirks module synthesizes it."""
+    ``command`` is what the person types; ``request`` names the typed request
+    in the command text: the binary's own placeholder where it substitutes
+    one, else where the model finds it. ``wrapper`` is how the command runs
+    the wrapper, the form the harness's own permission check lets through;
+    ``shell_timeout`` says how its shell tool counts a timeout.
+    ``frontmatter`` is written before the text when the binary reads one;
+    empty, the adapter's quirks module synthesizes it."""
 
     request: str
+    shell_timeout: str
+    command: str = "/reefine"
+    wrapper: str = '"$REEF_HARNESS_WRAPPER"'
+    wrapper_note: str = ""
     frontmatter: str = ""
 
 
+_TYPED = "the text after /reefine in the person's message"
+
 #: The adapters whose interactive session reaches a rendered agent_command, and how each passes the request on.
 _COMMANDS = {
+    # Claude Code refuses an allowed-tools rule on a variable, so the command runs the wrapper by name: the
+    # session's PATH starts with the install root.
     "claude": _Command(
         request='"$ARGUMENTS"',
-        frontmatter="---\ndescription: Ask Reef to change this harness\nargument-hint: <what it should do>\n---\n",
+        wrapper="reef-claude",
+        shell_timeout="The Bash tool's own timeout counts milliseconds: give it 150000.",
+        frontmatter=(
+            "---\ndescription: Ask Reef to change this harness\nargument-hint: <what it should do>\n"
+            "allowed-tools: Bash(reef-claude evolve:*), Bash(reef-claude wait:*)\n---\n"
+        ),
     ),
-    "codex": _Command(request='"$ARGUMENTS"', frontmatter="---\ndescription: Ask Reef to change this harness\n---\n"),
+    # Codex refuses a custom /command, so the command is a skill typed $reefine; its sandbox lets only the
+    # wrapper's absolute path, which the session's rules name, reach Reef.
+    "codex": _Command(
+        request="the text after $reefine in the person's message",
+        command="$reefine",
+        wrapper="<wrapper>",
+        wrapper_note=(
+            " Here <wrapper> is the absolute path REEF_HARNESS_WRAPPER holds: run printenv REEF_HARNESS_WRAPPER "
+            "once and write that path itself in each command, never the variable, since only that path may reach "
+            "Reef from the sandbox."
+        ),
+        shell_timeout="If the shell tool returns while it still runs, wait for it to finish.",
+    ),
+    # opencode runs a command with the session's current agent; a mode agent without bash could not file it.
     "opencode": _Command(
-        request='"$ARGUMENTS"', frontmatter="---\ndescription: Ask Reef to change this harness\n---\n"
+        request='"$ARGUMENTS"',
+        shell_timeout="The bash tool's own timeout counts milliseconds: give it 150000.",
+        frontmatter="---\ndescription: Ask Reef to change this harness\nagent: build\n---\n",
     ),
-    "hermes": _Command(request="the text after /reefine in the person's message"),
-    "dsh": _Command(request="the text after /reefine in the person's message"),
+    "hermes": _Command(
+        request=(
+            "the instruction at the end of the person's message, after 'The user has provided the following "
+            "instruction alongside the skill invocation:'"
+        ),
+        shell_timeout="The terminal tool's own timeout counts seconds too: give it 150.",
+    ),
+    "dsh": _Command(request=_TYPED, shell_timeout="Give the bash tool timeoutMs 150000."),
 }
 
 
@@ -81,7 +119,14 @@ def command_text(adapter: str) -> str:
     command = _COMMANDS.get(adapter)
     if command is None:
         raise DescriptorError(f"adapter {adapter!r} ships no requests command")
-    body = _read(_COMMAND_TEXT, adapter).format(request=command.request, adapter=adapter)
+    body = _read(_COMMAND_TEXT, adapter).format(
+        command=command.command,
+        request=command.request,
+        adapter=adapter,
+        wrapper=command.wrapper,
+        wrapper_note=command.wrapper_note,
+        shell_timeout=command.shell_timeout,
+    )
     return command.frontmatter + body
 
 

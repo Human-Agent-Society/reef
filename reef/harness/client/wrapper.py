@@ -443,6 +443,19 @@ def _reef_token(adapter: str, compose_dir: str) -> str | None:
         sys.exit(f"reef-{adapter}: {exc}")
 
 
+def _session_tree_token(adapter: str, compose_dir: str, upstream: str) -> str | None:
+    """The tree's own token for a session whose tool environment lost ``REEF_TOKEN`` (dsh strips every variable
+    named like a token from what its tools run), when the tree's binding names the session's service; a binding
+    another install rewrote belongs to another service, and its token is never sent here."""
+    try:
+        bound = _extract_reef_url(adapter, Path(compose_dir))
+        if bound is None or _strip_v1(bound.rstrip("/")) != upstream:
+            return None
+        return _extract_reef_token(adapter, Path(compose_dir))
+    except WrapperError:
+        return None
+
+
 def _strip_v1(url: str) -> str:
     return url[:-3] if url.endswith("/v1") else url
 
@@ -873,8 +886,9 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
-    # An evolved tool that starts a second agent session finds this harness's own binary first.
-    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), env.get("PATH", "")])
+    # An evolved tool that starts a second agent session finds this harness's own binary first, and a command
+    # that runs reef-<adapter> by name reaches this install's wrapper, not the one another install linked.
+    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), str(install_root), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -1564,7 +1578,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     ):
         upstream = _strip_v1(session_service.rstrip("/"))
         scenario = session_scenario
-        token = os.environ.get("REEF_TOKEN") or None
+        token = os.environ.get("REEF_TOKEN") or _session_tree_token(adapter, compose_dir, upstream)
     else:
         upstream = _reef_url_of(adapter, compose_dir)
         token = _reef_token(adapter, compose_dir)
@@ -1831,6 +1845,9 @@ def _run_install_script(script: bytes, install_root: Path, token: str | None) ->
     env = os.environ.copy()
     if token:
         env["REEF_TOKEN"] = token
+    # The script looks for python3 on PATH; this interpreter is the one with reef installed, whatever the shell's
+    # PATH puts first (an agent's shell tool may rebuild it from a login shell).
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
     with tempfile.NamedTemporaryFile(prefix="reef-harness-install-", suffix=".sh", delete=False) as handle:
         handle.write(script)
         path = Path(handle.name)

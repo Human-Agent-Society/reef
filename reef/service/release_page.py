@@ -492,7 +492,9 @@ def _refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
-def _setup(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
+def _setup(
+    row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], adapter: str = "pi"
+) -> str:
     """The step's own ``training_request.requires`` items, then what its release carries from earlier steps.
 
     The install script, ``reef-<adapter> setup`` and the update notice read
@@ -533,7 +535,9 @@ def _setup(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Ma
         parts.append(
             f'<h3>Carried from earlier steps</h3>{_scrolled(requires_table(carried), "Inherited requirements")}'
         )
-    parts.append('<p class="note">reef-pi setup lists these and runs a check only after you confirm it</p>')
+    parts.append(
+        f'<p class="note">reef-{escape(adapter)} setup lists these and runs a check only after you confirm it</p>'
+    )
     return "".join(parts) + tail
 
 
@@ -606,6 +610,7 @@ def build_release_page(
     before_files: Mapping[str, str] | None = None,
     node_paths: Mapping[str, str] | None = None,
     link_query: Mapping[str, str] | None = None,
+    adapter: str = "pi",
 ) -> str:
     """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/releases`` lists them.
 
@@ -615,7 +620,8 @@ def build_release_page(
     extension update shows its new text instead of a diff. ``link_query`` is
     carried to the Chain's links, so a page opened through query parameters
     links pages that open the same way. Design and Review appear only when the
-    row's ``proposal_notes`` carry them.
+    row's ``proposal_notes`` carry them. ``adapter`` names the wrapper the
+    Setup section's commands run.
     """
     row = rows[step]
     metrics = row.get("metrics")
@@ -652,7 +658,7 @@ def build_release_page(
         + _card("What changed", f"{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n")
         + _review(metrics)
         + _card("Result", f"{result_html(row, metrics, rows)}\n")
-        + _card("Setup", f"{_setup(row, metrics, rows)}\n")
+        + _card("Setup", f"{_setup(row, metrics, rows, adapter)}\n")
         + _card("Chain", f"{_chain(step, row, rows, link_query)}\n")
         + "</div>\n",
         tail=f'<script id="data" type="application/json">{data}</script>\n',

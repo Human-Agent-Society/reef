@@ -21,7 +21,13 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.requests import REQUESTS_COMMAND, REQUESTS_ENTRY_ID, REQUESTS_SKILL_ID, request_entries
+from reef.harness.episodes.requests import (
+    REQUESTS_COMMAND,
+    REQUESTS_ENTRY_ID,
+    REQUESTS_SKILL_ID,
+    command_text,
+    request_entries,
+)
 from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
@@ -115,38 +121,44 @@ def test_requests_refuses_an_adapter_without_a_shipped_extension(placeholders: t
 
 
 @pytest.mark.parametrize(
-    ("adapter", "path", "request_words"),
+    ("adapter", "typed", "request_words", "wrapper", "timeout"),
     [
-        ("claude", "claude/commands/reefine.md", 'The request is "$ARGUMENTS".'),
-        ("codex", "codex/prompts/reefine.md", 'The request is "$ARGUMENTS".'),
-        ("opencode", "opencode/command/reefine.md", 'The request is "$ARGUMENTS".'),
-        (
-            "hermes",
-            "hermes-commands/reefine/SKILL.md",
-            "The request is the text after /reefine in the person's message.",
-        ),
-        (
-            "dsh",
-            "dsh-agents/skills/reefine/SKILL.md",
-            "The request is the text after /reefine in the person's message.",
-        ),
+        ("claude", "/reefine", 'The request is "$ARGUMENTS".', "reef-claude", "give it 150000"),
+        ("codex", "$reefine", "the text after $reefine", "<wrapper>", "wait for it to finish"),
+        ("opencode", "/reefine", 'The request is "$ARGUMENTS".', '"$REEF_HARNESS_WRAPPER"', "give it 150000"),
+        ("hermes", "/reefine", "alongside the skill invocation:", '"$REEF_HARNESS_WRAPPER"', "give it 150."),
+        ("dsh", "/reefine", "the text after /reefine", '"$REEF_HARNESS_WRAPPER"', "timeoutMs 150000"),
     ],
 )
 def test_an_adapter_without_an_extension_seeds_one_reefine_command_the_wrapper_answers(
-    adapter: str, path: str, request_words: str
+    adapter: str, typed: str, request_words: str, wrapper: str, timeout: str
 ) -> None:
     """Off pi the requests entry is one agent_command, ``reefine``, rendered where the adapter keeps its commands:
-    it names the typed request and files it with the wrapper's evolve, then waits in pieces a shell tool allows."""
+    it names the typed request, files it with the wrapper's evolve in the form the harness's permission check lets
+    through, the request in single quotes, then waits in pieces the harness's shell tool allows."""
     recipe = CordisRecipe.from_environment({}, config=_config(adapter=adapter, requests=True))
     (options,) = [options for options in recipe.seed if options.get("id") == REQUESTS_ENTRY_ID]
     assert options["name"] == "agent_command" and options["config"]["name"] == REQUESTS_COMMAND
-    files = render_composition(_nodes([options]), get_adapter(adapter))
-    text = files[path]
-    assert request_words in text
-    assert '"$REEF_HARNESS_WRAPPER" evolve "<the request>"' in text
-    assert '"$REEF_HARNESS_WRAPPER" wait <request id> --timeout 100' in text
+    descriptor = get_adapter(adapter)
+    files = render_composition(_nodes([options]), descriptor)
+    text = files[descriptor.node_paths["agent_command"].format(name=REQUESTS_COMMAND)]
+    assert f"The person typed {typed} " in text and request_words in text
+    assert f"{wrapper} evolve '<the request>'" in text and f"`{wrapper} wait <request id> --timeout 100`" in text
+    assert timeout in text and "Its --timeout counts seconds." in text
     assert f"reef-{adapter} setup" in text and "{" not in text
     assert not any(options.get("id") == REQUESTS_SKILL_ID for options in recipe.seed)
+
+
+def test_the_claude_command_pre_approves_only_the_wrapper_and_opencode_runs_it_as_the_build_agent() -> None:
+    """Claude Code refuses an allowed-tools rule on a variable and approves a named one; opencode would run the
+    command with a mode agent that has no bash."""
+    claude = command_text("claude")
+    assert claude.startswith("---\ndescription: Ask Reef to change this harness\n")
+    assert "allowed-tools: Bash(reef-claude evolve:*), Bash(reef-claude wait:*)\n---\n" in claude
+    assert "agent: build\n---\n" in command_text("opencode")
+    # The quirks modules write the frontmatter hermes and dsh read; codex is told to write the path itself.
+    assert not command_text("hermes").startswith("---") and not command_text("dsh").startswith("---")
+    assert "printenv REEF_HARNESS_WRAPPER" in command_text("codex")
 
 
 def test_requests_must_be_a_boolean(placeholders: tuple[Path, Path]) -> None:

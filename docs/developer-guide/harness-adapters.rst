@@ -564,8 +564,19 @@ and the ``skill`` ``reef-pi-extension-api``
 (`reef/harness/adapters/pi/pi_extension_api.md
 <../../reef/harness/adapters/pi/pi_extension_api.md>`__, the pi extension
 API reference the service proposer reads before it writes an extension).
-The extension registers nothing under ``PI_OFFLINE``; otherwise it registers
-two commands, two tools and two event handlers:
+On ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` the same
+option seeds one ``agent_command`` named ``reefine`` under the id
+``reef-requests`` instead
+(`reef/harness/episodes/reefine_command.md
+<../../reef/harness/episodes/reefine_command.md>`__, filled per adapter in
+``reef/harness/episodes/requests.py``): the session's model runs
+``reef-<adapter> evolve`` and ``reef-<adapter> wait`` through its shell tool,
+in the form that harness's permission check lets through (a named command
+on Claude Code, the absolute path on Codex, ``"$REEF_HARNESS_WRAPPER"``
+elsewhere). The `reefine recipe guide
+<../user-guide/recipes/reefine.rst#adapters-other-than-pi>`__ has the table.
+The pi extension registers nothing under ``PI_OFFLINE``; otherwise it
+registers two commands, two tools and two event handlers:
 
 - ``/reefine <request>``: with a UI, clarifies the request in the
   background instead of in the session. The command returns at once and a

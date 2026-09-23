@@ -449,6 +449,10 @@ class _BudgetedBinding(ModelBinding):
             self._calls.record(entry)
             self._note_answer(entry)
 
+    def last_response(self) -> dict[str, Any] | None:
+        """The provider response of the latest call, as the wrapped binding kept it."""
+        return self._inner.last_response() if isinstance(self._inner, ModelBinding) else None
+
     def _note_answer(self, entry: Mapping[str, Any]) -> None:
         """One activity line for a finished call: how long it took and its tokens, or its error."""
         seconds = entry.get("seconds", 0)
