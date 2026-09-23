@@ -474,11 +474,9 @@ class Trainer:
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
             loss = self._records.loss(self.scenario)
-            metrics = {
-                **result.metrics,
-                "records/evicted_count": loss.record_count,
-                "records/data_incomplete": int(loss.record_count > 0),
-            }
+            metrics = dict(result.metrics)
+            if loss.record_count > 0:
+                metrics.update({"records/evicted_count": loss.record_count, "records/data_incomplete": 1})
             request = self._pending.batch.request
             if request is not None:
                 # The backend's own dict, when it wrote one, carries what its proposer added to ``requires``.

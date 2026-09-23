@@ -460,11 +460,16 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
     # next valid batch reuses rollout 0 rather than wedging the bridge at 1.
     assert runtime.calls[0]["rollout_id"] == 0
     assert scenario.scenario_step == 1
-    assert scenario.records.count("math") == 0
+    assert scenario.records.count("math") == 4
+    assert all(row.compacted_at is None for row in scenario.records.audit_page("math"))
     receipts = scenario.records.compaction_receipts("math")
     assert len(receipts) == 1
-    assert receipts[0]["metadata"] == {"outcome": "stale", "metrics": stale_metrics}
-    assert set(receipts[0]["compacted_ids"]) == {"inference-1", "report-1"}
+    assert receipts[0]["metadata"] == {
+        "outcome": "stale",
+        "metrics": stale_metrics,
+        "consumed_ids": ["inference-1", "report-1"],
+    }
+    assert receipts[0]["compacted_ids"] == ()
 
 
 @pytest.mark.unit

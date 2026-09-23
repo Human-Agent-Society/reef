@@ -490,9 +490,10 @@ def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bod
         assert records.get("math", "live") is None
         assert records.get_for_audit("math", "live").item == item("live", "math")
         with closing(SQLiteScenarioStorage(tmp_path)) as factory:
-            assert factory.prune(days=7, max_bytes=1) == 1
+            assert factory.prune(days=7, max_bytes=1) == 2
         assert records.get_for_audit("math", "live") is None
-        assert records.get("math", "next") is not None
+        assert records.get("math", "next") is None
+        assert records.loss("math").record_count == 2
 
 
 @pytest.mark.unit
@@ -524,6 +525,7 @@ def test_intermediate_schema_preserves_retirement_and_backfills_utf8_body_sizes(
     with SQLiteRecordStore(database) as records:
         monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 200.0)
         expected_bytes = len((payload_json + references_json + artifact_json).encode("utf-8"))
+        expected_bytes += len(b'{"value":"live"}[]')
         with closing(SQLiteScenarioStorage(tmp_path)) as factory:
             assert factory.prune(days=7, max_bytes=expected_bytes) == 0
             assert factory.prune(days=7, max_bytes=expected_bytes - 1) == 1
