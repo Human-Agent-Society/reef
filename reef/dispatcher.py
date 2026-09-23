@@ -13,6 +13,7 @@ import shutil
 import tempfile
 import time
 from collections.abc import Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -40,7 +41,6 @@ from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
-from reef.train.backend import StepExecution
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
@@ -715,6 +715,11 @@ class Dispatcher:
             raise RuntimeContractError(f"local backend scenario {scenario!r} is not loaded")
         if current.trainer_for(component).candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
+        runtime = current.runtime
+        if runtime is not None and not runtime.inference_admission_status.get("open", True):
+            # A dispatched job holds the served engine: this cycle would only wait on it and time out.
+            # The job's acknowledgement wakes this worker again.
+            return False
         self._record_training_error(scenario, None)
         # Local workers of one scenario take turns for a whole cycle, prepare
         # and commit together, under this lock alone: letting their commits
@@ -893,45 +898,54 @@ class Dispatcher:
         )
         if (batch := current.reserve_training_batch(component)) is None:
             return False
-        execution = self._execute_dispatched_step(current, component)
-        if execution.outcome == "retry":
-            if execution.storage is None:
-                raise RuntimeContractError("retry execution must carry storage status")
-            self._set_training_storage_status(dict(execution.storage))
-            return False
-        self._set_training_storage_status(None)
-        if execution.outcome == "drop":
-            logger.warning(
-                "dropping stale training batch %r for scenario %r",
-                batch.batch_id,
-                current.name,
-            )
-            current.reject_pending(execution.metrics, component=component)
-            return True
-        result = execution.result
-        if execution.outcome != "commit" or result is None:
-            raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
-        # Another component may have moved the head while the job ran. The
-        # committer merges a dispatched result rather than refusing it: the
-        # backend has published the weights already and its job can only be
-        # finished, never taken back.
-        self._commit_result(current.name, result, component)
-        if result.training_job_id is not None:
-            backend.acknowledge_commit(current.scenario_step, result.training_job_id)
+        with self.dispatched_turn(current, component):
+            execution = current.execute_reserved_training_step(component)
+            if execution.outcome == "retry":
+                if execution.storage is None:
+                    raise RuntimeContractError("retry execution must carry storage status")
+                self._set_training_storage_status(dict(execution.storage))
+                return False
+            self._set_training_storage_status(None)
+            if execution.outcome == "drop":
+                logger.warning(
+                    "dropping stale training batch %r for scenario %r",
+                    batch.batch_id,
+                    current.name,
+                )
+                current.reject_pending(execution.metrics, component=component)
+                return True
+            result = execution.result
+            if execution.outcome != "commit" or result is None:
+                raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
+            # Another component may have moved the head while the job ran. The
+            # committer merges a dispatched result rather than refusing it: the
+            # backend has published the weights already and its job can only be
+            # finished, never taken back.
+            self._commit_result(current.name, result, component)
+            if result.training_job_id is not None:
+                backend.acknowledge_commit(current.scenario_step, result.training_job_id)
+        # Local cycles that stood aside while the job held the engine run now.
+        self.wake_local_workers(current)
         return True
 
-    def _execute_dispatched_step(self, current: Scenario, component: str | None) -> StepExecution:
-        """Run the reserved dispatched job.
-
-        A colocated backend hands the served engine to training for the whole
-        job, so a local worker's cycle (its evaluation goes through that
-        engine) takes turns with it instead of timing out under it.
-        """
+    def dispatched_turn(self, current: Scenario, component: str | None) -> ExitStack:
+        """The locks a dispatched job holds from its execution through its commit and acknowledgement."""
+        turn = ExitStack()
         backend = current.trainer_for(component).candidate_backend
-        if backend is None or not backend.colocated:
-            return current.execute_reserved_training_step(component)
-        with self._local_cycle_lock(current.name):
-            return current.execute_reserved_training_step(component)
+        if backend is not None and backend.colocated:
+            # A colocated job holds the served engine, and admission is closed engine wide until it is
+            # acknowledged: every scenario's local cycles take turns with it instead of timing out under it.
+            with self._training.lock:
+                names = sorted({*self._training.local_cycle_locks, current.name})
+            for name in names:
+                turn.enter_context(self._local_cycle_lock(name))
+        return turn
+
+    def wake_local_workers(self, current: Scenario) -> None:
+        for bound in current.component_trainers:
+            backend = bound.trainer.candidate_backend
+            if backend is not None and not backend.dispatched:
+                self._start_local_backend_worker(current.name, bound.component)
 
     def _record_training_error(self, scenario: str, value: str | None) -> None:
         with self._training.lock:

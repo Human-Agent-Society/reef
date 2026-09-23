@@ -16,7 +16,7 @@ from reef.runtime.interfaces import (
     TrainingMetrics,
 )
 from reef.runtime.recovery import FileTrainingJobStore
-from reef.runtime.scheduler import TrainingExecution, training_job_id
+from reef.runtime.scheduler import TrainingExecution, legacy_training_job_id, training_job_id
 
 PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 
@@ -204,7 +204,40 @@ def test_cleanup_failure_after_record_replays_all_metrics(backend):
     assert backend.events == []
 
 
-@pytest.mark.parametrize("status", ["CHECKPOINT", "READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE", "REJECTED"])
+def test_a_rejected_job_trains_its_batch_again_from_the_start(backend):
+    # The rejected checkpoint was refused and can never be published; the same batch is a new job.
+    coordinator(backend).execute(PAYLOAD)
+    marker = markers.read_marker(backend.path)
+    marker.update(status="REJECTED", runtime_load_id="engine:1", commit_acknowledged=True)
+    markers.write_marker(backend.path, marker)
+    backend.events.clear()
+    backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path.with_name("checkpoint-1"))
+    result = coordinator(backend).execute(PAYLOAD)
+    assert result.outcome == "checkpoint"
+    assert [name for name, _ in backend.events] == ["prepare", "train", "save", "release"]
+    assert markers.read_marker(backend.path)["status"] == "CHECKPOINT"
+
+
+def test_a_marker_an_earlier_build_wrote_names_the_same_batch_by_its_step(backend):
+    # Earlier builds hashed the scenario step into the identity; their in flight marker still replays.
+    coordinator(backend).execute({**PAYLOAD, "rollout_id": 3})
+    marker = markers.read_marker(backend.path)
+    marker.update(job_id=legacy_training_job_id(PAYLOAD, 3))
+    marker.pop("scenario_step", None)
+    marker["rollout_id"] = 3
+    markers.write_marker(backend.path, marker)
+    backend.events.clear()
+    result = coordinator(backend).execute({**PAYLOAD, "rollout_id": 5})
+    assert (result.outcome, result.training_job_id) == ("checkpoint", legacy_training_job_id(PAYLOAD, 3))
+    assert backend.events == []
+
+
+def test_job_identity_ignores_the_processor_batch_number():
+    # A reload numbers the same rows again; the identity is the rows.
+    assert training_job_id({**PAYLOAD, "batch_id": "s:x:7"}) == training_job_id({**PAYLOAD, "batch_id": "s:x:1"})
+
+
+@pytest.mark.parametrize("status", ["CHECKPOINT", "READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"])
 def test_replay_skips_backend_for_every_replayable_state(backend, status):
     coordinator(backend).execute(PAYLOAD)
     marker = markers.read_marker(backend.path)

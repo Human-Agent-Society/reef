@@ -755,8 +755,13 @@ is recorded, a training/save failure is ambiguous and requires operator
 recovery; automatic retry must not repeat a possible optimizer step. A
 checkpointed or completed job replays without preparing or training again.
 Resource cleanup failure after ``CHECKPOINT`` also replays the recorded result.
-Job hashing, scenario/global checkpoint indexes and persisted marker fields
-remain compatible with existing deployments.
+A job's identity is its batch and admission fence: the scenario step is not
+part of it, since the other components of a composite advance that step while
+the job is out, nor is the processor's batch number, which a reload starts
+again. A marker an earlier build wrote for a job still in flight is matched by
+the step it recorded, so an upgrade mid job replays it. Scenario/global
+checkpoint indexes and persisted marker fields remain compatible with existing
+deployments.
 
 Commit-gated weight publication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

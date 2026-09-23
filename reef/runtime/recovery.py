@@ -201,7 +201,9 @@ def marker_disposition(marker: Mapping[str, Any] | None, job_id: str) -> MarkerD
     - ``resume``: the same job trained and checkpointed; only the serving
       publication remains.
     - ``conflict``: a different job is mid-flight; operator recovery required.
-    - ``fresh``: nothing blocks running this job from the start.
+    - ``fresh``: nothing blocks running this job from the start. A rejected
+      job's batch trains again from the start: its checkpoint was refused and
+      can never be published.
     """
     if marker is None:
         return "fresh"
@@ -209,7 +211,7 @@ def marker_disposition(marker: Mapping[str, Any] | None, job_id: str) -> MarkerD
     if marker["job_id"] == job_id:
         if status in PUBLISHED_STATES:
             return "replay"
-        if status in {"CHECKPOINT", "REJECTED"}:
+        if status == "CHECKPOINT":
             return "resume"
     return "conflict" if status in _IN_FLIGHT_STATES else "fresh"
 

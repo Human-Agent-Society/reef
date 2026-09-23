@@ -408,9 +408,12 @@ def test_a_colocated_weights_job_waits_for_the_local_cycle_that_needs_the_engine
         assert slow.evaluating.wait(10)
         assert scenario.reserve_training_batch(WEIGHTS) is not None
         executions: list[Any] = []
-        trainer = threading.Thread(
-            target=lambda: executions.append(dispatcher._execute_dispatched_step(scenario, WEIGHTS))
-        )
+
+        def job() -> None:
+            with dispatcher.dispatched_turn(scenario, WEIGHTS):
+                executions.append(scenario.execute_reserved_training_step(WEIGHTS))
+
+        trainer = threading.Thread(target=job)
         trainer.start()
         trainer.join(1)
         # The job has not started: the harness cycle still holds the engine it evaluates through.
@@ -425,6 +428,96 @@ def test_a_colocated_weights_job_waits_for_the_local_cycle_that_needs_the_engine
         assert scenario.scenario_step == 1
     finally:
         slow.release.set()
+        dispatcher.close()
+
+
+def _records_for(scenario: str, step: int) -> tuple[AgentRecord, AgentRecord]:
+    inference = AgentRecord.create(
+        scenario=scenario,
+        request_type=RequestType.INFERENCE,
+        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+        agent_record_id=f"{scenario}-i{step}",
+    )
+    report = AgentRecord.create(
+        scenario=scenario,
+        request_type=RequestType.REPORT,
+        payload={"score": 1.0, "references": [f"{scenario}-i{step}"]},
+        agent_record_id=f"{scenario}-r{step}",
+        references=(f"{scenario}-i{step}",),
+    )
+    return inference, report
+
+
+@pytest.mark.unit
+def test_a_colocated_weights_job_waits_for_every_scenario_that_shares_the_engine(tmp_path: Path) -> None:
+    """Admission is engine wide, so another scenario's harness cycle mid evaluation finishes first too."""
+    backends = {
+        WEIGHTS: _ColocatedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _SlowBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    slow = backends[HARNESS]
+    assert isinstance(slow, _SlowBackend)
+    try:
+        agent = dispatcher.get_or_create_scenario("agent")
+        other = dispatcher.get_or_create_scenario("other")
+        assert agent is not None and other is not None
+        for record in _records_for("agent", 1):
+            agent.records.append(record)
+        for record in _records_for("other", 1):
+            other.records.append(record)
+        worker = threading.Thread(target=lambda: dispatcher._process_local_backend_step("other", HARNESS))
+        worker.start()
+        assert slow.evaluating.wait(10)
+        assert agent.reserve_training_batch(WEIGHTS) is not None
+        executions: list[Any] = []
+
+        def job() -> None:
+            with dispatcher.dispatched_turn(agent, WEIGHTS):
+                executions.append(agent.execute_reserved_training_step(WEIGHTS))
+
+        trainer = threading.Thread(target=job)
+        trainer.start()
+        trainer.join(1)
+        assert trainer.is_alive()
+        assert backends[WEIGHTS].prepared == 0
+        slow.release.set()
+        worker.join(10)
+        trainer.join(10)
+        assert not trainer.is_alive()
+        assert executions[0].outcome == "commit"
+    finally:
+        slow.release.set()
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_harness_only_rollback_keeps_the_proof_that_the_weights_job_was_committed(tmp_path: Path) -> None:
+    """The backend must still finish a job whose weights a later rollback carried forward unchanged."""
+    dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        assert scenario.reserve_training_batch(WEIGHTS) is not None
+        execution = scenario.execute_reserved_training_step(WEIGHTS)
+        assert execution.outcome == "commit" and execution.result is not None
+        scenario.commit(execution.result, component=WEIGHTS)
+        assert scenario.committed_training_job_id == "job-1"
+        for step in (2, 3):
+            for record in _records(step):
+                scenario.records.append(record)
+            harness = scenario.prepare_training_step(HARNESS)
+            assert harness is not None
+            scenario.commit(harness, component=HARNESS)
+        first_harness = scenario.releases()[1]["release_id"]
+        assert scenario.committed_training_job_id == "job-1"
+        scenario.rollback(first_harness)
+        # Only the harness changed: the weights job's commit still stands.
+        assert scenario.committed_training_job_id == "job-1"
+        assert not scenario.committed_training_without_job_id
+    finally:
         dispatcher.close()
 
 

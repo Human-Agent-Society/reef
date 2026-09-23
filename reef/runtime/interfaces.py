@@ -650,6 +650,11 @@ class TrainingRuntime(ABC):
     def reject_candidate(self, candidate: ModelCandidate, decision: SelectionDecision) -> None:
         """Finish a rejected training candidate."""
 
+    @property
+    def supports_checkpoint_restore(self) -> bool:
+        """Whether :meth:`restore_checkpoint` can run; a rollback of the weights needs it."""
+        return False
+
     def restore_checkpoint(self, artifact: Artifact) -> None:
         """Restore training weights and optimizer state, without touching inference."""
         raise ReefError(f"{type(self).__name__} does not support training checkpoint restore")

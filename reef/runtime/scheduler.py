@@ -408,17 +408,25 @@ class InferenceMemory:
 
 
 def training_job_id(payload: Mapping[str, Any]) -> str:
-    """Preserve the retry-stable identity of the shared training payload.
-
-    The identity is the batch and its admission fence, never the scenario step:
-    the other components of a composite advance that step while a job is out,
-    and the retry of the same batch must replay the job, not conflict with it.
-    """
+    """Preserve the retry-stable identity of the shared training payload: its batch and admission fence."""
     identity = dict(payload)
     identity.pop("max_staleness", None)
+    # The other components of a composite advance the scenario step while a job is out; its retry must replay.
     identity.pop("rollout_id", None)
+    # The processor numbers batches per process; a reload numbers the same rows again.
+    identity.pop("batch_id", None)
     if uses_staleness_admission(payload):
         # A newer admission fence on retry must not repeat an optimizer step.
+        identity.pop("expected_runtime_load_id", None)
+    encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def legacy_training_job_id(payload: Mapping[str, Any], rollout_id: int) -> str:
+    """The identity an earlier build wrote into its job marker: the payload with the scenario step in it."""
+    identity = {**payload, "rollout_id": rollout_id}
+    identity.pop("max_staleness", None)
+    if uses_staleness_admission(payload):
         identity.pop("expected_runtime_load_id", None)
     encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
@@ -471,6 +479,11 @@ class TrainingExecution:
         if self._store is None:
             raise RuntimeError("training job checkpoint path is not configured")
         marker = self._store.read()
+        if marker is not None and marker["job_id"] != job_id:
+            # A marker an earlier build wrote names the same batch by the step it ran at.
+            legacy = legacy_training_job_id(payload, marker.get("scenario_step", marker["rollout_id"]))
+            if marker["job_id"] == legacy:
+                job_id = legacy
         disposition = marker_disposition(marker, job_id)
         if disposition == "conflict":
             if marker is None:

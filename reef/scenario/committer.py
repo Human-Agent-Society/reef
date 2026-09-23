@@ -244,7 +244,30 @@ class ScenarioCommitter:
         if len(self._trainers) == 1:
             return record.step == self._step
         records = self._store.history() if self._store.durable else ()
-        return all(later.operation == "training" for later in records if later.step > record.step)
+        return all(
+            later.operation == "training" or self.leaves_component(later, record)
+            for later in records
+            if later.step > record.step
+        )
+
+    def recorded_rollback_restored_weights(self, recorded: CommitRecord) -> bool:
+        """Whether the attempt that wrote ``recorded`` restored the loaded component, so its retry reopens admission."""
+        loaded = self._binding.surface.loader_component
+        if loaded is None:
+            return False
+        previous = next((entry for entry in self._store.history() if entry.step == recorded.step - 1), None)
+        if recorded.components is None or previous is None or previous.components is None:
+            # Records without a manifest predate components: every rollback restored the weights then.
+            return True
+        # A rollback that left the weights alone paused nothing; a dispatched job may still hold admission.
+        return recorded.components.get(loaded) != previous.components.get(loaded)
+
+    @staticmethod
+    def leaves_component(later: CommitRecord, record: CommitRecord) -> bool:
+        """Whether ``later`` (a rollback or promote) carried ``record``'s component forward unchanged."""
+        if record.component is None or later.components is None or record.components is None:
+            return False
+        return later.components.get(record.component) == record.components.get(record.component)
 
     def _release_manifest(self, artifact: Artifact) -> ReleaseComponents:
         """The manifest a release carries: its own, or the one-component manifest a flat release implies."""
@@ -358,7 +381,8 @@ class ScenarioCommitter:
                 recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
                 self._reconcile_recorded_artifact(recorded)
                 self._settle_trainer_commit(prepared, recorded, next_step, self._trainer)
-                self._resume_restored_weights()
+                if self.recorded_rollback_restored_weights(recorded):
+                    self._resume_restored_weights()
                 return recorded.artifact_ref
             if self._store.durable:
                 self._synchronize_checkpoint()
@@ -391,6 +415,12 @@ class ScenarioCommitter:
                 if self._binding.training_runtime is not None and loaded_component is not None and restore_weights:
                     if self._binding.runtime is None:
                         raise ReefError("training checkpoint restore requires an inference runtime")
+                    if not self._binding.training_runtime.supports_checkpoint_restore:
+                        # Refused before admission closes: nothing here can put the weights back.
+                        raise ReleaseNotRestorable(
+                            f"scenario {self._name!r}: {type(self._binding.training_runtime).__name__} cannot "
+                            f"restore training weights, so release {release_id!r} cannot be served again"
+                        )
                     self._binding.runtime.pause_admission()
                     self._binding.training_runtime.restore_checkpoint(
                         surface.component_artifact(source, loaded_component)

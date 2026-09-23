@@ -1907,7 +1907,8 @@ def test_slime_preparation_shuffle_is_deterministic_per_batch_and_keeps_groups_c
     other = _build_payload(_grouped_batch(8, 2, "b-2"), "pg", tuple(range(16)), scheduling)
 
     assert first == again
-    assert first["samples"] != other["samples"]
+    # The order follows the rows, not the batch number a reload starts again: a retry replays the same job.
+    assert other["samples"] == first["samples"]
     names = [row[0] for row in first["samples"]]
     assert names != [
         row[0]

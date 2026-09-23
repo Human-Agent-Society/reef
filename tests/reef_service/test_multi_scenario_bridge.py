@@ -263,6 +263,26 @@ def _local_ray_get(monkeypatch):
 
 
 @pytest.mark.unit
+def test_a_restart_after_a_rejected_job_brings_that_scenario_back_from_its_history(tmp_path, _local_ray_get) -> None:
+    version = _EngineVersion(0)
+    actor, _, _, _ = _actor(tmp_path, version)
+    assert _run(actor, _job("a", 0, "inc:0")).outcome == "complete"  # a serves inc:1
+    assert _run(actor, _job("b", 0, "inc:1")).outcome == "complete"  # b serves inc:2
+    checkpoint = actor.execute_training_job(_job("a", 1, "inc:2"))
+    assert checkpoint.outcome == "checkpoint"
+    actor.reject_training_candidate(checkpoint.training_job_id)
+    assert actor.health()["training_job"]["status"] == "REJECTED"
+
+    restarted, group2, _, _ = _actor(tmp_path, _EngineVersion(2), start_rollout_id=3)
+    after = restarted.health()
+    # Routing still names a's committed adapter, so the engine holds it again.
+    assert after["lora_adapters"]["a"]["adapter"] == scenario_adapter_name("a", "inc:1")
+    assert ("a", scenario_adapter_name("a", "inc:1")) in group2.published
+    assert ("b", scenario_adapter_name("b", "inc:2")) in group2.published
+    assert set(after["adapter_residency"]["scenarios"]) == {"a", "b"}
+
+
+@pytest.mark.unit
 def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, _local_ray_get) -> None:
     # A LoRA bridge that never trained publishes nothing at startup; every
     # training publication advances the engine version by one.
