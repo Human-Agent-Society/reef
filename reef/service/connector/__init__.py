@@ -349,6 +349,7 @@ def main(argv: list[str] | None = None) -> None:
             if args.serve is not None:
                 print(f"Starting Reef at {reef_url}. Logs: {directory / 'serve.log'}", flush=True)
             if args.foreground:
+                print(f"Connected {config['name']}. Open {platform_url}/local", flush=True)
                 with state.lock():
                     (directory / "connector.pid").write_text(str(os.getpid()))
                     asyncio.run(run_connector(config, state))

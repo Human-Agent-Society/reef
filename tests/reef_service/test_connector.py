@@ -448,6 +448,74 @@ def test_background_cli_stops_restarts_without_pairing_and_exits_on_revocation(t
     asyncio.run(run())
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process lifecycle")
+def test_foreground_cli_says_it_connected_once_the_pairing_is_approved(tmp_path):
+    """The foreground connector prints the line the background one prints, while it keeps running."""
+
+    async def run():
+        polled = asyncio.Event()
+
+        async def handler(request):
+            if request.path == "/api/connector/pair":
+                if request.method == "POST":
+                    return web.json_response(
+                        {
+                            "device_token": "foreground-test-token",
+                            "user_code": "ABCD-EF12-3456",
+                            "verification_uri": str(server.make_url("/local/authorize")),
+                            "expires_in": 60,
+                        }
+                    )
+                return web.json_response({"status": "approved", "runtime_id": "runtime-id"})
+            if request.path == "/api/connector/poll":
+                polled.set()
+                return web.json_response({"protocol": 1, "command": None})
+            if request.path == "/reef/scenarios":
+                return web.json_response({"scenarios": [{"scenario": "original"}]})
+            return web.json_response({"scenarios": {"original": {"training_mode": "manual"}}})
+
+        app = web.Application()
+        app.router.add_route("*", "/{path:.*}", handler)
+        async with TestServer(app) as server:
+            platform_url = str(server.make_url("")).rstrip("/")
+            process = await asyncio.create_subprocess_exec(
+                sys.executable,
+                "-m",
+                "reef.cli",
+                "connect",
+                "--no-browser",
+                "--foreground",
+                "--name",
+                "workstation",
+                "--platform",
+                platform_url,
+                "--url",
+                platform_url,
+                "--state-dir",
+                str(tmp_path),
+                cwd=Path(__file__).resolve().parents[2],
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                lines = []
+                while not lines or not lines[-1].startswith("Connected"):
+                    line = await asyncio.wait_for(process.stdout.readline(), 15)
+                    assert line, "the connector exited before it said it connected"
+                    lines.append(line.decode().rstrip("\n"))
+                assert lines[-1] == f"Connected workstation. Open {platform_url}/local"
+                # The connector is running: it polls after it said so, and stops cleanly on SIGTERM.
+                await asyncio.wait_for(polled.wait(), 15)
+                assert process.returncode is None
+            finally:
+                if process.returncode is None:
+                    process.send_signal(signal.SIGTERM)
+                _, stderr = await asyncio.wait_for(process.communicate(), 15)
+        assert process.returncode == 0, stderr.decode()
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize(
     ("url", "arguments"),
     [
