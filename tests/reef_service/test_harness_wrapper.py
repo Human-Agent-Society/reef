@@ -2591,6 +2591,24 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
 
 
 @pytest.mark.unit
+def test_claude_session_runs_with_the_autoupdater_off_unless_the_shell_sets_it(tmp_path) -> None:
+    """Claude Code's updater runs ``npm install --global`` and replaces the person's own claude, so a reef-claude
+    session gets ``DISABLE_AUTOUPDATER=1``; a value the shell sets reaches the agent unchanged."""
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    (compose / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}) + "\n")
+    binary = _make_env_dump_binary(tmp_path)
+    env = {key: value for key, value in os.environ.items() if key != "DISABLE_AUTOUPDATER"}
+    env["REEF_HARNESS_CAPTURES_DIR"] = str(tmp_path)
+    seen = []
+    for shell in ({}, {"DISABLE_AUTOUPDATER": "0"}):
+        with patch.dict(os.environ, {**env, **shell}, clear=True), contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", ["-p", "hi"])
+        seen.append(json.loads((tmp_path / "env.json").read_text()).get("DISABLE_AUTOUPDATER"))
+    assert seen == ["1", "0"]
+
+
+@pytest.mark.unit
 def test_main_dispatches_the_setup_forms_and_update(tmp_path) -> None:
     called: list[tuple[str, tuple, dict]] = []
 
