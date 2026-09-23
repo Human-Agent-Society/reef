@@ -3,15 +3,19 @@
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import io
 import json
 import os
 import re
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import urllib.error
 import uuid
 from pathlib import Path
@@ -1064,6 +1068,101 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
         data = json.loads(captures_file.read_text())
         assert [t["receipt"] for t in data["turns"]] == [receipt_id]
     server.shutdown()
+
+
+def _make_waiting_pi(tmp_path: Path) -> Path:
+    """A fake pi that makes one call through the proxy, notes its agent directory, then waits for a signal and notes
+    which one came."""
+    binary = tmp_path / "fake-waiting-pi"
+    binary.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import json, os, signal, sys, time, urllib.request
+            from pathlib import Path
+            here = Path(__file__).parent
+            agent_dir = Path(os.environ["PI_CODING_AGENT_DIR"])
+            base_url = list(json.loads((agent_dir / "models.json").read_text())["providers"].values())[0]["baseUrl"]
+            request = urllib.request.Request(
+                f"{base_url}/chat/completions", data=b'{"messages": []}', headers={"Content-Type": "application/json"}
+            )
+            urllib.request.urlopen(request, timeout=5).read()
+            def note(signum, frame):
+                (here / "signal").write_text(str(signum))
+                sys.exit(0)
+            signal.signal(signal.SIGHUP, note)
+            signal.signal(signal.SIGTERM, note)
+            (here / "agent.json").write_text(json.dumps({"dir": str(agent_dir)}))
+            while True:
+                time.sleep(0.05)
+            """
+        )
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+def _start_wrapper(tmp_path: Path, binary: Path, compose: str, captures: Path, preexec_fn=None) -> subprocess.Popen:
+    """``run_agent`` in a process of its own, as ``reef-pi`` runs it, once the agent is up and waiting."""
+    repo_root = str(Path(__file__).resolve().parents[2])
+    env = {
+        **os.environ,
+        "REEF_HARNESS_CAPTURES_DIR": str(captures),
+        "PYTHONPATH": os.pathsep.join(filter(None, (repo_root, os.environ.get("PYTHONPATH", "")))),
+    }
+    code = "import sys; from reef.harness.client.wrapper import run_agent; run_agent(*sys.argv[1:6], ['-p', 'hi'])"
+    wrapper = subprocess.Popen(
+        [sys.executable, "-c", code, str(binary), compose, "sig-scenario", "pi", "PI_CODING_AGENT_DIR"],
+        env=env,
+        preexec_fn=preexec_fn,
+    )
+    deadline = time.monotonic() + 30
+    while not (tmp_path / "agent.json").exists():
+        assert wrapper.poll() is None and time.monotonic() < deadline, "the fake agent never started"
+        time.sleep(0.05)
+    return wrapper
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
+def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cleans_up(tmp_path, signum) -> None:
+    """SIGHUP (the terminal closed) or SIGTERM at the wrapper goes on to the agent; once the agent exits the
+    wrapper removes the temp copy, whose binding holds the token, spools the receipts, and exits 128 plus the
+    signal number."""
+    reef = _FakeReef({})
+    compose = _make_compose(tmp_path, reef.port)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    wrapper = _start_wrapper(tmp_path, _make_waiting_pi(tmp_path), compose, captures)
+    temp = Path(json.loads((tmp_path / "agent.json").read_text())["dir"])
+    assert temp.is_dir() and temp.name.startswith("reef-harness-")
+    os.kill(wrapper.pid, signum)
+    assert wrapper.wait(timeout=30) == 128 + signum
+    reef.close()
+    assert (tmp_path / "signal").read_text() == str(int(signum))
+    assert not temp.exists()
+    (spooled,) = captures.glob("*.pending.json")
+    assert [turn["receipt"] for turn in json.loads(spooled.read_text())["turns"]] == ["ask-receipt"]
+
+
+@pytest.mark.unit
+def test_a_hangup_the_caller_ignores_stays_ignored(tmp_path) -> None:
+    """Under nohup SIGHUP is ignored, and the wrapper keeps it that way for itself and the agent."""
+    reef = _FakeReef({})
+    compose = _make_compose(tmp_path, reef.port)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    ignored = functools.partial(signal.signal, signal.SIGHUP, signal.SIG_IGN)
+    wrapper = _start_wrapper(tmp_path, _make_waiting_pi(tmp_path), compose, captures, preexec_fn=ignored)
+    temp = Path(json.loads((tmp_path / "agent.json").read_text())["dir"])
+    os.kill(wrapper.pid, signal.SIGHUP)
+    with pytest.raises(subprocess.TimeoutExpired):
+        wrapper.wait(timeout=1)
+    assert not (tmp_path / "signal").exists()
+    os.kill(wrapper.pid, signal.SIGTERM)
+    assert wrapper.wait(timeout=30) == 128 + signal.SIGTERM
+    reef.close()
+    assert not temp.exists()
 
 
 # -- reef-<adapter> harness: submit native manual training ---------------------

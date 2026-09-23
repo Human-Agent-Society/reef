@@ -19,6 +19,11 @@ refused first of all, before the binary is installed or a directory is
 made, with the setup list and the release that installs on a machine with
 nothing set up as the message; the refusal needs python3 only. Rerunning when everything already matches
 writes nothing at all, not even the release file, and says "already current".
+Last, the script records what it wrote in ``~/.reef/installs``, outside the
+install root: the sha256 of each composition, binding and wrapper file, the
+release file's checksum without its check offs, and the address the script
+was served from. ``reef-<adapter>`` refuses to start a session while one of
+those files differs from the record.
 The interpreter is decided once: the python3 the installing shell resolves,
 followed through to the interpreter behind it and pinned by absolute path
 into the wrapper, so a later shell with another python3 on PATH runs the one
@@ -318,6 +323,46 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
 TOKEN_PLACEHOLDER = "__REEF_TOKEN__"
 
 
+def _install_record_lines(wrapper_name: str, written: Sequence[str]) -> list[str]:
+    """Record what this install wrote in ``~/.reef/installs``, where ``reef-<adapter>`` reads it before a session.
+
+    The record names the install root, the address the script was served
+    from (``$SERVICE_URL``), the release file's checksum without its check
+    offs (``$RELEASE_FILE_CHECKSUM``) and the sha256 of every file in
+    ``written``, taken after the binding and the wrapper are on disk. It is
+    kept outside the install root, which may sit in a project a session can
+    write, and rewritten only when it changed."""
+    return [
+        "",
+        f"# What this install wrote, recorded outside the install root: {wrapper_name} refuses to start a session once",
+        "# one of these files changed, and a session that can write the tree cannot change the record.",
+        f'"$PYTHON" - "$DEST" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" {" ".join(_single_quoted(path) for path in written)} <<\'REEF_INSTALL_RECORD_EOF\'',
+        "import hashlib, json, os, sys",
+        "root, service_url, release_file = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3]",
+        "files = {}",
+        "for relative in sys.argv[4:]:",
+        '    with open(os.path.join(root, relative), "rb") as handle:',
+        "        files[relative] = hashlib.sha256(handle.read()).hexdigest()",
+        'record = {"install_root": root, "service_url": service_url or None, "release_file": release_file, "files": files}',
+        'text = json.dumps(record, indent=2) + "\\n"',
+        'path = os.path.join(os.path.expanduser("~"), ".reef", "installs", hashlib.sha256(root.encode("utf-8")).hexdigest() + ".json")',
+        "try:",
+        '    with open(path, encoding="utf-8") as handle:',
+        "        current = handle.read()",
+        "except OSError:",
+        "    current = None",
+        "if current != text:",
+        "    try:",
+        "        os.makedirs(os.path.dirname(path), exist_ok=True)",
+        '        with open(path + ".part", "w", encoding="utf-8") as handle:',
+        "            handle.write(text)",
+        '        os.replace(path + ".part", path)',
+        "    except OSError as exc:",
+        '        sys.exit("reef: cannot record what the install wrote in " + path + ": " + str(exc))',
+        "REEF_INSTALL_RECORD_EOF",
+    ]
+
+
 def _spinner_lines() -> list[str]:
     """``spin LABEL CMD...``: run a slow step with a spinner on a terminal, or one static line elsewhere.
 
@@ -461,6 +506,7 @@ def render_install_script(
     binding_files: Mapping[str, str] | None = None,
     requires: Sequence[Mapping[str, Any]] = (),
     fallback_release_id: str | None = None,
+    service_url: str | None = None,
 ) -> str:
     """The complete install script for one adapter and one served manifest.
 
@@ -477,7 +523,9 @@ def render_install_script(
     off in the release file on disk, naming ``fallback_release_id`` (the newest
     release in the chain that requires nothing) as the one to install on a
     machine with nothing set up, and records the list in the release file it
-    writes. Raises ``DescriptorError`` when the descriptor declares no
+    writes. ``service_url`` is the address the script was served from; the
+    install record keeps it, so the wrapper reaches Reef there even after a
+    session changed the binding. Raises ``DescriptorError`` when the descriptor declares no
     install section and ``ValueError`` when a composition path is absolute
     or escapes the destination through a ``..`` part, the same rule the
     stdlib client pull applies to served paths, or when an item of
@@ -536,6 +584,7 @@ def render_install_script(
         f'RELEASE_FILE_CHECKSUM="{release_info_checksum}"',
         f"REQUIRES={_single_quoted(json.dumps(items))}",
         f"FALLBACK={_single_quoted(fallback_release_id or '')}",
+        f"SERVICE_URL={_single_quoted(service_url or '')}",
         "",
         "if command -v sha256sum >/dev/null 2>&1; then",
         "    sha256() { sha256sum | cut -d' ' -f1; }",
@@ -603,6 +652,8 @@ def render_install_script(
         "            while IFS= read -r old; do",
         '                case "$old" in',
         f"                    {keep}) ;;",
+        "                    # A listed path that leaves the destination is never removed: a session can write this file.",
+        "                    /*|..|../*|*/..|*/../*) ;;",
         '                    *) rm -f "$DEST/$old" ;;',
         "                esac",
         "            done",
@@ -620,6 +671,7 @@ def render_install_script(
         "",
         *_wrapper_lines(descriptor, env_var, compose_dir, release_id, scenario),
         *_binding_lines(bindings),
+        *_install_record_lines(wrapper_name, sorted({*ordered, *bindings, wrapper_name})),
         "",
         'echo "reef: done"',
         f'echo "run:     $DEST/{wrapper_name}"',

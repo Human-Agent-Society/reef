@@ -399,7 +399,8 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
     """A reef-<adapter> run keeps what the binary's resume and first-run setup read in the installed tree."""
     kept = {name: get_adapter(name).client_state for name in ("pi", "claude", "codex", "hermes", "dsh")}
     assert kept == {
-        "pi": (ClientState("pi-agent/sessions", "directory"),),
+        # pi writes settings.json in place at its first interactive start (lastChangelogVersion).
+        "pi": (ClientState("pi-agent/sessions", "directory"), ClientState("pi-agent/settings.json", "file")),
         "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
         "codex": (ClientState("codex/sessions", "directory"),),
         "hermes": (ClientState("hermes/state.db", "sqlite"),),

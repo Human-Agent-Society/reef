@@ -528,7 +528,9 @@ Harness artifacts
 |                                | binding at the address the request reached (a gateway in      |
 |                                | front names it in ``x-forwarded-host`` and                    |
 |                                | ``x-forwarded-proto``), the token filled from ``REEF_TOKEN``  |
-|                                | when the script runs                                          |
+|                                | when the script runs; it records the sha256 of each file it   |
+|                                | wrote and that address in ``~/.reef/installs``, which the     |
+|                                | ``reef-<adapter>`` wrapper checks before a session starts     |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
