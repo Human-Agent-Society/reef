@@ -825,7 +825,8 @@ def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp
 @pytest.mark.parametrize("adapter", ["pi", "opencode", "claude", "codex", "dsh", "hermes", "native"])
 def test_wrapper_reads_and_rewrites_every_adapters_binding_from_its_descriptor(tmp_path, adapter) -> None:
     """The descriptor names where the binding renders Reef's address; the wrapper reads it back from the
-    installed tree and the temp copy equals a fresh render at the proxy, byte for byte, with the tree untouched."""
+    installed tree and the temp copy equals a fresh render at the proxy, byte for byte, with the tree untouched,
+    in every dialect the tree may be installed with (pi and dsh bind anthropic without the /v1 openai adds)."""
     from pathlib import PurePosixPath
 
     from reef.harness.adapters import get_adapter
@@ -834,26 +835,26 @@ def test_wrapper_reads_and_rewrites_every_adapters_binding_from_its_descriptor(t
     from reef.harness.tree.render import render_composition
 
     descriptor = get_adapter(adapter)
-    api = next(iter(descriptor.model_binding))
-    reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key="dummy", api=api)
-    files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
-    root = tmp_path / "tree"
-    for relative, text in files.items():
-        (root / relative).parent.mkdir(parents=True, exist_ok=True)
-        (root / relative).write_text(text, encoding="utf-8")
-    _, subdir = descriptor.compose_relocation()
-    compose = root / subdir
+    for api in descriptor.model_binding:
+        reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key="dummy", api=api)
+        files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
+        root = tmp_path / api
+        for relative, text in files.items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text, encoding="utf-8")
+        _, subdir = descriptor.compose_relocation()
+        compose = root / subdir
 
-    assert _extract_reef_url(adapter, compose) == "http://127.0.0.1:8900"
-    temp = Path(_create_temp_composition(adapter, str(compose), 41234))
-    proxied = ModelBinding(base_url="http://127.0.0.1:41234", model="qwen3-8b", api_key="dummy", api=api)
-    expected = render_composition([("rules", {"text": "Be brief."}), *proxied.compose_nodes(descriptor)], descriptor)
-    for relative, text in expected.items():
-        assert (temp / PurePosixPath(relative).relative_to(subdir)).read_text(encoding="utf-8") == text
-    # The installed tree keeps Reef's address: only the temp copy was rewritten.
-    for relative, text in files.items():
-        assert (root / relative).read_text(encoding="utf-8") == text
-    shutil.rmtree(temp)
+        assert _extract_reef_url(adapter, compose) == "http://127.0.0.1:8900"
+        temp = Path(_create_temp_composition(adapter, str(compose), 41234))
+        proxied = ModelBinding(base_url="http://127.0.0.1:41234", model="qwen3-8b", api_key="dummy", api=api)
+        nodes = [("rules", {"text": "Be brief."}), *proxied.compose_nodes(descriptor)]
+        for relative, text in render_composition(nodes, descriptor).items():
+            assert (temp / PurePosixPath(relative).relative_to(subdir)).read_text(encoding="utf-8") == text, api
+        # The installed tree keeps Reef's address: only the temp copy was rewritten.
+        for relative, text in files.items():
+            assert (root / relative).read_text(encoding="utf-8") == text
+        shutil.rmtree(temp)
 
 
 # -- the binding lookup follows the descriptor's key path, not the first URL in the file ------
@@ -921,7 +922,8 @@ def test_wrapper_picks_the_reef_provider_among_several_by_the_parent_key(tmp_pat
 
 @pytest.mark.unit
 def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) -> None:
-    """A bare origin in the tree still sends the agent to /v1 at the proxy, and a Reef behind a path prefix keeps it."""
+    """A bare origin in the tree still sends the agent to /v1 at the proxy, and a Reef behind a path prefix keeps it;
+    an entry that speaks anthropic keeps the bare origin, as that dialect's template writes it."""
     from reef.harness.client.wrapper import _create_temp_composition, _extract_reef_url
 
     compose = _pi_tree(tmp_path, {"providers": {"reef": {"baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}}})
@@ -933,6 +935,19 @@ def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) 
     shutil.rmtree(temp)
     compose = _pi_tree(tmp_path / "prefix", {"providers": {"reef": {"baseUrl": "http://gw.example/reef/v1"}}})
     assert _extract_reef_url("pi", Path(compose)) == "http://gw.example/reef"
+    # The entry's API names the dialect the tree was installed with: anthropic keeps the bare origin, openai
+    # still gets /v1, and a second provider speaking anthropic beside an openai Reef entry changes nothing.
+    other = {"api": "anthropic-messages", "baseUrl": "https://api.anthropic.com", "apiKey": "x"}
+    for api, rewritten in (
+        ("anthropic-messages", "http://127.0.0.1:41234"),
+        ("openai-completions", "http://127.0.0.1:41234/v1"),
+    ):
+        reef = {"api": api, "baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}
+        compose = _pi_tree(tmp_path / api, {"providers": {"anthropic": other, "reef": reef}})
+        assert _extract_reef_url("pi", Path(compose)) == "http://127.0.0.1:8900"
+        temp = Path(_create_temp_composition("pi", compose, 41234))
+        assert json.loads((temp / "models.json").read_text())["providers"]["reef"]["baseUrl"] == rewritten
+        shutil.rmtree(temp)
 
 
 @pytest.mark.unit
@@ -2590,10 +2605,8 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     reef.close()
 
 
-@pytest.mark.unit
-def test_dsh_run_reads_the_trees_commands_from_the_install_root(tmp_path) -> None:
-    """reef-dsh points DSH_HOME at the temp copy and DSH_AGENTS_HOME, a ``{root}`` value of ``client_env``, at the
-    installed tree's command root, where the rendered agent_commands are; a shell that sets its own keeps it."""
+def _dsh_install(tmp_path: Path) -> Path:
+    """An installed dsh tree with one agent_command, bound to a Reef that is never called."""
     from reef.harness.adapters import get_adapter
     from reef.harness.episodes.model_binding import ModelBinding
     from reef.harness.tree.render import render_composition
@@ -2605,6 +2618,14 @@ def test_dsh_run_reads_the_trees_commands_from_the_install_root(tmp_path) -> Non
     for relative, text in render_composition(nodes, descriptor).items():
         (root / relative).parent.mkdir(parents=True, exist_ok=True)
         (root / relative).write_text(text, encoding="utf-8")
+    return root
+
+
+@pytest.mark.unit
+def test_dsh_run_reads_the_trees_commands_from_the_install_root(tmp_path) -> None:
+    """reef-dsh points DSH_HOME at the temp copy and DSH_AGENTS_HOME, a ``{root}`` value of ``client_env``, at the
+    installed tree's command root, where the rendered agent_commands are; a shell that sets its own keeps it."""
+    root = _dsh_install(tmp_path)
     compose = str(root / "dsh")
     binary = _make_env_dump_binary(tmp_path)
     captures = tmp_path / "captures"
@@ -2623,6 +2644,59 @@ def test_dsh_run_reads_the_trees_commands_from_the_install_root(tmp_path) -> Non
     ):
         run_agent(str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", ["web"])
     assert json.loads((tmp_path / "env.json").read_text())["DSH_AGENTS_HOME"] == "/elsewhere/agents"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("on_interrupt", "status"), [("default", 130), ("exit", 0)])
+def test_run_agent_ends_quietly_on_ctrl_c(tmp_path, on_interrupt, status) -> None:
+    """Ctrl-C reaches the wrapper and the agent at once, as a terminal sends it to both (reef-dsh web runs
+    until then): the wrapper waits for the agent, prints no traceback, removes the temp copy, and exits with the
+    agent's status, 130 when the signal ended the agent."""
+    import signal
+    import subprocess
+    import time
+
+    compose = str(_dsh_install(tmp_path) / "dsh")
+    binary = tmp_path / "fake-dsh"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            """\
+            import json, os, signal, sys, time
+            from pathlib import Path
+            if sys.argv[1] == "exit":
+                signal.signal(signal.SIGINT, lambda *args: sys.exit(0))
+            else:
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+            Path(__file__).with_name("started.json").write_text(json.dumps({"home": os.environ["DSH_HOME"]}))
+            time.sleep(60)
+            """
+        )
+    )
+    binary.chmod(0o755)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    root = str(Path(__file__).resolve().parents[2])
+    code = f"import sys; sys.path.insert(0, {root!r}); from reef.harness.client.wrapper import run_agent; "
+    code += "run_agent(*sys.argv[1:6], sys.argv[6:])"
+    # A session of its own, so the signal reaches the wrapper and its agent and not the test runner.
+    wrapper = subprocess.Popen(
+        [sys.executable, "-c", code, str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", on_interrupt],
+        env=_ask_env(captures, compose),
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    started = tmp_path / "started.json"
+    deadline = time.monotonic() + 30
+    while not started.exists() and wrapper.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert started.exists(), wrapper.communicate(timeout=10)[1]
+    os.killpg(wrapper.pid, signal.SIGINT)
+    _, stderr = wrapper.communicate(timeout=30)
+    assert "Traceback" not in stderr and "KeyboardInterrupt" not in stderr, stderr
+    assert wrapper.returncode == status
+    assert not Path(json.loads(started.read_text())["home"]).exists()
 
 
 @pytest.mark.unit

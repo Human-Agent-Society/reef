@@ -252,6 +252,32 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
     }
 
 
+@pytest.mark.parametrize(
+    ("api", "route_api", "base_url"),
+    [
+        ("openai", "openai-completions", "http://127.0.0.1:9/v1"),
+        ("anthropic", "anthropic-messages", "http://127.0.0.1:9"),
+    ],
+)
+def test_dsh_binds_both_profiles_in_every_dialect(api, route_api, base_url) -> None:
+    """The headless and the web patch each carry the same Reef route and default model, in the dialect bound."""
+    descriptor = get_adapter("dsh")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1", api=api)
+    files = render_composition([*_dsh_nodes(), *binding.compose_nodes(descriptor)], descriptor)
+    route = {
+        "displayName": "Reef",
+        "apiKeyEnv": "REEF_API_KEY",
+        "api": route_api,
+        "baseURL": base_url,
+        "models": [{"id": "m1"}],
+    }
+    for patch_path in (DSH_PATCH, DSH_WEB_PATCH):
+        by_id = {row["id"]: row for row in yaml.safe_load(files[patch_path].replace("!!js ", "")) if "id" in row}
+        assert by_id["llm-pi-ai"]["config"] == {"providers": {"reef": route}}, patch_path
+        assert by_id["agent-default-model"]["config"] == {"provider": "reef", "model": "m1"}, patch_path
+    assert files["dsh/.env"] == "REEF_API_KEY=k-1\n"
+
+
 def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
     descriptor = get_adapter("dsh")
     with pytest.raises(RenderError, match="uncompressed"):

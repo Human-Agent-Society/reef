@@ -94,8 +94,11 @@ is named by ``apiKeyEnv`` and supplied through the ``env`` target, dsh's
 ``.env`` launch environment layer.
 
 dsh has no terminal interface a person can use, so a person runs the tree in
-the browser with ``reef-dsh web``. The ``web`` target is that profile's patch
-layer: it carries the same defaults as the headless patch (the web template
+the browser with ``reef-dsh web`` and stops it with Ctrl-C. The signal reaches
+dsh too, so the wrapper waits for dsh to exit, removes its temp copy, and
+exits with the status of dsh (130 after Ctrl-C) and no traceback. The ``web``
+target is that profile's patch layer: it carries the same defaults as the
+headless patch (the web template
 compresses its session log, and a compressed profile refuses a sessions root
 that holds plain logs), is checked the same way, and gets the model
 binding too, so the wrapper points it at its proxy. The ``web_manifest``
@@ -517,7 +520,7 @@ agent.
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted. The install script and the ``reef-<adapter>`` wrapper need one entry that relocates a directory above the primary config target with a ``{root}/<dir>`` value, the composition they write and point the binary at; ``terminus`` relocates the root itself and gets neither
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
-   model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
+   model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values. The ``reef-<adapter>`` wrapper points an installed binding at its proxy plus what the template writes after ``{base_url}`` in the dialect the tree was installed with. It tells that dialect by the values with no placeholder that the template writes beside the URL, such as the API name on pi and dsh, whose ``anthropic`` route has no ``/v1``
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
    client_env | variables the ``reef-<adapter>`` wrapper adds to a person's run and an episode never gets, such as a self-updater switch; ``{root}`` is substituted with the install root, for a directory of the installed tree outside the relocated composition. A variable the shell sets wins
    client_state | the sessions and settings the ``reef-<adapter>`` wrapper keeps in the installed tree, as ``{path, kind}`` below the relocated composition. The wrapper runs the binary on a temp copy of links that it removes afterwards, so state the binary creates there itself is lost. ``directory`` and ``sqlite`` (an empty database) are created before the run and linked; ``file`` is copied back with its mode after the run when the binary created it, or renamed a new file over its link
