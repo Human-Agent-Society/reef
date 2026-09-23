@@ -32,7 +32,7 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from reef.core.components import validate_component_name
-from reef.core.reports import ReportBase
+from reef.core.reports import ReportBase, ReportValidationError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
 from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe
@@ -49,6 +49,23 @@ from reef.train.trainer import ComponentTrainer
 CHECKPOINT_CADENCE_KEY = "checkpoint_every_n_versions"
 #: Metric prefixes experiment tracking keeps for itself; a component's metrics are prefixed with its name.
 RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
+
+
+def any_component_report(report_types: tuple[type[ReportBase], ...]) -> type[ReportBase]:
+    """A report contract a payload meets when any of ``report_types`` parses it; the refusal names each."""
+
+    class ComponentReport(ReportBase):
+        @classmethod
+        def from_dict(cls, payload: Mapping[str, Any]) -> ReportBase:
+            refusals = []
+            for report_type in report_types:
+                try:
+                    return report_type.from_dict(payload)
+                except ReportValidationError as exc:
+                    refusals.append(f"{report_type.__name__}: {exc}")
+            raise ReportValidationError("no component accepts this report: " + "; ".join(refusals))
+
+    return ComponentReport
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -199,13 +216,23 @@ class CompositeRecipe(Recipe):
 
     @property
     def report_type(self) -> type[ReportBase] | None:
-        """The one report contract the components agree on; ``None`` keeps ingress open."""
-        declared = {recipe.report_type for recipe in self.components.values() if recipe.report_type is not None}
-        if len(declared) > 1:
-            raise RecipeConfigError(
-                f"components declare different report types {sorted(item.__name__ for item in declared)}"
-            )
-        return next(iter(declared), None)
+        """The report contract ingress checks: a report any component accepts; ``None`` keeps ingress open.
+
+        Each trainer parses reports with its own component's contract, so a
+        weights recipe with a strict report (a rollout addressed into a grid)
+        and a harness recipe with a plain scored one share a scenario: ingress
+        refuses only a report no component would take.
+        """
+        declared: list[type[ReportBase]] = []
+        for recipe in self.components.values():
+            report_type = recipe.report_type
+            if report_type is not None and report_type not in declared:
+                declared.append(report_type)
+        if not declared:
+            return None
+        if len(declared) == 1:
+            return declared[0]
+        return any_component_report(tuple(declared))
 
     def build_surface(self, scenario: str) -> Surface:
         """Every component's serving capabilities under its own name; one component may carry harness info."""

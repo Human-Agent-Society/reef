@@ -193,11 +193,20 @@ class Scenario:
             bound.trainer.set_training_mode(training_mode)
 
     def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
-        """Prepare one local-backend step while excluding rollback and commit."""
-        with self._committer.lock:
-            return self.trainer_for(component).run_once(
-                self.scenario_step, base_release_id=self.current_artifact_ref().release_id
-            )
+        """Prepare one local-backend step.
+
+        A lone trainer runs its step under the commit lock, excluding rollback
+        and commit. With several trainers the step runs outside it: another
+        trainer's commit lands meanwhile and the result meets it at the commit
+        boundary, where the backend's stale policy decides; a dispatched
+        trainer still reserves its batch and the status stays readable while
+        a local evaluation takes its minutes.
+        """
+        trainer = self.trainer_for(component)
+        if len(self.component_trainers) == 1:
+            with self._committer.lock:
+                return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+        return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
@@ -258,9 +267,8 @@ class Scenario:
             return record.operation == "training" and record.operation_verified and record.training_job_id is None
 
     def last_commit_for(self, component: str | None) -> CommitRecord | None:
-        """The newest durable commit made by ``component``'s trainer."""
-        with self._committer.lock:
-            return self._committer.last_record_for(component)
+        """The newest durable commit made by ``component``'s trainer, read from the log without waiting on a commit."""
+        return self._committer.last_record_for(component)
 
     def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
         """Metrics of the training step that published ``release_id``, if logged."""

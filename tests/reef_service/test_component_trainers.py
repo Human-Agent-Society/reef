@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 import time
 import uuid
 from collections.abc import Mapping
@@ -94,6 +95,20 @@ class _ComponentBackend(CandidateBackend):
 
     def abort_step(self, prepared):
         pass
+
+
+class _SlowBackend(_ComponentBackend):
+    """The same cycle whose evaluation waits for the test to let it go, as a minutes long episode run would."""
+
+    def __init__(self, component: str, artifact_dir: Path, *, stale_policy: str = "merge") -> None:
+        super().__init__(component, artifact_dir, stale_policy=stale_policy)
+        self.evaluating = threading.Event()
+        self.release = threading.Event()
+
+    def evaluate(self, candidate):
+        self.evaluating.set()
+        assert self.release.wait(30)
+        return super().evaluate(candidate)
 
 
 class _DispatchedBackend(_ComponentBackend):
@@ -311,6 +326,58 @@ def _dispatched_pair(tmp_path: Path, job_id: str = "job-1") -> dict[str, _Compon
         WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", job_id),
         HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates"),
     }
+
+
+@pytest.mark.unit
+def test_a_local_step_of_one_trainer_does_not_hold_up_the_others_or_the_status(tmp_path: Path) -> None:
+    """While the harness evaluates for minutes, the weights job still reserves and commits, and status still reads."""
+    backends = {
+        WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _SlowBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    slow = backends[HARNESS]
+    assert isinstance(slow, _SlowBackend)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        base = scenario.current_artifact_ref().release_id
+        for record in _records(1):
+            scenario.records.append(record)
+        outcome: dict[str, Any] = {}
+
+        def harness_step() -> None:
+            outcome["result"] = scenario.prepare_training_step(HARNESS)
+
+        worker = threading.Thread(target=harness_step)
+        worker.start()
+        assert slow.evaluating.wait(10)
+        # The harness step is mid evaluation: the dispatched trainer reserves, executes and commits meanwhile...
+        assert scenario.reserve_training_batch(WEIGHTS) is not None
+        execution = scenario.execute_reserved_training_step(WEIGHTS)
+        assert execution.outcome == "commit" and execution.result is not None
+        scenario.commit(execution.result, component=WEIGHTS)
+        served = scenario.current_artifact_ref().release_id
+        assert served != base
+        # ...and the status reads the record it made.
+        last = scenario.last_commit_for(WEIGHTS)
+        assert last is not None and last.step == 1
+        assert dispatcher.build_training_status()["scenarios"]["agent"]["scenario_step"] == 1
+        slow.release.set()
+        worker.join(10)
+        assert not worker.is_alive()
+        harness = outcome["result"]
+        assert harness is not None
+        # Its result was prepared against the base; it merges onto the release served now.
+        scenario.commit(harness, component=HARNESS)
+        assert scenario.releases()[0]["metrics"]["merged_onto"] == served
+        assert _component_files(scenario, scenario.current_artifact_ref()) == {
+            WEIGHTS: "weights step 1",
+            HARNESS: "harness step 1",
+        }
+    finally:
+        slow.release.set()
+        dispatcher.close()
 
 
 @pytest.mark.unit

@@ -518,6 +518,57 @@ def _serve(recipe: CompositeRecipe, tmp_path: Path) -> Dispatcher:
     )
 
 
+@dataclass(frozen=True)
+class _GridTreeRecipe(_TreeRecipe):
+    """The same tree recipe, consuming rollouts addressed into a TTT-Discover grid."""
+
+    @property
+    def report_type(self) -> type[ScoredRolloutReport]:
+        from recipes.tttd.report import TTTDGroupedRolloutReport
+
+        return TTTDGroupedRolloutReport
+
+
+@pytest.mark.unit
+def test_components_with_different_report_contracts_admit_what_any_of_them_accepts(tmp_path: Path) -> None:
+    """A weights recipe's grid report and a harness recipe's scored report share one scenario's ingress."""
+    from recipes.tttd.report import TTTDGroupedRolloutReport
+
+    recipe = CompositeRecipe(
+        components={
+            "weights": _GridTreeRecipe(label="weights", artifact_dir=tmp_path / "w"),
+            "harness": _ScoredTreeRecipe(label="harness", artifact_dir=tmp_path / "h", seed={"AGENTS.md": "seed"}),
+        }
+    )
+    report_type = recipe.report_type
+    assert report_type is not None
+    plain = {"score": 1.0, "references": ["i1"]}
+    grid = {
+        "score": 1.0,
+        "references": ["i1"],
+        "metadata": {
+            "algorithm": "tttd",
+            "step": 0,
+            "group": 0,
+            "rollout": 1,
+            "groups_per_step": 1,
+            "rollouts_per_group": 4,
+        },
+    }
+    assert isinstance(report_type.from_dict(plain), ScoredRolloutReport)
+    assert isinstance(report_type.from_dict(grid), TTTDGroupedRolloutReport)
+    with pytest.raises(ReportValidationError, match=r"TTTDGroupedRolloutReport.*ScoredRolloutReport"):
+        report_type.from_dict({"references": ["i1"]})
+    # Two components with the same contract keep it as is.
+    same = CompositeRecipe(
+        components={
+            "a": _ScoredTreeRecipe(label="a", artifact_dir=tmp_path / "a", seed={"AGENTS.md": "seed"}),
+            "b": _ConfigRecipe(),
+        }
+    )
+    assert same.report_type is ScoredRolloutReport
+
+
 @pytest.mark.unit
 def test_composite_scenario_enforces_the_agreed_report_type_whatever_the_component_order(tmp_path: Path) -> None:
     # The component with no report contract is listed first; the harness contract still guards ingress.

@@ -431,5 +431,21 @@ def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path
     assert binding.api_key == "reef-local" and binding.model == "qwen3-8b"
     assert served.model_binding().base_url == "http://upstream.test"
     assert served._backend_kwargs("agent")["on_stale"] == "reevaluate"
+    # A scenario with its own model binds through the same route, whether resolved at build or at every step.
+    from reef.inference.model_config import ModelConfig
+    from reef.recipe.cordis import _ScenarioModels
+
+    configured = served.with_model_config(ModelConfig())
+    assert (
+        configured.model_bindings("agent").served.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
+    )
+    assert _ScenarioModels(ModelConfig(), configured, "agent").resolve().served.base_url.endswith("/agent/evaluation")
+    overridden = configured.with_model_config(
+        ModelConfig.from_value({"url": "http://other.test", "model": "other-model", "api_key": "k"})
+    )
+    resolved = overridden.model_bindings("agent").served
+    assert resolved.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
+    assert resolved.model == "other-model" and resolved.api_key == "reef-local"
+    assert overridden.model_bindings().served.base_url == "http://other.test"
     with pytest.raises(RecipeConfigError, match=r"evolution\.on_stale must be one of"):
         CordisRecipe.from_environment({}, config={**config, "evolution": {**config["evolution"], "on_stale": "later"}})

@@ -364,10 +364,10 @@ class ModelBindings(Mapping[str, ModelBinding]):
 
 
 class ModelBindingsResolver(ABC):
-    """Freeze the model configuration once for an entire evolution step."""
+    """Freeze the model configuration once for an entire evolution step, for the scenario named."""
 
     @abstractmethod
-    def resolve(self) -> ModelBindings: ...
+    def resolve(self, scenario: str | None = None) -> ModelBindings: ...
 
 
 def _mentions_model(value: Any) -> bool:

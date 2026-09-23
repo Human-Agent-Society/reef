@@ -136,12 +136,16 @@ def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[E
 class _ScenarioModels(ModelBindingsResolver):
     config: ModelConfig
     recipe: CordisRecipe
+    #: The scenario the bindings serve; a call naming none resolves for it.
+    scenario: str | None = None
 
-    def resolve(self) -> ModelBindings:
+    def resolve(self, scenario: str | None = None) -> ModelBindings:
+        scenario = self.scenario if scenario is None else scenario
         runtime = self.config.runtime
         if runtime is None:
-            return self.recipe.default_model_bindings()
-        served = ModelBinding.from_runtime(runtime)
+            return self.recipe.default_model_bindings(scenario)
+        # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
+        served = self.recipe.served_through_service(ModelBinding.from_runtime(runtime), scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
 
 
@@ -655,6 +659,10 @@ class CordisRecipe(Recipe):
             binding = ModelBinding.from_runtime(self.runtime, model=self.model_name)
         except ValueError as exc:
             raise RecipeConfigError(str(exc)) from exc
+        return self.served_through_service(binding, scenario)
+
+    def served_through_service(self, binding: ModelBinding, scenario: str | None) -> ModelBinding:
+        """``binding`` routed through this Reef's evaluation route for ``scenario``, when the service is known."""
         if self.served_endpoint is None or scenario is None:
             return binding
         return replace(
@@ -669,7 +677,7 @@ class CordisRecipe(Recipe):
     def model_bindings(self, scenario: str | None = None) -> ModelBindings:
         """The scenario's model override, or the recipe's served and named models."""
         if self.scenario_model is not None:
-            return _ScenarioModels(self.scenario_model, self).resolve()
+            return _ScenarioModels(self.scenario_model, self).resolve(scenario)
         return self.default_model_bindings(scenario)
 
     def build_surface(self, scenario: str) -> Surface:
@@ -718,7 +726,8 @@ class CordisRecipe(Recipe):
     ) -> Trainer:
         kwargs = self._backend_kwargs(scenario)
         if self.scenario_model is not None:
-            kwargs["model_resolver"] = _ScenarioModels(self.scenario_model, self)
+            # Frozen again at every step, for this scenario: the bindings then follow the service's route.
+            kwargs["model_resolver"] = _ScenarioModels(self.scenario_model, self, scenario)
         # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
         # so the path a commit record names resolves from any working directory.
         if kwargs["step_record_dir"] is not None:
