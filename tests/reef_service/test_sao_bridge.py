@@ -577,6 +577,22 @@ def test_prepare_critic_args_keeps_the_custom_advantage_path_and_pins_lambda() -
 
 
 @pytest.mark.unit
+def test_prepare_critic_args_disables_reference_kl_before_actor_pass() -> None:
+    from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
+    from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
+
+    args = critic_prep_args(kl_coef=0.1, adaptive_kl_mode="reward")
+    configure_megatron_runtime(args)
+    critic_args = prepare_critic_args(args)
+
+    # The critic runs first and cannot consume the actor reference log probs yet.
+    # The actor restores the original coefficient for the reward-side KL pass.
+    assert critic_args.kl_coef == 0.0
+    assert critic_args.adaptive_kl_mode == "off"
+    assert args.kl_coef == 0.1
+
+
+@pytest.mark.unit
 def test_prepare_critic_args_starts_the_critic_from_an_init_checkpoint_until_it_has_its_own(tmp_path) -> None:
     from reef.train.slime_backend.reef_adapters.preflight import configure_megatron_runtime
     from reef.train.slime_backend.reef_adapters.ray_train_groups import prepare_critic_args
