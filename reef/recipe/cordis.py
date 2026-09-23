@@ -663,15 +663,19 @@ class CordisRecipe(Recipe):
         return self.served_through_service(binding, scenario)
 
     def served_through_service(self, binding: ModelBinding, scenario: str | None) -> ModelBinding:
-        """``binding`` routed through this Reef's evaluation route for ``scenario``, when the service is known."""
+        """``binding`` routed through this Reef's evaluation route for ``scenario``, when the service is known.
+
+        A component of a composed release names itself in the route, so the
+        release's hooks for the component a candidate replaces stay out.
+        """
         if self.served_endpoint is None or scenario is None:
             return binding
-        return replace(
-            binding,
-            # The name is free form: quoted as the wrapper quotes it, so a slash or a space stays one segment.
-            base_url=f"{self.served_endpoint.url}/reef/scenarios/{quote(scenario, safe='')}/evaluation",
-            api_key=self.served_endpoint.token,
-        )
+        # The name is free form: quoted as the wrapper quotes it, so a slash or a space stays one segment.
+        route = f"{self.served_endpoint.url}/reef/scenarios/{quote(scenario, safe='')}"
+        component = self.served_endpoint.component
+        if component is not None:
+            route += f"/components/{quote(component, safe='')}"
+        return replace(binding, base_url=f"{route}/evaluation", api_key=self.served_endpoint.token)
 
     def default_model_bindings(self, scenario: str | None = None) -> ModelBindings:
         return ModelBindings(served=self.model_binding(scenario), named=dict(self.models))

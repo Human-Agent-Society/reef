@@ -450,6 +450,31 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         """The consumed inferences are trained sources now: a report arriving on one is settled, not resolved."""
         self._trained_sources.update(record_id for record_id in agent_record_ids if record_id in self._inferences)
 
+    def restore_settled(self, item: AgentRecord) -> None:
+        """A row this processor settled before the crash is settled again, not resolved.
+
+        Whether a report was settled can hang on state the replay does not
+        rebuild (the slot a report a commit consumed held when a retry of it
+        arrived), so the record says it: a report is terminal again, with
+        the sources it owns, and an inference a terminal report owned stays
+        in view and owned.
+        """
+        if item.request_type is RequestType.INFERENCE:
+            self._inferences[item.agent_record_id] = item
+            self._terminal_owned_sources.add(item.agent_record_id)
+        elif item.request_type is RequestType.REPORT and item.agent_record_id not in self._seen_reports:
+            self._seen_reports.add(item.agent_record_id)
+            self._terminate(item)
+
+    def settle_retired(self, item: AgentRecord) -> None:
+        """A report whose inference a commit retired is settled as a terminal report: it never trains here, and
+        the sources it owns under the ownership rule (``_terminate``) are released with it, as they are when the
+        report is read before the retirement."""
+        if item.request_type is not RequestType.REPORT or item.agent_record_id in self._seen_reports:
+            return
+        self._seen_reports.add(item.agent_record_id)
+        self._terminate(item)
+
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         super().compaction_applied(agent_record_ids)
         # --- scalar id sets ---

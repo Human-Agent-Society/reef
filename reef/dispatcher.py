@@ -320,8 +320,10 @@ class Dispatcher:
 
         A loaded instance knows its reserved batch; the marker also covers a
         scenario whose turn failed and was rebuilt, or one not loaded yet,
-        whose job the backend still holds. A marker that names no owner
-        counts for every scenario on the runtime.
+        whose job the backend still holds. A marker that names no owner (a
+        runtime training one scenario per process names none) belongs to the
+        loaded scenario whose commit names its job; without such a commit it
+        counts for every scenario, since the job may be any registration's.
         """
         runtime = self._recipe.training_runtime
         if runtime is None:
@@ -334,13 +336,26 @@ class Dispatcher:
                 f"cannot delete scenario {scenario!r}: the training runtime does not say whether its job is out "
                 f"({self._error_text(exc)}); retry once it answers"
             ) from exc
-        if not marker_in_flight(marker):
+        if marker is None or not marker_in_flight(marker):
             return False
-        owner = marker.get("scenario") if marker is not None else None
-        if owner is None and not runtime.concurrent_training_scenarios:
-            # A runtime that trains one scenario per process names none in its marker: the bound scenario owns it.
-            owner = self._registry.training_scenario_name
+        owner = marker.get("scenario")
+        if owner is None:
+            owner = self._committed_job_owner(marker.get("training_job_id"))
         return owner is None or owner == scenario
+
+    def _committed_job_owner(self, training_job_id: object) -> str | None:
+        """The loaded scenario whose newest dispatched commit names ``training_job_id``, or ``None``.
+
+        The scenario bound to the runtime is no proof: after a restart the
+        first registration binds, whoever's job the marker holds.
+        """
+        if not isinstance(training_job_id, str) or not training_job_id:
+            return None
+        for name in self._registry.loaded_names():
+            loaded = self._registry.get_optional(name)
+            if loaded is not None and loaded.committed_training_job_id == training_job_id:
+                return name
+        return None
 
     def _archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""

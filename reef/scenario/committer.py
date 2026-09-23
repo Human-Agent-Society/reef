@@ -221,7 +221,9 @@ class ScenarioCommitter:
         """Drop ``component``'s reserved batch, retiring only rows every trainer has released."""
         with self._lock:
             bound = self._bound_trainer(component)
-            compacted = bound.trainer.reject_pending(metrics, compactable=self._compactable_for(bound.component))
+            compacted = bound.trainer.reject_pending(
+                metrics, compactable=self._compactable_for(bound.component), component=bound.component
+            )
             # Retired rows leave every trainer's memory, as after a commit.
             for other in self._trainers:
                 if other is not bound:
@@ -452,6 +454,7 @@ class ScenarioCommitter:
                         high_water_offset=prepared.high_water_offset,
                         compacted_ids=prepared.compacted_ids,
                         consumed_ids=prepared.consumed_ids,
+                        settled_ids=prepared.settled_ids,
                     ),
                     metrics=prepared.metrics,
                     training_job_id=prepared.training_job_id,
@@ -712,6 +715,7 @@ class ScenarioCommitter:
                         high_water_offset=prepared.high_water_offset,
                         compacted_ids=prepared.compacted_ids,
                         consumed_ids=prepared.consumed_ids,
+                        settled_ids=prepared.settled_ids,
                     ),
                     metrics=prepared.metrics,
                     training_job_id=prepared.training_job_id,
@@ -894,6 +898,7 @@ class ScenarioCommitter:
             and record.high_water_offset == prepared.high_water_offset
             and record.compacted_ids == prepared.compacted_ids
             and record.consumed_ids == prepared.consumed_ids
+            and record.settled_ids == prepared.settled_ids
             and record.metrics == prepared.metrics
             and record.training_job_id == prepared.training_job_id
         )
@@ -942,6 +947,7 @@ class ScenarioCommitter:
             high_water_offset=prepared.high_water_offset,
             compacted_ids=prepared.compacted_ids,
             consumed_ids=prepared.consumed_ids,
+            settled_ids=prepared.settled_ids,
             operation=operation,
             rollback_target_release_id=rollback_target_release_id,
             metrics=prepared.metrics,

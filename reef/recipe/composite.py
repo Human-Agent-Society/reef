@@ -148,9 +148,11 @@ class CompositeRecipe(Recipe):
             cls._refuse_checkpoint_cadence(component_config, f"components.{component}")
             merged = dict(component_config)
             merged.setdefault("model", dict(config.get("model", {})))
-            if configured_mode is not None and configured_training_mode(merged) is None:
-                # The composite's mode is every component's mode: a component sets its own only to disagree.
-                merged["data"] = {**(merged.get("data") or {}), "training_mode": configured_mode}
+            data = merged.get("data", {})
+            if configured_mode is not None and isinstance(data, Mapping) and configured_training_mode(merged) is None:
+                # The composite's mode is every component's mode: a component sets its own only to disagree. A data
+                # section that is not an object is left as written, for the config parser to refuse.
+                merged["data"] = {**data, "training_mode": configured_mode}
             settings = recipe_config_from_mapping(merged)
             recipe_class = recipe_class_for(settings["implementation"])
             if recipe_class is None:
@@ -220,8 +222,13 @@ class CompositeRecipe(Recipe):
             raise RecipeConfigError(f"{where}.{key} has no effect: every step of a composite recipe checkpoints")
 
     def with_served_endpoint(self, endpoint: ServedEndpoint) -> CompositeRecipe:
+        # Each component's evaluation runs a candidate of that component alone: the endpoint names it.
         return replace(
-            self, components={name: recipe.with_served_endpoint(endpoint) for name, recipe in self.components.items()}
+            self,
+            components={
+                name: recipe.with_served_endpoint(replace(endpoint, component=name))
+                for name, recipe in self.components.items()
+            },
         )
 
     def with_model_config(self, config: ModelConfig) -> CompositeRecipe:
@@ -260,7 +267,7 @@ class CompositeRecipe(Recipe):
         components: dict[str, ComponentSurface] = {}
         harness: HarnessInfo | None = None
         for component, recipe in self.components.items():
-            surface = recipe.build_surface(scenario)
+            surface = recipe.serving_surface(scenario)
             if len(surface.components) > 1:
                 raise RecipeConfigError(f"component {component!r} serves several components of its own")
             components[component] = next(iter(surface.components.values()), ComponentSurface())

@@ -33,6 +33,8 @@ class PreparedCommit:
     high_water_offset: int
     compacted_ids: frozenset[str]
     consumed_ids: frozenset[str] = frozenset()
+    #: Rows the trainer released without training that another trainer still holds, not named by an earlier record.
+    settled_ids: frozenset[str] = frozenset()
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
     #: The release the step's batch was reserved against; the committer

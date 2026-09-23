@@ -316,6 +316,18 @@ class DataProcessor:
     def consumed_restored(self, agent_record_ids: frozenset[str]) -> None:
         """The replay is over: the rows committed batches consumed are trained from now on, not live."""
 
+    def settle_retired(self, item: AgentRecord) -> None:
+        """Learn of a report whose inference another commit retired; the trainer releases it, never ingests it."""
+
+    def restore_settled(self, item: AgentRecord) -> None:
+        """Replay a row this processor released without a batch before a restart, still stored for another trainer.
+
+        The default ingests it again, so the processor derives its own
+        decision once more; a processor whose decision hangs on state the
+        replay does not rebuild settles it directly instead.
+        """
+        self.ingest(item)
+
     def derivation_pending(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.
 

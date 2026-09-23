@@ -71,16 +71,56 @@ class _RecoveredTrainerState:
     consumed_ids: frozenset[str]
     #: Each own committed step's watermark with the rows its batch consumed, in commit order.
     consumed_by_step: tuple[tuple[int, frozenset[str]], ...] = ()
+    #: The rows its records say it released without training while another trainer held them.
+    settled_ids: frozenset[str] = frozenset()
+
+
+@dataclass(frozen=True)
+class _DroppedStep:
+    """A batch a backend dropped as stale: consumed without a commit, named by its compaction receipt."""
+
+    component: str | None
+    consumed_ids: frozenset[str]
+    settled_ids: frozenset[str]
+    high_water: tuple[int, int]
+
+
+def _dropped_steps(store: ScenarioStore, scenario: str) -> tuple[_DroppedStep, ...]:
+    """The stale drops the records store's receipts name, oldest first.
+
+    A drop retires only the rows every trainer has released; the rest stay
+    stored, and without this a replay would take them for live rows and
+    reserve the dropped batch again. A receipt that names no consumed rows
+    comes from a drop that retired every row it consumed, or from an older
+    Reef: nothing of it is left to skip.
+    """
+    dropped = []
+    for receipt in store.records.compaction_receipts(scenario):
+        metadata = receipt["metadata"]
+        if not isinstance(metadata, Mapping) or metadata.get("outcome") != "stale" or "consumed_ids" not in metadata:
+            continue
+        component = metadata.get("component")
+        dropped.append(
+            _DroppedStep(
+                component=component if isinstance(component, str) else None,
+                consumed_ids=frozenset(str(record_id) for record_id in metadata["consumed_ids"]),
+                settled_ids=frozenset(str(record_id) for record_id in metadata.get("settled_ids", ())),
+                high_water=(int(metadata["high_water_sequence"]), int(metadata["high_water_offset"])),
+            )
+        )
+    return tuple(dropped)
 
 
 def _recovered_trainer_states(
-    store: ScenarioStore, head_record: CommitRecord | None, surface: Surface
+    store: ScenarioStore, scenario: str, head_record: CommitRecord | None, surface: Surface
 ) -> dict[str, _RecoveredTrainerState]:
-    """What each component's trainer recovers from its own commits.
+    """What each component's trainer recovers from its own commits and its own stale drops.
 
     The only trainer of a one-component (or record-only) scenario also owns
     every commit that named no trainer: the records made before commits
-    carried a component, and rollbacks, which carry its state.
+    carried a component, and rollbacks, which carry its state. A drop is a
+    step without a commit: its rows count as consumed and its cursor as
+    read, the state stays the last commit's.
     """
     records = store.history()
     if not records and head_record is not None:
@@ -88,6 +128,7 @@ def _recovered_trainer_states(
         # only committed step there is.
         records = (head_record,)
     components = surface.names or (RECORDS_COMPONENT,)
+    dropped = _dropped_steps(store, scenario)
     states: dict[str, _RecoveredTrainerState] = {}
     for component in components:
         own = tuple(
@@ -95,12 +136,26 @@ def _recovered_trainer_states(
             for record in records
             if record.component == component or (len(components) == 1 and record.component is None)
         )
+        own_drops = tuple(
+            drop
+            for drop in dropped
+            if drop.component == component or (len(components) == 1 and drop.component is None)
+        )
         last = own[-1] if own else None
+        marks = [drop.high_water for drop in own_drops]
+        if last is not None:
+            marks.append((last.high_water_sequence, last.high_water_offset))
         states[component] = _RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
-            high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
-            consumed_ids=_consumed_by_committed_steps(own),
-            consumed_by_step=tuple((record.high_water_sequence, record.consumed_ids) for record in own),
+            high_water=max(marks) if marks else None,
+            consumed_ids=_consumed_by_committed_steps(own).union(*(drop.consumed_ids for drop in own_drops)),
+            consumed_by_step=(
+                *((record.high_water_sequence, record.consumed_ids) for record in own),
+                *((drop.high_water[0], drop.consumed_ids) for drop in own_drops),
+            ),
+            settled_ids=frozenset().union(
+                *(record.settled_ids for record in own), *(drop.settled_ids for drop in own_drops)
+            ),
         )
     return states
 
@@ -145,7 +200,7 @@ class ScenarioFactory:
         metadata = backend.metadata()
         registration = None if metadata is None else metadata.get(SCENARIO_METADATA_KEY)
         recipe = self._recipe.with_model_config(model_config)
-        surface = recipe.build_surface(scenario)
+        surface = recipe.serving_surface(scenario)
         if registration is None:
             selected = backend.resolve_release(release_id)
             registration_metadata: dict[str, object] = {
@@ -311,7 +366,7 @@ class ScenarioFactory:
             else:
                 scenario_step = head_record.step
                 committed_artifact = head_record.artifact_ref
-            recovered_states = _recovered_trainer_states(store, head_record, surface)
+            recovered_states = _recovered_trainer_states(store, name, head_record, surface)
 
             # Publication stages durable bytes before the commit record is durable, while
             # the backend's head is only a post-commit mirror. A crash between the
@@ -405,6 +460,7 @@ class ScenarioFactory:
                     consumed_ids=recovered.consumed_ids,
                     component=bound.component,
                     consumed_by_step=recovered.consumed_by_step,
+                    settled_ids=recovered.settled_ids,
                 )
                 scenario.restore_record_progress(
                     after_sequence=recovered.high_water[0], offset=recovered.high_water[1], component=bound.component

@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -13,12 +13,14 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
+from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
+from reef.recipe.base import ServedEndpoint
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
 from reef.runtime.interfaces import InferenceHandler
@@ -743,6 +745,144 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
         assert scenario is not None and scenario.records.count("agent") == 0
     finally:
         dispatcher.close()
+
+
+class _CaptureHandler(_EchoHandler):
+    """The echo handler, keeping every payload it serves."""
+
+    def __init__(self) -> None:
+        self.payloads: list[dict[str, Any]] = []
+
+    async def inference(self, artifact, path, payload):
+        self.payloads.append(dict(payload))
+        return await super().inference(artifact, path, payload)
+
+
+@pytest.mark.unit
+def test_an_evaluation_call_runs_every_hook_but_the_evaluated_components(tmp_path: Path) -> None:
+    """An episode runs its own candidate of one component, so that component's served hooks stay out of its calls:
+    evaluating the harness keeps the served request defaults, evaluating the config drops them."""
+    dispatcher = _serve(_composite(tmp_path), tmp_path)
+    handler = _CaptureHandler()
+    try:
+
+        async def run() -> None:
+            client = TestClient(TestServer(create_app(dispatcher, inference_handler=handler)))
+            await client.start_server()
+            try:
+                for path in (
+                    "/reef/scenarios/agent/evaluation/v1/chat/completions",
+                    "/reef/scenarios/agent/components/harness/evaluation/v1/chat/completions",
+                    "/reef/scenarios/agent/components/config/evaluation/v1/chat/completions",
+                ):
+                    response = await client.post(path, json={"messages": []})
+                    assert response.status == 200, path
+                missing = await client.post(
+                    "/reef/scenarios/agent/components/nothing/evaluation/v1/chat/completions", json={"messages": []}
+                )
+                assert missing.status == 404
+            finally:
+                await client.close()
+
+        asyncio.run(run())
+        assert [payload.get("temperature") for payload in handler.payloads] == [0.2, 0.2, None]
+    finally:
+        dispatcher.close()
+
+
+@dataclass(frozen=True)
+class _EndpointTreeRecipe(_TreeRecipe):
+    """The tree recipe, keeping the endpoint the service hands it."""
+
+    endpoint: ServedEndpoint | None = None
+
+    def with_served_endpoint(self, endpoint: ServedEndpoint) -> _EndpointTreeRecipe:
+        return replace(self, endpoint=endpoint)
+
+
+@pytest.mark.unit
+def test_a_composite_names_each_component_in_its_served_endpoint(tmp_path: Path) -> None:
+    composite = CompositeRecipe(
+        components={"harness": _EndpointTreeRecipe(label="harness"), "tools": _EndpointTreeRecipe(label="tools")}
+    )
+    served = composite.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900", token="t"))
+    assert {name: recipe.endpoint for name, recipe in served.components.items()} == {  # type: ignore[attr-defined]
+        "harness": ServedEndpoint("http://127.0.0.1:8900", token="t", component="harness"),
+        "tools": ServedEndpoint("http://127.0.0.1:8900", token="t", component="tools"),
+    }
+    surface = _composite(tmp_path).build_surface("agent")
+    assert surface.inference_for_evaluation("config") is None
+    assert surface.inference_for_evaluation("harness") is not None
+    with pytest.raises(ValueError, match="no component 'nothing'"):
+        surface.inference_for_evaluation("nothing")
+    assert create_config_surface().inference_for_evaluation(None) is None
+
+
+class _RefuseAll(ArtifactValidator):
+    def validate(self, artifact: Artifact) -> None:
+        raise ValueError("validator refused the artifact")
+
+
+@dataclass(frozen=True)
+class _GuardedTreeRecipe(_TreeRecipe):
+    """A recipe written before admission moved onto the component surface: it overrides build_artifact_validator."""
+
+    def build_artifact_validator(self) -> ArtifactValidator:
+        return _RefuseAll()
+
+
+@pytest.mark.unit
+def test_a_recipe_that_overrides_build_artifact_validator_still_admits_through_it(tmp_path: Path) -> None:
+    """The check joins the served component's own, alone or as a component of a composite; a recipe serving
+    several components cannot say which one it admits, so it is refused at build."""
+    flat = _GuardedTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
+    dispatcher = _serve(flat, tmp_path / "flat")
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        head = scenario.current_artifact_ref()
+        evolved = tmp_path / "evolved"
+        evolved.mkdir()
+        (evolved / "AGENTS.md").write_text("unvetted")
+        with pytest.raises(ValueError, match="validator refused the artifact"):
+            scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
+        assert scenario.current_artifact_ref() == head
+    finally:
+        dispatcher.close()
+    composite = CompositeRecipe(components={"harness": flat, "config": _ConfigRecipe()})
+    with pytest.raises(ValueError, match="validator refused the artifact"):
+        composite.build_surface("agent").components["harness"].validator.validate(Artifact.local(evolved))
+
+    @dataclass(frozen=True)
+    class GuardedComposite(CompositeRecipe):
+        def build_artifact_validator(self) -> ArtifactValidator:
+            return _RefuseAll()
+
+    guarded = GuardedComposite(components={"harness": _TreeRecipe(label="harness"), "config": _ConfigRecipe()})
+    with pytest.raises(RecipeConfigError, match="overrides build_artifact_validator but serves components"):
+        guarded.serving_surface("agent")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("data", [[["training_mode", "hybrid"]], "hybrid", [], "", None])
+def test_a_component_data_section_that_is_not_an_object_is_refused_under_a_composite_mode(data: Any) -> None:
+    with pytest.raises(RecipeConfigError, match="recipe config 'data' must be an object"):
+        build_recipe(
+            "reef.recipe.composite:CompositeRecipe",
+            {},
+            config={
+                "implementation": "reef.recipe.composite:CompositeRecipe",
+                "model": {"path": "served-model"},
+                "data": {"training_mode": "hybrid"},
+                "components": {
+                    "harness": {
+                        "implementation": "reef_service.test_composite_recipe:_HybridTreeRecipe",
+                        "data": data,
+                    },
+                    "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
+                },
+            },
+        )
 
 
 @pytest.mark.unit

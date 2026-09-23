@@ -84,9 +84,12 @@ async def _relay_inference_stream(
     record: bool,
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
+    evaluated: str | None = None,
 ) -> web.StreamResponse:
     """Stream one upstream inference to the client and, unless it is an evaluation call, record what it sent."""
-    upstream, pending = await request_service.start_stream(headers, payload, path, inference_handler, record=record)
+    upstream, pending = await request_service.start_stream(
+        headers, payload, path, inference_handler, record=record, evaluated=evaluated
+    )
     response_headers = {
         name: value
         for name, value in upstream.headers.items()
@@ -172,7 +175,7 @@ def register_inference_routes(
     inference_handler: InferenceHandler | None,
 ) -> None:
     async def serve(
-        request: web.Request, headers: Mapping[str, str], path: str, *, record: bool
+        request: web.Request, headers: Mapping[str, str], path: str, *, record: bool, evaluated: str | None = None
     ) -> web.StreamResponse:
         payload = await read_object(request)
         if payload.get("stream") is True:
@@ -184,9 +187,10 @@ def register_inference_routes(
                 record=record,
                 request_service=request_service,
                 inference_handler=inference_handler,
+                evaluated=evaluated,
             )
         response_payload, item = await request_service.infer_with_data(
-            headers, payload, path, inference_handler, record=record
+            headers, payload, path, inference_handler, record=record, evaluated=evaluated
         )
         response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
         if record:
@@ -197,12 +201,16 @@ def register_inference_routes(
         return await serve(request, request.headers, request.path, record=True)
 
     async def evaluation(request: web.Request) -> web.StreamResponse:
-        """An evaluation episode's call: the scenario's release, served like any other and kept by nobody."""
+        """An evaluation episode's call: the scenario's release, served like any other and kept by nobody.
+
+        The episode runs its own candidate of one component, named in the path
+        of a composed release, so that component's served hooks stay out.
+        """
         path = "/v1/" + request.match_info["route"]
         if path not in INFERENCE_PATHS:
             raise web.HTTPNotFound(text=f"{path} is not an inference route")
         headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
-        return await serve(request, headers, path, record=False)
+        return await serve(request, headers, path, record=False, evaluated=request.match_info.get("component"))
 
     async def multimodal(request: web.Request) -> web.StreamResponse:
         """Relay a multimodal call through the scenario's recipe; the answer streams back unchanged, unrecorded."""
@@ -224,6 +232,7 @@ def register_inference_routes(
     app.router.add_post("/v1/messages", inference)
     app.router.add_post("/v1/messages/count_tokens", inference)
     app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
+    app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
     for path in MULTIMODAL_ROUTES:
         app.router.add_post(path, multimodal)
 

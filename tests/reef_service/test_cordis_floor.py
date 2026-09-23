@@ -434,6 +434,12 @@ def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path
         served.model_binding("org/project").base_url == "http://127.0.0.1:8900/reef/scenarios/org%2Fproject/evaluation"
     )
     assert served.model_binding().base_url == "http://upstream.test"
+    # A component of a composite names itself, so its candidate's calls leave its own served hooks out.
+    component = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900", component="harness"))
+    assert (
+        component.model_binding("agent").base_url
+        == "http://127.0.0.1:8900/reef/scenarios/agent/components/harness/evaluation"
+    )
     assert served._backend_kwargs("agent")["on_stale"] == "reevaluate"
     # A scenario with its own model binds through the same route, whether resolved at build or at every step.
     from reef.inference.model_config import ModelConfig

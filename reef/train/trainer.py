@@ -148,6 +148,9 @@ class Trainer:
         # ingests. The processor never sees them, so the trainer itself keeps
         # releasing them until every trainer has.
         self._released_stored_ids: set[str] = set()
+        # Stored rows this trainer's durable records already name as consumed or settled: a record names a
+        # settled row once, so a sibling that holds it for many steps does not grow every record.
+        self._recorded_ids: set[str] = set()
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -309,14 +312,23 @@ class Trainer:
             if not items:
                 return
             for sequence, item in items:
-                if item.request_type in self.processor.required_request_types and not self._references_retired(item):
-                    self._processor.ingest(item)
-                else:
-                    self._released_stored_ids.add(item.agent_record_id)
+                self._ingest_or_release(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
                 if self._processor.ready():
                     return
+
+    def _ingest_or_release(self, item: AgentRecord) -> None:
+        """Hand a stored row to the processor, or release it: a row of a type it does not take, or a report on a
+        retired row, which the processor settles instead of resolving."""
+        if item.request_type not in self.processor.required_request_types:
+            self._released_stored_ids.add(item.agent_record_id)
+        elif self._references_retired(item):
+            # The processor's ownership rule releases what the report owns, as when it is read before the retirement.
+            self._processor.settle_retired(item)
+            self._released_stored_ids.add(item.agent_record_id)
+        else:
+            self._processor.ingest(item)
 
     def _references_retired(self, item: AgentRecord) -> bool:
         """Whether a report refers to a row a commit retired: another trainer's commit can retire an inference
@@ -546,6 +558,7 @@ class Trainer:
             compacted = self._releasable_ids()
             if compactable is not None:
                 compacted = compacted & compactable
+            settled = self._unrecorded_settled(consumed, compacted)
             metrics = dict(result.metrics)
             request = self._pending.batch.request
             if request is not None:
@@ -557,6 +570,7 @@ class Trainer:
                 high_water_offset=self._data_offset,
                 compacted_ids=frozenset(compacted),
                 consumed_ids=consumed,
+                settled_ids=settled,
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
                 base_release_id=self._pending.base_release_id,
@@ -587,7 +601,18 @@ class Trainer:
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._state = dict(prepared.algorithm_state)
+            self._recorded_ids |= (prepared.consumed_ids | prepared.settled_ids) - prepared.compacted_ids
             self._pending = None
+
+    def _unrecorded_settled(self, consumed: frozenset[str], compacted: frozenset[str]) -> frozenset[str]:
+        """Rows this trainer released without training that stay stored for another trainer, not yet on record.
+
+        A replay cannot always tell such a row was settled: a retry of a group
+        slot was settled because the slot's report was buffered, and a commit
+        consumed that report since. The record names the row, so recovery
+        settles it again instead of reading it as live.
+        """
+        return frozenset(self._releasable_ids() - consumed - compacted - self._recorded_ids)
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
         """Attach provider correlation fields to the exact pending result.
@@ -608,26 +633,43 @@ class Trainer:
             return annotated
 
     def reject_pending(
-        self, metrics: Mapping[str, Any] | None = None, *, compactable: frozenset[str] | None = None
+        self,
+        metrics: Mapping[str, Any] | None = None,
+        *,
+        compactable: frozenset[str] | None = None,
+        component: str | None = None,
     ) -> frozenset[str]:
-        """Drop the reserved batch; returns the rows retired with it."""
+        """Drop the reserved batch; returns the rows retired with it.
+
+        The batch is consumed without a commit. Where another trainer still
+        holds some of its rows they stay stored, so the receipt then names
+        what the drop consumed and settled and the cursor it read to, per
+        ``component``: recovery skips those rows as it skips a commit's. A drop
+        that retired every row it consumed writes the receipt it always did.
+        """
         with self._lock:
             if self._pending is None:
                 return frozenset()
             batch_id = self._pending.batch_id
             self._processor.dropped(batch_id)
-            self._processor.acknowledge(batch_id)
+            consumed = self._processor.acknowledge(batch_id)
             compacted = self._releasable_ids()
             if compactable is not None:
                 compacted = compacted & compactable
-            self._records.compact(
-                self.scenario,
-                compacted,
-                receipt_id=batch_id,
-                receipt_metadata={"outcome": "stale", "metrics": dict(metrics or {})},
-            )
+            settled = self._unrecorded_settled(consumed, compacted)
+            receipt: dict[str, Any] = {"outcome": "stale", "metrics": dict(metrics or {})}
+            if (consumed | settled) - compacted:
+                receipt.update(
+                    component=component,
+                    consumed_ids=sorted(consumed),
+                    settled_ids=sorted(settled),
+                    high_water_sequence=self._data_sequence,
+                    high_water_offset=self._data_offset,
+                )
+            self._records.compact(self.scenario, compacted, receipt_id=batch_id, receipt_metadata=receipt)
             self._processor.compaction_applied(compacted)
             self._released_stored_ids -= compacted
+            self._recorded_ids |= (consumed | settled) - compacted
             self._pending = None
             return compacted
 
@@ -643,6 +685,7 @@ class Trainer:
             self._records.compact(self.scenario, compacted_ids)
             self._processor.compaction_applied(compacted_ids)
             self._released_stored_ids -= compacted_ids
+            self._recorded_ids -= compacted_ids
 
     def compaction_applied(self, compacted_ids: frozenset[str]) -> None:
         """Notify the processor after the scenario store retires committed rows."""
@@ -650,6 +693,7 @@ class Trainer:
             with self._lock:
                 self._processor.compaction_applied(compacted_ids)
                 self._released_stored_ids -= compacted_ids
+                self._recorded_ids -= compacted_ids
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Notify the backend after ``state`` enters the durable commit log."""
@@ -676,6 +720,7 @@ class Trainer:
         up_to_sequence: int,
         consumed_ids: frozenset[str],
         consumed_by_step: Sequence[tuple[int, frozenset[str]]] = (),
+        settled_ids: frozenset[str] = frozenset(),
     ) -> None:
         """Rebuild processor memory from retained rows at or below a watermark.
 
@@ -696,6 +741,9 @@ class Trainer:
         rows its batch consumed: a row above a step's watermark was ingested
         after that step was acknowledged, so the step's consumed rows count
         as trained from there on, as they did before the crash.
+        ``settled_ids`` names the rows this trainer's records say it released
+        without training while another trainer held them: the processor
+        settles them again (``restore_settled``) instead of resolving them.
         """
         if up_to_sequence < 0:
             raise ValueError("up_to_sequence must be non-negative")
@@ -723,15 +771,19 @@ class Trainer:
                         # until every other trainer has too. The processor keeps it in view for the
                         # replayed reports that reference it, as it was before the crash.
                         self._released_stored_ids.add(item.agent_record_id)
+                        self._recorded_ids.add(item.agent_record_id)
                         self._processor.restore_consumed(item)
                         consumed.append(item)
                         continue
-                    if item.request_type in self.processor.required_request_types and not self._references_retired(
-                        item
+                    if (
+                        item.agent_record_id in settled_ids
+                        and item.request_type in self.processor.required_request_types
                     ):
-                        self._processor.ingest(item)
-                    else:
+                        self._processor.restore_settled(item)
                         self._released_stored_ids.add(item.agent_record_id)
+                        self._recorded_ids.add(item.agent_record_id)
+                        continue
+                    self._ingest_or_release(item)
             # After the replay, so a report that was live before the crash stays live as it was; a report
             # that arrives later on a consumed row is settled instead of resolved against it.
             self._processor.consumed_restored(frozenset(item.agent_record_id for item in consumed))

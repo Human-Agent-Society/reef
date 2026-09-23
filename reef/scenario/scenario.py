@@ -260,11 +260,15 @@ class Scenario:
         consumed_ids: frozenset[str],
         component: str | None = None,
         consumed_by_step: Sequence[tuple[int, frozenset[str]]] = (),
+        settled_ids: frozenset[str] = frozenset(),
     ) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""
         with self._committer.lock:
             self.trainer_for(component).reingest(
-                up_to_sequence=up_to_sequence, consumed_ids=consumed_ids, consumed_by_step=consumed_by_step
+                up_to_sequence=up_to_sequence,
+                consumed_ids=consumed_ids,
+                consumed_by_step=consumed_by_step,
+                settled_ids=settled_ids,
             )
 
     def restore_record_progress(self, *, after_sequence: int, offset: int, component: str | None = None) -> None:

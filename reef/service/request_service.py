@@ -34,7 +34,7 @@ from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
-from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
+from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
@@ -132,6 +132,9 @@ class PreparedInference:
     #: Releases serving state the surface held for this attempt (an adapter
     #: lease); called exactly once when the attempt ends.
     lease: InferenceLease | None = None
+    #: The request hooks this attempt runs: the surface's, or on an evaluation
+    #: call every component's but the one the episode evaluates.
+    hooks: InferenceHooks | None = None
 
     def release(self) -> None:
         try:
@@ -200,8 +203,10 @@ class RequestService:
         handler: InferenceHandler | None = None,
         *,
         record: bool = True,
+        evaluated: str | None = None,
     ) -> tuple[dict[str, Any], AgentRecord | None]:
-        """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call."""
+        """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
+        ``evaluated`` component (see ``Surface.inference_for_evaluation``)."""
         operations = await self.inference_operations(headers)
         # Evaluation traffic is measured apart, so a step's episodes do not read as served requests.
         measurement = operations.start(f"{request_family(record)}/request")
@@ -218,7 +223,7 @@ class RequestService:
                 if attempt > 1:
                     operations.increment(f"{request_family(record)}/retries_total")
                 prepared, payload = await self._prepare_request(
-                    headers, original_payload, path, handler, record=record
+                    headers, original_payload, path, handler, record=record, evaluated=evaluated
                 )
                 try:
                     if prepared.durable:
@@ -245,8 +250,8 @@ class RequestService:
                     if not interrupted:
                         # A completed response with invalid runtime-load-ID information is a
                         # handler contract error, not a retryable inference abort.
-                        if prepared.surface.inference is not None:
-                            prepared.surface.inference.verify_response(prepared.artifact, path, response)
+                        if prepared.hooks is not None:
+                            prepared.hooks.verify_response(prepared.artifact, path, response)
                         self._stamp_durable_runtime_load_id(prepared, payload, response)
                         item = None
                         if record:
@@ -293,11 +298,14 @@ class RequestService:
         handler: InferenceHandler | None = None,
         *,
         record: bool = True,
+        evaluated: str | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
         operations = await self.inference_operations(headers)
         measurement = operations.start(f"{request_family(record)}/request")
         try:
-            prepared, payload = await self._prepare_request(headers, payload, path, handler, record=record)
+            prepared, payload = await self._prepare_request(
+                headers, payload, path, handler, record=record, evaluated=evaluated
+            )
             admission = prepared.admission
             lease = prepared.lease
             try:
@@ -305,8 +313,8 @@ class RequestService:
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
                 if record_response is not None:
-                    if prepared.surface.inference is not None:
-                        prepared.surface.inference.verify_response(prepared.artifact, path, record_response)
+                    if prepared.hooks is not None:
+                        prepared.hooks.verify_response(prepared.artifact, path, record_response)
                     self._stamp_durable_runtime_load_id(prepared, payload, record_response)
                     # Buffered streaming backends have already finished model
                     # execution. Downstream client backpressure must not leave a
@@ -386,7 +394,7 @@ class RequestService:
             if pending.deferred_prepared is not None and isinstance(response.get("training"), Mapping):
                 if pending.path is None:
                     raise ReefError("deferred inference response has no request path")
-                hooks = pending.deferred_prepared.surface.inference
+                hooks = pending.deferred_prepared.hooks
                 if hooks is not None:
                     hooks.verify_response(
                         pending.deferred_prepared.artifact,
@@ -446,10 +454,13 @@ class RequestService:
         handler: InferenceHandler | None,
         *,
         record: bool = True,
+        evaluated: str | None = None,
     ) -> tuple[PreparedInference, dict[str, Any]]:
         """The shared first half of every inference: freeze the serving state
         (headers, scenario, artifact, handler, surface) and let the surface
-        transform the request payload. ``record`` names the measurement family."""
+        transform the request payload. ``record`` names the measurement family;
+        an evaluation call (``record`` False) runs every component's hooks but
+        the ``evaluated`` one's, whose candidate the episode runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         initial = await asyncio.to_thread(
             self._dispatcher.get_or_create_scenario,
@@ -458,6 +469,8 @@ class RequestService:
         )
         if initial is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        if evaluated is not None and evaluated not in initial.surface.names:
+            raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
             with initial.operations.measure("serve/admission" if record else "evaluate/admission"):
                 admission = await initial.runtime.acquire_inference()
@@ -468,7 +481,8 @@ class RequestService:
             # committed by the weight update that released it, never the head it
             # observed before waiting.
             prepared = await asyncio.to_thread(self._prepare_inference, parsed, handler, admission)
-            hooks = prepared.surface.inference
+            hooks = prepared.surface.inference if record else prepared.surface.inference_for_evaluation(evaluated)
+            prepared = replace(prepared, hooks=hooks)
             transformed = (
                 dict(payload)
                 if hooks is None

@@ -291,6 +291,30 @@ class Surface:
             return _LeasingChainedInferenceHooks(bound)
         return _ChainedInferenceHooks(bound)
 
+    def inference_for_evaluation(self, component: str | None) -> InferenceHooks | None:
+        """The request hooks of an evaluation call that runs a candidate of ``component``: every other component's.
+
+        The episode renders its own candidate of that component, so the served
+        release's hooks for it would mix the served content into the
+        candidate's calls (a skill catalog, for one); the rest of the release
+        (weights, request defaults) is served as it is. ``None`` names the only
+        component of a flat release and no component of a composed one.
+        """
+        if component is not None and component not in self.components:
+            raise ValueError(f"the release has no component {component!r}")
+        if self.single:
+            return None
+        bound = tuple(
+            (name, hooks.inference)
+            for name, hooks in self.components.items()
+            if name != component and hooks.inference is not None
+        )
+        if not bound:
+            return None
+        if any(isinstance(hooks, LeasingInferenceHooks) for _, hooks in bound):
+            return _LeasingChainedInferenceHooks(bound)
+        return _ChainedInferenceHooks(bound)
+
     @property
     def files(self) -> FileTree | None:
         name = self.files_component

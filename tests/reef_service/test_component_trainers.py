@@ -669,8 +669,10 @@ def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_sta
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
+        # Both rows first, then one wake: an accept wakes the worker per row, which would be two wakes.
         for record in _records(1):
-            dispatcher.accept_record(record)
+            scenario.records.append(record)
+        dispatcher._start_local_backend_worker("agent", HARNESS)
         deadline = time.monotonic() + 10
         while away.attempts == 0 and time.monotonic() < deadline:
             time.sleep(0.05)
@@ -831,11 +833,13 @@ def test_deleting_a_scenario_is_refused_while_the_runtime_cannot_say_whether_its
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     """A runtime that does not answer gets a busy answer, not a crash: a blind delete could orphan a job. A full
-    weight runtime names no owner in its marker: the bound scenario owns the job, no other scenario does."""
+    weight runtime names no owner in its marker: only a commit that names the job proves whose it is, and until one
+    does the job counts for every scenario."""
     training = StubTrainingRuntime()
     dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"), training=training)
     try:
-        assert dispatcher.get_or_create_scenario("agent") is not None
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
 
         def unhealthy() -> None:
             raise RuntimeError("train group is unhealthy")
@@ -847,12 +851,96 @@ def test_deleting_a_scenario_is_refused_while_the_runtime_cannot_say_whether_its
         marker: dict[str, Any] = {"status": "RUNNING", "training_job_id": "job-1"}
         monkeypatch.setattr(training, "training_job_status", lambda: marker)
         assert dispatcher.training_job_in_flight("agent") is True
+        assert dispatcher.training_job_in_flight("old") is True
+        # The training thread commits the job under its identity; the backend has not acknowledged it yet, and
+        # agent's commit names it.
+        for record in _records(1):
+            dispatcher.accept_record(record)
+        deadline = time.monotonic() + 10
+        while scenario.committed_training_job_id != "job-1" and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert scenario.committed_training_job_id == "job-1"
+        marker = {"status": "COMPLETE", "training_job_id": "job-1", "commit_acknowledged": False}
+        assert dispatcher.training_job_in_flight("agent") is True
         assert dispatcher.training_job_in_flight("old") is False
         with pytest.raises(ScenarioBusy, match="training job is out"):
             dispatcher.delete_scenario("agent")
-        marker.update(status="COMPLETE", commit_acknowledged=True)
+        marker.update(commit_acknowledged=True)
         assert dispatcher.delete_scenario("agent")["scenario"] == "agent"
     finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_restart_does_not_give_an_ownerless_job_to_the_scenario_that_bound_first(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """b trains on a one scenario runtime; a create of a is refused but leaves a's registration. b's job is out when
+    the process dies, and after the restart a binds first. The marker names no owner and no commit names its job, so
+    neither scenario can be deleted: the job may be b's, whose log is the only one that can finish it."""
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    dispatcher, _ = _dispatcher(
+        tmp_path, backends=_dispatched_pair(tmp_path), training=StubTrainingRuntime(), backend_factory=factory
+    )
+    try:
+        assert dispatcher.get_or_create_scenario("b") is not None
+        with pytest.raises(ReefError, match="already bound"):
+            dispatcher.get_or_create_scenario("a")
+    finally:
+        dispatcher.close()
+    training = StubTrainingRuntime()
+    monkeypatch.setattr(
+        training, "training_job_status", lambda: {"status": "UPDATING_WEIGHTS", "training_job_id": "job-b"}
+    )
+    dispatcher, _ = _dispatcher(
+        tmp_path, backends=_dispatched_pair(tmp_path), training=training, backend_factory=factory
+    )
+    try:
+        thread = dispatcher._lifecycle.preload_thread
+        if thread is not None:
+            thread.join(30)
+        assert dispatcher._registry.training_scenario_name == "a"
+        for name in ("a", "b"):
+            with pytest.raises(ScenarioBusy, match="training job is out"):
+                dispatcher.delete_scenario(name)
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_the_delete_guard_reads_the_runtime_once(tmp_path: Path) -> None:
+    """Every read of an executor runtime is a health call that can fail on its own: the guard makes one, and an
+    answer that goes bad on a second read cannot turn the busy answer into another error."""
+    from reef.train.runtime import ExecutorTrainingRuntime
+
+    class Handle:
+        calls = 0
+
+        def health(self) -> dict[str, Any]:
+            self.calls += 1
+            if self.calls > 1:
+                return {
+                    "ok": False,
+                    "phase": "dead",
+                    "training_job": {"deferred_weight_update": True, "status": "IDLE"},
+                }
+            return {
+                "ok": True,
+                "training_job": {"deferred_weight_update": True, "status": "RUNNING", "training_job_id": "j"},
+            }
+
+    handle = Handle()
+    dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path), training=StubTrainingRuntime())
+    try:
+        object.__setattr__(dispatcher._recipe, "training_runtime", ExecutorTrainingRuntime(handle))  # type: ignore[arg-type]
+        assert dispatcher.training_job_in_flight("x") is True
+        assert handle.calls == 1
+    finally:
+        object.__setattr__(dispatcher._recipe, "training_runtime", None)
         dispatcher.close()
 
 
@@ -1178,6 +1266,204 @@ def test_a_report_on_an_inference_the_sibling_commit_retired_is_released_not_rai
         weights = rebuilt.reserve_training_batch(WEIGHTS)
         assert weights is not None
         assert [item.source_agent_record_ids for item in weights.items] == [("i2", "r2")]
+    finally:
+        dispatcher.close()
+
+
+class _SlottedProcessor(ThresholdProcessor):
+    """Reports batch by the group and the retry slot named in their metadata; a group is ready at two slots."""
+
+    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        metadata = context.report.payload["metadata"]
+        return metadata["group"], metadata["slot"]
+
+    def decide_group(self, key: Hashable, items: tuple[Any, ...]) -> GroupDecision:
+        return GroupDecision.READY if len(items) >= 2 else GroupDecision.INCOMPLETE
+
+
+@dataclass(frozen=True)
+class _SlottedRecipe(_TwoTrainerRecipe):
+    """The two trainer recipe whose harness batches reports by group and retry slot."""
+
+    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+        def factory_for(component: str):
+            processor = _SlottedProcessor if component == HARNESS else ThresholdProcessor
+            return lambda context: processor(context.with_config({"batch_size": 1}))
+
+        return tuple(
+            ComponentTrainer(
+                component,
+                Trainer.build(
+                    scenario,
+                    records,
+                    processor_factory=factory_for(component),
+                    candidate_backend=backend,
+                    algorithm_state=algorithm_states.get(component),
+                    experiment_logger=experiment_logger,
+                ),
+            )
+            for component, backend in self.backends.items()
+        )
+
+
+def _slotted_report(record_id: str, reference: str, group: str, slot: int) -> AgentRecord:
+    return AgentRecord.create(
+        scenario="agent",
+        request_type=RequestType.REPORT,
+        payload={"score": 1.0, "references": [reference], "metadata": {"group": group, "slot": slot}},
+        agent_record_id=record_id,
+        references=(reference,),
+    )
+
+
+@pytest.mark.unit
+def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(tmp_path: Path) -> None:
+    """r1dup retried slot 0 while r1 held it, so the harness settled it; the harness commit consumed r1, which both
+    trainers had trained, and retired it. The weights trainer has not read r1dup, so it stays stored. The replay no
+    longer sees r1 hold the slot: the commit record names r1dup as settled, and the rebuilt harness keeps it out."""
+    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    records = tmp_path / "records"
+    dispatcher = Dispatcher(
+        _SlottedRecipe(backends=backends),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=records,
+        scenario_storage=SQLiteScenarioStorage(records),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2, 3):
+            scenario.records.append(_records(step)[0])
+        scenario.records.append(_slotted_report("r1", "i1", "G", 0))
+        scenario.records.append(_slotted_report("r1dup", "i3", "G", 0))
+        scenario.records.append(_slotted_report("r2", "i2", "G", 1))
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert weights is not None
+        assert [item.source_agent_record_ids for item in scenario.trainer_for(WEIGHTS).pending_batch.items] == [
+            ("i1", "r1")
+        ]
+        scenario.commit(weights, component=WEIGHTS)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        assert [item.source_agent_record_ids for item in scenario.trainer_for(HARNESS).pending_batch.items] == [
+            ("i1", "r1"),
+            ("i2", "r2"),
+        ]
+        scenario.commit(harness, component=HARNESS)
+        assert scenario.records.get("agent", "r1") is None
+        assert scenario.records.get("agent", "r1dup") is not None
+        rebuilt = dispatcher._registry.reload("agent")
+        rebuilt.records.append(_records(4)[0])
+        rebuilt.records.append(_slotted_report("r4", "i4", "G", 2))
+        # Live, slot 0 was never r1dup's: G holds r4 alone and waits.
+        assert rebuilt.prepare_training_step(HARNESS) is None
+        assert "r1dup" in rebuilt.trainer_for(HARNESS).releasable_agent_record_ids()
+        record = rebuilt.last_commit_for(HARNESS)
+        assert record is not None and "r1dup" in record.settled_ids
+    finally:
+        dispatcher.close()
+
+
+class _DroppingBackend(_DispatchedBackend):
+    """A dispatched backend whose runtime drops the next batch as stale when told to, each job its own id."""
+
+    def __init__(self, component: str, artifact_dir: Path, job_id: str) -> None:
+        super().__init__(component, artifact_dir, job_id)
+        self.drop_next = False
+
+    def prepare_step(self, batch, state, scenario_step):
+        if self.drop_next:
+            self.drop_next = False
+            self.prepared += 1
+            return PreparedStep.dropped(state=state, metrics={"stale": 1})
+        return super().prepare_step(batch, state, scenario_step)
+
+    def settle_step(self, prepared, decision):
+        self.job_id = f"job-{self.prepared}"
+        return super().settle_step(prepared, decision)
+
+
+@pytest.mark.unit
+def test_a_batch_the_weights_backend_dropped_stays_consumed_after_a_restart(tmp_path: Path) -> None:
+    """A drop consumes its batch without a commit; the harness still holds its rows, so they stay stored. The drop's
+    receipt names what it consumed and how far the trainer read, so neither a restart right after it nor one after a
+    later commit reserves the dropped batch again."""
+    weights = _DroppingBackend(WEIGHTS, tmp_path / "candidates", "job-0")
+    dispatcher, _ = _dispatcher(
+        tmp_path, backends={WEIGHTS: weights, HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")}
+    )
+
+    def turn(scenario: Scenario) -> list[tuple[str, ...]]:
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        sources = [item.source_agent_record_ids for item in batch.items]
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, weights, batch) is True
+        return sources
+
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2, 3):
+            for record in _records(step):
+                scenario.records.append(record)
+        assert turn(scenario) == [("i1", "r1")]
+        weights.drop_next = True
+        assert turn(scenario) == [("i2", "r2")]
+        assert scenario.records.get("agent", "r2") is not None
+        rebuilt = dispatcher._registry.reload("agent")
+        assert turn(rebuilt) == [("i3", "r3")]
+        for record in _records(4):
+            rebuilt.records.append(record)
+        rebuilt = dispatcher._registry.reload("agent")
+        assert turn(rebuilt) == [("i4", "r4")]
+        (receipt,) = [
+            row for row in rebuilt.records.compaction_receipts("agent") if row["metadata"]["outcome"] == "stale"
+        ]
+        assert receipt["metadata"]["component"] == WEIGHTS
+        assert set(receipt["metadata"]["consumed_ids"]) == {"i2", "r2"}
+    finally:
+        dispatcher.close()
+
+
+def _run_report(record_id: str, references: tuple[str, ...]) -> AgentRecord:
+    return AgentRecord.create(
+        scenario="agent",
+        request_type=RequestType.REPORT,
+        payload={"score": 0.5, "references": list(references)},
+        agent_record_id=record_id,
+        references=references,
+    )
+
+
+@pytest.mark.unit
+def test_a_run_report_settled_for_a_retired_inference_releases_its_other_inference(tmp_path: Path) -> None:
+    """run references i1 and i2 and is stored before the weights job retires i1. Each trainer then settles run for
+    the retired row, and the ownership rule releases i2 with it, as when run is read before the retirement."""
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in (*_records(1), _records(2)[0]):
+            scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        scenario.records.append(_run_report("run", ("i1", "i2")))
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        assert scenario.records.get("agent", "i1") is None
+        assert scenario.prepare_training_step(HARNESS) is None
+        assert scenario.reserve_training_batch(WEIGHTS) is None
+        for component in (WEIGHTS, HARNESS):
+            decision = scenario.trainer_for(component).processor.retention_decision()
+            assert "i2" not in decision.protected_agent_record_ids, component
+            assert {"i2", "run"} <= scenario.trainer_for(component).releasable_agent_record_ids(), component
     finally:
         dispatcher.close()
 

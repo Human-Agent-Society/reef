@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
+from reef.artifact.artifact import Artifact, ArtifactValidator
 from reef.core.components import RECORDS_COMPONENT
 from reef.core.reports import ReportBase
 from reef.inference.http import resolve_proxy_runtime
@@ -24,7 +25,7 @@ from reef.recipe.config_fields import config_field, parse_int, recipe_config_fie
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.surface.base import Surface
+from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
@@ -34,14 +35,29 @@ from reef.train.trainer import ComponentTrainer, Trainer
 
 
 @dataclass(frozen=True)
+class _EveryCheck(ArtifactValidator):
+    """Admit an artifact only when every check admits it, in order."""
+
+    checks: tuple[ArtifactValidator, ...]
+
+    def validate(self, artifact: Artifact) -> None:
+        for check in self.checks:
+            check.validate(artifact)
+
+
+@dataclass(frozen=True)
 class ServedEndpoint:
     """Where this Reef answers inference itself: what a recipe's own evaluation calls target.
 
     ``url`` is the service's base URL and ``token`` a bearer token it accepts.
+    ``component`` names the release component the recipe evolves when it is
+    one of several: its evaluation calls then leave that component's served
+    hooks out, since the episode runs a candidate of it.
     """
 
     url: str
     token: str | None = None
+    component: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.url, str) or not self.url.strip():
@@ -241,6 +257,31 @@ class Recipe:
         engine) route by it.
         """
         return Surface()
+
+    def build_artifact_validator(self) -> ArtifactValidator:
+        """An admission check run beside the component's own before the recipe's release is published or restored.
+
+        Kept for recipes written before admission moved onto the component
+        surface (``ComponentSurface.validator``, where a new recipe binds it):
+        it joins the check of the one component the recipe serves. A recipe
+        that overrides it while serving several components is refused at
+        build, since the check could not say which component it admits.
+        """
+        return AcceptAnyArtifact()
+
+    def serving_surface(self, scenario: str) -> Surface:
+        """``build_surface`` with ``build_artifact_validator`` joined to the served component's check."""
+        surface = self.build_surface(scenario)
+        if type(self).build_artifact_validator is Recipe.build_artifact_validator:
+            return surface
+        if len(surface.components) != 1:
+            raise RecipeConfigError(
+                f"{type(self).__name__} overrides build_artifact_validator but serves components "
+                f"{list(surface.names)}: bind the check on each component's ComponentSurface.validator instead"
+            )
+        ((name, component),) = surface.components.items()
+        checks = _EveryCheck((component.validator, self.build_artifact_validator()))
+        return replace(surface, components={name: replace(component, validator=checks)})
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
         """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
