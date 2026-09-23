@@ -124,7 +124,7 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
 
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only batching and checkpoint cadence.
-    assert recipe.batch_size == 1
+    assert recipe.batch_size == 128
     assert recipe.checkpoint_strategy == EveryNVersions(1)
 
 
@@ -446,7 +446,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
     initial.mkdir()
 
     dispatcher = Dispatcher(
-        SAORecipe(**runtime_bindings(runtime)),
+        SAORecipe(batch_size=1, **runtime_bindings(runtime)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -480,6 +480,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config={
+            "data": {"batch_size": 1},
             "evaluation": {
                 "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
                 "config": {
@@ -487,7 +488,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
                     "threshold": 0.8,
                     "token_env": "EVALUATION_TOKEN",
                 },
-            }
+            },
         },
         **runtime_bindings(runtime),
     )
@@ -529,7 +530,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
 
     dispatcher = Dispatcher(
-        SAORecipe(**runtime_bindings(runtime), checkpoint_strategy=EveryNVersions(99)),
+        SAORecipe(batch_size=1, **runtime_bindings(runtime), checkpoint_strategy=EveryNVersions(99)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -568,7 +569,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
     def _make_dispatcher() -> Dispatcher:
         return Dispatcher(
-            SAORecipe(**runtime_bindings(runtime)),
+            SAORecipe(batch_size=1, **runtime_bindings(runtime)),
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,
