@@ -2061,7 +2061,7 @@ def main() -> None:
         chosen = {"release": ns.release} if ns.release is not None else {}
         sys.exit(update(scenario, adapter, compose, **chosen))
     elif args and args[0] in get_adapter(adapter).client_updater_args:
-        # The binary's own updater would replace the version reef pins, so it never runs from here.
+        # The binary's own updater installs a version reef did not pin, so it never runs from here.
         sys.exit(f"reef-{adapter}: {pinned_version_line(adapter)}")
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)

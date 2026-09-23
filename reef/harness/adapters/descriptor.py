@@ -207,7 +207,7 @@ class AdapterDescriptor:
     #: session and which a binary may answer early only when nothing else is on the command line.
     client_version_args: tuple[str, ...] = ()
     #: First arguments that start the binary's own updater; the wrapper answers them itself and
-    #: never runs the binary, because an update would replace the version reef pins.
+    #: never runs the binary, because the updater installs a version reef did not pin.
     client_updater_args: tuple[str, ...] = ()
     #: Commands the binary expects on PATH at first start and otherwise fetches
     #: itself, as ``(command, package)``; the install script names the missing ones.
