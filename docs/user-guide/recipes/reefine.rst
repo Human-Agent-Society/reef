@@ -1,8 +1,8 @@
 Reefine
 ========
 
-Reefine is the built-in recipe for refining a pi coding harness from plain
-language instructions. Its implementation is
+Reefine is the built-in recipe for refining a pi or Claude Code harness from
+plain language instructions (see `Claude Code`_ for what differs there). Its implementation is
 ``reef.recipe.reefine:ReefineRecipe``, and its proposer and evaluator ship in
 the Reef wheel, so the service needs no tutorial checkout or training GPUs.
 
@@ -332,6 +332,42 @@ seconds and 8192 tokens for failure-driven proposals; the reply budgets are
 sized for a thinking model, which spends part of the budget on its reasoning
 before the JSON (a review budget of 8192 came back empty on one). The
 tutorial's ``run.sh`` sets 900 seconds and 16384 tokens for its local model.
+
+Claude Code
+-----------
+
+The same recipe evolves a Claude Code harness. Set ``evolution.adapter: claude``
+in a copy of the profile and point the upstream at an Anthropic-compatible
+endpoint (``inference.upstream-api: anthropic``): Claude Code speaks the
+Messages API and reef proxies ``/v1/messages`` through unchanged, so an
+OpenAI-only upstream cannot serve it. The install script
+(``GET /reef/harness/install?adapter=claude``) puts ``reef-claude`` on PATH,
+and ``reef-claude`` starts Claude Code with the tree as its
+``CLAUDE_CONFIG_DIR``.
+
+Claude Code loads no code from a harness, so reef's own entries take another
+shape there: ``/reefine`` is a command file (``claude/commands/reefine.md``)
+that runs the wrapper with the Bash tool, the update notice is a
+``SessionStart`` hook in ``settings.json`` that runs ``reef-claude notice``
+when a session starts (a newer served release, or a release that waits for
+review, is one line each), and the API reference the proposer reads is the
+``reef-claude-harness-api`` skill. The seed also allows ``Bash(reef-claude *)``,
+so ``/reefine install <id>`` runs without a permission prompt once you say yes.
+
+The text proposer answers a Claude Code request with the kinds Claude Code
+reads: ``skill``, ``rules``, ``agent_command`` (a command file with
+frontmatter) and ``config`` (a settings object with ``permissions`` and
+``hooks``). Behavior a prompt cannot give is a hook: a mode the user turns on
+and off is a marker file under the session's ``CLAUDE_CONFIG_DIR`` written by
+``UserPromptExpansion`` hooks on the commands' names and read by a
+``PreToolUse`` hook that exits 2 while the marker exists. A ``config`` entry
+runs shell commands on your machine, so it waits for your review like an
+extension does (``review_kinds`` lists both by default). The result line of
+a held release names ``reef-claude install --release <id>``, which promotes
+it and installs it in one step; ``/reefine install <id>`` does the same from
+the session, and ``/reefine update`` installs a served head. The agent
+proposer runs pi only, so a Claude Code request is always answered by the
+text proposer.
 
 Migration
 ---------
