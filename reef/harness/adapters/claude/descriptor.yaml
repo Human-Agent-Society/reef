@@ -31,6 +31,16 @@ env:
 # person's own claude.
 client_env:
   DISABLE_AUTOUPDATER: "1"
+# An interactive run otherwise registers the claude-cli:// link handler, and
+# unless $HOME/.local/bin/claude exists it points the handler at the pinned
+# binary, which replaces the handler of the person's own claude: on macOS the
+# app "$HOME/Applications/Claude Code URL Handler.app", on Linux and WSL an
+# xdg-mime default, on Windows a registry key. Claude Code reads this switch
+# only from settings, and it skips a whole settings.json that fails its schema
+# (cleanupPeriodDays 0, say), so the wrapper passes it as --settings, which the
+# tree cannot change. The binary reads the last --settings: one the person
+# passes replaces this one, and the settings.json default below still applies.
+client_args: ["--settings", '{"disableDeepLinkRegistration":"disable"}']
 # --resume and --continue read the transcripts under projects/, which
 # reef-claude would otherwise leave in the temp copy it removes. .claude.json
 # records the finished onboarding, the approved API key and the trusted
@@ -50,12 +60,8 @@ files:
         # No Co-Authored-By trailer written into commits an episode makes;
         # the updater is off through env and client_env, not here.
         includeCoAuthoredBy: false
-        # An interactive run otherwise registers the claude-cli:// link
-        # handler, and unless $HOME/.local/bin/claude exists it points the
-        # handler at the pinned binary, which replaces the handler of the
-        # person's own claude: on macOS the app
-        # "$HOME/Applications/Claude Code URL Handler.app", on Linux and WSL
-        # an xdg-mime default, on Windows a registry key.
+        # Covers a run where the person passes their own --settings, which
+        # replaces the one in client_args.
         disableDeepLinkRegistration: "disable"
   rules: "claude/CLAUDE.md"
   agent_command: "claude/commands/{name}.md"

@@ -870,7 +870,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
     try:
-        result = subprocess.run([binary, *args], env=env)
+        # Ahead of the person's arguments: a binary that reads the last of a repeated flag keeps the person's.
+        result = subprocess.run([binary, *descriptor.client_args, *args], env=env)
     finally:
         proxy.publish_turn()
         proxy.stop()

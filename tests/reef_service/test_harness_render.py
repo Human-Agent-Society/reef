@@ -404,6 +404,22 @@ def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:
     assert descriptor.client_tools == (("rg", "ripgrep"), ("fd", "fd"))
 
 
+def test_claude_descriptor_turns_deep_link_registration_off_on_the_command_line() -> None:
+    """Claude Code skips a whole settings.json that fails its schema, so reef-claude passes the setting as flag
+    settings, which no tree can change."""
+    assert get_adapter("claude").client_args == ("--settings", '{"disableDeepLinkRegistration":"disable"}')
+
+
+@pytest.mark.parametrize("value", ["--settings", [1], [""]])
+def test_descriptor_client_args_is_a_list_of_strings(tmp_path, value: object) -> None:
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "claude" / "descriptor.yaml").read_text())
+    data["client_args"] = value
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match="'client_args'"):
+        load_descriptor(target)
+
+
 def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:
     """A reef-<adapter> run keeps what the binary's resume and first-run setup read in the installed tree."""
     kept = {name: get_adapter(name).client_state for name in ("pi", "claude", "codex", "hermes", "dsh")}

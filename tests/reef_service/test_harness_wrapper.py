@@ -2537,15 +2537,16 @@ def test_session_does_not_redirect_an_explicit_update_of_another_installation(tm
 
 
 def _make_env_dump_binary(tmp_path: Path) -> Path:
-    """A fake agent that writes its environment to ``env.json`` beside itself and makes no call."""
+    """A fake agent that writes its environment to ``env.json`` and its arguments to ``argv.json`` beside itself."""
     binary = tmp_path / "fake-env-dump"
     binary.write_text(
         textwrap.dedent(
             """\
             #!/usr/bin/env python3
-            import json, os
+            import json, os, sys
             from pathlib import Path
             Path(__file__).with_name("env.json").write_text(json.dumps(dict(os.environ)))
+            Path(__file__).with_name("argv.json").write_text(json.dumps(sys.argv[1:]))
             """
         )
     )
@@ -2606,6 +2607,24 @@ def test_claude_session_runs_with_the_autoupdater_off_unless_the_shell_sets_it(t
             run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", ["-p", "hi"])
         seen.append(json.loads((tmp_path / "env.json").read_text()).get("DISABLE_AUTOUPDATER"))
     assert seen == ["1", "0"]
+
+
+@pytest.mark.unit
+def test_claude_session_keeps_the_link_handler_off_when_claude_code_skips_the_trees_settings(tmp_path) -> None:
+    """Claude Code skips a whole settings.json that fails its schema, so the tree's
+    ``disableDeepLinkRegistration`` cannot keep the pinned binary off the person's claude-cli:// handler; the wrapper
+    passes it as ``--settings`` ahead of the person's arguments, and a ``--settings`` the person gives comes last."""
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    rejected = {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}, "cleanupPeriodDays": 0}
+    (compose / "settings.json").write_text(json.dumps(rejected) + "\n")
+    binary = _make_env_dump_binary(tmp_path)
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    ours = ["--settings", '{"disableDeepLinkRegistration":"disable"}']
+    for args in (["-p", "hi"], ["--settings", "mine.json", "-p", "hi"]):
+        with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", args)
+        assert json.loads((tmp_path / "argv.json").read_text()) == [*ours, *args]
 
 
 @pytest.mark.unit

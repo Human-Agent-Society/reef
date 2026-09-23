@@ -12,9 +12,10 @@ environment variables (auto-update, telemetry, and non-essential traffic all
 off); a composition that sets ``settings.env`` to turn any of them back on,
 or that flips ``includeCoAuthoredBy`` on, is rejected at render — the same
 gate that rejects an invalid node. A composition that drops
-``disableDeepLinkRegistration: "disable"`` is rejected too: without it an
-interactive ``reef-claude`` run can point the person's ``claude-cli://``
-link handler at the pinned binary.
+``disableDeepLinkRegistration: "disable"`` is rejected too. ``reef-claude``
+passes the same setting as ``--settings`` so that no tree can point the
+person's ``claude-cli://`` link handler at the pinned binary; the default here
+covers a run where the person passes their own ``--settings``.
 """
 
 from __future__ import annotations
