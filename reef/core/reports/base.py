@@ -47,18 +47,6 @@ class ReportValidationError(ReefError):
     """
 
 
-def is_dataset_end_report(payload: Mapping[str, object]) -> bool:
-    """Recognize the explicit dataset boundary carried by a control-only report."""
-    metadata = payload.get("metadata")
-    if not isinstance(metadata, Mapping) or "dataset_end" not in metadata:
-        return False
-    if metadata["dataset_end"] is not True:
-        raise ReportValidationError("metadata.dataset_end must be true")
-    if payload.get("references") or payload.get("score") is not None or payload.get("feedback") is not None:
-        raise ReportValidationError("a dataset_end report must not contain references, score or feedback")
-    return True
-
-
 def validate_report_payload(payload: Mapping[str, Any]) -> None:
     """Reject removed eligibility controls and malformed optional scores."""
     metadata = payload.get("metadata")

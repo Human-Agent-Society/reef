@@ -22,7 +22,7 @@ none may block:
 - ``build_batch()``: produce it (the trainer validates it against ``output_schema``);
 - ``acknowledge(batch_id)``: the training step consumed that batch; returns
   the consumed record ids, which the commit record persists so recovery never
-  trains them twice in the same dataset pass.
+  re-ingests them.
 
 Every concrete processor produces ``TrainingBatch.items``, an ordered tuple of
 ``TrainDataItem`` values: ``TrajectoryItem`` for existing trajectories or
@@ -49,51 +49,71 @@ invariant failure).
 no-update default that ingests for audit and never becomes ready. Recipes
 can implement their own lifecycle or reuse one of the feedback engines below.
 
-Fixed dataset epochs
---------------------
+Dataset consumption from storage
+--------------------------------
 
-Set ``dataset_epochs`` to a positive integer in ``ProcessorContext.config``
-for a fixed dataset; omit it to preserve streaming batching. A weight recipe
-can expose it as ``dataset_epochs: int = config_field(4)``. Write inputs once,
-then send ``POST /reef/report`` with the scenario header and:
+``DatasetProcessor`` is a separate engine for cold-start recipes whose
+INFERENCE records each contain a complete training example. Subclass it and
+implement ``make_sample(record)``; optionally override ``make_batch(items,
+batch_number)``. Existing reported and computed feedback processors keep their
+normal ingestion, correlation and grouping behavior.
 
-.. code:: json
+Write records once through the existing record store. There is no dataset
+completion report or upload barrier. When consumption starts, the processor
+captures the storage's current last sequence and trains that range for
+``dataset_epochs`` passes (a positive integer, default 1). Records appended
+while it trains remain in storage for the next range, which gets its own K
+passes. Starting training during an upload therefore splits it into ranges;
+it does not wait for the entire upload. Each range repeats in arrival order.
 
-   {"agent_record_id": "dataset-complete", "metadata": {"dataset_end": true}}
+For three stored records, ``batch_size=2`` and ``dataset_epochs=2`` produce
+``[a, b], [c], [a, b], [c]``. Each batch, including a partial tail, commits
+normally. ``StepScheduling.epochs`` instead repeats optimizer work within one
+reserved batch before its commit; it does not reread the dataset across commits.
 
-Wait for all input writes before sending this signal. Reuse its receipt ID
-on retries. This control report has no references, score or feedback and
-bypasses the recipe's sample-report schema. Training waits for it, including
-in manual and hybrid mode. Later data remains audit-only; use a new scenario
-for another dataset. An empty dataset produces no automatic batches.
+.. code:: python
 
-``ReportedFeedbackProcessor`` uses its existing ``make_sample`` and
-``make_batch`` hooks. One report or complete group is one unit; incomplete
-groups at completion are rejected. Direct ``DataProcessor`` subclasses can
-call ``add_samples(record_id, (sample,))`` in ``ingest``; the identifying
-receipt must appear in the sample's ``source_agent_record_ids``. This only
-queues samples in memory; input records must already be persisted
-through the record store's ``append`` interface. The base
-owns passes and reservations, and existing batch hooks can read the selected
-samples through ``dataset_items()``. Asynchronous computed-feedback engines
-need to assemble stable units before using this queue.
+   from reef.train import DatasetProcessor, TrajectoryItem
 
-Units repeat in arrival order, preserving groups. Three units with
-``batch_size=2`` and ``dataset_epochs=2`` produce ``[a, b], [c], [a, b], [c]``.
-Each batch commits normally, including the tail. For one commit per pass,
-make the processor batch size cover the dataset and use
-``StepScheduling.batch_size`` for optimizer steps. ``StepScheduling.epochs``
-repeats a single reserved batch before its commit; it does not repeat the
-dataset across commits.
+   class OfflineProcessor(DatasetProcessor):
+       def make_sample(self, record):
+           return TrajectoryItem(record.payload["trajectory"])
 
-Commit/release metrics record the one-based ``dataset_epoch``, total
-``dataset_epochs``, ``dataset_size`` and consumed ``dataset_unit_ids``.
-Recovery rebuilds the current pass from these records; keep unit assembly,
-grouping and epoch count unchanged across restarts. A failed instruction
-consumes only the instruction. Inputs, shared references and the end report
-remain protected until their final use, then normal compaction applies.
-A stale-drop backend raises rather than discarding dataset progress without
-a commit. Samples remain in memory; stored inputs are never duplicated.
+Construct it with ``ProcessorContext.config`` containing ``dataset_epochs``
+and ``batch_size``. The engine attaches the input record's ID to each sample.
+Samples must be self-contained: cross-record references and report grouping
+are not supported by this engine. It supports ``auto`` and ``hybrid`` modes;
+hybrid instructions are read in append order alongside the current batch.
+Choose the mode before consumption begins and keep it unchanged on restart;
+auto mode leaves instruction records unused. This engine does not support
+changing training modes after it has started reading a dataset.
+
+Only the current batch's samples stay in memory. Records are fetched one at a
+time, and samples are assembled again on subsequent passes. In addition to
+``batch_size``, ``dataset_batch_bytes`` limits the sum of input payload JSON
+bytes per batch (default 64 MiB). An oversized record is processed alone so
+consumption can advance. This is an input-size budget, not a process RSS limit:
+Python objects, sample expansion, the largest individual record and backend
+allocations add memory overhead. Recipe hooks must not cache prior inputs.
+
+Commit metrics include ``dataset_epoch`` (one-based, for that batch) and
+``dataset_state`` (range start/end, next epoch/cursor, configured epoch count).
+Recovery restores these scalar values and reads the next batch from storage;
+it does not rebuild the dataset in memory or collect all previously trained
+record IDs. Keep the epoch count and record-to-sample mapping unchanged on
+restart. A failed instruction consumes only the instruction; its samples remain
+eligible. Input records become releasable after their final pass and are
+compacted only after the commit is durable. Dropping a stale batch without a
+commit is rejected because it would lose consumption progress.
+Use a new scenario when switching from another processor or an older dataset
+implementation whose training commits do not carry this consumption state.
+
+For custom consumption policies, ``DataProcessor.consume`` can own storage
+reads; return the ingestion watermark and count, or return ``None`` to retain
+the trainer's normal ingestion loop. ``consumption_metrics`` supplies state
+for the same commit as the training result. ``restore_consumption`` restores
+it from commit history and returns ``True`` when ordinary prefix replay should
+be skipped. The default implementations preserve existing processor behavior.
 
 Explicit manual training
 ------------------------

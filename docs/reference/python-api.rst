@@ -633,10 +633,11 @@ Every processor gets the scenario's experiment logger as
 namespace; processor code never imports W&B, and the logger is a no-op when
 tracking is off.
 
-For fixed input sets, ``ProcessorContext.config["dataset_epochs"]`` enables
-repeated passes after a report with ``metadata.dataset_end=true``. See
-`fixed dataset epochs <../developer-guide/processors.rst#fixed-dataset-epochs>`__
-for processor hooks, recovery and retention.
+``DatasetProcessor`` reads self-contained inference records from storage in
+bounded batches and repeats each automatically captured storage range for
+``dataset_epochs`` passes. It needs no completion report. See
+`dataset consumption <../developer-guide/processors.rst#dataset-consumption-from-storage>`__
+for recipe hooks, memory budgets, recovery and retention.
 
 Reported feedback
 ~~~~~~~~~~~~~~~~~

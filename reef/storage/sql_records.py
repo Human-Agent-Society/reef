@@ -430,6 +430,18 @@ class SQLRecordStore(RecordStore):
             )
         return tuple((int(row["sequence"]), self._decode(row)) for row in rows)
 
+    def latest_sequence(self, scenario: str) -> int:
+        with self._transaction(scenario, write=False) as connection:
+            return int(
+                connection.execute(
+                    select(func.coalesce(func.max(self._tables.records.c.sequence), 0)).where(
+                        self._tables.condition(self._tables.records),
+                        self._tables.records.c.scenario == scenario,
+                        self._tables.records.c.compacted_at.is_(None),
+                    )
+                ).scalar_one()
+            )
+
     def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
         """Count training-visible records, optionally by type and after an append sequence."""
         if after_sequence < 0:

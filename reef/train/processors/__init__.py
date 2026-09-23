@@ -1,5 +1,8 @@
 """Processors: records in, one typed training batch out.
 
+``DatasetProcessor`` reads self-contained offline examples directly from
+storage, repeating bounded storage ranges without caching the dataset.
+
 Feedback either arrives as reports referencing inference records — where it is
 whatever the report carries, scores, text, or structured objects, not only
 numbers — or is mined from the traffic itself. ``TaskGenerationProcessor``
@@ -21,6 +24,7 @@ retention, objectives own the training signal.
 
 from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.computed import ComputedFeedbackProcessor
+from reef.train.processors.dataset import DatasetProcessor
 from reef.train.processors.distill import DistillProcessor
 from reef.train.processors.reported import ReportedFeedbackProcessor
 from reef.train.processors.task_generation import TaskGenerationProcessor
@@ -28,6 +32,7 @@ from reef.train.processors.task_generation import TaskGenerationProcessor
 __all__ = [
     "ComputedFeedbackProcessor",
     "DataProcessor",
+    "DatasetProcessor",
     "DistillProcessor",
     "ReportedFeedbackProcessor",
     "RetentionDecision",

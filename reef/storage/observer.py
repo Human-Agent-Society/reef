@@ -75,6 +75,9 @@ class ObservedRecordStore(RecordStore):
     def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
         return self._inner.count(scenario, request_type=request_type, after_sequence=after_sequence)
 
+    def latest_sequence(self, scenario: str) -> int:
+        return self._inner.latest_sequence(scenario)
+
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         return self._inner.get_for_audit(scenario, agent_record_id)
 
