@@ -27,6 +27,10 @@ everything the shared engines need to drive one harness binary:
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
+- ``host_env`` (optional): service environment variables a local episode
+  keeps, for a host tool the relocated ``HOME`` would otherwise hide.
+- ``is_root_under_home`` (optional): the episode root is made under the home
+  directory, for a container runtime that bind-mounts paths below it.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -183,6 +187,13 @@ class AdapterDescriptor:
     #: the matching set when it runs evaluation episodes, so the served tree
     #: never carries a provider binding.
     model_binding: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
+    #: Service environment variables an episode under the local executor keeps: the service's own value, else
+    #: the default, where ``{home}`` is the service's home directory; an empty default leaves the variable
+    #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as terminus's docker CLI.
+    host_env: Mapping[str, str] = field(default_factory=dict)
+    #: True when the episode root is made under ``~/.reef/episodes`` rather than the temp directory: a container
+    #: runtime bind-mounts paths below it, and colima shares the home directory but not ``$TMPDIR``.
+    is_root_under_home: bool = False
     #: ``files.tree``: where the entries list travels with the rendered files (a JSON
     #: array of ``{id, name, config}``), so a resident process can reconcile the
     #: tree entry by entry; None for an adapter whose binary reads files only.
@@ -266,6 +277,14 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         isinstance(key, str) and isinstance(value, str) for key, value in env.items()
     ):
         raise DescriptorError(f"{where} 'env' must map strings to strings")
+    host_env = data.get("host_env", {})
+    if not isinstance(host_env, Mapping) or not all(
+        isinstance(key, str) and key.isidentifier() and isinstance(value, str) for key, value in host_env.items()
+    ):
+        raise DescriptorError(f"{where} 'host_env' must map variable names to default strings")
+    overlap = sorted(set(host_env) & set(env))
+    if overlap:
+        raise DescriptorError(f"{where} 'host_env' names variables 'env' already sets: {', '.join(overlap)}")
     whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
     writable_paths = _relative_paths(data.get("writable_paths", []), f"{where} 'writable_paths'")
     self_isolating = data.get("self_isolating", False)
@@ -274,6 +293,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     is_prompt_task_directory = data.get("is_prompt_task_directory", False)
     if not isinstance(is_prompt_task_directory, bool):
         raise DescriptorError(f"{where} 'is_prompt_task_directory' must be a boolean")
+    is_root_under_home = data.get("is_root_under_home", False)
+    if not isinstance(is_root_under_home, bool):
+        raise DescriptorError(f"{where} 'is_root_under_home' must be a boolean")
     client_env = data.get("client_env", {})
     if not isinstance(client_env, Mapping) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in client_env.items()
@@ -297,6 +319,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         install=_parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         is_prompt_task_directory=is_prompt_task_directory,
+        host_env=dict(host_env),
+        is_root_under_home=is_root_under_home,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
         tree_path=_parse_tree_path(files, where),
         validate_execution=validate_execution,

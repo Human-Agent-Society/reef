@@ -20,6 +20,7 @@ finding.
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
 import tempfile
@@ -150,7 +151,17 @@ def run_episode(
             "evolution.executor: sandbox; use 'local' and let the adapter's container be the boundary"
         )
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
-    root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-"))
+    # A container runtime bind-mounts paths below the root for some adapters, and Docker on macOS shares the home
+    # directory with its VM where it may not share the temp directory, so those roots live under the home.
+    if descriptor.is_root_under_home:
+        parent = Path.home() / ".reef" / "episodes"
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise EpisodeError(f"cannot create the episode root directory {parent}: {exc}") from exc
+    else:
+        parent = None
+    root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-", dir=parent))
     try:
         written = set()
         for relative, text in files.items():
@@ -177,6 +188,13 @@ def run_episode(
         # config discovery that ignores the relocation vars still lands inside
         # the episode instead of in the operator's real home.
         env.setdefault("HOME", str(root))
+        if isinstance(executor, LocalExecutor):
+            # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
+            # its explicit env_from, and a remote executor runs on another host.
+            for key, default in descriptor.host_env.items():
+                value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
+                if value:
+                    env[key] = value
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:
             outcome = executor.launch(

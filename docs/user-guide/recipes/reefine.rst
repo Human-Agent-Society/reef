@@ -313,10 +313,10 @@ do not apply:
 
 .. code:: bash
 
+   export REEF_UPSTREAM_API_KEY=sk-or-...
    reef serve --recipe reefine \
      --inference.upstream-url https://openrouter.ai/api \
      --inference.upstream-model openai/gpt-4o-mini \
-     --inference.upstream-api-key sk-or-... \
      --recipe.config.evolution.adapter terminus \
      --recipe.config.evolution.requests false \
      --recipe.config.evolution.version_check false
@@ -338,7 +338,12 @@ request:
 
 The answer carries the request's ``agent_record_id``, and
 ``GET /reef/harness/requests/<id>/page`` shows the step. The evaluation
-runs the health task directory above, so the service host needs Docker.
+runs the health task directory above, so the service host needs Docker. The
+episode uses the Docker your shell uses: it keeps the service's
+``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (default
+``~/.docker``, where colima and Docker Desktop set the current context), and
+its files live under ``~/.reef/episodes``, because colima does not share
+``$TMPDIR`` with its VM.
 ``GET /reef/harness`` serves the published tree; `Harness adapters
 <../../developer-guide/harness-adapters.rst>`__ shows the config that runs
 it through Reef yourself, including the ``x-reef-scenario`` header.

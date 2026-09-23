@@ -154,6 +154,22 @@ def trial_record(task: str, rewards: Any, trials_dir: Path, error: str = "") -> 
     }
 
 
+def mount_error(error: str, trials_dir: Path) -> str:
+    """Name the mount problem when the task container's writes never reached the trial directory.
+
+    Harbor bind-mounts each trial's ``verifier`` directory into the Docker task container, and the verifier's
+    output lands in ``test-stdout.txt`` there before any reward. No reward and no such file on this host means
+    Docker wrote into a directory its VM does not share with the host, not that the verifier failed.
+    """
+    if not error.startswith("No reward file found") or any(trials_dir.rglob("verifier/test-stdout.txt")):
+        return error
+    return (
+        f"{error}. Docker wrote nothing into {trials_dir}, which it bind-mounted into the task container: the "
+        "Docker VM does not share that path with this host. Share it with the VM, or use a path it shares "
+        "(colima and Docker Desktop share the home directory by default)"
+    )
+
+
 def write_trial(record: dict[str, Any], sessions: Path) -> Path:
     """Write the trial where the adapter's trajectory reader will find it."""
     sessions.mkdir(parents=True, exist_ok=True)
@@ -198,6 +214,8 @@ def run(task: str) -> int:
         )
     )
     error = str((getattr(row, "tags", None) or {}).get("error") or "")
+    if environment == "docker":
+        error = mount_error(error, trials)
     record = trial_record(task, getattr(row, "rewards", None), trials, error)
     write_trial(record, sessions)
     return 1 if record["failed"] else 0

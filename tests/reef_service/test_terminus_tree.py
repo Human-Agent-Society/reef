@@ -169,6 +169,19 @@ def test_a_torn_trajectory_costs_its_steps_not_the_trial(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_a_missing_reward_with_no_verifier_output_names_the_mount_problem(tmp_path: Path) -> None:
+    missing = "No reward file found at /t/verifier/reward.txt or /t/verifier/reward.json"
+    verifier = tmp_path / "trials" / "hello-world__a1" / "verifier"
+    verifier.mkdir(parents=True)
+    # Harbor made the directory on the host, and the container's writes never reached it.
+    assert "the Docker VM does not share that path" in runner.mount_error(missing, tmp_path)
+    # The verifier's own output reached the host: it ran and wrote no reward, which is the task's result.
+    (verifier / "test-stdout.txt").write_text("1 failed\n")
+    assert runner.mount_error(missing, tmp_path) == missing
+    assert runner.mount_error("docker compose build failed", tmp_path) == "docker compose build failed"
+
+
+@pytest.mark.unit
 def test_a_trial_record_carries_the_verifier_rewards(tmp_path: Path) -> None:
     record = runner.trial_record("hello-world", {"accuracy": 1.0}, tmp_path)
     assert record["reward"] == 1.0 and record["failed"] is False

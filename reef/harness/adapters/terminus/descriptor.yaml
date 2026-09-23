@@ -10,8 +10,8 @@
 # The prompt is the task: a Harbor task directory or a registry id, which is
 # what reef-eval resolves. An episode therefore needs no dataset location in
 # its environment, which run_episode would not have carried anyway - it hands
-# an episode only the descriptor's own env, and {root}/{prompt} are the only
-# substitutions.
+# an episode only the descriptor's own env and host_env, and {root}/{prompt}
+# are the only substitutions in env and argv.
 #
 # Evolved Python requires Reef's sandbox around this runner and remote E2B
 # tasks. Declarative trees can use the default local runner with Docker.
@@ -28,6 +28,21 @@ env:
   REEF_TERMINUS_SESSION_DIR: "{root}/terminus/sessions"
   REEF_TERMINUS_TRIALS_DIR: "{root}/terminus/trials"
   HOME: "{root}/workspace"
+# Harbor drives the task container with the docker CLI, which finds its
+# endpoint and context through these variables, else through the current
+# context in its config directory (colima and Docker Desktop set one there),
+# where it also finds the compose plugin. HOME is relocated above, so the
+# episode keeps the service's own values; {home} is the service's home.
+host_env:
+  DOCKER_HOST: ""
+  DOCKER_CONTEXT: ""
+  DOCKER_CONFIG: "{home}/.docker"
+# Harbor bind-mounts each trial's directories under the root into the task
+# container, so the root must be on a path Docker shares with the host. Linux
+# Docker shares every path, and colima and Docker Desktop share the home
+# directory by default; colima does not share $TMPDIR (/var/folders on
+# macOS), and container writes there never reach the host.
+is_root_under_home: true
 files:
   config:
     primary:
@@ -57,10 +72,13 @@ self_isolating: true
 quirks: reef.harness.adapters.terminus.quirks
 # Terminus 2 reaches the model through litellm, so the binding is the provider
 # base URL, key, and model name. The served tree never carries a provider.
-# litellm routes to api_base only under a provider prefix and strips it before
-# the call, so the model reaches the endpoint as it is named: a bare
-# "qwen/qwen3-coder" has no litellm provider, and "deepseek/..." would go to
-# litellm's DeepSeek client without its vendor prefix.
+# custom_openai sends the model to api_base as it is named whatever vendor
+# prefix it carries: without it a bare "qwen/qwen3-coder" has no litellm
+# provider, and "deepseek/..." goes to litellm's DeepSeek client without its
+# vendor prefix. model_name stays the served name, the one Harbor looks up in
+# litellm's model table for the context limit Terminus 2 summarizes against.
+# litellm drops reasoning_effort for custom_openai unless it is allowed, and a
+# tree may set it.
 # A tree a person runs against Reef itself also needs llm_kwargs.extra_headers
 # {"x-reef-scenario": "<scenario>"}, or Reef answers 400. Evaluation episodes
 # call the upstream directly and need no header.
@@ -68,7 +86,9 @@ model_binding:
   openai:
     - target: primary
       data:
-        model_name: "openai/{model}"
+        model_name: "{model}"
         api_base: "{base_url}/v1"
         llm_kwargs:
           api_key: "{api_key}"
+          custom_llm_provider: "custom_openai"
+          allowed_openai_params: ["reasoning_effort"]

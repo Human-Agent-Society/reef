@@ -185,10 +185,15 @@ def test_terminus_binding_renders_the_litellm_provider(model: str) -> None:
     binding = ModelBinding(base_url="http://127.0.0.1:9", model=model, api_key="k-1")
     files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
     config = json.loads(files["terminus/config.json"])
-    # The openai prefix routes litellm to api_base whatever vendor prefix the served name carries.
-    assert config["model_name"] == f"openai/{model}"
+    # The served name stays the model name Harbor looks the context limit up under; custom_openai routes litellm
+    # to api_base whatever vendor prefix that name carries, and keeps a tree's reasoning_effort only when allowed.
+    assert config["model_name"] == model
     assert config["api_base"] == "http://127.0.0.1:9/v1"
-    assert config["llm_kwargs"] == {"api_key": "k-1"}
+    assert config["llm_kwargs"] == {
+        "api_key": "k-1",
+        "custom_llm_provider": "custom_openai",
+        "allowed_openai_params": ["reasoning_effort"],
+    }
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
@@ -430,6 +435,34 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("host_env", ["DOCKER_HOST"], "'host_env' must map variable names"),
+        ("host_env", {"NOT A NAME": ""}, "'host_env' must map variable names"),
+        ("host_env", {"PI_CODING_AGENT_DIR": ""}, "'env' already sets: PI_CODING_AGENT_DIR"),
+        ("is_root_under_home", "yes", "'is_root_under_home' must be a boolean"),
+    ],
+)
+def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
+    data[field] = value
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=message):
+        load_descriptor(target)
+
+
+def test_only_terminus_keeps_host_environment_or_roots_under_home() -> None:
+    """Every other bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
+    terminus = get_adapter("terminus")
+    assert terminus.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
+    assert terminus.is_root_under_home
+    for name in sorted(set(available_adapters()) - {"terminus"}):
+        descriptor = get_adapter(name)
+        assert descriptor.host_env == {} and not descriptor.is_root_under_home, name
 
 
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
