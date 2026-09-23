@@ -1413,6 +1413,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         artifact = self._rendered_publications.pop(int(state["steps"]), None)
         if artifact is not None:
             artifact.discard()
+        # The tree follows the durable state, whatever settlement or a subclass left in it.
+        self._loader.root.update([copy.deepcopy(entry) for entry in state["entries"]])
         # The step is over: no earlier settlement can be aborted any more.
         self._settled_proposals.clear()
 

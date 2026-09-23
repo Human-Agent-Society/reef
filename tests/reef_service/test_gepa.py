@@ -768,6 +768,8 @@ def test_one_step_publishes_and_the_gate_carries_the_gepa_metrics(tmp_path: Path
         assert result.state is not None
         assert result.state[ARCHIVE_STATE_KEY]["served"] == 1
         scenario.commit(result)
+        # The commit discards the rendered tree it published.
+        assert not result.artifact.local_path.exists()
     finally:
         dispatcher.close()
 
