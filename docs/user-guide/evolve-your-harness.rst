@@ -123,14 +123,15 @@ on ``web_search`` for your ``reef-codex`` session; episodes always run with
 web search off. The shell in a ``reef-codex`` session has no network, so a
 command that reaches Reef, such as ``reef-codex evolve``, runs only after you
 approve it when Codex asks. Episodes never ask, and ``reef-codex exec``
-cannot ask, so its shell cannot reach Reef. Answer "Yes, proceed". "Yes, and
-don't ask again" runs every command that starts with the text Codex shows in
-that answer with no question until the session ends, also after the session
-changes the ``reef-codex`` file, which it can do when the harness is installed
-inside the project directory. Terminus accepts one
-Python module defining ``Agent(Terminus2)`` when Reef's sandbox isolates the
-runner and Harbor uses remote E2B tasks. See the adapter guide for the
-required deployment settings.
+cannot ask, so its shell cannot reach Reef. Answer "Yes, proceed", which
+approves one call. "Yes, and don't ask again" runs every command that starts
+with the text Codex shows in that answer with no question until the session
+ends. An approved call runs the ``reef-codex`` file as it is at that moment,
+and when the harness is installed inside the project directory the session
+can change that file before the call. Terminus accepts one Python module
+defining ``Agent(Terminus2)`` when Reef's sandbox isolates the runner and
+Harbor uses remote E2B tasks. See the adapter guide for the required
+deployment settings.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
