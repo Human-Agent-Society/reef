@@ -36,6 +36,9 @@ There are also related Slime discussions, including
 consulted for the exact upstream runtime and current maintainer direction, but
 they must not be treated as proof that the required reward-side hook already
 exists in the pinned checkout.
+The raw-KL boundary is provided by upstream Slime commit
+[`045310b2`](https://github.com/THUDM/slime/commit/045310b2), merged through [Slime #2114](https://github.com/THUDM/slime/pull/2114).
+Reef consumes the preserved `rollout_data["kl"]` field for adaptive-KL telemetry and does not patch Slime. The experiment must not rely on the now-closed duplicate PR #2408.
 
 The implementation agent must record the exact Slime commit or package version
 used by the experiment. Do not assume that the current upstream main branch,
