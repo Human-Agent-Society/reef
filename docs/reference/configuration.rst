@@ -589,41 +589,51 @@ persistent.
    reef.artifact_work_dir | .reef/artifact-work | materialization scratch
    reef.artifact_cache_dir | .reef/artifact-cache | fetched artifact cache
    reef.agent_record_dir | .reef/agent-record | the record store
-   reef.agent_record_retention_days | 7.0 | compacted trace bodies expire this many days after compaction
-   reef.agent_record_retention_max_bytes | 21474836480 | 20 GiB shared across compacted trace bodies in the record directory
+   reef.agent_record_retention_days | 7.0 | deprecated compatibility setting; automatic cleanup no longer expires data by age
+   reef.agent_record_retention_max_bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
 
 .. warning::
 
    On ephemeral storage, a restart loses the record store, the commit logs, and
    every version.
 
-The record store keeps trace bodies after training compaction. Compaction marks
-records as retired from training; it does not remove their requests, responses,
-or feedback from SQLite immediately. The HTTP service starts retention cleanup
-at startup and repeats it every 60 seconds, outside the inference and training
-request paths. It first removes bodies older than 7 days, then the oldest
-remaining bodies until their total fits within 20 GiB. Both limits are
-configurable above and must be positive; the time limit must also be finite.
+Training completion updates consumption progress without retiring stored bodies.
+Storage manages cleanup independently: the HTTP service runs a sweep at startup
+and every 60 seconds. When the total record-body size exceeds the configured
+budget, storage evicts the oldest records by stored creation time, breaking ties
+by append sequence. Both consumed and unconsumed data are eligible; processors
+cannot protect disk records from capacity eviction. The legacy
+``agent_record_retention_days`` option is accepted but has no cleanup effect.
 
-The byte budget counts UTF-8 JSON payloads, references, and artifact references
-across all scenario databases, including databases under ``archived/``. It is
-shared across the directory, not allocated separately to each scenario. Deletes
-commit in batches of 256. Active records, retry hashes, and commit/receipt
-metadata are retained. Cleanup failures are logged and retried on the next sweep.
+The budget measures UTF-8 JSON payloads, references and artifact references
+across active and archived scenarios. SQLite shares it across the record
+directory; PostgreSQL shares it across the deployment schema. Each eviction
+logs a warning with the scenario, record count, sequence range and body bytes.
+Per-scenario loss totals survive restart. Processor status exposes
+``record_data_incomplete``, ``evicted_record_count`` and ``evicted_body_bytes``
+after a loss; metrics also expose ``records/evicted_count`` and
+``records/data_incomplete``. These describe missing stored data, not proof that
+an already committed model missed those examples. Pending reports whose inputs
+are no longer stored are skipped with a warning; remaining records continue
+through the usual processor.
 
-This is a retained-body budget, not a hard disk quota. Incoming compaction can
-exceed the budget between sweeps; active records, indexes, hashes, commit logs,
-and WAL files take additional space. SQLite reuses pages freed by cleanup but
-does not automatically shrink the database file. Allow additional disk headroom.
-Standalone Python stores do not start a maintenance task; see `Python API <python-api.rst>`__
-for explicit retention and purge methods.
+Retry hashes and commit metadata survive eviction, so retrying an upload does
+not restore evicted records or train them again. A consumer needing multiple
+passes must tolerate missing records once capacity eviction occurs.
 
-Existing stores gain ``compacted_at`` and ``body_bytes`` columns when opened.
-The migration measures retained JSON byte sizes once. Already
-deleted bodies cannot be recovered by this migration. Older Reef versions do
-not filter that column: stop the service and restore a pre-upgrade backup for
-rollback, or purge all compacted bodies with the new version before downgrading.
-Do not share a migrated store between old and new writers.
+This is a body budget, not a hard filesystem quota or an emergency disk-full
+handler. Concurrent writes can exceed it between sweeps. Indexes, retry hashes,
+commit logs and WAL require additional disk headroom. SQLite reuses freed pages
+without automatically shrinking its file. Cleanup failures are logged and
+retried on the next sweep. Standalone stores need an explicit maintenance call;
+see `Python API <python-api.rst>`__.
+
+Existing stores gain a small ``record_eviction`` table for loss totals and a
+capacity-order index; PostgreSQL advances its schema version to 2. Legacy
+compacted rows retain their previous visibility and recovery semantics. New
+training commits leave ``compacted_ids`` empty and persist consumption separately.
+Already deleted bodies cannot be recovered. Do not share stores between old and
+new writers, or downgrade without restoring a compatible backup.
 
 Recipe settings such as ``batch_size`` sit beside these in the same section,
 along with any others the recipe declares with ``config_field``. When

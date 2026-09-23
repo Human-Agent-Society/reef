@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from contextlib import closing
 
 import pytest
 from reef_service.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime, candidate_backend, runtime_bindings
@@ -703,9 +704,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
     assert first.state == {"steps": 1}
     assert first.data_offset == prepared.high_water_offset == 2
 
-    # Simulate restart: a fresh trainer is built with the algorithm_state
-    # recovered from artifact metadata. the record store on disk retains only the
-    # untrained prefix (compaction retired i1/r1 from training reads).
+    # Recovery restores consumption independently of the retained record bodies.
     recovered_state = first.algorithm_state_dict()
     second = Trainer.build(
         "math",
@@ -715,6 +714,8 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
         algorithm_state=recovered_state,
     )
 
+    second.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+    second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
     assert second.state == {"steps": 1}
     second_batch = second.reserve_training_batch()
     assert second_batch is not None
@@ -728,7 +729,7 @@ def test_trainer_restores_algorithm_state_from_metadata() -> None:
 
 
 @pytest.mark.unit
-def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) -> None:
+def test_commit_retains_readable_records_and_recovery_skips_committed_consumption(tmp_path) -> None:
     database = tmp_path / "records.sqlite3"
     first_inference = positioned_inference(1)
     first_report = positioned_report(2, first_inference.agent_record_id, 1.0)
@@ -752,11 +753,14 @@ def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) ->
         first.commit(prepared)
         first.apply_compaction(prepared.compacted_ids)
 
-        assert first_store.get("math", first_inference.agent_record_id) is None
-        assert first_store.get("math", first_report.agent_record_id) is None
+        assert first_store.get("math", first_inference.agent_record_id) == first_inference
+        assert first_store.get("math", first_report.agent_record_id) == first_report
         assert first_store.get_for_audit("math", first_inference.agent_record_id).item == first_inference
         assert first_store.get_for_audit("math", first_report.agent_record_id).item == first_report
+        assert prepared.compacted_ids == frozenset()
         assert [item.agent_record_id for item in first_store.replay("math")] == [
+            first_inference.agent_record_id,
+            first_report.agent_record_id,
             second_inference.agent_record_id,
             second_report.agent_record_id,
         ]
@@ -769,6 +773,8 @@ def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) ->
             candidate_backend=_PreparingBackend(),
             algorithm_state={"steps": 1},
         )
+        second.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+        second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == {"steps": 1}
         batch = second.reserve_training_batch()
         assert batch is not None
@@ -778,10 +784,10 @@ def test_commit_retires_consumed_payloads_and_retains_audit_history(tmp_path) ->
         prepared = second.prepare_commit(second_result)
         second.commit(prepared)
         second.apply_compaction(prepared.compacted_ids)
-        assert second_store.count("math") == 0
+        assert second_store.count("math") == 4
         archived = second_store.audit_page("math")
         assert [entry.item for entry in archived] == [first_inference, first_report, second_inference, second_report]
-        assert all(entry.compacted_at is not None for entry in archived)
+        assert all(entry.compacted_at is None for entry in archived)
         assert second.reserve_training_batch() is None
 
 
@@ -923,3 +929,77 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
         to_slime_rollout_data(prepared.payload)
     assert processor.build_batch() is batch
     assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+
+
+def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp_path, caplog):
+    database = tmp_path / "records.sqlite3"
+    with SQLiteRecordStore(database) as records:
+        records.append(positioned_inference(1))
+        records.append(positioned_report(2, "i1", 1.0))
+        # Keep the report but evict its input before the processor sees either.
+        with records._transaction("math", write=False) as connection:
+            keep_bytes = connection.exec_driver_sql(
+                "SELECT body_bytes FROM agent_record WHERE agent_record_id='r2'"
+            ).scalar_one()
+        with closing(SQLiteScenarioStorage(tmp_path)) as storage:
+            assert storage.prune(days=7, max_bytes=keep_bytes) == 1
+        records.append(positioned_inference(3))
+        records.append(positioned_report(4, "i3", 1.0))
+        trainer = Trainer.build(
+            "math",
+            records,
+            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            candidate_backend=_PreparingBackend(),
+        )
+        assert trainer.processor_status()["record_data_incomplete"] is True
+        batch = trainer.reserve_training_batch()
+        assert batch is not None
+        assert source_record_id(batch.items[0]) == "i3"
+        result = trainer.execute_reserved_step(0).result
+        assert result is not None
+        prepared = trainer.prepare_commit(result)
+        assert "r2" in prepared.consumed_ids
+        assert prepared.metrics["records/data_incomplete"] == 1
+        trainer.commit(prepared)
+        assert trainer.reserve_training_batch() is None
+        assert "Skipping report r2" in caplog.text
+    with SQLiteRecordStore(database) as records:
+        resumed = Trainer.build(
+            "math",
+            records,
+            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            candidate_backend=_PreparingBackend(),
+            algorithm_state=prepared.algorithm_state,
+        )
+        resumed.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+        resumed.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
+        assert resumed.reserve_training_batch() is None
+        assert resumed.processor_status()["evicted_record_count"] == 1
+        assert records.get("math", "i3") is not None
+
+
+def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
+    from reef.scenario.factory import _consumed_by_committed_steps
+    from reef.storage.commit_log import CommitLogScenarioStore
+
+    database = tmp_path / "records.sqlite3"
+    for index in (1, 2):
+        with SQLiteRecordStore(database) as records:
+            records.append(inference(f"i{index}"))
+            records.append(report(f"r{index}", f"i{index}", 1.0))
+            trainer = Trainer.build(
+                "math",
+                records,
+                processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+                candidate_backend=_PreparingBackend(),
+            )
+            with closing(CommitLogScenarioStore("math", records)) as session:
+                consumed = _consumed_by_committed_steps(session, None, "math")
+                trainer.reingest(up_to_sequence=0, consumed_ids=consumed)
+                batch = trainer.reserve_training_batch()
+                assert batch is not None
+                assert source_record_id(batch.items[0]) == f"i{index}"
+                trainer.reject_pending({"reason": "stale"})
+                assert trainer.reserve_training_batch() is None
+                assert records.get("math", f"i{index}") is not None
+                assert len(records.compaction_receipts("math")) == index

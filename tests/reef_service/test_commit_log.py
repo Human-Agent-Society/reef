@@ -532,7 +532,8 @@ def test_each_committed_step_appends_one_atomic_record(tmp_path) -> None:
     assert first.artifact_ref.runtime_load_id == "w1"
     assert first.checkpoint is False
     assert first.algorithm_state == {"steps": 1}
-    assert first.compacted_ids == frozenset({"i1", "r1"})
+    assert first.compacted_ids == frozenset()
+    assert first.consumed_ids == frozenset({"i1", "r1"})
     assert first.high_water_sequence == 2
     assert second.artifact_ref.runtime_load_id == "w2"
     assert second.high_water_sequence == 4
@@ -716,12 +717,8 @@ def test_recovery_reingests_retained_rows_behind_the_watermark(tmp_path) -> None
 
 
 @pytest.mark.unit
-def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path, monkeypatch) -> None:
-    """Crash window: commit record appended, compaction never applied.
-
-    Recovery must re-apply the recorded deletions; otherwise the rows would be
-    re-ingested (the state came from the record) and trained twice.
-    """
+def test_recovery_skips_consumption_after_processor_release_failure(tmp_path, monkeypatch) -> None:
+    """A committed batch cannot train twice even if processor cleanup fails."""
     initial = tmp_path / "initial"
     initial.mkdir()
     agent_record_dir = tmp_path / "agent-record"
@@ -730,7 +727,7 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path, monkeypa
     first = build_training_dispatcher(first_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     scenario = first.get_or_create_scenario("math")
 
-    original_compact = scenario.records.compact
+    original_compact = scenario.trainer.compaction_applied
     crash = {"armed": True}
 
     def exploding_compaction(*args, **kwargs) -> None:
@@ -739,7 +736,7 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path, monkeypa
             raise RuntimeError("simulated crash between record append and compaction")
         original_compact(*args, **kwargs)
 
-    monkeypatch.setattr(scenario.records, "compact", exploding_compaction)
+    monkeypatch.setattr(scenario.trainer, "compaction_applied", exploding_compaction)
     first.accept_record(sft_inference("i1"))
     first.accept_record(sft_report("r1", "i1"))
     wait_for_step(first, 1)
@@ -749,8 +746,8 @@ def test_recovery_replays_a_compaction_interrupted_by_a_crash(tmp_path, monkeypa
     second_runtime = RecordingRuntime()
     second = build_training_dispatcher(second_runtime, tmp_path, backend_factory, agent_record_dir=agent_record_dir)
     recovered = second.get_or_create_scenario("math")
-    # Recovery replayed the interrupted compaction and resumed at step 1.
-    assert recovered.records.get("math", "i1") is None
+    # Recovery uses committed consumption while leaving bodies readable.
+    assert recovered.records.get("math", "i1") is not None
     assert recovered.scenario_step == 1
 
     second.accept_record(sft_inference("i2"))
@@ -809,7 +806,7 @@ def test_recovery_adopts_a_checkpoint_whose_record_was_lost(tmp_path) -> None:
     assert adopted.checkpoint is True
     assert adopted.artifact_ref == recovered.repository.require_current_artifact()
     assert adopted.high_water_sequence == 2
-    assert adopted.compacted_ids == frozenset({"i1", "r1"})
+    assert adopted.compacted_ids == frozenset()
     assert adopted.training_job_id == "job-0"
     assert adopted.operation == "training"
     assert adopted.operation_verified is True
@@ -843,7 +840,7 @@ def test_checkpoint_metadata_restores_a_commit_record(tmp_path) -> None:
     assert metadata["record_progress"] == {
         "high_water_sequence": 2,
         "high_water_offset": 2,
-        "compacted_ids": ["i1", "r1"],
+        "compacted_ids": [],
         "consumed_ids": ["i1", "r1"],
     }
 
@@ -1217,7 +1214,7 @@ def test_artifact_commit_failure_keeps_the_pending_batch_retryable(tmp_path, mon
     assert backend.batch_ids == [pending.batch_id]
     assert scenario.trainer.state == {"steps": 1}
     assert scenario.trainer.pending_batch is None
-    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i2"]
+    assert [record.agent_record_id for record in scenario.records.replay("math")] == ["i1", "r1", "i2"]
     assert len(scenario.store.history()) == 1
     dispatcher.close()
 
@@ -1407,8 +1404,8 @@ def test_durable_local_backend_recovers_after_post_commit_notification_failure(t
     wait_for_step(dispatcher, 1, scenario="skills")
     recovered = dispatcher.get_or_create_scenario("skills")
     assert recovered is not original
-    assert recovered.records.get("skills", "i1") is None
-    assert recovered.records.get("skills", "r1") is None
+    assert recovered.records.get("skills", "i1") is not None
+    assert recovered.records.get("skills", "r1") is not None
     status = dispatcher.build_training_status()["scenarios"]["skills"]
     assert status["scenario_step"] == 1
     assert status["last_committed_step"]["step"] == 1
@@ -1464,7 +1461,8 @@ def test_no_artifact_commit_appends_a_record_and_advances_the_step(tmp_path) -> 
     assert record.artifact_ref == head  # head unchanged: no new artifact published
     assert record.algorithm_state == {"steps": 1, "entries": []}
     assert record.high_water_sequence == 2
-    assert record.compacted_ids == frozenset({"i1", "r1"})
+    assert record.compacted_ids == frozenset()
+    assert record.consumed_ids == frozenset({"i1", "r1"})
     dispatcher.close()
 
 

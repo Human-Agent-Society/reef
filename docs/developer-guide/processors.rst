@@ -34,9 +34,12 @@ and group completeness remain recipe decisions. There is no separate dataset
 container. See `batch values <../reference/python-api.rst#batch>`__ for formats
 and algorithm support.
 
-The processor also controls retention. The trainer reads
-``retention_decision()`` (protected vs releasable ids) and reports deletions
-back through ``compaction_applied()``. A batch the backend dropped as stale is
+The processor controls its in-memory buffers, not disk retention. For API
+compatibility, ``retention_decision()`` still names protected/releasable IDs and
+``compaction_applied()`` releases their in-memory state after a successful
+commit. New commits retain the stored bodies; consumption progress prevents
+retraining on restart. Storage can independently evict any body under capacity
+pressure, with warnings and durable loss totals. A batch the backend dropped as stale is
 announced through ``dropped()`` before its acknowledgement, for a processor
 that paces work on what actually trained.
 Nothing numeric lives here. Advantages and the loss family are the step

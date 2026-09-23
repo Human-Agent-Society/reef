@@ -95,7 +95,7 @@ class ScenarioStorage(ABC):
 
     @abstractmethod
     def prune(self, *, days: float, max_bytes: int) -> int:
-        """Purge retained compacted bodies across active and archived storage."""
+        """Evict oldest bodies over max_bytes; days is a deprecated compatibility argument."""
 
     @abstractmethod
     def close(self) -> None:

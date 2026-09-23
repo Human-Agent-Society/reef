@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 import re
 import shutil
 import time
@@ -37,7 +38,7 @@ from sqlalchemy.schema import CreateSchema
 
 from reef.core.errors import ReefError
 from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
-from reef.storage.records import RecordRetention
+from reef.storage.records import RecordLoss, RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
 
@@ -116,7 +117,18 @@ def _record_tables(metadata: MetaData) -> RecordTables:
         records.c.sequence,
         postgresql_where=records.c.compacted_at.is_not(None),
     )
-    return RecordTables(records, consumed, receipts)
+    eviction = Table(
+        "record_eviction",
+        metadata,
+        Column("storage_id", String(32), ForeignKey("record_store.storage_id"), primary_key=True),
+        Column("scenario", Text, primary_key=True),
+        Column("record_count", BigInteger, nullable=False),
+        Column("body_bytes", BigInteger, nullable=False),
+        Column("first_sequence", BigInteger, nullable=False),
+        Column("last_sequence", BigInteger, nullable=False),
+    )
+    Index("agent_record_capacity", records.c.created_at, records.c.sequence)
+    return RecordTables(records, consumed, receipts, eviction)
 
 
 class PostgresRecordDatabase:
@@ -156,11 +168,15 @@ class PostgresRecordDatabase:
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
                 versions = connection.execute(select(version.c.version)).scalars().all()
-                if versions and versions != [1]:
+                if versions and versions not in ([1], [2]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 metadata.create_all(connection)
-                if not versions:
-                    connection.execute(version.insert().values(version=1))
+                for index in self.tables.records.indexes:
+                    index.create(connection, checkfirst=True)
+                if versions == [1]:
+                    connection.execute(version.update().values(version=2))
+                elif not versions:
+                    connection.execute(version.insert().values(version=2))
         except BaseException:
             self._engine.dispose()
             raise
@@ -217,9 +233,9 @@ class PostgresRecordDatabase:
             return storage_id
 
     def prune(self, retention: RecordRetention) -> int:
-        """Apply age and body-byte limits across active and archived generations."""
+        """Evict oldest bodies across generations when the capacity budget is exceeded."""
         queries = SQLRecordRetention(self.tables)
-        cutoff = time.time() - retention.days * 86400
+        losses: list[tuple[str, RecordLoss]] = []
         removed = 0
         with self.transaction() as connection:
             # Concurrent maintenance must not count the same deletion twice.
@@ -227,11 +243,10 @@ class PostgresRecordDatabase:
                 hashlib.sha256(f"reef-record-retention:{self._schema}".encode()).digest()[:8], "big", signed=True
             )
             connection.execute(select(func.pg_advisory_xact_lock(key)))
-            while True:
-                count = queries.purge_expired(connection, before=cutoff)
-                removed += count
-                if count == 0:
-                    break
+            # Use the same namespace locks as append/compaction to protect retry hashes.
+            connection.execute(
+                select(self._stores.c.storage_id).order_by(self._stores.c.storage_id).with_for_update()
+            ).all()
             retained = queries.retained_bytes(connection)
             after_time, after_sequence = float("-inf"), 0
             while retained > retention.max_bytes:
@@ -245,7 +260,19 @@ class PostgresRecordDatabase:
                     after_time, after_sequence = compacted_at, sequence
                     if retained <= retention.max_bytes:
                         break
-                removed += queries.delete(connection, selected)
+                batch_losses = queries.evict(connection, selected)
+                losses.extend(batch_losses)
+                removed += sum(loss.record_count for _, loss in batch_losses)
+        for scenario, loss in losses:
+            logging.getLogger(__name__).warning(
+                "Record capacity exceeded: evicted %d records (%d body bytes), scenario=%s, sequence=%d..%d; "
+                "training data may be incomplete",
+                loss.record_count,
+                loss.body_bytes,
+                scenario,
+                loss.first_sequence,
+                loss.last_sequence,
+            )
         return removed
 
     def close(self) -> None:

@@ -24,7 +24,7 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from reef.core.artifact_ref import decode_artifact_ref, encode_artifact_ref
 from reef.core.records_types import AgentRecord, RequestType
-from reef.storage.records import AppendResult, RecordConflict, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, RecordConflict, RecordLoss, RecordStore, StoredRecord
 
 
 @dataclass(frozen=True)
@@ -39,6 +39,7 @@ class RecordTables:
     records: Table
     consumed: Table
     compaction_receipts: Table
+    eviction: Table
     scope: Mapping[str, str] = field(default_factory=dict)
 
     def condition(self, table: Table) -> ColumnElement[bool]:
@@ -88,11 +89,11 @@ class SQLRecordRetention:
         ).rowcount
 
     def retained_bytes(self, connection: Connection) -> int:
-        """Count compacted JSON body bytes without counting active records."""
+        """Count all stored JSON bodies, independent of training consumption."""
         return int(
             connection.execute(
                 select(func.coalesce(func.sum(self._records.c.body_bytes), 0)).where(
-                    self._tables.condition(self._records), self._records.c.compacted_at.is_not(None)
+                    self._tables.condition(self._records)
                 )
             ).scalar_one()
         )
@@ -100,28 +101,102 @@ class SQLRecordRetention:
     def page(
         self, connection: Connection, *, after_time: float, after_sequence: int, limit: int = 256
     ) -> tuple[tuple[float, int, int], ...]:
-        """Read retained body timestamps, append sequences, and byte sizes."""
+        """Read oldest records across scenarios using their stored timestamps."""
         rows = connection.execute(
-            select(self._records.c.compacted_at, self._records.c.sequence, self._records.c.body_bytes)
+            select(self._records.c.created_at, self._records.c.sequence, self._records.c.body_bytes)
             .where(
                 self._tables.condition(self._records),
-                self._records.c.compacted_at.is_not(None),
-                tuple_(self._records.c.compacted_at, self._records.c.sequence) > (after_time, after_sequence),
+                tuple_(self._records.c.created_at, self._records.c.sequence) > (after_time, after_sequence),
             )
-            .order_by(self._records.c.compacted_at, self._records.c.sequence)
+            .order_by(self._records.c.created_at, self._records.c.sequence)
             .limit(limit)
         ).all()
-        return tuple((float(compacted_at), int(sequence), int(size)) for compacted_at, sequence, size in rows)
+        return tuple((float(created_at), int(sequence), int(size)) for created_at, sequence, size in rows)
 
-    def delete(self, connection: Connection, sequences: Sequence[int]) -> int:
-        """Delete the selected bodies only while they remain compacted."""
-        return connection.execute(
-            self._records.delete().where(
-                self._tables.condition(self._records),
-                self._records.c.compacted_at.is_not(None),
-                self._records.c.sequence.in_(sequences),
+    def evict(self, connection: Connection, sequences: Sequence[int]) -> tuple[tuple[str, RecordLoss], ...]:
+        """Delete bodies and persist retry hashes and loss totals in the same transaction.
+
+        The adapter serializes this operation with record writes. Loss totals are
+        per storage generation and scenario; metadata never includes payloads.
+        """
+        tables = self._tables
+        rows = (
+            connection.execute(
+                select(self._records).where(tables.condition(self._records), self._records.c.sequence.in_(sequences))
             )
-        ).rowcount
+            .mappings()
+            .all()
+        )
+        if not rows:
+            return ()
+        groups: dict[tuple[str, ...], list[RowMapping]] = {}
+        scope_names = tuple(column.name for column in tables.eviction.primary_key if column.name != "scenario")
+        for row in rows:
+            key = tuple(str(row[name]) for name in (*scope_names, "scenario"))
+            groups.setdefault(key, []).append(row)
+        losses: list[tuple[str, RecordLoss]] = []
+        for key, members in groups.items():
+            scope = dict(zip(scope_names, key[:-1], strict=True))
+            scenario = key[-1]
+            ids = [row["agent_record_id"] for row in members]
+            hashes = tables.consumed
+            present = set(
+                connection.execute(
+                    select(hashes.c.agent_record_id).where(
+                        *(hashes.c[name] == value for name, value in scope.items()),
+                        hashes.c.agent_record_id.in_(ids),
+                    )
+                ).scalars()
+            )
+            missing = [
+                {
+                    **scope,
+                    "agent_record_id": row["agent_record_id"],
+                    "content_sha256": SQLRecordStore._content_sha256(SQLRecordStore._row_content(row)),
+                }
+                for row in members
+                if row["agent_record_id"] not in present
+            ]
+            if missing:
+                connection.execute(hashes.insert(), missing)
+            loss = RecordLoss(
+                len(members),
+                sum(int(row["body_bytes"]) for row in members),
+                min(int(row["sequence"]) for row in members),
+                max(int(row["sequence"]) for row in members),
+            )
+            state = tables.eviction
+            condition = and_(state.c.scenario == scenario, *(state.c[name] == value for name, value in scope.items()))
+            previous = connection.execute(select(state).where(condition)).mappings().first()
+            if previous is None:
+                connection.execute(
+                    state.insert().values(
+                        **scope,
+                        scenario=scenario,
+                        record_count=loss.record_count,
+                        body_bytes=loss.body_bytes,
+                        first_sequence=loss.first_sequence,
+                        last_sequence=loss.last_sequence,
+                    )
+                )
+            else:
+                connection.execute(
+                    state.update()
+                    .where(condition)
+                    .values(
+                        record_count=state.c.record_count + loss.record_count,
+                        body_bytes=state.c.body_bytes + loss.body_bytes,
+                        first_sequence=min(int(previous["first_sequence"]), loss.first_sequence),
+                        last_sequence=max(int(previous["last_sequence"]), loss.last_sequence),
+                    )
+                )
+            losses.append((scenario, loss))
+        connection.execute(
+            self._records.delete().where(
+                tables.condition(self._records), self._records.c.sequence.in_([row["sequence"] for row in rows])
+            )
+        )
+        return tuple(losses)
 
 
 class SQLRecordStore(RecordStore):
@@ -607,6 +682,20 @@ class SQLRecordStore(RecordStore):
             raise ValueError("limit must be a positive integer")
         with self._transaction(scenario, write=True) as connection:
             return self._retention_queries.purge_expired(connection, before=before, limit=limit, scenario=scenario)
+
+    def loss(self, scenario: str) -> RecordLoss:
+        table = self._tables.eviction
+        with self._transaction(scenario, write=False) as connection:
+            row = (
+                connection.execute(select(table).where(self._tables.condition(table), table.c.scenario == scenario))
+                .mappings()
+                .first()
+            )
+        if row is None:
+            return RecordLoss()
+        return RecordLoss(
+            *(int(row[name]) for name in ("record_count", "body_bytes", "first_sequence", "last_sequence"))
+        )
 
     def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
         """Return durable, ordered metadata for explicitly recorded compactions."""

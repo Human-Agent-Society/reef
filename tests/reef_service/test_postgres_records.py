@@ -110,7 +110,7 @@ def test_schema_version_and_database_close(postgres_config):
         store.append(record())
     with database.transaction() as connection:
         version = database.tables.records.metadata.tables[f"{schema}.schema_version"]
-        connection.execute(version.update().values(version=2))
+        connection.execute(version.update().values(version=999))
     database.close()
     database.close()
     with pytest.raises(RuntimeError, match="closed"), database.transaction():
@@ -191,11 +191,12 @@ def test_archive_generation_retention_and_closed_sessions(postgres_database):
             assert new.storage_id != old.storage_id
             assert new.compaction_receipts("math") == ()
             assert new.append_result(record()).inserted
-            assert postgres_database.prune(RecordRetention(max_bytes=1)) == 1
-            assert new.count("math") == 1
+            assert postgres_database.prune(RecordRetention(max_bytes=1)) == 3
+            assert new.count("math") == 0
+            assert new.loss("math").record_count == 1
             with postgres_database.transaction() as connection:
                 rows = connection.execute(select(postgres_database.tables.records.c.agent_record_id)).scalars().all()
-            assert sorted(rows) == ["active", "first"]
+            assert rows == []
     finally:
         old.close()
         old.close()
@@ -203,7 +204,7 @@ def test_archive_generation_retention_and_closed_sessions(postgres_database):
         old.count("math")
 
 
-def test_retention_age_then_oldest_byte_budget(postgres_database):
+def test_capacity_counts_all_records_and_preserves_retry_hashes(postgres_database):
     with closing(PostgresRecordStore(postgres_database)) as store:
         for name in ("expired", "oldest", "newest", "active"):
             store.append(record(name))
@@ -215,8 +216,9 @@ def test_retention_age_then_oldest_byte_budget(postgres_database):
             newest_bytes = connection.execute(
                 select(table.c.body_bytes).where(table.c.agent_record_id == "newest")
             ).scalar_one()
-        assert postgres_database.prune(RecordRetention(max_bytes=newest_bytes)) == 2
-        assert [row.item.agent_record_id for row in store.audit_page("math")] == ["newest", "active"]
+        assert postgres_database.prune(RecordRetention(max_bytes=newest_bytes)) == 3
+        assert [row.item.agent_record_id for row in store.audit_page("math")] == ["active"]
+        assert store.loss("math").record_count == 3
         assert store.append_result(record("expired")).inserted is False
 
 
@@ -258,7 +260,7 @@ def test_factory_commit_recovery_and_archive(postgres_config, tmp_path, monkeypa
         with closing(factory.open("math")) as store:
             assert store.history() == ()
             assert store.records.append_result(record()).inserted
-        assert factory.prune(days=7, max_bytes=1) == 1
+        assert factory.prune(days=7, max_bytes=1) == 2
 
 
 def test_archive_move_failure_cannot_replay_old_log(postgres_config, tmp_path, monkeypatch):
@@ -339,3 +341,22 @@ def test_deployment_selects_record_backend(backend, request, tmp_path):
                 scenario.records.append(record())
         finally:
             dispatcher.close()
+
+
+def test_capacity_metadata_upgrade_preserves_existing_records(postgres_config):
+    url, schema = postgres_config
+    with closing(PostgresRecordDatabase(url, schema=schema)) as database:
+        with closing(PostgresRecordStore(database)) as records:
+            records.append(record())
+        with database.transaction() as connection:
+            database.tables.eviction.drop(connection)
+            version = database.tables.records.metadata.tables[f"{schema}.schema_version"]
+            connection.execute(version.update().values(version=1))
+    with (
+        closing(PostgresRecordDatabase(url, schema=schema)) as database,
+        closing(PostgresRecordStore(database)) as records,
+    ):
+        assert records.get("math", "first") == record()
+        assert records.loss("math").record_count == 0
+        assert database.prune(RecordRetention(max_bytes=1)) == 1
+        assert records.loss("math").record_count == 1

@@ -34,58 +34,45 @@ def store_factory(tmp_path):
         yield factory
 
 
-def test_retention_uses_one_budget_across_scenarios_and_archived_databases(tmp_path, monkeypatch, store_factory):
+def test_capacity_evicts_unconsumed_and_consumed_records_across_archives(tmp_path, store_factory, caplog):
     archive = tmp_path / "archived" / "removed" / "archived.sqlite3"
-    oldest = trace("old")
+    oldest = replace(trace("old"), created_at=10.0)
     with SQLiteRecordStore(tmp_path / "a.sqlite3") as first, SQLiteRecordStore(tmp_path / "b.sqlite3") as second:
         with SQLiteRecordStore(archive) as removed:
-            for clock, store, record in (
-                (10.0, first, oldest),
-                (15.0, removed, trace("archived")),
-                (20.0, second, trace("middle", "code")),
-                (30.0, first, trace("new")),
-            ):
-                monkeypatch.setattr("reef.storage.sql_records.time.time", lambda clock=clock: clock)
-                store.append(record)
-                store.compact(record.scenario, frozenset({record.agent_record_id}))
-        first.append(replace(trace("active"), payload={"text": "x" * 4096}))
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 40.0)
+            first.append(oldest)
+            removed.append(replace(trace("archived"), created_at=15.0))
+            second.append(replace(trace("middle", "code"), created_at=20.0))
+            first.append(replace(trace("new"), created_at=30.0))
+            first.compact("math", frozenset({"old"}))  # legacy rows also count
         assert store_factory.prune(days=7, max_bytes=2 * BODY_BYTES) == 2
         assert first.get_for_audit("math", "old") is None
-        assert first.get_for_audit("math", "new") is not None
-        assert second.get_for_audit("code", "middle") is not None
-        assert first.get("math", "active") is not None
+        assert first.get("math", "new") is not None
+        assert second.get("code", "middle") is not None
+        assert first.loss("math").record_count == 1
+        assert first.loss("other").record_count == 0
         assert first.append_result(oldest).inserted is False
         with pytest.raises(RecordConflict):
             first.append(replace(oldest, payload={"text": "changed"}))
-        assert (
-            first.append_result(replace(trace("late"), request_type=RequestType.REPORT, references=("old",))).inserted
-            is False
-        )
     with SQLiteRecordStore(archive) as removed:
-        assert removed.get_for_audit("math", "archived") is None
+        assert removed.get("math", "archived") is None
+        assert removed.loss("math").record_count == 1
+    with SQLiteRecordStore(tmp_path / "a.sqlite3") as reopened:
+        assert reopened.loss("math").body_bytes == BODY_BYTES
+        assert reopened.loss("math").first_sequence == reopened.loss("math").last_sequence == 1
+    assert "Record capacity exceeded" in caplog.text
+    assert "scenario=math" in caplog.text
+    assert "sequence=1..1" in caplog.text
 
 
-def test_retention_expires_bodies_in_batches_and_preserves_boundary_and_receipts(tmp_path, monkeypatch, store_factory):
+def test_record_age_and_training_completion_do_not_trigger_deletion(tmp_path, store_factory):
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
-        for index in range(257):
-            records.append(trace(f"old-{index}"))
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 99.0)
-        records.compact(
-            "math",
-            frozenset(f"old-{index}" for index in range(257)),
-            receipt_id="batch",
-            receipt_metadata={"outcome": "stale"},
-        )
-        records.append(trace("boundary"))
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
-        records.compact("math", frozenset({"boundary"}))
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 7 * 86400 + 100.0)
-        retention = RecordRetention()
-        assert store_factory.prune(days=retention.days, max_bytes=retention.max_bytes) == 257
-        assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["boundary"]
-        assert records.compaction_receipts("math")[0]["receipt_id"] == "batch"
-        assert store_factory.prune(days=retention.days, max_bytes=retention.max_bytes) == 0
+        records.append(replace(trace("old"), created_at=1.0))
+        records.compact("math", frozenset({"old"}))
+        with records._transaction("math", write=True) as connection:
+            connection.exec_driver_sql("UPDATE agent_record SET compacted_at=1")
+        assert store_factory.prune(days=0.01, max_bytes=BODY_BYTES) == 0
+        assert records.get_for_audit("math", "old") is not None
+        assert records.loss("math").record_count == 0
 
 
 def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_path, monkeypatch, store_factory):
@@ -101,7 +88,7 @@ def test_budget_purge_pages_across_equal_timestamps_without_skipping_rows(tmp_pa
 def test_large_finite_retention_days_still_enforce_the_byte_budget(tmp_path, monkeypatch, store_factory):
     with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
         for timestamp, record_id in ((1.0, "old"), (2.0, "new")):
-            records.append(trace(record_id))
+            records.append(replace(trace(record_id), created_at=timestamp))
             monkeypatch.setattr("reef.storage.sql_records.time.time", lambda timestamp=timestamp: timestamp)
             records.compact("math", frozenset({record_id}))
         monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 3.0)
@@ -171,7 +158,9 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
             records.compact("math", frozenset({"expired"}))
 
         async def run():
-            app = assembly.build_app(ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path)))
+            app = assembly.build_app(
+                ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), agent_record_retention_max_bytes=1)
+            )
             runner = web.AppRunner(app)
             await runner.setup()
             try:
@@ -189,7 +178,7 @@ def test_service_runs_retention_retries_failure_and_stops_on_cleanup(tmp_path, m
 
         asyncio.run(run())
     assert len(attempts) >= 2
-    assert attempts[0] == RecordRetention(days=7, max_bytes=20 * 1024**3)
+    assert attempts[0] == RecordRetention(days=7, max_bytes=1)
     assert "record retention failed" in caplog.text
 
 
@@ -224,3 +213,37 @@ def test_retention_serializes_with_scenario_file_archival(tmp_path, monkeypatch)
             assert deletion.result(timeout=3)["archived"]
     finally:
         dispatcher.close()
+
+
+def test_sqlite_upgrade_preserves_records_and_adds_capacity_metadata(tmp_path):
+    database = tmp_path / "records.sqlite3"
+    original = trace("original")
+    with SQLiteRecordStore(database) as records:
+        records.append(original)
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TABLE record_eviction")
+        connection.execute("DROP INDEX agent_record_capacity")
+    with SQLiteRecordStore(database) as records:
+        assert records.get("math", "original") == original
+        assert records.loss("math").record_count == 0
+    with closing(SQLiteScenarioStorage(tmp_path)) as storage:
+        assert storage.prune(days=7, max_bytes=1) == 1
+    with SQLiteRecordStore(database) as records:
+        assert records.loss("math").record_count == 1
+        assert not records.append_result(original).inserted
+
+
+def test_capacity_eviction_rolls_back_bodies_hashes_and_loss_totals(tmp_path):
+    from reef.storage.sql_records import SQLRecordRetention
+
+    original = trace("original")
+    with SQLiteRecordStore(tmp_path / "records.sqlite3") as records:
+        records.append(original)
+        with pytest.raises(RuntimeError, match="rollback"), records._transaction("math", write=True) as connection:
+            SQLRecordRetention(records._tables).evict(connection, [1])
+            raise RuntimeError("rollback")
+        assert records.get("math", "original") == original
+        assert records.loss("math").record_count == 0
+        assert not records.append_result(original).inserted
+        with records._transaction("math", write=False) as connection:
+            assert connection.exec_driver_sql("SELECT count(*) FROM consumed_agent_record").scalar_one() == 0

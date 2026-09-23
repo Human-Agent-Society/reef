@@ -5,13 +5,16 @@ through its bound backend. Dispatched backends reserve the batch first so
 long-running work happens outside scenario locks.
 Backends expose prepare/evaluate/settle phases; the trainer executes one
 configured candidate evaluator between preparation and settlement, defaulting
-to backend evaluation plus ``AlwaysSelectMixin``. Commit and compaction are split
-so the scenario committer can make the commit record durable before any
-row is deleted.
+to backend evaluation plus ``AlwaysSelectMixin``. Consumption progress is committed
+before processor memory is released. Storage owns disk eviction independently;
+new training commits never retire record bodies.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import logging
 import math
 import time
 from collections.abc import Callable, Mapping
@@ -21,7 +24,7 @@ from threading import Lock
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
-from reef.core.records_types import RequestType
+from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
@@ -50,6 +53,9 @@ class _PendingStep:
     @property
     def batch_id(self) -> str:
         return self.batch.batch_id
+
+
+logger = logging.getLogger(__name__)
 
 
 class Trainer:
@@ -120,6 +126,8 @@ class Trainer:
         self._state = dict(state)
         self._data_offset = 0
         self._data_sequence = 0
+        self.consumed_record_ids: set[str] = set()
+        self.skipped_record_ids: set[str] = set()
         self._pending: _PendingStep | None = None
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
@@ -132,7 +140,15 @@ class Trainer:
         A busy processor omits its gauges for this sample instead of blocking
         execution metrics behind ingestion or commit work.
         """
+        loss = self._records.loss(self.scenario)
         values = {f"training/{key}": value for key, value in self.operations.snapshot().items()}
+        values.update(
+            {
+                "records/evicted_count": loss.record_count,
+                "records/evicted_body_bytes": loss.body_bytes,
+                "records/data_incomplete": int(loss.record_count > 0),
+            }
+        )
         if self._candidate_backend is not None:
             values.update(self._candidate_backend.operational_metrics())
         if not self._lock.acquire(blocking=False):
@@ -238,7 +254,15 @@ class Trainer:
     def processor_status(self) -> Mapping[str, Any]:
         """Return caller-visible processor state under the processor's lock."""
         with self._lock:
-            return dict(self._processor.status())
+            loss = self._records.loss(self.scenario)
+            if not loss.record_count:
+                return dict(self._processor.status())
+            return {
+                **self._processor.status(),
+                "record_data_incomplete": loss.record_count > 0,
+                "evicted_record_count": loss.record_count,
+                "evicted_body_bytes": loss.body_bytes,
+            }
 
     def _build_validated_batch(self) -> TrainingBatch:
         """Build the next batch and hold the processor to its declared schema.
@@ -257,6 +281,28 @@ class Trainer:
             )
         return batch
 
+    def ingest_retained(self, item: AgentRecord) -> None:
+        """Consumption state is independent of record visibility in storage."""
+        if item.agent_record_id in self.consumed_record_ids:
+            return
+        if item.request_type is RequestType.REPORT:
+            if any(ref in self.consumed_record_ids for ref in item.references):
+                self.skipped_record_ids.add(item.agent_record_id)
+                return
+            missing = [ref for ref in item.references if self._records.get(self.scenario, ref) is None]
+            if missing:
+                logger.warning(
+                    "Skipping report %s in scenario %s: %d referenced records are no longer stored; "
+                    "training data is incomplete",
+                    item.agent_record_id,
+                    self.scenario,
+                    len(missing),
+                )
+                self.skipped_record_ids.add(item.agent_record_id)
+                return
+        if item.request_type in self.processor.required_request_types:
+            self._processor.ingest(item)
+
     def _consume_data(self) -> None:
         while True:
             items = self._records.replay_page(
@@ -267,8 +313,7 @@ class Trainer:
             if not items:
                 return
             for sequence, item in items:
-                if item.request_type in self.processor.required_request_types:
-                    self._processor.ingest(item)
+                self.ingest_retained(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
                 if self._processor.ready():
@@ -279,7 +324,7 @@ class Trainer:
 
         Returns ``None`` when this trainer has no candidate backend (it
         only advances record consumption, because a non-training scenario still
-        has to drain and compact its store) or when the processor is not yet
+        has to advance its record cursor) or when the processor is not yet
         ready to produce a batch.
         """
         if self._candidate_backend is not None and self._candidate_backend.dispatched:
@@ -428,7 +473,12 @@ class Trainer:
                 consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
-            metrics = dict(result.metrics)
+            loss = self._records.loss(self.scenario)
+            metrics = {
+                **result.metrics,
+                "records/evicted_count": loss.record_count,
+                "records/data_incomplete": int(loss.record_count > 0),
+            }
             request = self._pending.batch.request
             if request is not None:
                 # The backend's own dict, when it wrote one, carries what its proposer added to ``requires``.
@@ -437,8 +487,9 @@ class Trainer:
                 algorithm_state=dict(result.state),
                 high_water_sequence=self._data_sequence,
                 high_water_offset=self._data_offset,
-                compacted_ids=frozenset(compacted),
-                consumed_ids=consumed,
+                compacted_ids=frozenset(),
+                consumed_ids=frozenset(consumed | compacted | self.skipped_record_ids),
+                released_ids=frozenset(compacted),
                 metrics=metrics or None,
                 training_job_id=result.training_job_id,
             )
@@ -468,6 +519,9 @@ class Trainer:
             if self._pending.prepared_commit is not prepared:
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._state = dict(prepared.algorithm_state)
+            self.consumed_record_ids.update(prepared.consumed_ids)
+            self.skipped_record_ids.difference_update(prepared.consumed_ids)
+            self._processor.compaction_applied(prepared.released_ids)
             self._pending = None
 
     def add_commit_metrics(self, result: TrainStepResult, metrics: Mapping[str, Any]) -> TrainStepResult:
@@ -494,15 +548,20 @@ class Trainer:
                 return
             batch_id = self._pending.batch_id
             self._processor.dropped(batch_id)
-            self._processor.acknowledge(batch_id)
+            consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = frozenset(retention.releasable_agent_record_ids - retention.protected_agent_record_ids)
             self._records.compact(
                 self.scenario,
-                compacted,
-                receipt_id=batch_id,
-                receipt_metadata={"outcome": "stale", "metrics": dict(metrics or {})},
+                frozenset(),
+                receipt_id=f"{batch_id}:{hashlib.sha256(json.dumps(sorted(consumed | compacted)).encode()).hexdigest()}",
+                receipt_metadata={
+                    "outcome": "stale",
+                    "metrics": dict(metrics or {}),
+                    "consumed_ids": sorted(consumed | compacted),
+                },
             )
+            self.consumed_record_ids.update(consumed | compacted)
             self._processor.compaction_applied(compacted)
             self._pending = None
 
@@ -563,6 +622,7 @@ class Trainer:
         if up_to_sequence < 0:
             raise ValueError("up_to_sequence must be non-negative")
         with self._lock:
+            self.consumed_record_ids.update(consumed_ids)
             sequence = 0
             while True:
                 items = self._records.replay_page(
@@ -577,8 +637,7 @@ class Trainer:
                         return
                     if item.agent_record_id in consumed_ids:
                         continue
-                    if item.request_type in self.processor.required_request_types:
-                        self._processor.ingest(item)
+                    self.ingest_retained(item)
 
     def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
         """Resume consumption from a recovered commit record's high-water mark.

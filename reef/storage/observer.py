@@ -15,7 +15,7 @@ from collections.abc import Mapping, Sequence
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
-from reef.storage.records import AppendResult, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, RecordLoss, RecordStore, StoredRecord
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 
 logger = logging.getLogger(__name__)
@@ -105,6 +105,9 @@ class ObservedRecordStore(RecordStore):
 
     def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
         return self._inner.compaction_receipts(scenario)
+
+    def loss(self, scenario: str) -> RecordLoss:
+        return self._inner.loss(scenario)
 
     def close(self) -> None:
         self._inner.close()

@@ -413,7 +413,7 @@ def test_storage_preserves_paths_archives_and_recreates_without_old_history(tmp_
     factory.close()
 
 
-def test_storage_retention_includes_archives_and_preserves_active_records(tmp_path):
+def test_storage_capacity_includes_unconsumed_archived_records(tmp_path):
     factory = SQLiteScenarioStorage(tmp_path)
     with closing(factory.open("math")) as session:
         session.records.append(record("record-1"))
@@ -421,12 +421,12 @@ def test_storage_retention_includes_archives_and_preserves_active_records(tmp_pa
         session.commit_step(expected_step=0, commit=commit())
     archived = factory.archive("math")
 
-    assert factory.prune(days=7.0, max_bytes=1) == 1
+    assert factory.prune(days=7.0, max_bytes=1) == 2
 
     database = next(Path(path) for path in archived if path.endswith(".sqlite3"))
     with SQLiteRecordStore(database) as records:
         assert records.get_for_audit("math", "record-1") is None
-        assert records.get("math", "active") is not None
+        assert records.get("math", "active") is None
     factory.close()
 
 

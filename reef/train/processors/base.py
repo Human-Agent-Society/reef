@@ -19,11 +19,10 @@ from reef.train.types import ProcessorContext, TrainingBatch
 
 @dataclass(frozen=True)
 class RetentionDecision:
-    """Processor-owned semantic decision about stored records.
+    """Processor-owned decision about in-memory records, not disk retention.
 
-    A record is compactable only when it is explicitly releasable.
-    Protected records document the processor's current dependencies
-    and take precedence.
+    The legacy name is retained for recipe compatibility. Storage capacity
+    eviction is independent of these protected/releasable sets.
     """
 
     protected_agent_record_ids: frozenset[str] = frozenset()
@@ -289,7 +288,7 @@ class DataProcessor:
         return frozenset()
 
     def retention_decision(self) -> RetentionDecision:
-        """Return the records the processor currently protects or releases.
+        """Return records the processor keeps in memory or releases after commit.
 
         The no-update default protects every ingested id (audit-only retention).
         Subclasses with real pairing semantics override this to derive
@@ -301,7 +300,7 @@ class DataProcessor:
         )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
-        """Forget semantic markers whose positioned records were deleted."""
+        """Release committed in-memory state; the legacy name does not imply disk deletion."""
         self._agent_record_ids -= agent_record_ids
         self._consumed_requests -= agent_record_ids
 

@@ -125,7 +125,8 @@ def test_manual_waits_for_instruction_without_automatic_batch_gates(processor, b
     assert batch.request.text == "request-1"
     assert batch.items == ()
     prepared = trainer.prepare_commit(result)
-    assert prepared.consumed_ids == frozenset({"request-1"})
+    assert "request-1" in prepared.consumed_ids
+    assert not {"other-session", "turn-1", "turn-2"} & prepared.consumed_ids
     assert prepared.metrics["training_request"]["text"] == "request-1"
     trainer.commit(prepared)
     trainer.apply_compaction(prepared.compacted_ids)
@@ -717,7 +718,7 @@ def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(t
         assert current.trainer.pending_instructions() == 0
         assert current.trainer.processor_status() == {"buffered_requests": 0}
         assert current.trainer.instruction_failures() == {}
-        assert current.records.get("s", "poison") is None
+        assert current.records.get("s", "poison") is not None
         assert current.trainer.training_mode == "manual"
     finally:
         release.set()
@@ -807,8 +808,9 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
         )
         # The skip row consumed the instruction alone: the unit it carried is held for the automatic step.
         assert skip.consumed_ids == frozenset({"poison"})
-        assert skip.compacted_ids == frozenset({"poison"})
-        assert current.records.get("s", "poison") is None
+        assert skip.compacted_ids == frozenset()
+        assert skip.consumed_ids == frozenset({"poison"})
+        assert current.records.get("s", "poison") is not None
         assert current.records.get("s", "report-a") is not None
         assert current.trainer.pending_instructions() == 0
         assert current.trainer.instruction_failures() == {}
@@ -828,12 +830,13 @@ def test_hybrid_skips_a_failed_instruction_alone_and_keeps_the_units_it_carried(
     try:
         loaded = restarted.get_or_create_scenario("s")
         assert loaded.scenario_step == 1
-        assert loaded.records.get("s", "poison") is None
+        assert loaded.records.get("s", "poison") is not None
         # Recovery replays the unit as unconsumed and never the instruction the skip row named.
         restarted.set_training_mode("s", "hybrid")
         assert _wait(lambda: _automatic_traces(restarted) == [1])
         assert seen == [(None, ("a",))]
-        assert _wait(lambda: loaded.records.get("s", "report-a") is None)
+        assert _wait(lambda: loaded.scenario_step == 2)
+        assert loaded.records.get("s", "report-a") is not None
         assert loaded.trainer.pending_instructions() == 0
         assert restarted.get_or_create_scenario("s").scenario_step == 2
     finally:
@@ -906,7 +909,7 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
         assert scenario.trainer.pending_instructions() == 0
         assert scenario.trainer.processor_status() == {"buffered_requests": 0}
         assert scenario.trainer.instruction_failures() == {}
-        assert scenario.records.get("s", "poison") is None
+        assert scenario.records.get("s", "poison") is not None
     finally:
         release.set()
         dispatcher.close()
@@ -1079,7 +1082,7 @@ def test_hybrid_runs_a_queued_instruction_alone_when_no_units_are_held(processor
         assert prepared.metrics["training_request"]["id"] == "alone"
         trainer.commit(prepared)
         trainer.apply_compaction(prepared.compacted_ids)
-        assert records.get("s", "alone") is None
+        assert records.get("s", "alone") is not None
         assert trainer.run_once() is None
         assert trainer.training_mode == "hybrid"
     finally:
@@ -1103,7 +1106,7 @@ def test_hybrid_runs_a_queued_instruction_with_the_held_units_as_samples(process
         assert {"a", "with-context"} <= prepared.consumed_ids
         trainer.commit(prepared)
         trainer.apply_compaction(prepared.compacted_ids)
-        assert records.get("s", "a") is None
+        assert records.get("s", "a") is not None
         records.append(instruction("after"))
         assert trainer.run_once() is not None
         assert backend.batches[1].request.id == "after"

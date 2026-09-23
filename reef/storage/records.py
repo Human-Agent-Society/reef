@@ -43,12 +43,22 @@ class StoredRecord:
 
 
 @dataclass(frozen=True)
-class RecordRetention:
-    """Deployment-wide limits on compacted JSON bodies, applied by service maintenance.
+class RecordLoss:
+    """Durable capacity-eviction totals for one scenario's stored records."""
 
-    The byte budget counts compacted JSON bodies only. It excludes active
-    records, retry metadata, indexes, and storage overhead; it is not a physical
-    database size limit. Storage services apply these limits.
+    record_count: int = 0
+    body_bytes: int = 0
+    first_sequence: int = 0
+    last_sequence: int = 0
+
+
+@dataclass(frozen=True)
+class RecordRetention:
+    """Deployment-wide budget for all record bodies, regardless of consumption.
+
+    Retry metadata, indexes and database overhead are outside the body budget.
+    ``days`` is accepted for configuration compatibility but no longer expires
+    data: capacity alone triggers automatic eviction.
     """
 
     days: float = 7.0
@@ -176,6 +186,10 @@ class RecordStore(ABC):
     def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
         """Read durable compaction receipts in recorded-time and receipt-id order."""
 
+    def loss(self, scenario: str) -> RecordLoss:
+        """Capacity losses, including after restart; non-evicting stores return zero."""
+        return RecordLoss()
+
     @abstractmethod
     def close(self) -> None:
         """Release resources; repeated closes are harmless."""
@@ -185,6 +199,7 @@ __all__ = [
     "AgentRecord",
     "AppendResult",
     "RecordConflict",
+    "RecordLoss",
     "RecordRetention",
     "RecordStore",
     "RequestType",

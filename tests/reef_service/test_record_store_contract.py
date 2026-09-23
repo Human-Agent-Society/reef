@@ -185,6 +185,15 @@ def custom_record_tables(metadata: MetaData) -> RecordTables:
             Column("metadata_json", Text, nullable=False),
             Column("recorded_at", Float, nullable=False),
         ),
+        Table(
+            "custom_eviction",
+            metadata,
+            Column("scenario", Text, primary_key=True),
+            Column("record_count", Integer, nullable=False),
+            Column("body_bytes", Integer, nullable=False),
+            Column("first_sequence", Integer, nullable=False),
+            Column("last_sequence", Integer, nullable=False),
+        ),
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import logging
 import math
 import shutil
 import time
@@ -107,7 +108,19 @@ Index(
     sqlite_where=_AGENT_RECORD.c.compacted_at.is_not(None),
 )
 
-_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, _COMPACTION_RECEIPTS)
+RECORD_EVICTION = Table(
+    "record_eviction",
+    _METADATA,
+    Column("scenario", Text, primary_key=True),
+    Column("record_count", Integer, nullable=False),
+    Column("body_bytes", Integer, nullable=False),
+    Column("first_sequence", Integer, nullable=False),
+    Column("last_sequence", Integer, nullable=False),
+)
+Index("agent_record_capacity", _AGENT_RECORD.c.created_at, _AGENT_RECORD.c.sequence)
+logger = logging.getLogger(__name__)
+
+_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, _COMPACTION_RECEIPTS, RECORD_EVICTION)
 
 
 class SQLiteRecordStore(SQLRecordStore):
@@ -257,13 +270,12 @@ class SQLiteRecordRetention:
         self._queries = SQLRecordRetention(_TABLES)
 
     def prune(self, directory: Path) -> int:
-        """Purge expired bodies, then the oldest bodies across this directory to meet the budget.
+        """Evict oldest bodies under capacity pressure, regardless of training state.
 
-        The caller must serialize this sweep with scenario file moves. Deletes
-        commit in batches of 256 and never touch active records or retry metadata.
-        Concurrent compaction may exceed the budget until the next sweep.
+        Deletes commit in bounded batches. Concurrent appends can exceed the
+        configured body budget until the next sweep. Freed database pages are
+        reusable; the budget does not measure filesystem allocation.
         """
-        cutoff = time.time() - self._retention.days * 86400
         paths = sorted((*directory.glob("*.sqlite3"), *(directory / "archived").rglob("*.sqlite3")))
         purged = 0
         total = 0
@@ -281,13 +293,9 @@ class SQLiteRecordRetention:
                     # Old stores have no retained compacted bodies; migration belongs to SQLiteRecordStore.
                     continue
                 retained_paths.append(str(database_path))
-                while True:
-                    with connection.begin():
-                        count = self._queries.purge_expired(connection, before=cutoff)
-                    purged += count
-                    if count < 256:
-                        break
-
+                with connection.begin():
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    RECORD_EVICTION.create(connection, checkfirst=True)
                 with connection.begin():
                     total += self._queries.retained_bytes(connection)
         if total <= self._retention.max_bytes:
@@ -337,7 +345,19 @@ class SQLiteRecordRetention:
 
     def _delete(self, path: str, sequences: list[int]) -> int:
         with self._connect(path) as connection, connection.begin():
-            return self._queries.delete(connection, sequences)
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            losses = self._queries.evict(connection, sequences)
+        for scenario, loss in losses:
+            logger.warning(
+                "Record capacity exceeded: evicted %d records (%d body bytes), scenario=%s, sequence=%d..%d; "
+                "training data may be incomplete",
+                loss.record_count,
+                loss.body_bytes,
+                scenario,
+                loss.first_sequence,
+                loss.last_sequence,
+            )
+        return sum(loss.record_count for _, loss in losses)
 
 
 class SQLiteScenarioStorage(ScenarioStorage):
