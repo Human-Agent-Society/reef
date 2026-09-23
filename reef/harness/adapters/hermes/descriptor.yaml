@@ -52,8 +52,8 @@ files:
           external_dirs:
             - "${HERMES_HOME}/../hermes-commands"
     # The env file hermes loads from its home; the model binding puts the
-    # provider key here, since hermes reads a custom provider's key from the
-    # environment and not from config.yaml.
+    # provider key here too, since for an OpenRouter host hermes reads the
+    # key from the environment and not from config.yaml.
     env:
       path: "hermes/.env"
       defaults: {}
@@ -93,12 +93,14 @@ cleanup_whitelist:
   - ".local/**"
   - ".rustup/**"
 quirks: reef.harness.adapters.hermes.quirks
-# How to point hermes at a model endpoint: a custom provider in config.yaml
-# and its key as OPENAI_API_KEY in the home's .env file, the one place hermes
-# reads a custom provider's key from (a key written under model in
-# config.yaml is ignored). Reef renders this set into evaluation episodes;
-# the served tree never carries a provider or a key. Only the openai dialect
-# is bound; hermes's anthropic_messages api mode was not measured.
+# How to point hermes at a model endpoint: a custom provider with its key in
+# config.yaml, and the same key as OPENAI_API_KEY in the home's .env file.
+# hermes reads the key under model for a loopback or an unknown host, and
+# takes an OpenRouter host for its OpenRouter provider, where only the
+# environment or .env supplies the key; both are written so either kind of
+# endpoint answers. Reef renders this set into evaluation episodes; the
+# served tree never carries a provider or a key. Only the openai dialect is
+# bound; hermes's anthropic_messages api mode was not measured.
 model_binding:
   openai:
     - target: primary
@@ -107,6 +109,7 @@ model_binding:
           provider: custom
           default: "{model}"
           base_url: "{base_url}/v1"
+          api_key: "{api_key}"
     - target: env
       data:
         OPENAI_API_KEY: "{api_key}"
