@@ -18,6 +18,18 @@ The traps a mutated patch could reopen: the session log must stay plain
 JSONL (the reader cannot parse zstd), and the session telemetry and the LLM
 title call stay disabled. A composition that flips any of them is rejected
 at render, the same gate that rejects an invalid node.
+
+Every model call stays on Reef's model binding. The binding writes the
+``llm-pi-ai`` route ``reef`` and selects it in ``agent-default-model``, and
+puts the route's key in ``.env``; it renders after the tree and wins every
+key it writes. The key is a credential, which a tree cannot hold because
+admission refuses an inline credential, so the two entries pass only beside
+it, and only with the keys the binding writes. Another route, DeepSeek's own
+adapter (``llm-deepseek``), the web search model and its endpoint, and a
+provider or a model set for the title call, a subagent, a declared agent or
+the compaction summary are the tree choosing where calls go, and are
+refused, as is a patch entry that names another package or holds a js
+expression in those plugins, where the check cannot read the value.
 """
 
 from __future__ import annotations
@@ -35,6 +47,24 @@ _EXTENSIONS = "dsh/profiles/headless/extensions/"
 _SKILLS = "dsh/skills/"
 _COMMANDS = "dsh-agents/skills/"
 _JS = "!!js "
+
+#: The key Reef's binding puts in .env for its route, the entries it writes, and the keys of each.
+BINDING_KEY_ENV = "REEF_API_KEY"
+BINDING_ROUTE = "reef"
+BINDING_ROUTE_KEYS = frozenset({"api", "apiKeyEnv", "baseURL", "displayName", "models"})
+BINDING_PLUGINS = ("agent-default-model", "llm-pi-ai")
+#: Plugins whose config chooses a model call's provider, endpoint, credential or model, each with where that choice
+#: sits: a key of the config (no parent), or a key of the object, or of each object in the list, under the parent.
+MODEL_ROUTE_KEYS: dict[str, tuple[tuple[str | None, str], ...]] = {
+    "agent-loop": (("agents", "model"), ("agents", "provider")),
+    "compaction-basic": (("modelPolicies", "summarizationModel"), ("modelPolicies", "summarizationProvider")),
+    "session-title-llm": ((None, "model"), (None, "provider")),
+    "tool-subagent": (("agentOptions", "model"), ("agentOptions", "provider")),
+    "tool-subagent-fork": (("agentOptions", "model"), ("agentOptions", "provider")),
+    "web-search-deepseek": ((None, "apiKeyEnv"), (None, "baseURL"), (None, "model")),
+}
+#: DeepSeek's own adapter, whose config is its endpoint: Reef never binds it.
+UNBOUND_ADAPTERS = ("llm-deepseek",)
 
 # dsh's boot scaffolds the profile beside the rendered patch: a package
 # manifest, the empty root entry list, the pnpm workspace file, node_modules
@@ -94,6 +124,62 @@ def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
     return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
+def holds_js(value: Any) -> bool:
+    if isinstance(value, str):
+        return value.startswith(_JS)
+    if isinstance(value, dict):
+        return any(holds_js(item) for item in value.values())
+    if isinstance(value, list):
+        return any(holds_js(item) for item in value)
+    return False
+
+
+def check_binding_entry(plugin: str, entry: dict[str, Any], bound: bool) -> None:
+    """``llm-pi-ai`` holds only the binding's route and ``agent-default-model`` selects it, beside the binding's key."""
+    refusal = f"dsh composition must not set {plugin}: Reef's model binding writes it"
+    config = entry.get("config")
+    if not bound or set(entry) != {"config"} or not isinstance(config, dict):
+        raise RenderError(refusal)
+    if plugin == "agent-default-model":
+        if set(config) != {"model", "provider"} or config["provider"] != BINDING_ROUTE:
+            raise RenderError(refusal)
+        return
+    providers = config.get("providers")
+    if set(config) != {"providers"} or not isinstance(providers, dict) or set(providers) != {BINDING_ROUTE}:
+        raise RenderError(f"{refusal}; its only route is {BINDING_ROUTE!r}")
+    route = providers[BINDING_ROUTE]
+    if not isinstance(route, dict) or set(route) != BINDING_ROUTE_KEYS or route["apiKeyEnv"] != BINDING_KEY_ENV:
+        raise RenderError(refusal)
+
+
+def check_model_route(entries: dict[str, Any], env: dict[str, Any]) -> None:
+    """Refuse a model route, an endpoint, a credential or a model the binding did not write."""
+    credential = env.get(BINDING_KEY_ENV)
+    bound = isinstance(credential, str) and bool(credential.strip())
+    refusal = "Reef's model binding chooses the provider, the endpoint, the credential and the model"
+    for plugin, entry in entries.items():
+        if not isinstance(entry, dict):
+            continue
+        if "name" in entry:
+            raise RenderError(f"dsh composition must not set {plugin}.name: a patch entry keeps its own package")
+        if plugin in BINDING_PLUGINS:
+            check_binding_entry(plugin, entry, bound)
+        elif plugin in UNBOUND_ADAPTERS and set(entry) - {"disabled"}:
+            raise RenderError(f"dsh composition must not configure {plugin}: {refusal}")
+        elif plugin in MODEL_ROUTE_KEYS:
+            if holds_js(entry):
+                raise RenderError(f"dsh composition must not write {plugin} as a js expression: {refusal}")
+            config = entry.get("config")
+            if not isinstance(config, dict):
+                continue
+            for parent, key in MODEL_ROUTE_KEYS[plugin]:
+                value = config if parent is None else config.get(parent)
+                for item in value if isinstance(value, list) else [value]:
+                    if isinstance(item, dict) and key in item:
+                        where = key if parent is None else f"{parent}.{key}"
+                        raise RenderError(f"dsh composition must not set {plugin} {where}: {refusal}")
+
+
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     entries = json.loads(files[_PATCH])
     log = entries.get("session-persistence-jsonl", {}).get("config", {})
@@ -104,6 +190,7 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
     for plugin in ("session-telemetry-otel", "session-title-llm"):
         if entries.get(plugin, {}).get("disabled") is not True:
             raise RenderError(f"dsh composition must keep {plugin} disabled for benchmark episodes")
+    check_model_route(entries, json.loads(files[_ENV]))
     extensions = sorted(
         path[len(_EXTENSIONS) : -len(".mjs")]
         for path in files

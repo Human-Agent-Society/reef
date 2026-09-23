@@ -119,6 +119,54 @@ binding is a custom provider with a literal key in ``config.yaml``; only the
 inside the working directory with no prompt and refuses a command it flags as
 dangerous with a tool error, so no bypass flag is used.
 
+For the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus`` adapters,
+Reef's model binding is the only source of a model call's endpoint,
+credential and model. The binding renders after the tree and replaces every
+value it writes. One value it writes is the key (``ANTHROPIC_AUTH_TOKEN``,
+hermes ``model.api_key``, dsh ``REEF_API_KEY``, pi
+``providers.reef.apiKey``, terminus ``llm_kwargs.api_key``), and a tree
+cannot hold a key because admission refuses an inline credential. So a key
+the binding writes passes render only beside the binding's key, and a tree
+that sets one alone is refused. Render also refuses every other key the
+pinned binary reads to choose the endpoint, the provider, the credential or
+the model:
+
+- ``claude``: in the ``settings.json`` ``env``, every ``ANTHROPIC_`` name,
+  the cloud provider switches and their credentials (Bedrock, Vertex,
+  Foundry and the others), proxies, endpoints and model names, matched
+  without case as Windows reads the environment; the settings ``model``,
+  ``fallbackModel``, ``availableModels``, ``modelOverrides``,
+  ``advisorModel`` and the other model choices, the credential helpers
+  (``apiKeyHelper``, ``awsAuthRefresh``, ``awsCredentialExport``,
+  ``gcpAuthRefresh``, ``proxyAuthHelper``) and the login method; and a
+  ``model`` in the frontmatter of a command or a skill. A frontmatter block
+  render cannot read the way Claude Code does counts when it holds the word
+  ``model`` or an escape.
+- ``hermes``: ``providers``, ``custom_providers``, ``fallback_model``,
+  ``fallback_providers``, ``moa.presets`` and ``auxiliary.openrouter_model``;
+  and a provider, an endpoint, a credential, a model or ``prefer_fast_model``
+  for an auxiliary task, for delegation or for cron. An auxiliary task may
+  keep the provider ``auto`` or ``main``, which run it on the main model.
+- ``dsh``: a route in ``llm-pi-ai`` other than the binding's ``reef``, a key
+  on that route the binding does not write, ``agent-default-model``,
+  ``llm-deepseek`` (DeepSeek's own endpoint), the web search endpoint and
+  model, and a provider or a model for the title call, a subagent, a
+  declared agent or the compaction summary. A patch entry may not name
+  another package, and those plugins may not hold a js expression, which
+  render cannot read.
+- ``pi``: a provider in ``models.json`` other than ``reef`` (a new one, or
+  pi's own with another endpoint), a key on ``reef`` the binding does not
+  write, ``enabledModels``, and ``httpProxy``, which sends every call through
+  another host.
+- ``terminus``: a ``llm_kwargs`` key the binding does not write, and a
+  litellm argument in ``llm_call_kwargs`` that sets the endpoint, the
+  provider, a credential, the model, a fallback model or a logging callback
+  (``base_url``, ``api_base``, ``custom_llm_provider``, ``model``,
+  ``fallbacks`` and the others the quirk lists).
+
+A request body field a tree passes to the bound endpoint, such as
+``extra_body``, is not read by the harness and stays admitted.
+
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which
 defines ``run(args, workdir) -> str``, and after it ``NAME``,

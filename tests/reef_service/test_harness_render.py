@@ -49,8 +49,14 @@ def golden_tree(adapter: str) -> dict[str, str]:
     return {path.relative_to(root).as_posix(): path.read_text() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
+def _pi_nodes():
+    # pi keeps every model call on the binding, so the provider and model choice in NODES are swapped for a setting.
+    nodes = [node for node in NODES if node[0] != "config"]
+    return [("config", {"data": {"defaultThinkingLevel": "off"}}), *nodes]
+
+
 def test_pi_render_matches_the_golden_tree() -> None:
-    assert render_composition(NODES, get_adapter("pi")) == golden_tree("pi")
+    assert render_composition(_pi_nodes(), get_adapter("pi")) == golden_tree("pi")
 
 
 def test_opencode_render_matches_the_golden_tree() -> None:
@@ -350,12 +356,12 @@ def test_native_render_matches_the_golden_tree() -> None:
 def test_config_nodes_deep_merge_in_tree_order() -> None:
     files = render_composition(
         [
-            ("config", {"data": {"compaction": {"enabled": True, "keep": 4}, "defaultProvider": "a"}}),
+            ("config", {"data": {"compaction": {"enabled": True, "keep": 4}, "defaultThinkingLevel": "off"}}),
             ("config", {"data": {"compaction": {"keep": 8}}}),  # later node wins per key
         ],
         get_adapter("pi"),
     )
-    assert '"defaultProvider": "a"' in files["pi-agent/settings.json"]  # sibling keys survive the merge
+    assert '"defaultThinkingLevel": "off"' in files["pi-agent/settings.json"]  # sibling keys survive the merge
     assert '"enabled": true' in files["pi-agent/settings.json"]
     assert '"keep": 8' in files["pi-agent/settings.json"]
 

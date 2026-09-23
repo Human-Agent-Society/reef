@@ -15,6 +15,7 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.terminus.quirks import _ALLOWED_KNOBS, _BINDING_KNOBS
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.terminus import instruction_paths, skill_roots
 from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
 from reef.harness.tree.render import render_composition
@@ -25,7 +26,11 @@ NODES = [
     ("rules", {"text": "Be brief."}),
     ("skill", {"name": "notes", "text": "# Notes\n\nTake notes."}),
     ("agent_command", {"name": "summarize", "text": "Summarize."}),
-    ("config", {"data": {"model_name": "openai/stub", "max_turns": 12}}),
+    ("config", {"data": {"max_turns": 12}}),
+    # The model comes from Reef's binding: a tree cannot set model_name.
+    *ModelBinding(base_url="http://127.0.0.1:9", model="openai/stub", api_key="k").compose_nodes(
+        get_adapter("terminus")
+    ),
 ]
 
 
@@ -54,7 +59,11 @@ def test_harbor_validates_the_trial_the_runner_builds(tmp_path: Path) -> None:
     # Harbor's own agent, configured rather than subclassed.
     assert config.agent.name == AGENT_NAME
     assert config.agent.model_name == "openai/stub"
-    assert config.agent.kwargs == {"max_turns": 12}
+    assert config.agent.kwargs == {
+        "max_turns": 12,
+        "api_base": "http://127.0.0.1:9/v1",
+        "llm_kwargs": {"api_key": "k"},
+    }
     assert config.extra_instruction_paths == [tmp_path / "root" / "terminus/AGENTS.md"]
 
 

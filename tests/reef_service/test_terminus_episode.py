@@ -22,6 +22,7 @@ import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import SandboxExecutor
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeError, run_episode
 from reef.harness.runners.terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV
 from reef.harness.tree.render import render_composition
@@ -59,7 +60,11 @@ NODES = [
     ("rules", {"text": "Be brief."}),
     ("skill", {"name": "notes", "text": "# Notes\n\nTake notes."}),
     ("agent_command", {"name": "summarize", "text": "Summarize."}),
-    ("config", {"data": {"model_name": "openai/gpt-4o", "max_turns": 12}}),
+    ("config", {"data": {"max_turns": 12}}),
+    # The model comes from Reef's binding: a tree cannot set model_name.
+    *ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k").compose_nodes(
+        get_adapter("terminus")
+    ),
 ]
 
 

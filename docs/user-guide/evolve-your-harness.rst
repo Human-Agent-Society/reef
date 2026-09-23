@@ -121,6 +121,13 @@ its command sandbox. Terminus accepts one Python module defining
 ``Agent(Terminus2)`` when Reef's sandbox isolates the runner and Harbor uses
 remote E2B tasks. See the adapter guide for the required deployment settings.
 
+A tree does not choose where model calls go. Reef's model binding writes the
+endpoint, the key and the model when it renders an episode or an install,
+and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
+adapters, render refuses a ``config`` entry, a command or a skill that sets
+them or names another provider, a proxy, a credential helper or another
+model. The adapter guide lists the keys for each adapter.
+
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
 .. code:: text
