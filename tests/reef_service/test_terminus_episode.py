@@ -68,7 +68,7 @@ NODES = [
 
 @pytest.fixture(autouse=True)
 def home(tmp_path: Path, monkeypatch) -> Path:
-    """terminus roots its episodes under the home directory, so every test here gets a home of its own."""
+    """On macOS terminus roots its episodes under the home directory, so every test here gets a home of its own."""
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -136,14 +136,22 @@ def test_the_episode_carries_no_host_environment_beyond_the_descriptor(tmp_path:
 
 
 @pytest.mark.unit
-def test_the_episode_root_is_under_the_home_directory_and_removed(tmp_path: Path, home: Path) -> None:
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+def test_the_episode_root_is_under_the_home_directory_on_macos_only_and_removed(
+    tmp_path: Path, home: Path, monkeypatch, platform: str
+) -> None:
     # Harbor bind-mounts the trial directory under the root into the task
-    # container; colima shares the home directory with its VM, not $TMPDIR.
+    # container. Docker on macOS runs in a VM, and colima shares the home
+    # directory with it, not $TMPDIR; Linux Docker shares every path, so a
+    # service user there needs no writable home.
+    monkeypatch.setattr(sys, "platform", platform)
     descriptor = get_adapter("terminus")
     result = run_episode(descriptor, render_composition(NODES, descriptor), "t", binary=_stub(tmp_path), timeout=60.0)
     root = Path(result.trajectory[0]["root"])
-    assert root.parent == home / ".reef" / "episodes"
+    expected = home / ".reef" / "episodes" if platform == "darwin" else Path(tempfile.gettempdir())
+    assert root.parent == expected
     assert not root.exists()
+    assert (home / ".reef").exists() == (platform == "darwin")
 
 
 @pytest.mark.unit
@@ -169,7 +177,8 @@ def test_the_episode_keeps_the_services_docker_settings(tmp_path: Path, home: Pa
 
 @pytest.mark.unit
 def test_an_executor_other_than_the_local_one_gets_no_service_settings(tmp_path: Path, monkeypatch) -> None:
-    # A sandbox forwards only its env_from, and a remote executor runs no local container.
+    # A sandbox forwards only its env_from, and a remote executor runs no local container, on macOS too.
+    monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
     launched: list[tuple[Path, dict[str, str]]] = []
 

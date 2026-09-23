@@ -29,8 +29,9 @@ everything the shared engines need to drive one harness binary:
   validates a compatible configuration (such as a remote task environment).
 - ``host_env`` (optional): service environment variables a local episode
   keeps, for a host tool the relocated ``HOME`` would otherwise hide.
-- ``is_root_under_home`` (optional): a local episode makes its root under the
-  home directory, for a container runtime that bind-mounts paths below it.
+- ``is_root_bind_mounted`` (optional): the binary bind-mounts paths below the
+  episode root into a container, so on macOS a local episode makes its root
+  under the home directory, which Docker's VM shares with the host.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -191,10 +192,10 @@ class AdapterDescriptor:
     #: the default, where ``{home}`` is the service's home directory; an empty default leaves the variable
     #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as terminus's docker CLI.
     host_env: Mapping[str, str] = field(default_factory=dict)
-    #: True when an episode under the local executor makes its root under ``~/.reef/episodes`` rather than the temp
-    #: directory: a container runtime bind-mounts paths below it, and colima shares the home directory but not
-    #: ``$TMPDIR``.
-    is_root_under_home: bool = False
+    #: True when the binary bind-mounts paths below the episode root into a container. On macOS Docker runs in a VM
+    #: that shares the home directory, and colima does not share ``$TMPDIR``, so an episode under the local executor
+    #: then makes its root under ``~/.reef/episodes``; on other platforms the root stays in the temp directory.
+    is_root_bind_mounted: bool = False
     #: ``files.tree``: where the entries list travels with the rendered files (a JSON
     #: array of ``{id, name, config}``), so a resident process can reconcile the
     #: tree entry by entry; None for an adapter whose binary reads files only.
@@ -294,9 +295,9 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     is_prompt_task_directory = data.get("is_prompt_task_directory", False)
     if not isinstance(is_prompt_task_directory, bool):
         raise DescriptorError(f"{where} 'is_prompt_task_directory' must be a boolean")
-    is_root_under_home = data.get("is_root_under_home", False)
-    if not isinstance(is_root_under_home, bool):
-        raise DescriptorError(f"{where} 'is_root_under_home' must be a boolean")
+    is_root_bind_mounted = data.get("is_root_bind_mounted", False)
+    if not isinstance(is_root_bind_mounted, bool):
+        raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
     client_env = data.get("client_env", {})
     if not isinstance(client_env, Mapping) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in client_env.items()
@@ -321,7 +322,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         self_isolating=self_isolating,
         is_prompt_task_directory=is_prompt_task_directory,
         host_env=dict(host_env),
-        is_root_under_home=is_root_under_home,
+        is_root_bind_mounted=is_root_bind_mounted,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
         tree_path=_parse_tree_path(files, where),
         validate_execution=validate_execution,

@@ -40,7 +40,7 @@ NODES = [
 ]
 
 
-def bound_config(base_url: str, served: str, knobs: dict[str, str] | None = None) -> dict[str, Any]:
+def bound_config(base_url: str, served: str, knobs: dict[str, Any] | None = None) -> dict[str, Any]:
     """The terminus config a tree with ``knobs`` renders under the model binding for ``served`` at ``base_url``."""
     descriptor = get_adapter("terminus")
     binding = ModelBinding(base_url=base_url, model=served, api_key="k-1")
@@ -138,22 +138,47 @@ def test_every_admitted_knob_is_a_real_terminus_2_argument() -> None:
     assert unknown == [], f"the quirk admits arguments Terminus 2 does not take: {unknown}"
 
 
+#: Provider fields a tree may pass through llm_call_kwargs, for example OpenRouter's routing and sampling fields.
+CALL_KWARGS = {
+    "provider": {"sort": "price"},
+    "reasoning": {"effort": "low"},
+    "transforms": ["middle-out"],
+    "models": ["qwen/qwen3-coder"],
+    "top_k": 5,
+    "min_p": 0.1,
+    "repetition_penalty": 1.1,
+    "extra_body": {"plugins": [{"id": "web"}]},
+}
+
+
 @pytest.mark.unit
-@pytest.mark.parametrize("served", ["qwen/qwen3-coder", "deepseek/deepseek-chat", "openai/gpt-4o-mini", "gemma4:26b"])
-def test_terminus_2_sends_the_served_model_to_the_bound_endpoint(tmp_path: Path, endpoint, served: str) -> None:
+@pytest.mark.parametrize(
+    "served",
+    ["qwen/qwen3-coder", "deepseek/deepseek-chat", "openai/gpt-4o-mini", "gemma4:26b", "anthropic/claude-sonnet-4"],
+)
+def test_terminus_2_sends_the_served_model_and_the_trees_arguments_to_the_bound_endpoint(
+    tmp_path: Path, endpoint, served: str
+) -> None:
     """Terminus 2 built from the bound config posts the served name unchanged to api_base. Without the binding's
-    custom_openai, a vendor prefix litellm does not know has no route, and one it knows picks that vendor's client
-    and drops the prefix. The tree's reasoning_effort, which litellm drops for custom_openai unless allowed, and the
-    bound key arrive too."""
+    provider, a vendor prefix litellm does not know has no route, and one it knows picks that vendor's client and
+    drops the prefix. The tree's reasoning_effort, thinking budget and provider fields reach the body: custom_openai
+    would drop the first two and fail on the rest. The bound key arrives too."""
     from harbor.agents.terminus_2.terminus_2 import Terminus2
 
     base_url, seen = endpoint
-    agent = Terminus2(logs_dir=tmp_path, **bound_config(base_url, served, {"reasoning_effort": "low"}))
-    asyncio.run(agent._llm.call("ping"))
+    knobs = {"reasoning_effort": "low", "max_thinking_tokens": 2048, "llm_call_kwargs": CALL_KWARGS}
+    agent = Terminus2(logs_dir=tmp_path, **bound_config(base_url, served, knobs))
+    # Terminus 2 passes llm_call_kwargs to every call it makes.
+    asyncio.run(agent._llm.call("ping", **agent._llm_call_kwargs))
     [(path, body, authorization)] = seen
     assert (path, body["model"], body["reasoning_effort"]) == ("/v1/chat/completions", served, "low")
     assert authorization == "Bearer k-1"
-    assert not {"custom_llm_provider", "allowed_openai_params"} & set(body)
+    fields = {key: value for key, value in CALL_KWARGS.items() if key != "extra_body"} | CALL_KWARGS["extra_body"]
+    assert {key: body.get(key) for key in fields} == fields
+    # Harbor asks for extended thinking only for a Claude model.
+    thinking = {"type": "enabled", "budget_tokens": 2048} if "claude" in served else None
+    assert body.get("thinking") == thinking
+    assert "custom_llm_provider" not in body
 
 
 @pytest.mark.unit

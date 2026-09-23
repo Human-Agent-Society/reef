@@ -185,15 +185,11 @@ def test_terminus_binding_renders_the_litellm_provider(model: str) -> None:
     binding = ModelBinding(base_url="http://127.0.0.1:9", model=model, api_key="k-1")
     files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
     config = json.loads(files["terminus/config.json"])
-    # The served name stays the model name Harbor looks the context limit up under; custom_openai routes litellm
-    # to api_base whatever vendor prefix that name carries, and keeps a tree's reasoning_effort only when allowed.
+    # The served name stays the model name Harbor looks the context limit up under; litellm_proxy routes litellm
+    # to api_base whatever vendor prefix that name carries, with the tree's call arguments in the request body.
     assert config["model_name"] == model
     assert config["api_base"] == "http://127.0.0.1:9/v1"
-    assert config["llm_kwargs"] == {
-        "api_key": "k-1",
-        "custom_llm_provider": "custom_openai",
-        "allowed_openai_params": ["reasoning_effort"],
-    }
+    assert config["llm_kwargs"] == {"api_key": "k-1", "custom_llm_provider": "litellm_proxy"}
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
@@ -443,7 +439,7 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
         ("host_env", ["DOCKER_HOST"], "'host_env' must map variable names"),
         ("host_env", {"NOT A NAME": ""}, "'host_env' must map variable names"),
         ("host_env", {"PI_CODING_AGENT_DIR": ""}, "'env' already sets: PI_CODING_AGENT_DIR"),
-        ("is_root_under_home", "yes", "'is_root_under_home' must be a boolean"),
+        ("is_root_bind_mounted", "yes", "'is_root_bind_mounted' must be a boolean"),
     ],
 )
 def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
@@ -455,14 +451,14 @@ def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: s
         load_descriptor(target)
 
 
-def test_only_terminus_keeps_host_environment_or_roots_under_home() -> None:
+def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
     """Every other bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
     terminus = get_adapter("terminus")
     assert terminus.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
-    assert terminus.is_root_under_home
+    assert terminus.is_root_bind_mounted
     for name in sorted(set(available_adapters()) - {"terminus"}):
         descriptor = get_adapter(name)
-        assert descriptor.host_env == {} and not descriptor.is_root_under_home, name
+        assert descriptor.host_env == {} and not descriptor.is_root_bind_mounted, name
 
 
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:

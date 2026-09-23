@@ -341,9 +341,10 @@ The answer carries the request's ``agent_record_id``, and
 runs the health task directory above, so the service host needs Docker. The
 episode uses the Docker your shell uses: it keeps the service's
 ``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (default
-``~/.docker``, where colima and Docker Desktop set the current context), and
-its files live under ``~/.reef/episodes``, because colima does not share
-``$TMPDIR`` with its VM.
+``~/.docker``, where colima and Docker Desktop set the current context). On
+macOS its files live under ``~/.reef/episodes``, because colima does not
+share ``$TMPDIR`` with its VM; on Linux, WSL and Windows they stay in the
+temp directory.
 ``GET /reef/harness`` serves the published tree; `Harness adapters
 <../../developer-guide/harness-adapters.rst>`__ shows the config that runs
 it through Reef yourself, including the ``x-reef-scenario`` header.
