@@ -232,6 +232,21 @@ def test_a_marker_an_earlier_build_wrote_names_the_same_batch_by_its_step(backen
     assert backend.events == []
 
 
+def test_a_batch_rejected_by_an_earlier_build_trains_again_under_the_current_identity(backend):
+    # The legacy name serves replay and resume only; a fresh run must be retryable under this build's name.
+    coordinator(backend).execute({**PAYLOAD, "rollout_id": 3})
+    marker = markers.read_marker(backend.path)
+    marker.update(status="REJECTED", job_id=legacy_training_job_id(PAYLOAD, 3), runtime_load_id="engine:1")
+    markers.write_marker(backend.path, marker)
+    backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path.with_name("checkpoint-1"), scenario_step=5)
+    first = coordinator(backend).execute({**PAYLOAD, "rollout_id": 5})
+    assert (first.outcome, first.training_job_id) == ("checkpoint", training_job_id(PAYLOAD))
+    backend.events.clear()
+    again = coordinator(backend).execute({**PAYLOAD, "rollout_id": 5})
+    assert (again.outcome, again.training_job_id) == ("checkpoint", training_job_id(PAYLOAD))
+    assert backend.events == []
+
+
 def test_job_identity_ignores_the_processor_batch_number():
     # A reload numbers the same rows again; the identity is the rows.
     assert training_job_id({**PAYLOAD, "batch_id": "s:x:7"}) == training_job_id({**PAYLOAD, "batch_id": "s:x:1"})

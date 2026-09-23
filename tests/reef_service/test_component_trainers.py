@@ -492,6 +492,33 @@ def test_a_colocated_weights_job_waits_for_every_scenario_that_shares_the_engine
 
 
 @pytest.mark.unit
+def test_a_dispatched_turn_wakes_every_local_worker_and_yields_before_the_next_cycle(tmp_path: Path) -> None:
+    """Workers of every scenario stand aside for a waiting job and are woken when its turn ends."""
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        for name in ("agent", "other"):
+            scenario = dispatcher.get_or_create_scenario(name)
+            assert scenario is not None
+            for record in _records_for(name, 1):
+                scenario.records.append(record)
+        other = dispatcher.get_or_create_scenario("other")
+        assert other is not None
+        dispatcher._start_local_backend_worker("other", HARNESS)
+        # A job is waiting for its turn: the drain loop runs no cycle.
+        dispatcher._training.turn_waiting.set()
+        dispatcher._drain_local_backend("other", HARNESS)
+        assert backends[HARNESS].prepared == 0
+        dispatcher._training.turn_waiting.clear()
+        with dispatcher._training.lock:
+            worker = dispatcher._training.local_workers[("other", HARNESS)]
+        worker.ready.clear()
+        dispatcher.wake_local_workers()
+        assert worker.ready.is_set()
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_a_harness_only_rollback_keeps_the_proof_that_the_weights_job_was_committed(tmp_path: Path) -> None:
     """The backend must still finish a job whose weights a later rollback carried forward unchanged."""
     dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))

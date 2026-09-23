@@ -104,6 +104,26 @@ def _fail_next_install(scenario) -> None:
 
 
 @pytest.mark.unit
+def test_a_local_cycle_stands_aside_while_admission_is_closed_and_runs_once_it_reopens(tmp_path: Path) -> None:
+    training = _RestoringTraining()
+    dispatcher = _dispatcher(tmp_path)
+    try:
+        scenario = _scenario(dispatcher, training)
+        for record in _records(1):
+            scenario.records.append(record)
+        training.inference.pause_admission()
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is False
+        assert dispatcher._recipe.backends[HARNESS].prepared == 0
+        assert ("agent", HARNESS) in dispatcher._training.stood_aside
+        training.inference.resume_admission()
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        assert dispatcher._recipe.backends[HARNESS].prepared == 1
+        assert ("agent", HARNESS) not in dispatcher._training.stood_aside
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_a_harness_only_rollback_leaves_held_admission_closed(tmp_path: Path) -> None:
     """A rollback that restores nothing neither resumes admission nor calls a version served."""
     training = _RestoringTraining()
@@ -144,6 +164,57 @@ def test_the_recorded_retry_of_a_harness_only_rollback_leaves_held_admission_clo
         assert _component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness step 1"
         assert not training.inference.inference_admission_status["open"]
         assert training.inference.current_runtime_load_id() == "before"
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_rejected_step_before_the_rollback_does_not_make_its_retry_look_like_a_restore(tmp_path: Path) -> None:
+    """The release served before the rollback is the newest published one, not a rejected step's empty record."""
+    training = _RestoringTraining()
+    dispatcher = _dispatcher(tmp_path)
+    try:
+        scenario = _scenario(dispatcher, training)
+        first = _step(scenario, HARNESS, 1)
+        _step(scenario, HARNESS, 2)
+        dispatcher._recipe.backends[HARNESS].reject_next = True
+        _step(scenario, HARNESS, 3)
+        assert scenario.store.history()[-1].components is None
+        training.inference.pause_admission()
+        _fail_next_install(scenario)
+        with pytest.raises(RuntimeError, match="artifact backend away"):
+            scenario.rollback(first)
+        scenario.rollback(first)
+        assert not training.inference.inference_admission_status["open"]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_composite_without_loaded_weights_never_resumes_admission_on_a_recorded_retry(tmp_path: Path) -> None:
+    training = _RestoringTraining()
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    dispatcher = Dispatcher(
+        _TwoTrainerRecipe(backends=backends),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+    )
+    try:
+        scenario = _scenario(dispatcher, training)
+        first = _step(scenario, WEIGHTS, 1)
+        _step(scenario, WEIGHTS, 2)
+        training.inference.pause_admission()
+        _fail_next_install(scenario)
+        with pytest.raises(RuntimeError, match="artifact backend away"):
+            scenario.rollback(first)
+        scenario.rollback(first)
+        assert not training.inference.inference_admission_status["open"]
     finally:
         dispatcher.close()
 

@@ -41,7 +41,8 @@ from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
-from reef.train.types import TrainStepResult
+from reef.train.backend import CandidateBackend
+from reef.train.types import TrainingBatch, TrainStepResult
 
 logger = logging.getLogger(__name__)
 
@@ -79,6 +80,10 @@ class _ScenarioTrainingError(Exception):
         self.cause = cause
 
 
+#: How soon a local worker that stood aside for closed admission looks again.
+STOOD_ASIDE_RETRY_SECONDS = 5.0
+
+
 @dataclass
 class _TrainingState:
     lock: Lock = field(default_factory=Lock)
@@ -94,6 +99,10 @@ class _TrainingState:
     local_workers: dict[tuple[str, str | None], _LocalBackendWorkerState] = field(default_factory=dict)
     #: One local candidate cycle at a time per scenario: prepare and commit together.
     local_cycle_locks: dict[str, Lock] = field(default_factory=dict)
+    #: A dispatched job is waiting for the cycle locks: local workers finish their cycle and yield.
+    turn_waiting: Event = field(default_factory=Event)
+    #: Local workers that found inference admission closed and stood aside; they look again soon.
+    stood_aside: set[tuple[str, str | None]] = field(default_factory=set)
     #: Results refused because another trainer's commit replaced their base, per (scenario, component).
     stale_refusals_in_a_row: dict[tuple[str, str | None], int] = field(default_factory=dict)
     stale_refusals_total: dict[tuple[str, str | None], int] = field(default_factory=dict)
@@ -652,7 +661,11 @@ class Dispatcher:
     def _run_local_backend_worker(self, scenario: str, component: str | None, ready: Event) -> None:
         try:
             while True:
-                ready.wait()
+                with self._training.lock:
+                    stood_aside = (scenario, component) in self._training.stood_aside
+                # A worker that stood aside for closed admission looks again soon: whatever closed it
+                # (a job on any scenario, a rollback) reopens it without naming this worker.
+                ready.wait(timeout=STOOD_ASIDE_RETRY_SECONDS if stood_aside else None)
                 ready.clear()
                 if self._lifecycle.closed.is_set() or not self._local_backend_worker_registered(scenario, component):
                     return
@@ -663,7 +676,8 @@ class Dispatcher:
 
     def _drain_local_backend(self, scenario: str, component: str | None) -> None:
         try:
-            while self._process_local_backend_step(scenario, component):
+            # A dispatched job waiting for its turn goes before the next cycle; it wakes the workers after.
+            while not self._training.turn_waiting.is_set() and self._process_local_backend_step(scenario, component):
                 pass
         except Exception as exc:
             logger.exception("local backend failed to commit for scenario %r", scenario)
@@ -716,10 +730,14 @@ class Dispatcher:
         if current.trainer_for(component).candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         runtime = current.runtime
+        key = (scenario, component)
         if runtime is not None and not runtime.inference_admission_status.get("open", True):
             # A dispatched job holds the served engine: this cycle would only wait on it and time out.
-            # The job's acknowledgement wakes this worker again.
+            with self._training.lock:
+                self._training.stood_aside.add(key)
             return False
+        with self._training.lock:
+            self._training.stood_aside.discard(key)
         self._record_training_error(scenario, None)
         # Local workers of one scenario take turns for a whole cycle, prepare
         # and commit together, under this lock alone: letting their commits
@@ -727,6 +745,9 @@ class Dispatcher:
         # each refusal threw away a full candidate evaluation. A dispatched
         # commit still lands meanwhile; the stale policy answers it.
         with self._local_cycle_lock(scenario):
+            if self._registry.get_optional(scenario) is not current:
+                # Deleted or reloaded while this worker waited for a job's turn.
+                return False
             try:
                 result = current.prepare_training_step(component)
             except Exception as exc:
@@ -898,6 +919,15 @@ class Dispatcher:
         )
         if (batch := current.reserve_training_batch(component)) is None:
             return False
+        try:
+            return self._run_dispatched_turn(current, component, backend, batch)
+        finally:
+            # Local cycles that stood aside or yielded for the job run now, on every scenario, whatever the outcome.
+            self.wake_local_workers()
+
+    def _run_dispatched_turn(
+        self, current: Scenario, component: str | None, backend: CandidateBackend, batch: TrainingBatch
+    ) -> bool:
         with self.dispatched_turn(current, component):
             execution = current.execute_reserved_training_step(component)
             if execution.outcome == "retry":
@@ -924,28 +954,36 @@ class Dispatcher:
             self._commit_result(current.name, result, component)
             if result.training_job_id is not None:
                 backend.acknowledge_commit(current.scenario_step, result.training_job_id)
-        # Local cycles that stood aside while the job held the engine run now.
-        self.wake_local_workers(current)
         return True
 
     def dispatched_turn(self, current: Scenario, component: str | None) -> ExitStack:
         """The locks a dispatched job holds from its execution through its commit and acknowledgement."""
         turn = ExitStack()
         backend = current.trainer_for(component).candidate_backend
-        if backend is not None and backend.colocated:
-            # A colocated job holds the served engine, and admission is closed engine wide until it is
-            # acknowledged: every scenario's local cycles take turns with it instead of timing out under it.
-            with self._training.lock:
-                names = sorted({*self._training.local_cycle_locks, current.name})
-            for name in names:
+        if backend is None or not backend.colocated:
+            return turn
+        # A colocated job holds the served engine, and admission is closed engine wide until it is
+        # acknowledged: every scenario's local cycles take turns with it instead of timing out under it.
+        names = {row["scenario"] for row in self._registry.list()}
+        with self._training.lock:
+            names.update(self._training.local_cycle_locks)
+        names.add(current.name)
+        self._training.turn_waiting.set()
+        try:
+            for name in sorted(names):
                 turn.enter_context(self._local_cycle_lock(name))
+        except BaseException:
+            turn.close()
+            raise
+        finally:
+            self._training.turn_waiting.clear()
         return turn
 
-    def wake_local_workers(self, current: Scenario) -> None:
-        for bound in current.component_trainers:
-            backend = bound.trainer.candidate_backend
-            if backend is not None and not backend.dispatched:
-                self._start_local_backend_worker(current.name, bound.component)
+    def wake_local_workers(self) -> None:
+        with self._training.lock:
+            workers = tuple(self._training.local_workers.values())
+        for worker in workers:
+            worker.ready.set()
 
     def _record_training_error(self, scenario: str, value: str | None) -> None:
         with self._training.lock:

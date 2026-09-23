@@ -480,9 +480,10 @@ class TrainingExecution:
             raise RuntimeError("training job checkpoint path is not configured")
         marker = self._store.read()
         if marker is not None and marker["job_id"] != job_id:
-            # A marker an earlier build wrote names the same batch by the step it ran at.
+            # A marker an earlier build wrote names the same batch by the step it ran at. Its job replays or
+            # resumes under that name; a batch that trains again from the start carries the current identity.
             legacy = legacy_training_job_id(payload, marker.get("scenario_step", marker["rollout_id"]))
-            if marker["job_id"] == legacy:
+            if marker["job_id"] == legacy and marker_disposition(marker, legacy) != "fresh":
                 job_id = legacy
         disposition = marker_disposition(marker, job_id)
         if disposition == "conflict":

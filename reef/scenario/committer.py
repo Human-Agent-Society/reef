@@ -255,12 +255,22 @@ class ScenarioCommitter:
         loaded = self._binding.surface.loader_component
         if loaded is None:
             return False
-        previous = next((entry for entry in self._store.history() if entry.step == recorded.step - 1), None)
-        if recorded.components is None or previous is None or previous.components is None:
+        # The release served before the rollback: the newest earlier record that published a manifest and was
+        # not held for review; a rejected step publishes nothing and a held release was never served.
+        served = next(
+            (
+                entry
+                for entry in reversed(self._store.history())
+                if entry.step < recorded.step and entry.components is not None and not entry.pending
+            ),
+            None,
+        )
+        served_components = None if served is None else served.components
+        if recorded.components is None or served_components is None:
             # Records without a manifest predate components: every rollback restored the weights then.
             return True
         # A rollback that left the weights alone paused nothing; a dispatched job may still hold admission.
-        return recorded.components.get(loaded) != previous.components.get(loaded)
+        return recorded.components.get(loaded) != served_components.get(loaded)
 
     @staticmethod
     def leaves_component(later: CommitRecord, record: CommitRecord) -> bool:
