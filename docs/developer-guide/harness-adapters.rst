@@ -146,26 +146,27 @@ js-yaml, the YAML reader in gray-matter, cannot read a block, opencode rewrites
 each top level value that holds ``': '`` and is not quoted as a block scalar
 and reads the file again. Render does the same, so it admits a file such as
 ``description: Chat mode: web search only``, and refuses a block the rewrite
-does not repair, which opencode reads with no keys or skips. Render reads each
-plain value with the types of js-yaml, so ``1e5`` is a number and ``yes`` a
-string, as opencode reads them, and it refuses a date that does not exist, such
-as ``2001-13-45``. A command file's frontmatter ``name``, when set, must be its
-file name: opencode files the command under that name, in place of the command
-already named so, ``/reefine`` included. A command's ``agent`` must name an
-agent the tree defines under ``agent`` (or the older ``mode``) and does not
-disable, or one of opencode's built in agents: ``build``, ``plan``,
-``general``, ``explore``, and the hidden ``title``, ``summary`` and
-``compaction``. Its ``description``, ``agent``, ``variant`` and ``subtask``
-must have the types opencode reads, and so must an agent's ``disable`` and
-``hidden`` (true or false) and ``mode`` (``subagent``, ``primary`` or ``all``).
-``default_agent`` must name such an agent that is neither a subagent nor
-hidden, and a tree with no ``default_agent`` must keep at least one such agent.
-An agent must not set a ``name`` other than its own. opencode otherwise fails
-the command, or every run, with an unexplained error or a refusal of its whole
-configuration. ``reef-opencode`` sets ``OPENCODE_ENABLE_EXA=1``, which
-registers opencode's ``websearch`` tool (Exa, no key needed) for provider
-``reef``; episodes do not set it, so a benchmark episode does not search the
-web.
+does not repair, which opencode reads with no keys or skips, and a block it
+cannot read that holds a tab, since js-yaml reads a tab after a colon as a
+space where PyYAML fails. Render reads each plain value with the types of
+js-yaml, so ``1e5`` is a number and ``yes`` a string, as opencode reads them,
+and it refuses a date that does not exist, such as ``2001-13-45``. A command
+file's frontmatter ``name``, when set, must be its file name: opencode files
+the command under that name, in place of the command already named so,
+``/reefine`` included. A command's ``agent`` must name an agent the tree
+defines under ``agent`` (or the older ``mode``) and does not disable, or one of
+opencode's built in agents: ``build``, ``plan``, ``general``, ``explore``, and
+the hidden ``title``, ``summary`` and ``compaction``. Its ``description``,
+``agent``, ``variant`` and ``subtask`` must have the types opencode reads, and
+so must an agent's ``disable`` and ``hidden`` (true or false) and ``mode``
+(``subagent``, ``primary`` or ``all``). ``default_agent`` must name such an
+agent that is neither a subagent nor hidden, and a tree with no
+``default_agent`` must keep at least one such agent. An agent must not set a
+``name`` other than its own. opencode otherwise fails the command, or every
+run, with an unexplained error or a refusal of its whole configuration.
+``reef-opencode`` sets ``OPENCODE_ENABLE_EXA=1``, which registers opencode's
+``websearch`` tool (Exa, no key needed) for provider ``reef``; episodes do not
+set it, so a benchmark episode does not search the web.
 
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which

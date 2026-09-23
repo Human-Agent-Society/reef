@@ -299,7 +299,7 @@ class OpencodeSessionReader(TrajectoryReader):
     format = "opencode-session-sqlite"
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        database = Path(path) / "opencode.db"
+        database = Path(path).resolve() / "opencode.db"
         if not database.is_file():
             return ()
 

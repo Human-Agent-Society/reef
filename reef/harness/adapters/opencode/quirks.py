@@ -33,8 +33,9 @@ rewritten as block scalars. The check reads the plain form, a ``---`` line, a
 YAML mapping with no tags and a closing ``---`` line, with js-yaml's types
 for plain values (``1e5`` is a number and ``yes`` a string), and reads a
 block js-yaml cannot read again with the same rewrite, so it sees the keys
-opencode sees. It refuses every other form, so no command reaches opencode
-with an agent, a model or a name the check did not see. A command file's
+opencode sees. It refuses every other form, a block it cannot read that holds
+a tab included (js-yaml reads a tab after a colon as a space), so no command
+reaches opencode with an agent, a model or a name the check did not see. A command file's
 frontmatter ``name`` must be the file's own, since opencode files the command
 under that name, in place of the command of that name. A command's ``agent``
 and ``default_agent`` must name an agent the run has, an agent must keep its
@@ -290,19 +291,19 @@ def read_frontmatter(where: str, text: str) -> Mapping[object, object]:
         raise RenderError(f"opencode {where} starts with a byte order mark; {FRONTMATTER_FORM}")
     if not text.startswith("---") or text.startswith("----"):
         return {}
-    rewritten = rewritten_frontmatter(text)
+    block = frontmatter_block(where, text)
+    rewritten = frontmatter_block(where, rewritten_frontmatter(text))
     retried = False
     try:
         try:
-            data = yaml.load(frontmatter_block(where, text), Loader=FrontmatterLoader)
-        except yaml.YAMLError as error:
-            # js-yaml fails on this block too, unless the check itself refused a value js-yaml reads.
-            if isinstance(error, RefusedValueError) or rewritten == text:
+            data = yaml.load(block, Loader=FrontmatterLoader)
+        except yaml.MarkedYAMLError as error:
+            # js-yaml fails where PyYAML does, except on a value the check itself refuses and on a tab, which js-yaml
+            # reads as a space and PyYAML does not, so a block with a tab is not known to be one opencode rewrites.
+            if isinstance(error, RefusedValueError) or "\t" in block or rewritten == block:
                 raise
             retried = True
-            data = yaml.load(frontmatter_block(where, rewritten), Loader=FrontmatterLoader)
-    except RenderError:
-        raise
+            data = yaml.load(rewritten, Loader=FrontmatterLoader)
     except Exception as error:
         # PyYAML's constructors can raise more than YAMLError, and deep nesting a RecursionError; a file the check
         # cannot read is a refusal, never a crash of admission.

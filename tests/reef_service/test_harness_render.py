@@ -523,7 +523,9 @@ def test_opencode_admits_the_frontmatter_forms_it_reads_as_opencode_does() -> No
 def test_opencode_reads_frontmatter_again_as_opencode_rewrites_it() -> None:
     """When js-yaml cannot read a block, opencode rewrites each top level value that holds ': ' and is not quoted as
     a block scalar and reads the file again; render reads the same keys, so it admits a file opencode loads and
-    still sees an agent, a model or a name next to such a value."""
+    still sees an agent, a model or a name next to such a value. PyYAML also fails on a tab after a colon, which
+    js-yaml reads (``description:<tab>{a: b}`` is a mapping to opencode), so render reads a file again only after a
+    failure both readers share."""
     descriptor = get_adapter("opencode")
     chat = "Enter chat mode: conversation with web search only, no other tools"
     for text, description in (
@@ -531,6 +533,7 @@ def test_opencode_reads_frontmatter_again_as_opencode_rewrites_it() -> None:
         ("---\r\ndescription: a: b\r\nagent: plan\r\n---\r\nSay hi.", "a: b"),
         ("---\ndescription: a: 'b'\n---\nSay hi.", "a: 'b'"),
         ("---\ndescription :  a: b  \n# a: note\n---\nSay hi.", "a: b"),
+        ("---\ndescription: `/chat`: web search only\n---\nSay hi.", "`/chat`: web search only"),
     ):
         assert read_frontmatter("command 'hi'", text)["description"] == description
         render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
@@ -539,6 +542,7 @@ def test_opencode_reads_frontmatter_again_as_opencode_rewrites_it() -> None:
         ("---\nmodel: opencode/big-pickle\ndescription: note: more\n---\nSay hi.", "must not choose a model"),
         ("---\nname: reefine\ndescription: note: more\n---\nSay hi.", "must not set name 'reefine'"),
         ("---\ndescription: !!str a: b\n---\nSay hi.", "a value has the tag"),
+        ("---\ndescription:\t{a: b}\n---\nSay hi.", "cannot start any token at line 2"),
     ):
         with pytest.raises(RenderError, match=f"opencode command 'hi' .*{message}"):
             render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
