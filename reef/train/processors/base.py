@@ -12,6 +12,7 @@ from dataclasses import dataclass, field, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.train.types import ProcessorContext, TrainingBatch
@@ -141,6 +142,10 @@ class DataProcessor:
         if training_mode not in self.supported_training_modes:
             raise NotImplementedError(f"{type(self).__name__} does not implement training_mode={training_mode!r}")
         self._context = replace(self._context, training_mode=training_mode)
+
+    def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
+        """Name the contract the scenario's ingress admits when it is wider than this processor's own."""
+        self._context = replace(self._context, admitted_report_type=report_type)
 
     def buffered_requests(self) -> int:
         """How many instructions are read into memory and not yet consumed."""

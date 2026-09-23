@@ -265,18 +265,18 @@ class CompositeRecipe(Recipe):
         algorithm_states: Mapping[str, Mapping[str, Any] | None],
         experiment_logger: ExperimentLogger | None = None,
     ) -> tuple[ComponentTrainer, ...]:
-        return tuple(
-            ComponentTrainer(
-                component,
-                recipe.build(
-                    scenario,
-                    records,
-                    algorithm_state=algorithm_states.get(component),
-                    experiment_logger=experiment_logger,
-                ),
+        trainers = []
+        for component, recipe in self.components.items():
+            trainer = recipe.build(
+                scenario,
+                records,
+                algorithm_state=algorithm_states.get(component),
+                experiment_logger=experiment_logger,
             )
-            for component, recipe in self.components.items()
-        )
+            # Ingress admits what any component accepts; each trainer then releases the reports shaped for another.
+            trainer.admit_reports_of(self.report_type)
+            trainers.append(ComponentTrainer(component, trainer))
+        return tuple(trainers)
 
     def base_artifact_files(self) -> Mapping[str, str] | None:
         """Each component's seed under that component's directory; ``None`` when no component seeds one."""

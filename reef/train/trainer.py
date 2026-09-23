@@ -231,6 +231,11 @@ class Trainer:
         """The report type selected by the recipe that built this trainer."""
         return self._processor.context.report_type
 
+    def admit_reports_of(self, report_type: type[ReportBase] | None) -> None:
+        """Name the contract the scenario's ingress admits, when several trainers share one scenario."""
+        with self._lock:
+            self._processor.admit_reports_of(report_type)
+
     @property
     def candidate_backend(self) -> CandidateBackend | None:
         return self._candidate_backend

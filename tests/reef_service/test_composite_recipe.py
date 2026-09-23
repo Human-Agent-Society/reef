@@ -84,6 +84,7 @@ class _TreeRecipe(Recipe):
             processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
             candidate_backend=_FileBackend(self.label, self.artifact_dir),
             algorithm_state=algorithm_state,
+            report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
         )
@@ -106,6 +107,7 @@ class _HybridTreeRecipe(_TreeRecipe):
             processor_factory=lambda context: _HybridThresholdProcessor(context.with_config({"batch_size": 1})),
             candidate_backend=_FileBackend(self.label, self.artifact_dir),
             algorithm_state=algorithm_state,
+            report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
         )
@@ -529,6 +531,17 @@ class _GridTreeRecipe(_TreeRecipe):
         return TTTDGroupedRolloutReport
 
 
+@dataclass(frozen=True)
+class _GridConfigRecipe(_ConfigRecipe):
+    """The config recipe, declaring the TTT-Discover grid report."""
+
+    @property
+    def report_type(self) -> type[ScoredRolloutReport]:
+        from recipes.tttd.report import TTTDGroupedRolloutReport
+
+        return TTTDGroupedRolloutReport
+
+
 @pytest.mark.unit
 def test_components_with_different_report_contracts_admit_what_any_of_them_accepts(tmp_path: Path) -> None:
     """A weights recipe's grid report and a harness recipe's scored report share one scenario's ingress."""
@@ -567,6 +580,25 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
         }
     )
     assert same.report_type is ScoredRolloutReport
+    # Every trainer of a composite is told what its scenario's ingress admits.
+    mixed = CompositeRecipe(
+        components={
+            "harness": _ScoredTreeRecipe(label="harness", artifact_dir=tmp_path / "h", seed={"AGENTS.md": "seed"}),
+            "config": _GridConfigRecipe(),
+        }
+    )
+    assert mixed.report_type is not None and mixed.report_type.__name__.startswith("AnyOf")
+    trainers = mixed.build_trainers(
+        "agent",
+        SQLiteScenarioStorage().open("agent").records,
+        surface=mixed.build_surface("agent"),
+        algorithm_states={},
+    )
+    assert [bound.trainer.processor.context.admitted_report_type is mixed.report_type for bound in trainers] == [
+        True,
+        True,
+    ]
+    assert trainers[0].trainer.report_type is ScoredRolloutReport
 
 
 @pytest.mark.unit

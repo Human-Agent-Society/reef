@@ -75,9 +75,17 @@ def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
             self.assembled = []
             self.fail_assembly = False
 
+    from reef.core.reports import ScoredRolloutReport
+    from reef.recipe.composite import any_component_report
+
     processor = GridProcessor()
     processor.ingest(inference("i1"))
     processor.ingest(inference("i2"))
+    # Alone, the processor refuses a report of another shape, as ingress would have.
+    with pytest.raises(ReportValidationError):
+        processor.ingest(report("r0", "i1"))
+    # Told what the scenario's ingress admits, it releases such a report as another component's.
+    processor.admit_reports_of(any_component_report((TTTDGroupedRolloutReport, ScoredRolloutReport)))
     processor.ingest(report("r1", "i1"))  # the harness component's plain scored report
     assert processor.assembled == []
     assert "r1" in processor.retention_decision().releasable_agent_record_ids

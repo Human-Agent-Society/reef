@@ -83,6 +83,15 @@ class _PendingReport:
 # ------------------------------------------------- reported-feedback processor
 
 
+def _accepted_by(report_type: type[ReportBase], payload: Mapping[str, Any]) -> bool:
+    """Whether ``report_type`` parses ``payload``."""
+    try:
+        report_type.from_dict(payload)
+    except ReportValidationError:
+        return False
+    return True
+
+
 class ReportedFeedbackProcessor(DataProcessor, ABC):
     """Assemble valid reports and their existing inference records into batches.
 
@@ -214,8 +223,12 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             try:
                 parsed_report = report_type.from_dict(item.payload)
             except ReportValidationError:
-                # Ingress admits what any component of the scenario accepts; a report another component's
-                # contract shaped is not this method's training data, and this trainer releases it.
+                # A scenario of several components admits what any of them accepts: a report the ingress
+                # contract takes and this one refuses is another component's, not this method's training
+                # data, and this trainer releases it. A report of this shape with a broken field still raises.
+                admitted = self.context.admitted_report_type
+                if admitted is None or admitted is report_type or not _accepted_by(admitted, item.payload):
+                    raise
                 self._seen_reports.add(item.agent_record_id)
                 self._terminate(item)
                 return
