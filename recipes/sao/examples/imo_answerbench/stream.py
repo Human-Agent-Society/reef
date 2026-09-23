@@ -52,8 +52,9 @@ import random
 import sys
 import threading
 import time
+import urllib.error
 import urllib.request
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from pathlib import Path
 
 from reef_client import ReefClient, ReefClientError
@@ -73,15 +74,18 @@ BUDGET = int(os.environ.get("SAO_BUDGET", "320"))
 MAX_TOKENS = int(os.environ.get("SAO_MAX_TOKENS", "61440"))
 RECORDS_PATH = Path(os.environ.get("SAO_RECORDS_PATH", "work/records/stream.jsonl"))
 SEED = int(os.environ.get("SAO_SEED", "0"))
-MAX_FAILURE_STREAK = 24
 BATCH = int(os.environ.get("SAO_BATCH", "1"))
 TRAIN_DRAIN_TIMEOUT_S = int(os.environ.get("SAO_TRAIN_DRAIN_TIMEOUT_S", "14400"))
 PROGRESS_FILE = os.environ.get("SAO_PROGRESS_FILE")
 AHEAD = int(os.environ.get("SAO_AHEAD", "3"))
+STALL_S = int(os.environ.get("SAO_STALL_S", "2700"))
+MAX_FAILURE_STREAK = 24
 FAILURE_PAUSE_S = 60
 INSTRUCTION_SUFFIX = "\n\nPut your final answer within \\boxed{}."
+#: A failed request, or a completion without the fields the grader reads; the prompt is retried later.
+ROLLOUT_FAILURES = (ReefClientError, OSError, KeyError, IndexError, TypeError)
 
-_write_lock = threading.Lock()
+records_lock = threading.Lock()
 
 
 def load_problems() -> list[dict]:
@@ -111,13 +115,14 @@ def problem_order(problems: list[dict], budget: int) -> list[dict]:
 
 
 def releases() -> list[dict] | None:
+    """The scenario's release chain, or None while the service cannot answer."""
     request = urllib.request.Request(
         f"{SERVICE_URL}/reef/scenarios/{SCENARIO}/releases", headers={"Authorization": f"Bearer {TOKEN}"}
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             return json.loads(response.read())["releases"]
-    except Exception:
+    except (urllib.error.URLError, TimeoutError):
         return None
 
 
@@ -127,45 +132,46 @@ def serving_release() -> str | None:
     return str(rows[-1]["release_id"]) if rows else None
 
 
-STALL_S = int(os.environ.get("SAO_STALL_S", "2700"))
-_started_at = time.time()
-_credit = 0
-_credit_lock = threading.Lock()
-
-
-def trained_steps() -> tuple[int, float] | None:
-    """(steps done, seconds since the progress file last changed); None when pacing is off."""
-    if not PROGRESS_FILE:
-        return None
-    try:
-        with open(PROGRESS_FILE) as handle:
-            steps = int(handle.read().strip() or 0)
-        return steps, time.time() - os.path.getmtime(PROGRESS_FILE)
-    except (OSError, ValueError):
-        return 0, time.time() - _started_at  # no file yet: pace from zero, count idleness from launch
-
-
-def pace(started: int) -> None:
+class TrainerPacer:
     """Hold new submissions while more than AHEAD batches are out beyond the trainer.
 
     Reef drops batches whose rollouts exceed max-staleness, and the driver
     cannot see that, so an idle trainer (no progress for STALL_S) releases one
     batch of credit; otherwise a burst of dropped batches would deadlock.
     """
-    global _credit
-    while True:
-        progress = trained_steps()
-        if progress is None:
-            return
-        steps, idle = progress
-        with _credit_lock:
-            if started < (steps + 1 + AHEAD) * BATCH + _credit:
+
+    def __init__(self, progress_file: str | None) -> None:
+        self.progress_file = progress_file
+        self.started_at = time.time()
+        self.credit = 0
+        self.lock = threading.Lock()
+
+    def trained_steps(self) -> tuple[int, float] | None:
+        """(steps done, seconds since the progress file last changed); None when pacing is off."""
+        if not self.progress_file:
+            return None
+        try:
+            with open(self.progress_file) as handle:
+                steps = int(handle.read().strip() or 0)
+            return steps, time.time() - os.path.getmtime(self.progress_file)
+        except (OSError, ValueError):
+            return 0, time.time() - self.started_at  # no file yet: pace from zero, count idleness from launch
+
+    def wait(self, completed: int) -> None:
+        """Block until one more rollout fits within AHEAD batches of the trainer's progress."""
+        while True:
+            progress = self.trained_steps()
+            if progress is None:
                 return
-            if idle > STALL_S:
-                _credit += BATCH
-                print(f"pace: trainer idle {idle:.0f}s at step {steps}; releasing one more batch", flush=True)
-                continue
-        time.sleep(10)
+            steps, idle = progress
+            with self.lock:
+                if completed < (steps + 1 + AHEAD) * BATCH + self.credit:
+                    return
+                if idle > STALL_S:
+                    self.credit += BATCH
+                    print(f"pace: trainer idle {idle:.0f}s at step {steps}; releasing one more batch", flush=True)
+                    continue
+            time.sleep(10)
 
 
 def wait_for_training(expected: int) -> None:
@@ -180,6 +186,20 @@ def wait_for_training(expected: int) -> None:
             return
         time.sleep(15)
     print(f"WARNING: only {trained}/{expected} steps trained within {TRAIN_DRAIN_TIMEOUT_S}s", flush=True)
+
+
+class RolloutCounts:
+    """Scored and failed rollouts so far; group workers update it from their own threads."""
+
+    def __init__(self) -> None:
+        self.done = 0
+        self.failures = 0
+        self.lock = threading.Lock()
+
+    def add(self, done: int = 0, failures: int = 0) -> None:
+        with self.lock:
+            self.done += done
+            self.failures += failures
 
 
 def one_rollout(client: ReefClient, model: str, problem: dict, position: int, report: bool = True) -> dict:
@@ -215,7 +235,7 @@ def one_rollout(client: ReefClient, model: str, problem: dict, position: int, re
         "seconds": round(time.time() - started, 1),
         "recorded_at": time.time(),
     }
-    with _write_lock:
+    with records_lock:
         RECORDS_PATH.parent.mkdir(parents=True, exist_ok=True)
         with open(RECORDS_PATH, "a") as out:
             out.write(json.dumps(record) + "\n")
@@ -232,44 +252,11 @@ def main() -> None:
     order = problem_order(problems, BUDGET)
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=7200)
     model = os.environ.get("SAO_MODEL_NAME", "reef")  # the name run.py sends; Reef's SGLang serves it
+    pacer = TrainerPacer(PROGRESS_FILE)
+    counts = RolloutCounts()
     print(
         f"pool={len(problems)} problems, budget={BUDGET}, in_flight={IN_FLIGHT}, max_tokens={MAX_TOKENS}", flush=True
     )
-
-    done = 0
-    failures = 0
-    streak = 0
-
-    def settle(futures) -> list[dict]:
-        """Count finished rollouts; a failure is retried later rather than spent from the budget."""
-        nonlocal done, failures, streak
-        retry = []
-        for future in futures:
-            try:
-                future.result()
-            except ReefClientError as error:
-                failures += 1
-                streak += 1
-                retry.append(future.problem)
-                print(f"rollout failed: {error}", flush=True)
-            except Exception as error:  # a single failed rollout must not end the run
-                failures += 1
-                streak += 1
-                retry.append(future.problem)
-                print(f"rollout failed: {type(error).__name__}: {error}", flush=True)
-            else:
-                done += 1
-                streak = 0
-        if streak >= MAX_FAILURE_STREAK:
-            raise SystemExit(f"{streak} rollouts failed in a row; the serving stack is down")
-        if retry:
-            time.sleep(FAILURE_PAUSE_S)  # give the engine time to come back before re-sending
-        return retry
-
-    def submit(pool, problem, position):
-        future = pool.submit(one_rollout, client, model, problem, position)
-        future.problem = problem
-        return future
 
     if GROUP > 1:
         # GRPO control: GROUP rollouts of one prompt form a group; IN_FLIGHT // GROUP
@@ -277,16 +264,15 @@ def main() -> None:
         # go, so Slime's group-relative baseline sees complete groups in order.
         report_lock = threading.Lock()
 
-        def run_group(problem: dict, first_position: int) -> int:
-            nonlocal done, failures
-            pace(done)
+        def run_group(problem: dict, first_position: int) -> None:
+            pacer.wait(counts.done)
+            records: list[dict] = []
+            attempts = 0
             with ThreadPoolExecutor(max_workers=GROUP) as members:
-                records: list[dict] = []
-                attempts = 0
                 while len(records) < GROUP:
-                    need = GROUP - len(records)
                     if attempts >= MAX_FAILURE_STREAK:
                         raise SystemExit("a group could not be completed; the serving stack is down")
+                    need = GROUP - len(records)
                     futures = [
                         members.submit(one_rollout, client, model, problem, first_position + len(records) + k, False)
                         for k in range(need)
@@ -294,8 +280,8 @@ def main() -> None:
                     for future in wait(futures).done:
                         try:
                             records.append(future.result())
-                        except Exception as error:
-                            failures += 1
+                        except ROLLOUT_FAILURES as error:
+                            counts.add(failures=1)
                             attempts += 1
                             print(f"rollout failed: {type(error).__name__}: {error}", flush=True)
                     if len(records) < GROUP:
@@ -305,8 +291,7 @@ def main() -> None:
                     client.report(
                         SCENARIO, {"score": record["score"], "references": [record["agent_record_id"]]}, recipe=RECIPE
                     )
-            done += GROUP
-            return GROUP
+            counts.add(done=GROUP)
 
         groups_in_flight = max(1, IN_FLIGHT // GROUP)
         with ThreadPoolExecutor(max_workers=groups_in_flight) as pool:
@@ -316,21 +301,49 @@ def main() -> None:
             for future in futures:
                 future.result()
     else:
+        streak = 0
+        problems_by_future: dict[Future, dict] = {}
+
+        def settle(futures) -> list[dict]:
+            """Count finished rollouts; a failure is retried later rather than spent from the budget."""
+            nonlocal streak
+            retry = []
+            for future in futures:
+                problem = problems_by_future.pop(future)
+                try:
+                    future.result()
+                except ROLLOUT_FAILURES as error:
+                    counts.add(failures=1)
+                    streak += 1
+                    retry.append(problem)
+                    print(f"rollout failed: {type(error).__name__}: {error}", flush=True)
+                else:
+                    counts.add(done=1)
+                    streak = 0
+            if streak >= MAX_FAILURE_STREAK:
+                raise SystemExit(f"{streak} rollouts failed in a row; the serving stack is down")
+            if retry:
+                time.sleep(FAILURE_PAUSE_S)  # give the engine time to come back before re-sending
+            return retry
+
         with ThreadPoolExecutor(max_workers=IN_FLIGHT) as pool:
-            pending = set()
+            pending: set[Future] = set()
             queue = list(order)
             position = 0
-            while done < BUDGET:
+            while counts.done < BUDGET:
                 while len(pending) < IN_FLIGHT and queue:
-                    pace(done)  # completed rollouts, so the in-flight set stays full while the trainer catches up
-                    pending.add(submit(pool, queue.pop(0), position))
+                    pacer.wait(counts.done)  # the in-flight set stays full while the trainer catches up
+                    problem = queue.pop(0)
+                    future = pool.submit(one_rollout, client, model, problem, position)
+                    problems_by_future[future] = problem
+                    pending.add(future)
                     position += 1
                 if not pending:
                     break
                 finished, pending = wait(pending, return_when=FIRST_COMPLETED)
                 queue = settle(finished) + queue  # failed prompts go back to the front
-    print(f"finished: {done} rollouts, {failures} failures", flush=True)
-    wait_for_training(done // BATCH)
+    print(f"finished: {counts.done} rollouts, {counts.failures} failures", flush=True)
+    wait_for_training(counts.done // BATCH)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ import json
 import sys
 import time
 from pathlib import Path
+from typing import TextIO
 
 import aiohttp
 
@@ -47,7 +48,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-async def one(session, semaphore, args, problem, run, out, lock) -> None:
+async def one(
+    session: aiohttp.ClientSession,
+    semaphore: asyncio.Semaphore,
+    args: argparse.Namespace,
+    problem: dict,
+    run: int,
+    out: TextIO,
+    lock: asyncio.Lock,
+) -> None:
     payload = {
         "model": args.model,
         "messages": [{"role": "user", "content": problem["problem"] + INSTRUCTION_SUFFIX}],
@@ -60,7 +69,8 @@ async def one(session, semaphore, args, problem, run, out, lock) -> None:
         try:
             async with session.post(args.url, json=payload, timeout=aiohttp.ClientTimeout(total=args.timeout_s)) as r:
                 body = await r.json()
-        except Exception as error:
+        except (TimeoutError, aiohttp.ClientError, json.JSONDecodeError) as error:
+            # A failed or malformed request is recorded, not retried; a rerun skips only scored rows.
             async with lock:
                 out.write(
                     json.dumps(
@@ -100,7 +110,7 @@ async def one(session, semaphore, args, problem, run, out, lock) -> None:
 async def main() -> None:
     args = parse_args()
     with open(args.problems) as handle:
-        problems = {int(r["problem_idx"]): r for r in map(json.loads, handle) if r}
+        problems = {int(row["problem_idx"]): row for row in (json.loads(line) for line in handle if line.strip())}
     indices = [int(x) for x in args.indices.split(",") if x.strip()]
     out_path = Path(args.out)
     done: set[tuple[int, int]] = set()
@@ -124,8 +134,8 @@ async def main() -> None:
             print(f"{len(tasks)} samples to run ({len(done)} already present)", flush=True)
             await asyncio.gather(*tasks)
     with open(out_path) as handle:
-        rows = [json.loads(line) for line in handle if '"score"' in line]
-    total = sum(r["score"] for r in rows)
+        rows = [row for row in (json.loads(line) for line in handle if line.strip()) if "score" in row]
+    total = sum(row["score"] for row in rows)
     print(f"{args.label}: {int(total)}/{len(rows)} = {total / max(1, len(rows)):.4f}", flush=True)
 
 

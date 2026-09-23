@@ -14,28 +14,13 @@ the plot keeps them in separate panels on purpose.
 from __future__ import annotations
 
 import argparse
-import json
-import math
 
 import matplotlib
 
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 
-
-def wilson(successes: float, n: int, z: float = 1.96) -> tuple[float, float]:
-    if n == 0:
-        return (0.0, 0.0)
-    p = successes / n
-    denominator = 1 + z * z / n
-    center = (p + z * z / (2 * n)) / denominator
-    half = z * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n)) / denominator
-    return (center - half, center + half)
-
-
-def load(path: str) -> list[dict]:
-    with open(path) as handle:
-        return [json.loads(line) for line in handle if line.strip()]
+from evaluation_stats import load_jsonl, wilson_interval
 
 
 def main() -> None:
@@ -50,22 +35,22 @@ def main() -> None:
 
     fig, (left, right) = plt.subplots(1, 2, figsize=(14, 4.8), gridspec_kw={"width_ratios": [2.2, 1]})
     for path in args.records:
-        rows = sorted((r for r in load(path) if "score" in r), key=lambda r: r["recorded_at"])
-        steps = [rows[i : i + args.batch] for i in range(0, len(rows) - len(rows) % args.batch, args.batch)]
-        means = [sum(r["score"] for r in step) / len(step) for step in steps]
-        xs = list(range(1, len(means) + 1))
+        rows = sorted((row for row in load_jsonl(path) if "score" in row), key=lambda row: row["recorded_at"])
+        steps = [
+            rows[start : start + args.batch] for start in range(0, len(rows) - len(rows) % args.batch, args.batch)
+        ]
+        means = [sum(row["score"] for row in step) / len(step) for step in steps]
+        step_numbers = list(range(1, len(means) + 1))
         label = path.rsplit("/", 1)[-1].replace(".jsonl", "")
-        left.scatter(xs, means, s=16, alpha=0.5)
+        correct = int(sum(row["score"] for row in rows))
+        left.scatter(step_numbers, means, s=16, alpha=0.5)
         if len(means) >= 4:
-            avg = [sum(means[i - 3 : i + 1]) / 4 for i in range(3, len(means))]
+            moving_average = [sum(means[index - 3 : index + 1]) / 4 for index in range(3, len(means))]
             left.plot(
-                xs[3:],
-                avg,
-                lw=2,
-                label=f"{label}: {int(sum(r['score'] for r in rows))}/{len(rows)} rollouts (4-step avg)",
+                step_numbers[3:], moving_average, lw=2, label=f"{label}: {correct}/{len(rows)} rollouts (4-step avg)"
             )
         else:
-            left.plot([], [], lw=2, label=f"{label}: {int(sum(r['score'] for r in rows))}/{len(rows)} rollouts")
+            left.plot([], [], lw=2, label=f"{label}: {correct}/{len(rows)} rollouts")
     if args.pool_base is not None:
         left.axhline(
             args.pool_base, color="k", ls=":", lw=1.5, label=f"untrained rate on the pool {args.pool_base:.3f}"
@@ -80,27 +65,27 @@ def main() -> None:
     labels, values, lows, highs, counts = [], [], [], [], []
     for pair in args.eval:
         label, path = pair.split("=", 1)
-        rows = [r for r in load(path) if "score" in r]
-        total = sum(r["score"] for r in rows)
-        lo, hi = wilson(total, len(rows))
+        rows = [row for row in load_jsonl(path) if "score" in row]
+        total = sum(row["score"] for row in rows)
+        low, high = wilson_interval(total, len(rows))
         labels.append(label)
         values.append(total / max(1, len(rows)))
-        lows.append(values[-1] - lo)
-        highs.append(hi - values[-1])
+        lows.append(values[-1] - low)
+        highs.append(high - values[-1])
         counts.append(f"{int(total)}/{len(rows)}")
     if labels:
-        xs = range(len(labels))
+        positions = range(len(labels))
         right.bar(
-            xs,
+            positions,
             values,
             yerr=[lows, highs],
             capsize=4,
-            color=["k" if lab == "base" else "tab:red" for lab in labels],
+            color=["k" if label == "base" else "tab:red" for label in labels],
             alpha=0.85,
         )
-        for x, c in zip(xs, counts, strict=False):
-            right.text(x, 0.02, c, ha="center", color="w", fontsize=9, rotation=90)
-        right.set_xticks(list(xs))
+        for position, count in zip(positions, counts, strict=False):
+            right.text(position, 0.02, count, ha="center", color="w", fontsize=9, rotation=90)
+        right.set_xticks(list(positions))
         right.set_xticklabels(labels)
     right.set_ylim(0, 1.0)
     right.set_title("held-out problems, fresh samples, 95% interval")

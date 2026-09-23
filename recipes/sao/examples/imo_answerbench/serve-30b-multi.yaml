@@ -94,8 +94,8 @@ training:
     use-dynamic-batch-size: true
     max-tokens-per-gpu: "32768"
     log-probs-max-tokens-per-gpu: "32768"
-    # The training node writes the checkpoint and the coordinator (another node)
-    # verifies it, so SAO_CKPT_DIR must be shared storage; keep its footprint
+    # The coordinator verifies the exports from wherever Reef schedules it, so
+    # the README runs kept SAO_CKPT_DIR on shared storage; keep its footprint
     # bounded by pruning old exports.
     reef-checkpoint-max-storage: "1500GB"
     lr: "1e-6"

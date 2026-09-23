@@ -224,38 +224,46 @@ class SaoAlgorithm(SlimeAlgorithm):
         )
 
     def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
-        head, sep, tail = serving_version.rpartition(":")
-        serving_step = int(tail) if sep and tail.isdigit() else None
-        metrics: dict[str, Any] = {}
-        if serving_step is not None and head:
-            steps = [
-                step
-                for token in rollout_data.get("producing_runtime_load_ids") or []
-                if token is not None and (step := _runtime_load_id_sequence(str(token), head)) is not None
-            ]
-            future_steps = [step for step in steps if step > serving_step]
-            if future_steps:
-                _logger.warning(
-                    "dropping %d producing weight step(s) %s ahead of serving step %d from sao policy-lag stats",
-                    len(future_steps),
-                    sorted(set(future_steps)),
-                    serving_step,
-                )
-            lags = [serving_step - step for step in steps if step <= serving_step]
-            if lags:
-                metrics.update({"sao/policy_lag_max": max(lags), "sao/policy_lag_mean": sum(lags) / len(lags)})
-        ages = [
-            max(0.0, time.time() - float(value))
-            for value in rollout_data.get("rollout_created_ats") or []
-            if value is not None
+        return sao_rollout_metrics(rollout_data, serving_version)
+
+
+def sao_rollout_metrics(rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
+    """Asynchrony telemetry of one step: policy lag, queue age, and the trained-token rate.
+
+    Shared with the GRPO(+DIS) control, which ships the same rollout columns.
+    """
+    head, sep, tail = serving_version.rpartition(":")
+    serving_step = int(tail) if sep and tail.isdigit() else None
+    metrics: dict[str, Any] = {}
+    if serving_step is not None and head:
+        steps = [
+            step
+            for token in rollout_data.get("producing_runtime_load_ids") or []
+            if token is not None and (step := _runtime_load_id_sequence(str(token), head)) is not None
         ]
-        if ages:
-            metrics.update({"sao/queue_age_s_max": max(ages), "sao/queue_age_s_mean": sum(ages) / len(ages)})
-        total = sum(rollout_data.get("response_lengths") or [])
-        if total > 0:
-            trained = sum(sum(mask) for mask in rollout_data.get("loss_masks") or [])
-            metrics["sao/effective_token_rate"] = trained / total
-        return metrics
+        future_steps = [step for step in steps if step > serving_step]
+        if future_steps:
+            _logger.warning(
+                "dropping %d producing weight step(s) %s ahead of serving step %d from sao policy-lag stats",
+                len(future_steps),
+                sorted(set(future_steps)),
+                serving_step,
+            )
+        lags = [serving_step - step for step in steps if step <= serving_step]
+        if lags:
+            metrics.update({"sao/policy_lag_max": max(lags), "sao/policy_lag_mean": sum(lags) / len(lags)})
+    ages = [
+        max(0.0, time.time() - float(value))
+        for value in rollout_data.get("rollout_created_ats") or []
+        if value is not None
+    ]
+    if ages:
+        metrics.update({"sao/queue_age_s_max": max(ages), "sao/queue_age_s_mean": sum(ages) / len(ages)})
+    total = sum(rollout_data.get("response_lengths") or [])
+    if total > 0:
+        trained = sum(sum(mask) for mask in rollout_data.get("loss_masks") or [])
+        metrics["sao/effective_token_rate"] = trained / total
+    return metrics
 
 
 def _runtime_load_id_sequence(token: str, incarnation: str) -> int | None:
@@ -291,4 +299,4 @@ def _apply_attention_freeze(critic_args: Namespace) -> None:
     _logger.info("SAO: freezing MoE critic attention via patterns %s", patterns)
 
 
-__all__ = ["SaoAlgorithm", "SaoSettings"]
+__all__ = ["SaoAlgorithm", "SaoSettings", "sao_rollout_metrics"]

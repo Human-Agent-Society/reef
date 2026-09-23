@@ -2,9 +2,10 @@
 
 This example implements the harness side of
 [Single-Rollout Asynchronous Optimization](https://arxiv.org/abs/2607.07508).
-SAO trains on one graded rollout at a time. There is no comparison group and
-no barrier, so a rollout enters training the moment its score arrives, and the
-next request is served by the updated weights. The method itself is the `sao`
+SAO samples one rollout per prompt and grades each on its own. There is no
+comparison group and no barrier: a scored rollout joins the next optimizer
+step without waiting for siblings, and the next request is served by the
+updated weights. The method itself is the `sao`
 recipe package (`recipes/sao/`). This directory holds the loop around it: three
 IMOAnswerBench problems as Harbor tasks, a Harbor agent that runs six scored
 rollouts per problem through Reef, and `run.py`, which runs the tasks in order.
@@ -282,6 +283,32 @@ python plot_stream.py results/curve.png --records work/records/stream-*.jsonl \
     --eval base=work/eval-base.jsonl sao=work/eval-sao.jsonl --batch 8
 ```
 
+The host-side scripts need `aiohttp`, `datasets` and `matplotlib`; install
+them with `pip install -e ".[stream]"` from this directory.
+
+The batch-128 runs in Results use `serve-30b-multi.yaml` (SAO) and
+`serve-30b-grpo-multi.yaml` (the control) on an existing Ray cluster
+(`RAY_ADDRESS`): `SAO_TRAIN_NODES` 8-GPU nodes host the actor, tensor
+parallel 8 per node and data parallel across nodes with the critic colocated,
+and `SAO_ROLLOUT_GPUS` GPUs on other nodes host the engines, tensor parallel
+4 each. The runs kept `SAO_CKPT_DIR` on shared storage with the retention
+cap set in the stack file, so Reef's coordinator sees the exports it verifies
+from whichever node it lands on. `SAO_PROGRESS_FILE`
+paces the driver on the trainer: write the number of completed optimizer
+steps into it from a host that sees `SAO_CKPT_DIR`, for example the highest
+exported step, `ls "$SAO_CKPT_DIR/hf" | sort -n | tail -1`. The control keeps
+the same topology and adds `SAO_GROUP=8`, so a step of `SAO_BATCH=128`
+rollouts is 16 complete groups. The problems JSONL has the same columns as
+`export_problems.py` writes, here filled from the DeepMath pools described
+in Results.
+
+```bash
+export RAY_ADDRESS=<head>:6379 SAO_TRAIN_NODES=4 SAO_ROLLOUT_GPUS=<engine GPUs> SAO_CKPT_DIR=<shared dir>
+SAO_BATCH=128 SAO_IN_FLIGHT=256 SAO_SERVE_YAML=serve-30b-multi.yaml SAO_DRIVER=stream.py \
+SAO_PROBLEMS=work/deepmath.jsonl SAO_PROGRESS_FILE=work/progress SAO_BUDGET=12800 ./run.sh
+SAO_GROUP=8 SAO_SERVE_YAML=serve-30b-grpo-multi.yaml ... ./run.sh   # the GRPO(+DIS) control
+```
+
 The cookbook configuration is a functional smoke rather than the paper's
 setup: it serves Qwen2.5-1.5B-Instruct with a 2048-token generation window,
 trains on the benchmark's own problems, starts from the public
@@ -354,9 +381,9 @@ All accuracies below are percentages.
 
 SAO seed 0 and the first GRPO(+DIS) run each completed 99 steps before failing during step-100 artifact publication; with publication disabled, the GRPO(+DIS) rerun (same pool, same seed and prompt order) ran 144 steps and was stopped, with checkpoints every 20 steps. We continued from seed 0’s saved step-99 weights with a fresh critic and optimizer, including 10 critic-only warmup steps. The continuation uses a +99 plotting offset. Seed 1 ended at step 61. Seeds differ only in prompt order, with the same order for a given seed value.
 
-Several SAO checkpoints gained 2 to 4 points over base on AIME and IMO. HMMT fluctuated around base, including below-base checkpoints. The pooled scores suggest the same overall pattern, but checkpoints are correlated and do not provide independent evidence.
+Several SAO checkpoints gained 2 to 4 points over base on AIME and IMO. HMMT fluctuated around base, including below-base checkpoints. The pooled scores suggest the same overall pattern, but checkpoints are correlated and are not independent measurements.
 
-After the restart with a fresh critic and optimizer, the continuation drifted, with training reward falling from 0.83 to about 0.80 and response length and truncation rising over its 47 steps; its held-out points at steps 119 and 139 sit near the base rate, and we stopped it without reading it as evidence either way about SAO.
+After the restart with a fresh critic and optimizer, the continuation drifted, with training reward falling from 0.83 to about 0.80 and response length and truncation rising over its 47 steps; its held-out points at steps 119 and 139 sit near the base rate, and we stopped it without reading it as a result for or against SAO.
 
 GRPO(+DIS) matches SAO through step 40 in both of its runs (the two runs agree within about 4 points at their shared steps 40 and 80), then falls below SAO on all three sets by step 80: 5 to 13 points below, depending on the run and the set. The rerun reaches 9.6 / 5.4 / 9.9 by step 140, between a tenth and a fifth of the base rate, with its mean response length under 1k tokens. Its training reward on the pool also falls after step 100, from about 0.90 to between 0.55 and 0.75.
 

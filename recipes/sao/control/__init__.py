@@ -10,12 +10,13 @@ SAO is compared against once vanilla GRPO has collapsed.
 from __future__ import annotations
 
 from argparse import Namespace
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from numbers import Real
 from typing import Any
 
-from recipes.sao.slime import SaoAlgorithm, build_sao_rollout_data, sao_sample_row
+from recipes.sao.slime import SaoAlgorithm, build_sao_rollout_data, sao_rollout_metrics, sao_sample_row
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult, register_loss_family
+from reef.train.types import TrajectoryItem
 
 
 @register_loss_family
@@ -28,6 +29,8 @@ class SaoGrpoControlAlgorithm(SlimeAlgorithm):
     forbidden_advantages_message = (
         "the GRPO(+DIS) control computes group advantages in the training backend; the Reef payload must omit them"
     )
+    # The wire surface is SAO's: the same columns reach the workers, only the
+    # advantage estimate differs.
     rollout_data_keys = SaoAlgorithm.rollout_data_keys
     rollout_tensor_dtypes: Mapping[str, str] = dict(SaoAlgorithm.rollout_tensor_dtypes)
     response_aligned_keys = SaoAlgorithm.response_aligned_keys
@@ -63,23 +66,25 @@ class SaoGrpoControlAlgorithm(SlimeAlgorithm):
             ):
                 raise RuntimeError(f"{source} requires --{name.replace('_', '-')} in the DIS range")
 
-    def parse_specific_options(self, arguments):
-        return None, list(arguments)
-
-    def shape_sample_row(self, sample):
+    def shape_sample_row(self, sample: TrajectoryItem) -> list[Any]:
         return sao_sample_row(sample)
 
-    def build_rollout_data(self, payload, samples):
+    def build_rollout_data(self, payload: Mapping[str, Any], samples: Sequence) -> dict:
         return build_sao_rollout_data(payload, samples, self)
 
-    def bind(self, config=None, *, critic_steps_per_actor=None, critic_only_steps=0):
-        return SaoGrpoControlAlgorithm()
-
-    def train(self, rollout_id, refs, *, actor_group, critic_group, resolve):
+    def train(
+        self,
+        rollout_id: int,
+        rollout_data_refs: Any,
+        *,
+        actor_group: Any,
+        critic_group: Any,
+        resolve: Callable[[Any], Any],
+    ) -> TrainResult:
         if critic_group is not None:
             raise RuntimeError("the GRPO(+DIS) control was booted with a critic group; drop --use-critic")
-        actor_results = list(resolve(actor_group.async_train(rollout_id, refs)) or ())
+        actor_results = list(resolve(actor_group.async_train(rollout_id, rollout_data_refs)) or ())
         return TrainResult(actor_results, {"control/actor_trained": 1})
 
     def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
-        return {}
+        return sao_rollout_metrics(rollout_data, serving_version)

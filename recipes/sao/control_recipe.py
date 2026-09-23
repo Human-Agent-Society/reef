@@ -8,7 +8,6 @@ from recipes.sao.objective import SaoObjective
 from recipes.sao.processor import SAOProcessor
 from recipes.sao.recipe import SAORecipe
 from reef.recipe.base import StepScheduling, WeightTrainingSpec
-from reef.recipe.config_fields import config_field
 from reef.train.algos.registry import register_objective
 
 
@@ -22,14 +21,17 @@ class SaoGrpoControlObjective(SaoObjective):
 
 @dataclass(frozen=True, kw_only=True)
 class SAOGrpoControlRecipe(SAORecipe):
-    """GRPO(+DIS) control: a group of ``batch_size`` rollouts of one prompt per step.
+    """GRPO(+DIS) control: ``batch_size`` rollouts per step in complete groups of one prompt.
 
-    ``batch_size`` must equal the Slime driver's ``--n-samples-per-prompt`` and
-    ``--global-batch-size`` so one Reef training step is exactly one GRPO group.
+    The driver posts each group's ``--n-samples-per-prompt`` reports together,
+    so a step of ``batch_size`` accepted rollouts holds only complete groups
+    and Slime's group-relative baseline never mixes prompts. ``batch_size``
+    is therefore a multiple of the group size (one group per step when the
+    two are equal) and, as for SAO, must equal the driver's
+    ``--global-batch-size``. It inherits SAO's default and environment key.
     """
 
     name: str = "sao-grpo-dis"
-    batch_size: int = config_field(4, env="REEF_SAO_CONTROL_GROUP")
 
     @classmethod
     def training_spec(cls) -> WeightTrainingSpec:
