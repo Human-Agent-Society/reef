@@ -6,6 +6,7 @@ import argparse
 from collections.abc import Sequence
 
 from reef.train.slime_backend.loss_families import LOSS_FAMILIES
+from reef.train.slime_backend.reef_adapters.adaptive_kl import add_adaptive_kl_arguments, validate_adaptive_kl_args
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.megatron.lora import validate_megatron_lora_args
 
@@ -97,6 +98,7 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         default=False,
         help="Enable a critic when the selected Slime advantage estimator does not imply one.",
     )
+    add_adaptive_kl_arguments(parser)
     return parser
 
 
@@ -153,6 +155,7 @@ def configure_reef_loss_args(args: SlimeArguments) -> None:
     args.reef_external_batch_keys = tuple(spec.external_batch_keys)
     args.reef_rollout_log_skip_keys = tuple(spec.rollout_log_skip_keys)
     spec.configure_backend_args(args)
+    validate_adaptive_kl_args(args, loss_family=family)
     if spec.uses_pg_loss_primitive:
         # Route Slime's numerical CISPO callsite onto the family's registered
         # pg primitive: the worker swaps loss.compute_cispo_loss for the
