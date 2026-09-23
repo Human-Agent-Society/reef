@@ -258,6 +258,13 @@ class ScenarioFactory:
                     f"scenario {name!r} was registered with components {list(registered_components.names)}; "
                     f"the recipe also serves {missing}"
                 )
+        elif registered_components is not None and not registered_components.single:
+            # The reverse mismatch: a flat recipe would serve the composed root as its one tree and its next
+            # step would publish a head without the other components.
+            raise ReefError(
+                f"scenario {name!r} was registered with components {list(registered_components.names)}; "
+                "a recipe serving one component cannot reopen it"
+            )
         checkpoint_head = backend.current()
         registered_name, base_artifact, checkpoint = parse_scenario_metadata(
             registration,

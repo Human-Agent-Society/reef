@@ -43,6 +43,11 @@ from reef.train.trainer import Trainer
 logger = logging.getLogger(__name__)
 
 
+def request_family(record: bool) -> str:
+    """The operation metrics family of a call: served traffic keeps a record, an evaluation call does not."""
+    return "serve" if record else "evaluate"
+
+
 def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
     """The headers a page route reads, ``?scenario=`` standing in for ``x-reef-scenario`` when that header is absent.
 
@@ -199,7 +204,7 @@ class RequestService:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call."""
         operations = await self.inference_operations(headers)
         # Evaluation traffic is measured apart, so a step's episodes do not read as served requests.
-        measurement = operations.start("serve/request" if record else "evaluate/request")
+        measurement = operations.start(f"{request_family(record)}/request")
         succeeded = False
         try:
             original_payload = dict(payload)
@@ -211,7 +216,7 @@ class RequestService:
             while True:
                 attempt += 1
                 if attempt > 1:
-                    operations.increment("serve/retries_total")
+                    operations.increment(f"{request_family(record)}/retries_total")
                 prepared, payload = await self._prepare_request(
                     headers, original_payload, path, handler, record=record
                 )
@@ -272,10 +277,10 @@ class RequestService:
                 remaining_budget -= sleep_for
                 retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
         except RuntimeLoadMismatch:
-            operations.increment("serve/version_mismatch_total")
+            operations.increment(f"{request_family(record)}/version_mismatch_total")
             raise
         except InferenceRetryTimeout:
-            operations.increment("serve/timeouts_total")
+            operations.increment(f"{request_family(record)}/timeouts_total")
             raise
         finally:
             measurement.finish(succeeded=succeeded)
@@ -290,7 +295,7 @@ class RequestService:
         record: bool = True,
     ) -> tuple[InferenceStream, PendingInference]:
         operations = await self.inference_operations(headers)
-        measurement = operations.start("serve/request" if record else "evaluate/request")
+        measurement = operations.start(f"{request_family(record)}/request")
         try:
             prepared, payload = await self._prepare_request(headers, payload, path, handler, record=record)
             admission = prepared.admission
@@ -347,7 +352,7 @@ class RequestService:
         except BaseException as exc:
             measurement.finish(succeeded=False)
             if isinstance(exc, RuntimeLoadMismatch):
-                operations.increment("serve/version_mismatch_total")
+                operations.increment(f"{request_family(record)}/version_mismatch_total")
             raise
 
     async def relay_multimodal(
@@ -404,7 +409,7 @@ class RequestService:
             return stored
         except Exception as exc:
             if isinstance(exc, RuntimeLoadMismatch) and pending.measurement is not None:
-                pending.measurement.metrics.increment("serve/version_mismatch_total")
+                pending.measurement.metrics.increment(f"{request_family(pending.record)}/version_mismatch_total")
             logger.exception(
                 "dispatcher rejected the stream record for scenario %r (record %s)",
                 pending.item.scenario,

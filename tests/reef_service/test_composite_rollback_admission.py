@@ -137,9 +137,16 @@ def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> Non
         assert dispatcher._process_local_backend_step("agent", HARNESS) is True
         assert dispatcher._training_errors() == ["agent: RuntimeError: training marker is UPDATING_WEIGHTS"]
         dispatcher._record_training_error("agent", "harness away", source=local_error_source(HARNESS))
+        assert sorted(dispatcher._training_errors()) == [
+            "agent: RuntimeError: training marker is UPDATING_WEIGHTS",
+            "agent: harness away",
+        ]
         for record in _records(2):
             scenario.records.append(record)
+        # The harness cycle clears its own error; the training thread's stays until that thread clears it.
         assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        assert dispatcher._training_errors() == ["agent: RuntimeError: training marker is UPDATING_WEIGHTS"]
+        dispatcher._record_training_error("agent", None)
         assert dispatcher._training_errors() == []
     finally:
         dispatcher.close()
@@ -154,13 +161,21 @@ def test_a_local_cycle_that_waited_for_a_job_stands_aside_when_the_job_left_admi
         for record in _records(1):
             scenario.records.append(record)
         outcomes: list[bool] = []
-        with dispatcher._local_cycle_lock("agent"):
+        asked_for_the_lock = threading.Event()
+        cycle_lock = dispatcher._local_cycle_lock
+
+        def signalling_lock(name: str):
+            asked_for_the_lock.set()
+            return cycle_lock(name)
+
+        dispatcher._local_cycle_lock = signalling_lock  # type: ignore[method-assign]
+        with cycle_lock("agent"):
             worker = threading.Thread(
                 target=lambda: outcomes.append(dispatcher._process_local_backend_step("agent", HARNESS))
             )
             worker.start()
-            worker.join(0.5)
-            assert worker.is_alive()  # past the first admission check, waiting for the lock
+            # Past the first admission check, waiting for the lock this thread holds.
+            assert asked_for_the_lock.wait(10)
             training.inference.pause_admission()
         worker.join(10)
         assert outcomes == [False]

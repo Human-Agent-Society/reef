@@ -94,8 +94,8 @@ def local_error_source(component: str | None) -> str:
 class _TrainingState:
     lock: Lock = field(default_factory=Lock)
     ready: Event = field(default_factory=Event)
-    #: The last error per scenario, with the worker that recorded it: only that worker clears it.
-    errors: dict[str, tuple[str, str]] = field(default_factory=dict)
+    #: The last error per (scenario, worker that recorded it): only that worker clears its own.
+    errors: dict[tuple[str, str], str] = field(default_factory=dict)
     failure_counts: dict[str, int] = field(default_factory=dict)
     status_build_error: str | None = None
     storage_status: Mapping[str, Any] | None = None
@@ -591,7 +591,7 @@ class Dispatcher:
             metrics.update(current.operations.snapshot())
             with self._training.lock:
                 metrics["training/failed_attempts_total"] = self._training.failure_counts.get(current.name, 0)
-                metrics["training/error"] = int(current.name in self._training.errors)
+                metrics["training/error"] = int(any(key[0] == current.name for key in self._training.errors))
                 if current.training_runtime is not None:
                     metrics["training/checkpoint_storage_blocked"] = int(self._training.storage_status is not None)
             current.trainer.processor.experiment_logger.log(metrics, namespace="operations")
@@ -689,7 +689,9 @@ class Dispatcher:
                 pass
         except Exception as exc:
             logger.exception("local backend failed to commit for scenario %r", scenario)
-            self._record_training_error(scenario, self._error_text(exc), source=local_error_source(component))
+            if self._local_backend_worker_registered(scenario, component):
+                # A scenario deleted under this cycle keeps no error: nothing would ever clear it.
+                self._record_training_error(scenario, self._error_text(exc), source=local_error_source(component))
 
     def _reload_durable_local_scenario(self, scenario: str, current: Scenario) -> None:
         if not current.store.durable:
@@ -697,6 +699,7 @@ class Dispatcher:
         with self._registry.lock_for(scenario):
             if self._registry.get_optional(scenario) is current:
                 self._reload_with_instruction_failures(scenario, current)
+        self.wake_local_workers()
 
     def _recover_failed_step(
         self, scenario: str, current: Scenario, cause: Exception, component: str | None = None
@@ -730,6 +733,8 @@ class Dispatcher:
             return
         self._fail_instruction(current, cause, current.dispatched_component)
         self._reload_with_instruction_failures(scenario, current)
+        # The rebuilt instance holds the local components' rows unread; their workers look again.
+        self.wake_local_workers()
 
     def _process_local_backend_step(self, scenario: str, component: str | None = None) -> bool:
         current = self._registry.get_optional(scenario)
@@ -949,30 +954,36 @@ class Dispatcher:
                 self._set_training_storage_status(dict(execution.storage))
                 return False
             self._set_training_storage_status(None)
-            if execution.outcome == "drop":
-                logger.warning(
-                    "dropping stale training batch %r for scenario %r",
-                    batch.batch_id,
-                    current.name,
-                )
-                current.reject_pending(execution.metrics, component=component)
-                return True
-            result = execution.result
-            if execution.outcome != "commit" or result is None:
+            if execution.outcome not in ("drop", "commit"):
                 raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
-            if self._registry.get_optional(current.name) is not current:
-                # A local worker's failure reloaded the scenario while the job ran: its result belongs to the
-                # instance that reserved the batch. The rebuilt trainer reserves the same rows and the
-                # backend replays the job under its marker, so the commit lands with the job's identity.
-                logger.warning("scenario %r was reloaded under its training job; the job replays", current.name)
-                return True
-            # Another component may have moved the head while the job ran. The
-            # committer merges a dispatched result rather than refusing it: the
-            # backend has published the weights already and its job can only be
-            # finished, never taken back.
-            self._commit_result(current.name, result, component)
-            if result.training_job_id is not None:
-                backend.acknowledge_commit(current.scenario_step, result.training_job_id)
+            # The registry lock keeps a local worker's reload out between the instance check and the commit.
+            with self._registry.lock_for(current.name):
+                loaded = self._registry.get_optional(current.name)
+                if loaded is None:
+                    raise RuntimeContractError(
+                        f"scenario {current.name!r} was deleted under its training job; the backend's job needs "
+                        "operator recovery"
+                    )
+                if loaded is not current:
+                    # A local worker's failure reloaded the scenario while the job ran: its result belongs to the
+                    # instance that reserved the batch. The rebuilt trainer reserves the same rows and the
+                    # backend replays the job under its marker, so the commit lands with the job's identity.
+                    logger.warning("scenario %r was reloaded under its training job; the job replays", current.name)
+                    return True
+                if execution.outcome == "drop":
+                    logger.warning("dropping stale training batch %r for scenario %r", batch.batch_id, current.name)
+                    current.reject_pending(execution.metrics, component=component)
+                    return True
+                result = execution.result
+                if result is None:
+                    raise RuntimeContractError("commit execution must carry a training result")
+                # Another component may have moved the head while the job ran. The
+                # committer merges a dispatched result rather than refusing it: the
+                # backend has published the weights already and its job can only be
+                # finished, never taken back.
+                self._commit_result(current.name, result, component)
+                if result.training_job_id is not None:
+                    backend.acknowledge_commit(current.scenario_step, result.training_job_id)
         return True
 
     def dispatched_turn(self, current: Scenario, component: str | None) -> ExitStack:
@@ -1016,11 +1027,11 @@ class Dispatcher:
         """
         with self._training.lock:
             if value is None:
-                recorded = self._training.errors.get(scenario)
-                if recorded is not None and (source is None or recorded[0] == source):
-                    self._training.errors.pop(scenario, None)
+                for key in [key for key in self._training.errors if key[0] == scenario]:
+                    if source is None or key[1] == source:
+                        self._training.errors.pop(key, None)
             else:
-                self._training.errors[scenario] = (source or TRAINING_THREAD_SOURCE, value)
+                self._training.errors[(scenario, source or TRAINING_THREAD_SOURCE)] = value
                 self._training.failure_counts[scenario] = self._training.failure_counts.get(scenario, 0) + 1
 
     def _record_status_build_error(self, value: str | None) -> bool:
@@ -1176,7 +1187,7 @@ class Dispatcher:
             training_thread = self._training.thread
         training_scenario = self._registry.training_scenario_name or "<unbound>"
         if (
-            training_scenario not in training_errors
+            (training_scenario, TRAINING_THREAD_SOURCE) not in training_errors
             and training_thread is not None
             and not training_thread.is_alive()
             and not self._lifecycle.closed.is_set()
@@ -1184,8 +1195,8 @@ class Dispatcher:
             error = "RuntimeError: training thread stopped unexpectedly"
             logger.error("%s: %s", training_scenario, error)
             self._record_training_error(training_scenario, error)
-            training_errors[training_scenario] = (TRAINING_THREAD_SOURCE, error)
-        errors = [f"{key}: {training_errors[key][1]}" for key in sorted(training_errors)]
+            training_errors[(training_scenario, TRAINING_THREAD_SOURCE)] = error
+        errors = [f"{scenario}: {training_errors[(scenario, source)]}" for scenario, source in sorted(training_errors)]
         if status_build_error is not None:
             errors.append(status_build_error)
         return errors

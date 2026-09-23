@@ -21,6 +21,7 @@ from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.recipe import Recipe
+from reef.runtime.interfaces import RuntimeContractError
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
 from reef.service.request_service import RequestService
@@ -501,19 +502,80 @@ def test_a_dispatched_turn_wakes_every_local_worker_and_yields_before_the_next_c
             assert scenario is not None
             for record in _records_for(name, 1):
                 scenario.records.append(record)
-        other = dispatcher.get_or_create_scenario("other")
-        assert other is not None
-        dispatcher._start_local_backend_worker("other", HARNESS)
-        # A job is waiting for its turn: the drain loop runs no cycle.
+        # A job is waiting for its turn: a worker woken now runs no cycle.
         dispatcher._training.turn_waiting.set()
-        dispatcher._drain_local_backend("other", HARNESS)
+        dispatcher._start_local_backend_worker("other", HARNESS)
+        time.sleep(0.5)
         assert backends[HARNESS].prepared == 0
+        # The turn ends: every worker is woken and the cycle runs.
         dispatcher._training.turn_waiting.clear()
-        with dispatcher._training.lock:
-            worker = dispatcher._training.local_workers[("other", HARNESS)]
-        worker.ready.clear()
         dispatcher.wake_local_workers()
-        assert worker.ready.is_set()
+        deadline = time.monotonic() + 10
+        while backends[HARNESS].prepared == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert backends[HARNESS].prepared == 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_reload_after_a_training_failure_wakes_the_local_workers(tmp_path: Path) -> None:
+    """The rebuilt instance holds the local components' rows unread; their workers look again."""
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        dispatcher._training.turn_waiting.set()
+        dispatcher._start_local_backend_worker("agent", HARNESS)
+        time.sleep(0.2)
+        dispatcher._training.turn_waiting.clear()
+        for record in _records(1):
+            scenario.records.append(record)
+        dispatcher._reload_after_training_failure("agent", RuntimeError("job away"))
+        deadline = time.monotonic() + 10
+        while backends[HARNESS].prepared == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        assert backends[HARNESS].prepared == 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_scenario_deleted_under_its_training_job_is_an_error_not_a_silent_replay(tmp_path: Path) -> None:
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        old = dispatcher.get_or_create_scenario("agent")
+        assert old is not None
+        for record in _records(1):
+            old.records.append(record)
+        batch = old.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        dispatcher.delete_scenario("agent")
+        with pytest.raises(RuntimeContractError, match="deleted under its training job"):
+            dispatcher._run_dispatched_turn(old, WEIGHTS, backends[WEIGHTS], batch)
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_rollback_to_the_creation_after_a_rejected_first_step(tmp_path: Path) -> None:
+    """A rejected step records the creation without a checkpoint; the creation still has its own bytes."""
+    dispatcher, backends = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        creation = scenario.current_artifact_ref().release_id
+        backends[HARNESS].reject_next = True
+        for step in (1, 2):
+            for record in _records(step):
+                scenario.records.append(record)
+            result = scenario.prepare_training_step(HARNESS)
+            assert result is not None
+            scenario.commit(result, component=HARNESS)
+        assert scenario.current_artifact_ref().release_id != creation
+        assert next(row for row in scenario.releases() if row["operation"] == "creation")["restorable"] is True
+        scenario.rollback(creation)
+        assert _component_files(scenario, scenario.current_artifact_ref())[HARNESS] == "harness seed"
     finally:
         dispatcher.close()
 

@@ -1144,10 +1144,13 @@ The following names are relative to ``operations/``:
    * - ``serve/retries_total``, ``serve/timeouts_total``
      - Additional buffered inference attempts and requests that exhaust the
        inference retry deadline. Retries do not create extra request counts.
+       Calls on the evaluation route count under ``evaluate/retries_total``
+       and ``evaluate/timeouts_total``.
    * - ``serve/version_mismatch_total``
      - Responses rejected by runtime-load-ID verification, including missing
        engine version information and buffered or deferred streaming responses.
        This is a counter of observed rejections, not a background drift probe.
+       Calls on the evaluation route count under ``evaluate/version_mismatch_total``.
    * - ``ingest/accepted_total``, ``ingest/duplicates_total``
      - New records appended and identical retries acknowledged by the dispatcher.
        Accepted records include incomplete-stream diagnostics; acceptance does

@@ -127,10 +127,11 @@ class ScenarioReleases:
                     return record.artifact_ref, True
                 if found is None:
                     found = (record.artifact_ref, False)
+        if self._creation_artifact.release_id == release_id:
+            # A rejected first step records the creation without a checkpoint; the creation has its own bytes.
+            return self._creation_artifact, True
         if found is not None:
             return found
-        if self._creation_artifact.release_id == release_id:
-            return self._creation_artifact, True
         current = self._artifacts.current
         if current.release_id == release_id:
             # Without a durable log the served release is known by the chain alone.

@@ -270,8 +270,9 @@ class ScenarioCommitter:
             served_entry = None if creation is None else creation.get(loaded)
         recorded_entry = None if recorded.components is None else recorded.components.get(loaded)
         if recorded_entry is None or served_entry is None:
-            # Nothing names the weights on one side: treat the retry as a restore, as every rollback once was.
-            return True
+            # A composed release always names its weights: a side that cannot be read (the creation manifest
+            # while the repository is away) must not open admission a dispatched job may still hold.
+            return False
         return recorded_entry != served_entry
 
     @staticmethod
