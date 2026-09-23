@@ -133,19 +133,27 @@ admission refuses an inline credential. So a tree that sets ``provider`` or
 ``model`` at all, sets ``disabled_providers``, or chooses a model elsewhere
 (``small_model``, or the ``model`` of an agent or a command) is refused at
 render. A command or a skill file must write its frontmatter in the plain
-form: a ``---`` line, a YAML mapping and a closing ``---`` line. opencode
-reads frontmatter with gray-matter, which also takes a byte order mark,
-another engine named after the opening ``---`` (JSON, JavaScript), a block
-with no closing line, and YAML it cannot read, which opencode reads again
-after rewriting; a check that read those forms another way could miss the
-agent or the model opencode sees, so render refuses them. A command's
-``agent`` must name an agent the tree defines under ``agent`` (or the older
-``mode``) and does not disable, or one of opencode's built in agents,
-``build``, ``plan``, ``general`` and ``explore``, and its ``description``,
-``agent``, ``variant`` and ``subtask`` must have the types opencode reads.
-``default_agent`` must name such an agent that is neither a subagent nor
-hidden. opencode otherwise fails the command, or every run, with an
-unexplained error. ``reef-opencode`` sets ``OPENCODE_ENABLE_EXA=1``, which
+form: a ``---`` line, a YAML mapping with no tags and a closing ``---``
+line. opencode reads frontmatter with gray-matter, which also takes a byte
+order mark, another engine named after the opening ``---`` (JSON,
+JavaScript), a block with no closing line, and YAML it cannot read, which
+opencode reads again after rewriting; a check that read those forms another
+way could miss the agent or the model opencode sees, so render refuses them.
+Render reads each plain value with the types of js-yaml, the YAML reader in
+gray-matter, so ``1e5`` is a number and ``yes`` a string, as opencode reads
+them, and it refuses a date that does not exist, such as ``2001-13-45``. A
+command file's frontmatter ``name``, when set, must be its file name:
+opencode files the command under that name, in place of the command
+already named so, ``/reefine`` included. A command's ``agent`` must name an
+agent the tree defines under ``agent`` (or the older ``mode``) and does not
+disable, or one of opencode's built in agents: ``build``, ``plan``,
+``general``, ``explore``, and the hidden ``title``, ``summary`` and
+``compaction``. Its ``description``, ``agent``, ``variant`` and ``subtask``
+must have the types opencode reads. ``default_agent`` must name such an
+agent that is neither a subagent nor hidden, and a tree with no
+``default_agent`` must keep at least one such agent. An agent must not set
+a ``name`` other than its own. opencode otherwise fails the command, or
+every run, with an unexplained error. ``reef-opencode`` sets ``OPENCODE_ENABLE_EXA=1``, which
 registers opencode's ``websearch`` tool (Exa, no key needed) for provider
 ``reef``; episodes do not set it, so a benchmark episode does not search the
 web.

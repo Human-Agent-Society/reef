@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -469,13 +470,18 @@ def test_opencode_runs_offer_only_the_binding_provider() -> None:
         ("---\n- build\n---\nSay hi.", "frontmatter is a list"),
         ("---\ndescription: 5\n---\nSay hi.", "field 'description' must be a str, got 5"),
         ("---\nsubtask: yes\n---\nSay hi.", "field 'subtask' must be a bool, got 'yes'"),
+        ("---\ndescription: !!int 1e5\n---\nSay hi.", "a value has the tag 'tag:yaml.org,2002:int' at line 2"),
+        ("---\ndescription: ! 5\n---\nSay hi.", "a value has the tag '!' at line 2"),
+        ("---\ndescription: 2001-13-45\n---\nSay hi.", "the date '2001-13-45' does not exist at line 2"),
     ],
 )
 def test_opencode_refuses_frontmatter_it_cannot_read_as_opencode_does(text: str, message: str) -> None:
     """opencode's gray-matter strips a byte order mark, takes text after --- as another engine, reads to the end of
     the file with no closing line, and fails on a repeated key and on YAML that opencode then rewrites and retries;
     for each form a check that read the file its own way would miss the agent or the model opencode sees. A field
-    of the wrong type, with js-yaml's booleans (true and false only), makes opencode refuse its whole config."""
+    of the wrong type, with js-yaml's booleans (true and false only), makes opencode refuse its whole config. js-yaml
+    checks a tag against its value and moves a date that does not exist forward to a real one, where PyYAML's
+    constructors fail, so a tagged value and such a date are refused rather than read another way."""
     descriptor = get_adapter("opencode")
     with pytest.raises(RenderError, match=f"opencode command 'hi' .*{message}"):
         render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
@@ -499,6 +505,87 @@ def test_opencode_admits_the_frontmatter_forms_it_reads_as_opencode_does() -> No
     render_composition(
         [("skill", {"name": "notes", "text": "---\nname: notes\ndescription: Notes.\n---\n"})], descriptor
     )
+
+
+@pytest.mark.parametrize(
+    ("value", "number"),
+    [
+        ("1e5", 100000.0),
+        ("1.5e3", 1500.0),
+        ("1E5", 100000.0),
+        ("1.", 1.0),
+        ("017", 15),
+        ("0x1F", 31),
+        ("1_000", 1000),
+        ("1:30", 90),
+        ("09", None),
+        ("01.5", None),
+        ("1_", None),
+        ("0b_", None),
+        ("=", None),
+        ("-.nan", None),
+        ("2001-1-1", None),
+    ],
+)
+def test_opencode_reads_frontmatter_values_as_js_yaml_does(value: str, number: float | None) -> None:
+    """js-yaml 3, opencode's frontmatter reader, reads 1e5 and 1.5e3 as numbers, which PyYAML reads as strings, and
+    09, 01.5, 1_, 0b_ and = as strings, which PyYAML reads as numbers or cannot read. A number in a string field
+    makes opencode refuse its whole config, so render refuses exactly the values opencode reads as numbers."""
+    descriptor = get_adapter("opencode")
+    for field in ("description", "variant"):
+        nodes = [("agent_command", {"name": "hi", "text": f"---\n{field}: {value}\n---\nSay hi."})]
+        if number is None:
+            render_composition(nodes, descriptor)
+        else:
+            with pytest.raises(RenderError, match=re.escape(f"field {field!r} must be a str, got {number!r}")):
+                render_composition(nodes, descriptor)
+
+
+def test_opencode_command_file_keeps_its_own_name() -> None:
+    """opencode files a command file under the name in its frontmatter, so a file with another name could take the
+    place of /reefine; render refuses a name that is not the file's."""
+    descriptor = get_adapter("opencode")
+
+    def command(name: str, frontmatter_name: str) -> tuple[str, dict]:
+        return ("agent_command", {"name": name, "text": f"---\nname: {frontmatter_name}\n---\nSay hi."})
+
+    render_composition([command("chat", "chat")], descriptor)
+    with pytest.raises(RenderError, match="command 'chat' frontmatter must not set name 'reefine'"):
+        render_composition([command("reefine", "reefine"), command("chat", "reefine")], descriptor)
+    with pytest.raises(RenderError, match="command 'chat' frontmatter must not set name 5"):
+        render_composition([command("chat", "5")], descriptor)
+
+
+def test_opencode_tree_keeps_an_agent_that_starts_a_run() -> None:
+    """With no default_agent opencode starts a run with its first agent that is neither a subagent nor hidden, and
+    fails every run when none is left; its title, summary and compaction agents stay hidden unless the tree says
+    otherwise. An agent given another name is looked up by that name and fails the run that uses it."""
+    descriptor = get_adapter("opencode")
+
+    def render(data: dict) -> None:
+        render_composition([("config", {"data": data})], descriptor)
+
+    off = {"build": {"disable": True}, "plan": {"disable": True}}
+    for data in (
+        {"agent": {**off, "chat": {"prompt": "You chat."}}},
+        {"agent": {**off, "title": {"hidden": False}}},
+        {"agent": off, "mode": {"chat": {"prompt": "You chat."}}},
+        {"agent": {"build": {"name": "build"}}},
+    ):
+        render(data)
+    for data in (
+        {"agent": off},
+        {"agent": {"build": {"mode": "subagent"}, "plan": {"disable": True}}},
+        {"agent": {"build": {"hidden": True}, "plan": {"disable": True}}},
+        {"agent": {**off, "title": {"prompt": "Name it."}}},
+        {"agent": {**off, "chat": {"prompt": "You chat.", "mode": "subagent"}}},
+    ):
+        with pytest.raises(RenderError, match="leaves no agent that can start a run"):
+            render(data)
+    with pytest.raises(RenderError, match="opencode agent 'build' must not set name 'ghost'"):
+        render({"agent": {"build": {"name": "ghost"}}})
+    with pytest.raises(RenderError, match="opencode mode 'chat' must not set name 'talk'"):
+        render({"mode": {"chat": {"prompt": "You chat.", "name": "talk"}}})
 
 
 def test_opencode_default_agent_must_start_a_run() -> None:
@@ -537,7 +624,7 @@ def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
         return ("agent_command", {"name": "hi", "text": f"---\nagent: {agent}\n---\nSay hi to $ARGUMENTS."})
 
     chat = {"mode": "primary", "permission": {"*": "deny", "websearch": "allow"}}
-    for agent in ("build", "plan", "general", "explore"):
+    for agent in ("build", "plan", "general", "explore", "title"):
         render_composition([command(agent)], descriptor)
     render_composition([("config", {"data": {"agent": {"chat": chat}}}), command("chat")], descriptor)
     render_composition([("config", {"data": {"mode": {"chat": chat}}}), command("chat")], descriptor)

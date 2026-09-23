@@ -29,12 +29,17 @@ which strips a byte order mark, takes the text after the opening ``---`` as
 the name of another engine (JSON, JavaScript), reads to the end of the file
 when no line closes the block, and fails on YAML js-yaml cannot read, which
 opencode then reads again with its values that hold a colon rewritten. The
-check reads only the plain form, a ``---`` line, a YAML mapping and a closing
-``---`` line, where both readers agree, and refuses every other form, so no
-command reaches opencode with an agent or a model the check did not see. A
-command's ``agent`` and ``default_agent`` must name an agent the run has,
-since opencode otherwise fails the command, or every run, with an opaque
-server error, and a command field of the wrong type makes opencode refuse
+check reads only the plain form, a ``---`` line, a YAML mapping with no tags
+and a closing ``---`` line, with js-yaml's types for plain values (``1e5`` is
+a number and ``yes`` a string), where both readers agree, and refuses every
+other form, so no command reaches opencode with an agent, a model or a name
+the check did not see. A command file's frontmatter ``name`` must be the
+file's own, since opencode files the command under that name, in place of
+the command of that name. A command's ``agent`` and ``default_agent`` must
+name an agent the run has, an agent must keep its own name, and a tree with
+no ``default_agent`` must keep an agent that is neither a subagent nor
+hidden, since opencode otherwise fails the command, or every run, with an
+opaque server error; a command field of the wrong type makes opencode refuse
 its whole configuration.
 """
 
@@ -59,15 +64,48 @@ BINDING_PROVIDER_KEYS = frozenset({"models", "npm", "options"})
 BINDING_OPTION_KEYS = frozenset({"apiKey", "baseURL"})
 #: Top-level keys the binding never writes that choose which model or which providers a run uses.
 MODEL_CHOICE_KEYS = ("small_model", "disabled_providers")
-#: The agents opencode documents as built in, with their modes. Its hidden title, summary and compaction agents
-#: also run, but they are the prompts of opencode's own calls, not agents a command or a default picks.
-BUILTIN_AGENT_MODES = {"build": "primary", "plan": "primary", "general": "subagent", "explore": "subagent"}
+#: The agents opencode builds in, with their modes. Its title, summary and compaction agents are hidden: they hold
+#: the prompts of opencode's own calls, and a command may name one, but none starts a run.
+BUILTIN_AGENT_MODES = {
+    "build": "primary",
+    "plan": "primary",
+    "general": "subagent",
+    "explore": "subagent",
+    "compaction": "primary",
+    "summary": "primary",
+    "title": "primary",
+}
+BUILTIN_HIDDEN_AGENTS = frozenset({"compaction", "summary", "title"})
 #: The command fields opencode reads beside its model and the type each must have; any other type fails its whole
 #: configuration.
 COMMAND_FIELD_TYPES: dict[str, type] = {"agent": str, "description": str, "subtask": bool, "variant": str}
-#: The words js-yaml, opencode's YAML reader, reads as booleans; YAML 1.1, which PyYAML follows, adds yes, no, on, off.
-JS_YAML_BOOLEAN = re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$")
-FRONTMATTER_FORM = "write the frontmatter as a --- line, a YAML mapping, and a closing --- line"
+#: How js-yaml 3, the YAML reader gray-matter gives opencode, types a plain value: each tag with its pattern and the
+#: characters the value can start with, tried in this order. PyYAML follows YAML 1.1 instead, where yes and no are
+#: booleans, 1e5 and 1.5e3 are strings (its floats need a dot and a signed exponent), and 01.5 and 1_ are numbers.
+JS_YAML_RESOLVERS = (
+    ("tag:yaml.org,2002:null", r"^(?:~|null|Null|NULL|)$", ("~", "n", "N", "")),
+    ("tag:yaml.org,2002:bool", r"^(?:true|True|TRUE|false|False|FALSE)$", tuple("tTfF")),
+    (
+        "tag:yaml.org,2002:int",
+        r"^[-+]?(?:0|0b[01_]*[01]|0x[0-9a-fA-F_]*[0-9a-fA-F]|0[0-7_]*[0-7]"
+        r"|[1-9](?:[0-9_]*[0-9])?|[1-9][0-9_]*(?::[0-5]?[0-9])+)$",
+        tuple("-+0123456789"),
+    ),
+    (
+        "tag:yaml.org,2002:float",
+        r"^(?:[-+]?(?:0|[1-9][0-9_]*)(?:\.[0-9_]*)?(?:[eE][-+]?[0-9]+)?|\.[0-9_]+(?:[eE][-+]?[0-9]+)?"
+        r"|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))(?<!_)$",
+        tuple("-+0123456789."),
+    ),
+    (
+        "tag:yaml.org,2002:timestamp",
+        r"^(?:[0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:[Tt]|[ \t]+)[0-9]{1,2}:[0-9]{2}:[0-9]{2}"
+        r"(?:\.[0-9]*)?(?:[ \t]*(?:Z|[-+][0-9]{1,2}(?::[0-9]{2})?))?)$",
+        tuple("0123456789"),
+    ),
+    ("tag:yaml.org,2002:merge", r"^(?:<<)$", ("<",)),
+)
+FRONTMATTER_FORM = "write the frontmatter as a --- line, a YAML mapping with no tags, and a closing --- line"
 
 cleanup_whitelist = (
     "opencode/.gitignore",
@@ -79,15 +117,28 @@ cleanup_whitelist = (
 
 
 class FrontmatterLoader(yaml.SafeLoader):
-    """``yaml.safe_load`` as js-yaml reads frontmatter: its booleans, and a repeated key refused.
+    """``yaml.safe_load`` as js-yaml reads frontmatter: its types for plain values, and no value it reads otherwise.
 
-    PyYAML reads a repeated key as its last value, where js-yaml fails and opencode reads the file another way.
+    PyYAML reads a repeated key as its last value, where js-yaml fails and opencode reads the file another way. A
+    tagged value and a date that does not exist (2001-13-45) are refused too: js-yaml checks a tag against its value
+    where PyYAML's constructors can fail on it, and moves such a date forward to a real one where PyYAML fails.
     """
 
-    yaml_implicit_resolvers: ClassVar[dict[str, list[tuple[str, re.Pattern[str]]]]] = {
-        first: [(tag, JS_YAML_BOOLEAN if tag == "tag:yaml.org,2002:bool" else pattern) for tag, pattern in resolvers]
-        for first, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
-    }
+    yaml_implicit_resolvers: ClassVar[dict[str, list[tuple[str, re.Pattern[str]]]]] = {}
+
+    def compose_node(self, parent: yaml.Node | None, index: object) -> yaml.Node | None:
+        event = self.peek_event()
+        if isinstance(event, (yaml.ScalarEvent, yaml.CollectionStartEvent)) and event.tag is not None:
+            raise yaml.MarkedYAMLError(problem=f"a value has the tag {event.tag!r}", problem_mark=event.start_mark)
+        return super().compose_node(parent, index)
+
+    def construct_yaml_timestamp(self, node: yaml.ScalarNode) -> object:
+        try:
+            return super().construct_yaml_timestamp(node)
+        except ValueError as error:
+            raise yaml.MarkedYAMLError(
+                problem=f"the date {node.value!r} does not exist", problem_mark=node.start_mark
+            ) from error
 
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Hashable, object]:
         seen: set[str] = set()
@@ -99,6 +150,11 @@ class FrontmatterLoader(yaml.SafeLoader):
                     )
                 seen.add(key.value)
         return super().construct_mapping(node, deep=deep)
+
+
+for tag, pattern, first in JS_YAML_RESOLVERS:
+    FrontmatterLoader.add_implicit_resolver(tag, re.compile(pattern), first)
+FrontmatterLoader.add_constructor("tag:yaml.org,2002:timestamp", FrontmatterLoader.construct_yaml_timestamp)
 
 
 def check_binding_shape(config: Mapping[str, object]) -> None:
@@ -181,7 +237,7 @@ def read_frontmatter(where: str, text: str) -> Mapping[object, object]:
         else:
             detail = " ".join(str(error).split())
         raise RenderError(
-            f"opencode {where} frontmatter is not valid YAML: {detail}; {FRONTMATTER_FORM}, "
+            f"opencode {where} frontmatter cannot be read: {detail}; {FRONTMATTER_FORM}, "
             "quoting a value that holds ': '"
         ) from error
     if data is None:
@@ -208,7 +264,7 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
             raise RenderError(f"opencode composition must not set {key}: Reef's model binding chooses the model")
     modes = dict(BUILTIN_AGENT_MODES)
     disabled: set[str] = set()
-    hidden: set[str] = set()
+    hidden = set(BUILTIN_HIDDEN_AGENTS)
     # ``mode`` is opencode's deprecated name for ``agent``; opencode folds its entries in as primary agents.
     for section in ("agent", "mode"):
         entries = config.get(section)
@@ -219,12 +275,20 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
                 raise RenderError(
                     f"opencode {section} {name!r} must not choose a model: Reef's model binding chooses it"
                 )
+            # opencode files an agent under its key but runs it by this name, so a run that uses it finds no agent.
+            if "name" in agent and agent["name"] != name:
+                raise RenderError(
+                    f"opencode {section} {name!r} must not set name {agent['name']!r}: opencode then finds no agent "
+                    "by that name and fails a run that uses it"
+                )
             # An agent opencode does not build in takes either role unless its mode says which.
             modes[name] = "primary" if section == "mode" else str(agent.get("mode", modes.get(name, "all")))
             if agent.get("disable") is True:
                 disabled.add(name)
             if agent.get("hidden") is True:
                 hidden.add(name)
+            elif agent.get("hidden") is False:
+                hidden.discard(name)
     agents = {name: mode for name, mode in modes.items() if name not in disabled}
     if "default_agent" in config:
         default = config["default_agent"]
@@ -233,14 +297,28 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
             raise RenderError(
                 f"opencode default_agent names agent {default!r}, a subagent or a hidden agent, which cannot start a run"
             )
+    elif all(mode == "subagent" or name in hidden for name, mode in agents.items()):
+        # With no default_agent opencode starts a run with the first agent that is neither, and fails with none.
+        raise RenderError(
+            "opencode composition leaves no agent that can start a run: every agent it keeps is a subagent or hidden"
+        )
     commands = config.get("command")
     for name, command in commands.items() if isinstance(commands, dict) else ():
         if isinstance(command, dict):
             check_command(f"command {name!r} in opencode.json", command, agents)
     for path, text in files.items():
         if path.startswith(COMMAND_DIR) and path.endswith(".md"):
-            where = f"command {path[len(COMMAND_DIR) : -len('.md')]!r}"
-            check_command(where, read_frontmatter(where, text), agents)
+            command_name = path[len(COMMAND_DIR) : -len(".md")]
+            where = f"command {command_name!r}"
+            frontmatter = read_frontmatter(where, text)
+            # opencode files a command file under the name in its frontmatter, so another name would put this
+            # file in the place of the command of that name, /reefine included.
+            if "name" in frontmatter and frontmatter["name"] != command_name:
+                raise RenderError(
+                    f"opencode {where} frontmatter must not set name {frontmatter['name']!r}: opencode files the "
+                    "command under that name, in place of any command already named so"
+                )
+            check_command(where, frontmatter, agents)
         elif path.startswith(SKILL_DIR) and path.endswith("/SKILL.md"):
             read_frontmatter(f"skill {path[len(SKILL_DIR) : -len('/SKILL.md')]!r}", text)
     return files
