@@ -310,6 +310,14 @@ scenario state, settling each step and its record progress together. Recipes
 and trainers use the record interface; ``Scenario`` coordinates training and
 artifact publication through its supplied scenario store.
 
+``RecordStore.append_many(items)`` atomically appends an ordered batch from one
+scenario and returns an ``AppendResult`` for each input. Conflicts roll back the
+batch; identical retries and retired records follow ``append_result`` semantics.
+SQLite and PostgreSQL implement this with one write transaction. Other adapters
+must implement atomic batch append to support ``POST /reef/records/batch``;
+the default raises ``NotImplementedError`` before writing. Single-record
+callers remain compatible with existing adapters.
+
 Storage implementations explicitly subclass ``RecordStore``,
 ``ScenarioStore``, and ``ScenarioStorage`` and override their abstract
 methods and properties. Incomplete subclasses cannot be instantiated. The

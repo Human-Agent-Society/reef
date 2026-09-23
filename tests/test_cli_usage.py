@@ -51,3 +51,11 @@ def test_version_flags_are_unchanged() -> None:
         assert result.returncode == 0
         assert result.stdout.strip() == f"reef {reef.__version__}"
         assert result.stderr == ""
+
+
+def test_import_help_describes_file_and_resume_options() -> None:
+    result = _run_cli("import", "--help")
+    assert result.returncode == 0
+    assert "JSONL" in result.stdout
+    assert "--progress" in result.stdout
+    assert "--max-batch-bytes" in result.stdout

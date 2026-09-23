@@ -174,6 +174,25 @@ class RequestService:
         A stable client ID makes uploads retryable. The scenario comes from
         the headers, and importing never invokes an inference handler.
         """
+        parsed, item = self.prepare_import_record(headers, body)
+        return self._dispatcher.accept_record(item, release_id=parsed.release_id)
+
+    def import_records(self, headers: Mapping[str, str], body: Mapping[str, object]) -> tuple[AgentRecord, ...]:
+        """Import a bounded, atomic batch using the existing record contract."""
+        records = body.get("records")
+        if body.keys() != {"records"} or not isinstance(records, list) or not 1 <= len(records) <= 1000:
+            raise ValueError("body must contain only 'records', an array of 1 to 1000 record objects")
+        items: list[AgentRecord] = []
+        for record in records:
+            if not isinstance(record, Mapping):
+                raise ValueError("each record must be an object")
+            parsed, item = self.prepare_import_record(headers, record)
+            items.append(item)
+        return self._dispatcher.accept_records(items, release_id=parsed.release_id)
+
+    def prepare_import_record(
+        self, headers: Mapping[str, str], body: Mapping[str, object]
+    ) -> tuple[RequestHeaders, AgentRecord]:
         if body.keys() - {"agent_record_id", "request_type", "payload"}:
             raise ValueError("record fields must be agent_record_id, request_type and payload")
         record_id = body.get("agent_record_id")
@@ -186,7 +205,15 @@ class RequestService:
         if not isinstance(payload, Mapping):
             raise ValueError("record payload must be an object")
         parsed = parse_request_headers(headers, RequestType(request_type))
-        return self._accept(parsed, payload, agent_record_id=record_id)
+        normalized, references = normalize_request_payload(parsed.request_type, payload)
+        item = AgentRecord.create(
+            scenario=parsed.scenario,
+            request_type=parsed.request_type,
+            payload=_with_tags(normalized, parsed),
+            agent_record_id=record_id,
+            references=references,
+        )
+        return parsed, item
 
     async def infer(
         self,

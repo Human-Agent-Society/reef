@@ -39,6 +39,8 @@ Routes
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/records``                                 | import one existing inference or report           |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records/batch``                           | atomically import a batch of records              |
++--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                  | submit feedback about one or more receipts        |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                   | enqueue one training instruction                  |
@@ -166,10 +168,8 @@ or assign the current serving artifact to externally generated examples.
 Reports use the same schema and reference validation as ``POST /reef/report``;
 import referenced inferences first. Training instructions use ``POST /reef/train``.
 
-For large datasets, read the source incrementally and issue successive requests,
-retrying the same IDs after interruption. The existing HTTP body limit (1 MiB
-per request) also applies here; this endpoint does not accept a whole dataset
-in one body or provide an atomic multi-record transaction.
+For existing datasets, use the batch endpoint and resumable JSONL importer
+below. Both endpoints retain the existing 1 MiB HTTP request-body limit.
 
 Imported records enter the same scenario storage and wake the same training
 worker as live traffic. Keep the same scenario header when subsequently calling
@@ -189,6 +189,61 @@ recipe and processor. Uploading can overlap training; this API adds no dataset
 epochs, cold-start completion barrier, or automatic algorithm switch. To start
 chat traffic after cold-start training has finished, use the recipe's progress
 and commit status to determine when its imported examples have been consumed.
+
+Batch imports and resume
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
+record uses the same three-field envelope as ``POST /reef/records``. The batch
+must contain 1 to 1000 records and fit within the 1 MiB request-body limit.
+All records share the request's scenario, release and tag headers. Put an
+inference before reports that reference it, including within the same batch.
+
+Reef validates the entire batch and persists it in one database transaction.
+Malformed records or missing references return 400; conflicting IDs return
+409. Neither failure persists any new records from the batch. Identical retries
+are accepted, including after training compaction. Oversized requests return
+413. The response is ``{"records": [receipt, ...]}``, in input order, with the
+same receipt fields as the single-record endpoint. A successful import wakes
+the existing consumer once after commit. Atomicity applies to one request,
+not the entire dataset or subsequent training.
+
+For a large local dataset, save one envelope per line in an immutable UTF-8
+JSONL file. Keep original record IDs and report references; the importer does
+not generate new IDs or convert arbitrary dataset schemas.
+
+.. code:: bash
+
+   # Authentication is read from REEF_TOKEN when set.
+   reef import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
+
+The CLI reads incrementally and sends batches limited by both ``--batch-size``
+(default 128 records) and ``--max-batch-bytes`` (default 524288 bytes). Only a
+bounded batch and one look-ahead record are buffered. The defaults are starting
+settings, not throughput guarantees. A single JSONL line must fit the byte
+limit; increase it, below 1048576, for larger records.
+
+Progress is saved to ``records.jsonl.reef-import.json``, or ``--progress PATH``.
+It contains the destination, scenario, source checksum and last acknowledged
+byte offset/count; it contains no token or record payloads. Each invocation
+first hashes the complete file with bounded memory to verify its identity,
+then seeks to the saved offset. The source must remain unchanged during import.
+A local file lock prevents simultaneous use of the same checkpoint.
+
+Run the same command after interruption to continue. Transient connection
+failures and HTTP 408, 429, 500, 502, 503 or 504 are retried up to ``--retries``
+(default 3) with backoff and unchanged IDs. If a reply is lost after commit,
+server deduplication prevents the replayed batch from being inserted again.
+Permanent errors stop without advancing that batch's checkpoint. Earlier
+acknowledged batches remain stored. A modified source or different destination
+requires a separate progress file; existing IDs still deduplicate at the server.
+The reported count includes every acknowledged source row, including retries
+of records already present, and does not count completed training samples.
+
+This importer supports local JSONL on platforms with POSIX file locking, including
+Linux and macOS. Parquet/Hugging Face schema conversion and server-side S3 import
+jobs are not part of this interface. Import completion acknowledges storage;
+use the scenario's training progress before treating cold-start learning as done.
 
 Manual training
 ---------------

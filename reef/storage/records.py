@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from reef.core.errors import ReefError
@@ -91,6 +91,15 @@ class RecordStore(ABC):
         Reports referencing retired records remain outside training reads.
         Their content is still remembered so conflicting retries are rejected.
         """
+
+    def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
+        """Atomically append a bounded batch from one scenario, in input order.
+
+        Any conflict rolls back the entire batch. Identical retries retain
+        the same semantics as append_result, including retired records.
+        Adapters without atomic batch support must reject before writing.
+        """
+        raise NotImplementedError("this record store does not support atomic batch append")
 
     @abstractmethod
     def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:

@@ -387,11 +387,42 @@ class Dispatcher:
                 raise UnknownScenario(f"unknown scenario {item.scenario!r}")
             return self._accept_record(current, item)
 
-    def _accept_record(self, current: Scenario, item: AgentRecord) -> AgentRecord:
+    def accept_records(
+        self, items: Sequence[AgentRecord], *, release_id: str | None = None
+    ) -> tuple[AgentRecord, ...]:
+        """Validate an ordered import batch, commit it, then wake its consumer."""
+        if not items:
+            raise ValueError("a record batch must not be empty")
+        scenario = items[0].scenario
+        if any(item.scenario != scenario or item.request_type is RequestType.TRAIN for item in items):
+            raise ValueError("a record batch must contain inferences or reports from one scenario")
+        with self._registry.lock_for(scenario):
+            current = self.get_or_create_scenario(scenario, release_id=release_id)
+            if current is None:
+                raise UnknownScenario(f"unknown scenario {scenario!r}")
+            preceding: dict[str, AgentRecord] = {}
+            for item in items:
+                self.validate_record(current, item, preceding)
+                preceding[item.agent_record_id] = item
+            try:
+                with current.operations.measure("ingest/write"):
+                    appended = current.records.append_many(items)
+            except RecordConflict:
+                current.operations.increment("ingest/rejected_conflict_total")
+                raise
+            for result in appended:
+                metric = "ingest/accepted_total" if result.inserted else "ingest/duplicates_total"
+                current.operations.increment(metric)
+            if any(result.inserted for result in appended):
+                self.process_accepted_records(current)
+            return tuple(result.item for result in appended)
+
+    def validate_record(
+        self, current: Scenario, item: AgentRecord, preceding: Mapping[str, AgentRecord]
+    ) -> AgentRecord | None:
         try:
             if item.request_type is RequestType.TRAIN:
                 if (existing := current.records.existing_receipt(item)) is not None:
-                    current.operations.increment("ingest/duplicates_total")
                     return existing
                 if current.trainer.training_mode == "auto":
                     raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
@@ -410,7 +441,6 @@ class Dispatcher:
             if item.request_type is RequestType.REPORT:
                 # An identical retry remains valid after its sources were compacted.
                 if (existing := current.records.existing_receipt(item)) is not None:
-                    current.operations.increment("ingest/duplicates_total")
                     return existing
                 validate_report_payload(item.payload)
                 if (report_type := current.report_type) is not None:
@@ -418,8 +448,11 @@ class Dispatcher:
                 if len(set(item.references)) != len(item.references):
                     raise ReportValidationError("report references must be unique")
                 for reference in item.references:
-                    stored_reference = current.records.get_for_audit(item.scenario, reference)
-                    if stored_reference is None or stored_reference.item.request_type is not RequestType.INFERENCE:
+                    source = preceding.get(reference)
+                    if source is None:
+                        stored_reference = current.records.get_for_audit(item.scenario, reference)
+                        source = stored_reference.item if stored_reference is not None else None
+                    if source is None or source.request_type is not RequestType.INFERENCE:
                         raise ReportValidationError(
                             f"report reference {reference!r} must identify an existing inference in scenario {item.scenario!r}"
                         )
@@ -432,6 +465,12 @@ class Dispatcher:
         except ValueError:
             current.operations.increment("ingest/rejected_request_total")
             raise
+        return None
+
+    def _accept_record(self, current: Scenario, item: AgentRecord) -> AgentRecord:
+        if (existing := self.validate_record(current, item, {})) is not None:
+            current.operations.increment("ingest/duplicates_total")
+            return existing
         try:
             with current.operations.measure("ingest/write"):
                 appended = current.records.append_result(item)
@@ -443,12 +482,17 @@ class Dispatcher:
             current.operations.increment("ingest/duplicates_total")
             return stored
         current.operations.increment("ingest/accepted_total")
+        self.process_accepted_records(current)
+        return stored
+
+    def process_accepted_records(self, current: Scenario) -> None:
+        """Start consumption only after the accepted records are durable."""
         if current.training_runtime is not None:
             self._training.ready.set()
-            return stored
+            return
         if current.trainer.candidate_backend is not None:
             self._start_local_backend_worker(current.name)
-            return stored
+            return
         result = current.prepare_training_step()
         if result is not None:
             # scenario.commit is the single commit point: it commits the
@@ -457,7 +501,6 @@ class Dispatcher:
             # crash in any gap is recovered by replaying the scenario's
             # commit log instead of silently losing the batch.
             self._commit_result(current.name, result)
-        return stored
 
     # -- Commit & publication --------------------------------------------
 

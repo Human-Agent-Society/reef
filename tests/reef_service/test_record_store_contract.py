@@ -258,3 +258,58 @@ def test_retry_after_outer_rollback_returns_the_other_stores_canonical_record(ch
             other.close()
     finally:
         engine.dispose()
+
+
+def test_batch_commit_rollback_and_retired_retries(records: RecordStore) -> None:
+    first, second = record("first"), record("second")
+    with pytest.raises(RecordConflict):
+        records.append_many([first, second, replace(first, payload={"changed": True})])
+    assert records.count("math") == 0
+    assert records.existing_receipt(first) is None
+    assert records.append_many([first, second, first]) == (
+        AppendResult(first, True),
+        AppendResult(second, True),
+        AppendResult(first, False),
+    )
+    assert [item.agent_record_id for _, item in records.replay_page("math")] == ["first", "second"]
+    with pytest.raises(ValueError, match="one scenario"):
+        records.append_many([record("third"), record("other", "other")])
+    assert records.count("math") == 2
+    records.compact("math", frozenset({"first"}))
+    assert records.append_many([first])[0].inserted is False
+    with pytest.raises(RecordConflict):
+        records.append_many([record("third"), replace(first, payload={"changed": True})])
+    assert records.get("math", "third") is None
+
+
+def test_batch_uses_one_write_transaction_and_observes_only_committed_records(tmp_path):
+    from sqlalchemy import event
+
+    from reef.storage.observer import ObservedRecordStore, RecordObserver
+
+    class Observer(RecordObserver):
+        def __init__(self):
+            self.accepted = []
+
+        def record_accepted(self, item):
+            self.accepted.append(item.agent_record_id)
+
+    inner = SQLiteRecordStore(tmp_path / "batch.sqlite3")
+    observer = Observer()
+    store = ObservedRecordStore(inner, observer)
+    transactions = []
+
+    def committed(connection):
+        transactions.append("commit")
+
+    event.listen(inner._engine, "commit", committed)
+    try:
+        store.append_many([record(str(index)) for index in range(100)])
+        assert transactions == ["commit"]
+        assert observer.accepted == [str(index) for index in range(100)]
+        with pytest.raises(RecordConflict):
+            store.append_many([record("new"), replace(record("0"), payload={"changed": True})])
+        assert "new" not in observer.accepted
+        assert transactions == ["commit"]
+    finally:
+        store.close()

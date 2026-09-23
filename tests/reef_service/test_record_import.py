@@ -6,6 +6,8 @@ import asyncio
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import pytest
+
 from aiohttp.test_utils import TestClient, TestServer
 
 from reef.artifact import InMemoryRepositoryBackend
@@ -107,7 +109,8 @@ async def wait_for_training(scenario, count):
     assert scenario.trainer.state["trained"] == count
 
 
-def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path):
+@pytest.mark.parametrize("bulk", (False, True))
+def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk):
     recipe = LearningRecipe()
     dispatcher = dispatcher_for(tmp_path, recipe)
     handler = EchoHandler()
@@ -118,19 +121,31 @@ def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path):
         ) as client:
             # Interleave records and their feedback just as an online producer
             # does, so the existing processor can consume each ready batch.
+            records = []
             for index in range(6):
                 name = f"offline-{index}"
-                response = await client.post("/reef/records", headers=HEADERS, json=imported(name))
-                assert response.status == 200, await response.text()
-                response = await client.post(
-                    "/reef/records",
-                    headers=HEADERS,
-                    json=imported(f"score-{name}", {"score": 1, "references": [name]}, "report"),
+                records.extend(
+                    [
+                        imported(name),
+                        imported(f"score-{name}", {"score": 1, "references": [name]}, "report"),
+                    ]
                 )
+            if bulk:
+                response = await client.post("/reef/records/batch", headers=HEADERS, json={"records": records})
                 assert response.status == 200, await response.text()
+                receipts = (await response.json())["records"]
+                assert [item["agent_record_id"] for item in receipts] == [item["agent_record_id"] for item in records]
+            else:
+                for record in records:
+                    response = await client.post("/reef/records", headers=HEADERS, json=record)
+                    assert response.status == 200, await response.text()
             scenario = dispatcher.get_or_create_scenario("s")
             processor = scenario.trainer.processor
             await wait_for_training(scenario, 6)
+            if bulk:
+                retry = await client.post("/reef/records/batch", headers=HEADERS, json={"records": records})
+                assert retry.status == 200
+                assert len(recipe.batches) == 3
             assert handler.calls == 0
             assert len(recipe.batches) == 3
 
@@ -252,6 +267,73 @@ def test_imported_reports_follow_the_recipes_report_schema(tmp_path):
             )
             assert response.status == 400
             assert dispatcher.get_or_create_scenario("s").records.get("s", "missing-score") is None
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_batch_admission_is_atomic_and_ordered(tmp_path):
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            endpoint = "/reef/records/batch"
+            response = await client.post(endpoint, json={"records": [imported("first")]})
+            assert response.status == 401
+            invalid = [
+                [],
+                {},
+                {"records": []},
+                {"records": [1]},
+                {"records": [{}]},
+                {"records": [imported("first")], "scenario": "other"},
+                {"records": [imported(str(index)) for index in range(1001)]},
+                {"records": [imported("first"), imported("bad", {"references": ["first"]}, "report")]},
+                {"records": [imported("first"), imported("bad", {"score": 1, "references": ["missing"]}, "report")]},
+                {"records": [imported("bad", {"score": 1, "references": ["first"]}, "report"), imported("first")]},
+                {"records": [imported("first"), imported("instruction", {}, "train")]},
+            ]
+            for body in invalid:
+                response = await client.post(endpoint, headers=HEADERS, json=body)
+                assert response.status == 400, await response.text()
+            scenario = dispatcher.get_or_create_scenario("s")
+            assert scenario.records.count("s") == 0
+
+            body = {"records": [imported("first"), imported("first", inference_payload("conflict"))]}
+            response = await client.post(endpoint, headers=HEADERS, json=body)
+            assert response.status == 409
+            assert scenario.records.count("s") == 0
+            response = await client.post(endpoint, headers=HEADERS, json={"records": [imported("first")] * 2})
+            assert response.status == 200
+            assert scenario.records.count("s") == 1
+            response = await client.post(
+                endpoint,
+                headers=HEADERS,
+                json={
+                    "records": [
+                        imported("new"),
+                        imported("first", inference_payload("conflict")),
+                    ]
+                },
+            )
+            assert response.status == 409
+            assert scenario.records.get("s", "new") is None
+            response = await client.post(
+                endpoint,
+                headers={**HEADERS, "x-reef-scenario": "other"},
+                json={
+                    "records": [imported("bad", {"score": 1, "references": ["first"]}, "report")],
+                },
+            )
+            assert response.status == 400
+            response = await client.post(
+                endpoint, headers=HEADERS, json={"records": [imported("large", {"text": "x" * (1024 * 1024)})]}
+            )
+            assert response.status == 413
+            assert scenario.records.get("s", "large") is None
+            assert not dispatcher._recipe.batches
 
     try:
         asyncio.run(run())

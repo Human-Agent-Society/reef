@@ -275,85 +275,97 @@ class SQLRecordStore(RecordStore):
             return self._decode(row)
 
     def append_result(self, item: AgentRecord) -> AppendResult:
+        return self.append_many((item,))[0]
+
+    def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
+        if not items:
+            return ()
+        scenario = items[0].scenario
+        if any(item.scenario != scenario for item in items):
+            raise ValueError("a record batch must belong to one scenario")
+        with self._transaction(scenario, write=True) as connection:
+            return tuple(self.append_in_transaction(connection, item) for item in items)
+
+    def append_in_transaction(self, connection: Connection, item: AgentRecord) -> AppendResult:
+        """Apply the same retry and retirement rules to single and batch writes."""
         encoded = self._encode(item)
-        with self._transaction(item.scenario, write=True) as connection:
-            consumed = (
-                connection.execute(
-                    select(self._tables.consumed.c.content_sha256).where(
-                        self._tables.condition(self._tables.consumed),
-                        self._tables.consumed.c.agent_record_id == item.agent_record_id,
-                    )
+        consumed = (
+            connection.execute(
+                select(self._tables.consumed.c.content_sha256).where(
+                    self._tables.condition(self._tables.consumed),
+                    self._tables.consumed.c.agent_record_id == item.agent_record_id,
                 )
-                .mappings()
-                .first()
             )
-            if consumed is not None:
-                if consumed["content_sha256"] != self._content_sha256(encoded):
-                    raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-                return AppendResult(item, False)
-            if item.request_type is RequestType.REPORT and item.references:
-                retired_reference = connection.execute(
-                    select(self._tables.consumed.c.agent_record_id)
-                    .where(
-                        self._tables.condition(self._tables.consumed),
-                        self._tables.consumed.c.agent_record_id.in_(item.references),
-                    )
-                    .limit(1)
-                ).first()
-                if retired_reference is not None:
-                    # A report is discarded once its references are gone, but a row
-                    # already stored under this id stays canonical: check the discard
-                    # against that row so a divergent retry cannot register its own
-                    # content as the receipt and reject the honest retry that follows.
-                    existing = (
-                        connection.execute(
-                            select(self._tables.records).where(
-                                self._tables.condition(self._tables.records),
-                                self._tables.records.c.agent_record_id == item.agent_record_id,
-                            )
-                        )
-                        .mappings()
-                        .first()
-                    )
-                    if existing is not None and self._content(self._row_content(existing)) != self._content(encoded):
-                        raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-                    self._insert(
-                        connection,
-                        self._tables.consumed,
-                        {"agent_record_id": item.agent_record_id, "content_sha256": self._content_sha256(encoded)},
-                    )
-                    return AppendResult(item, False)
-            inserted = self._insert(
-                connection,
-                self._tables.records,
-                {
-                    **encoded._asdict(),
-                    "body_bytes": sum(len(value.encode("utf-8")) for value in encoded[4:] if value is not None),
-                },
-            )
-            if inserted:
-                self._live_records[item.agent_record_id] = item
-                return AppendResult(item, True)
-            existing = (
-                connection.execute(
-                    select(self._tables.records).where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.agent_record_id == item.agent_record_id,
-                    )
-                )
-                .mappings()
-                .first()
-            )
-            if existing is None or self._content(self._row_content(existing)) != self._content(encoded):
+            .mappings()
+            .first()
+        )
+        if consumed is not None:
+            if consumed["content_sha256"] != self._content_sha256(encoded):
                 raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
-            stored = self._decode(existing)
-            live = self._live_records.get(item.agent_record_id)
-            # An outer transaction can roll back after caching the inserted
-            # object. Reuse it only while the persisted record still matches.
-            if live is not None and live == stored:
-                return AppendResult(live, False)
-            self._live_records[item.agent_record_id] = stored
-            return AppendResult(stored, False)
+            return AppendResult(item, False)
+        if item.request_type is RequestType.REPORT and item.references:
+            retired_reference = connection.execute(
+                select(self._tables.consumed.c.agent_record_id)
+                .where(
+                    self._tables.condition(self._tables.consumed),
+                    self._tables.consumed.c.agent_record_id.in_(item.references),
+                )
+                .limit(1)
+            ).first()
+            if retired_reference is not None:
+                # A report is discarded once its references are gone, but a row
+                # already stored under this id stays canonical: check the discard
+                # against that row so a divergent retry cannot register its own
+                # content as the receipt and reject the honest retry that follows.
+                existing = (
+                    connection.execute(
+                        select(self._tables.records).where(
+                            self._tables.condition(self._tables.records),
+                            self._tables.records.c.agent_record_id == item.agent_record_id,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if existing is not None and self._content(self._row_content(existing)) != self._content(encoded):
+                    raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
+                self._insert(
+                    connection,
+                    self._tables.consumed,
+                    {"agent_record_id": item.agent_record_id, "content_sha256": self._content_sha256(encoded)},
+                )
+                return AppendResult(item, False)
+        inserted = self._insert(
+            connection,
+            self._tables.records,
+            {
+                **encoded._asdict(),
+                "body_bytes": sum(len(value.encode("utf-8")) for value in encoded[4:] if value is not None),
+            },
+        )
+        if inserted:
+            self._live_records[item.agent_record_id] = item
+            return AppendResult(item, True)
+        existing = (
+            connection.execute(
+                select(self._tables.records).where(
+                    self._tables.condition(self._tables.records),
+                    self._tables.records.c.agent_record_id == item.agent_record_id,
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if existing is None or self._content(self._row_content(existing)) != self._content(encoded):
+            raise RecordConflict(f"agent_record_id {item.agent_record_id!r} already has different content")
+        stored = self._decode(existing)
+        live = self._live_records.get(item.agent_record_id)
+        # An outer transaction can roll back after caching the inserted
+        # object. Reuse it only while the persisted record still matches.
+        if live is not None and live == stored:
+            return AppendResult(live, False)
+        self._live_records[item.agent_record_id] = stored
+        return AppendResult(stored, False)
 
     def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         """Read a record still visible to training, scoped to its scenario."""

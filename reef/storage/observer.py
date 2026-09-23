@@ -11,7 +11,7 @@ part of record acceptance or the commit transaction.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
@@ -51,12 +51,21 @@ class ObservedRecordStore(RecordStore):
 
     def append_result(self, item: AgentRecord) -> AppendResult:
         appended = self._inner.append_result(item)
-        if appended.inserted:
-            try:
-                self._observer.record_accepted(appended.item)
-            except Exception:
-                logger.exception("record observer failed on accepted record %s", appended.item.agent_record_id)
+        self.notify_accepted((appended,))
         return appended
+
+    def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
+        appended = self._inner.append_many(items)
+        self.notify_accepted(appended)
+        return appended
+
+    def notify_accepted(self, results: Sequence[AppendResult]) -> None:
+        for appended in results:
+            if appended.inserted:
+                try:
+                    self._observer.record_accepted(appended.item)
+                except Exception:
+                    logger.exception("record observer failed on accepted record %s", appended.item.agent_record_id)
 
     def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:
         return self._inner.existing_receipt(item)
