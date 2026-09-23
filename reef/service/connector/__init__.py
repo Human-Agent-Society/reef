@@ -56,7 +56,7 @@ class Connector:
             refresh = command.get("action") == "refresh"
             value = await self.snapshot() if refresh else await self.runtime.execute(command)
             result: dict[str, Any] = {"state": "succeeded", "value": value}
-            if command.get("action") != "releases":
+            if command.get("action") not in ("releases", "requests"):
                 result["snapshot"] = value if refresh else await self.snapshot()
             if len(json.dumps(result).encode()) > BODY_LIMIT:
                 result = {"state": "failed", "error": "The result exceeds the connector size limit"}

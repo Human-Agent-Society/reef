@@ -6,6 +6,7 @@ from itertools import islice
 from typing import Any
 
 from reef.core.artifact_ref import encode_artifact_ref
+from reef.core.records_types import RequestType
 from reef.scenario.scenario import Scenario
 from reef.storage.records import StoredRecord
 
@@ -24,10 +25,14 @@ def record_metadata(stored: StoredRecord) -> dict[str, Any]:
     }
 
 
-def read_records(scenario: Scenario, *, after_sequence: int, limit: int) -> dict[str, Any]:
+def read_records(
+    scenario: Scenario, *, after_sequence: int, limit: int, request_type: RequestType | None = None
+) -> dict[str, Any]:
     if after_sequence < 0 or not 1 <= limit <= 100:
         raise ValueError("after_sequence must be non-negative and limit must be between 1 and 100")
-    retained = scenario.records.audit_page(scenario.name, after_sequence=after_sequence, limit=limit + 1)
+    retained = scenario.records.audit_page(
+        scenario.name, after_sequence=after_sequence, limit=limit + 1, request_type=request_type
+    )
     page = retained[:limit]
     return {
         "scenario": scenario.name,

@@ -135,3 +135,48 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             dispatcher.close()
 
     asyncio.run(run())
+
+
+def test_record_list_filters_by_request_type(tmp_path):
+    async def run():
+        dispatcher = build_default_dispatcher(
+            agent_record_dir=tmp_path / "records",
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+        )
+        scenario = dispatcher.get_or_create_scenario("one")
+        for name, request_type in (
+            ("turn-1", RequestType.INFERENCE),
+            ("ask-1", RequestType.TRAIN),
+            ("turn-2", RequestType.INFERENCE),
+            ("ask-2", RequestType.TRAIN),
+            ("ask-3", RequestType.TRAIN),
+        ):
+            payload = {"text": "change it"} if request_type is RequestType.TRAIN else {"messages": []}
+            scenario.records.append(
+                AgentRecord.create(scenario="one", request_type=request_type, agent_record_id=name, payload=payload)
+            )
+        client = TestClient(TestServer(create_app(dispatcher, tokens="inspection-test-token")))
+        await client.start_server()
+        headers = {"authorization": "Bearer inspection-test-token"}
+        try:
+            first = await (
+                await client.get("/reef/scenarios/one/records?request_type=train&limit=2", headers=headers)
+            ).json()
+            assert [r["agent_record_id"] for r in first["records"]] == ["ask-1", "ask-2"]
+            tail = await (
+                await client.get(
+                    f'/reef/scenarios/one/records?request_type=train&after_sequence={first["next_after_sequence"]}',
+                    headers=headers,
+                )
+            ).json()
+            assert [r["agent_record_id"] for r in tail["records"]] == ["ask-3"]
+            assert tail["next_after_sequence"] is None
+            everything = await (await client.get("/reef/scenarios/one/records", headers=headers)).json()
+            assert len(everything["records"]) == 5
+            response = await client.get("/reef/scenarios/one/records?request_type=bogus", headers=headers)
+            assert response.status == 400
+        finally:
+            await client.close()
+            dispatcher.close()
+
+    asyncio.run(run())

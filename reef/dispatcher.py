@@ -294,12 +294,19 @@ class Dispatcher:
         with self._registry.lock_for(scenario):
             return self._registry.require(scenario).releases()
 
-    def read_records(self, scenario: str, *, after_sequence: int = 0, limit: int = 50) -> dict[str, Any]:
-        """Read retained summaries without changing the training queue."""
+    def read_records(
+        self, scenario: str, *, after_sequence: int = 0, limit: int = 50, request_type: RequestType | None = None
+    ) -> dict[str, Any]:
+        """Read retained summaries, optionally of one request type, without changing the training queue."""
         from reef.scenario.history import read_records
 
         with self._registry.lock_for(scenario):
-            return read_records(self._registry.require(scenario), after_sequence=after_sequence, limit=limit)
+            return read_records(
+                self._registry.require(scenario),
+                after_sequence=after_sequence,
+                limit=limit,
+                request_type=request_type,
+            )
 
     def read_record(self, scenario: str, record_id: str) -> dict[str, Any] | None:
         """Read a retained trace within its scenario, including compacted bodies."""

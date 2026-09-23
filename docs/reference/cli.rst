@@ -156,13 +156,20 @@ a token, set ``REEF_TOKEN`` in the connector's environment; use
 ``--reef-token-env VARIABLE`` to select a different environment variable.
 Do not put tokens in URLs or command-line arguments.
 
-The platform receives scenario names, serving release identifiers, training
-modes, selected numeric evaluation results, the Reef URL the connector checks
-and, with ``--serve``, whether Reef is starting, running or exited. It can create a scenario,
+The platform receives scenario names, each scenario's harness adapter,
+serving release identifiers, training modes, selected numeric evaluation
+results, the Reef URL the connector checks and, with ``--serve``, whether Reef
+is starting, running or exited. For each release step it also receives the
+step's result (such as ``selected``, ``rejected``, ``skipped`` or ``failed``),
+the selection outcome, policy, evaluator and pass and fail counts, the ID of
+the request the step answered with the names and kinds of what it requires,
+and each change's operation, entry ID and kind. For each harness request it
+receives the ID, the state and the time it was filed. It can create a scenario,
 request training, change training mode, promote or roll back a release.
-Local provider credentials, artifact files, and recorded prompts are not
-uploaded. Instructions you submit through the dashboard are stored on the
-platform as commands. Inference continues to use your runtime URL directly.
+Local provider credentials, artifact files, entry contents, request text and
+recorded prompts are not uploaded. Instructions you submit through the
+dashboard are stored on the platform as commands. Inference continues to use
+your runtime URL directly.
 
 Lifecycle and local state
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -187,6 +194,15 @@ The connector sends ``DELETE /reef/scenarios/{scenario}`` to Reef, which
 removes that scenario and archives its own saved state. Other scenarios and
 the connection remain available. Update and restart older connectors before
 using this action; they reject the new ``delete_scenario`` command.
+
+The console lists the harness requests of a connected runtime, including the
+ones filed on the machine, through the ``requests`` command. The connector
+reads the scenario's training instructions from
+``GET /reef/scenarios/{scenario}/records?request_type=train`` and each state
+from ``GET /reef/harness/requests/{record_id}/progress``, and sends the newest
+100. Older connectors reject this command and send no adapter, so the console
+cannot list their requests or name their adapter until you update Reef and
+restart the connector.
 
 The connector reconnects after network failures. It does not install an OS
 startup service; use ``--foreground`` with your process supervisor for restart

@@ -160,7 +160,7 @@ class ScenarioRegistry:
         return self._resolve(scenario, None)
 
     def list(self) -> tuple[dict[str, Any], ...]:
-        """Known scenarios: loaded ones with their binding, durable ones by name."""
+        """Known scenarios: loaded ones with their binding and harness adapter, durable ones by name."""
         registered: tuple[str, ...] = ()
         if isinstance(self._backend_factory, EnumerableRepositoryBackendFactory):
             registered = self._backend_factory.list_registrations()
@@ -174,6 +174,9 @@ class ScenarioRegistry:
                 ref = current.repository.require_current_artifact()
                 row["release_id"] = ref.release_id
                 row["content_id"] = ref.content_id
+                harness = current.surface.harness
+                if harness is not None and harness.adapter is not None:
+                    row["adapter"] = harness.adapter
             rows.append(row)
         return tuple(rows)
 

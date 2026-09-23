@@ -659,6 +659,7 @@ class CordisRecipe(Recipe):
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             client_models=client_models,
+            adapter=self.adapter,
         )
 
     def base_artifact_files(self) -> Mapping[str, str] | None:

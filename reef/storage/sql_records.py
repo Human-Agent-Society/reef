@@ -471,26 +471,23 @@ class SQLRecordStore(RecordStore):
         *,
         after_sequence: int = 0,
         limit: int = 256,
+        request_type: RequestType | None = None,
     ) -> tuple[StoredRecord, ...]:
-        """Read a bounded append-order page including compacted bodies, scoped to one scenario."""
+        """Read a bounded append-order page including compacted bodies, scoped to one scenario and optional type."""
         if after_sequence < 0:
             raise ValueError("after_sequence must be non-negative")
         if limit <= 0:
             raise ValueError("limit must be positive")
+        statement = select(self._tables.records).where(
+            self._tables.condition(self._tables.records),
+            self._tables.records.c.scenario == scenario,
+            self._tables.records.c.sequence > after_sequence,
+        )
+        if request_type is not None:
+            statement = statement.where(self._tables.records.c.request_type == request_type.value)
         with self._transaction(scenario, write=False) as connection:
             rows = (
-                connection.execute(
-                    select(self._tables.records)
-                    .where(
-                        self._tables.condition(self._tables.records),
-                        self._tables.records.c.scenario == scenario,
-                        self._tables.records.c.sequence > after_sequence,
-                    )
-                    .order_by(self._tables.records.c.sequence)
-                    .limit(limit)
-                )
-                .mappings()
-                .all()
+                connection.execute(statement.order_by(self._tables.records.c.sequence).limit(limit)).mappings().all()
             )
         return tuple(self._audit_record(row) for row in rows)
 
