@@ -247,6 +247,12 @@ Linux and macOS. Parquet/Hugging Face schema conversion and server-side S3 impor
 jobs are not part of this interface. Import completion acknowledges storage;
 use the scenario's training progress before treating cold-start learning as done.
 
+The upload buffer limit does not bound processor memory. Report-based processors
+may retain inference records while waiting for feedback; placing all inferences
+before all reports can therefore build a large in-memory backlog. Where possible,
+place reports close to their referenced inferences. Large-dataset throughput and
+end-to-end memory use require measurement with the selected recipe.
+
 Manual training
 ---------------
 
