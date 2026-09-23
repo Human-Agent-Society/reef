@@ -449,7 +449,10 @@ class ScenarioCommitter:
                     artifacts.discard(staged)
                 raise
             self._settle_trainer_commit(prepared, record, next_step, self._trainer)
-            self._resume_restored_weights()
+            if restore_weights:
+                # A rollback that left the weights alone paused nothing; resuming here would open admission
+                # under a dispatched job that still holds it and call its unpublished version served.
+                self._resume_restored_weights()
             return published_ref
 
     def publish_shipped_content(self) -> ArtifactRef | None:

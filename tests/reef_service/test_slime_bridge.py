@@ -438,7 +438,7 @@ class _FakeGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.republication_calls.append(runtime_load_id)
 
-    def save_model(self, rollout_id, force_sync=False):
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
         self.save_calls.append((rollout_id, force_sync))
         self.timeline.append("save_model")
 
@@ -449,8 +449,8 @@ class _DurableGroup(_FakeGroup):
         self.template = template
         self.megatron_root = megatron_root
 
-    def save_model(self, rollout_id, force_sync=False):
-        super().save_model(rollout_id, force_sync)
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
+        super().save_model(rollout_id, force_sync, scenario_step)
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
         checkpoint.mkdir(parents=True)
         (checkpoint / "weights").write_text("hf", encoding="utf-8")
@@ -738,7 +738,8 @@ def test_bridge_checkpoint_requires_save_template() -> None:
         _execute_and_update_weights(actor, payload)
 
 
-JOB_ID = "0956bba7f3b4ab2e268625c28e716cdd589bbf0d7b3a787b00311267aa0ff2e7"
+# The identity of the fixture payload: its rows and admission fence, not its scenario step.
+JOB_ID = "d54ddfad3343892d72fe6c067e789de79ab878daa84468025904f3246b857c05"
 
 
 @pytest.mark.unit
@@ -1153,7 +1154,7 @@ def test_bridge_rejects_symlinked_checkpoint(tmp_path, monkeypatch) -> None:
     target = tmp_path / "checkpoint-target"
     target.mkdir()
 
-    def save_model(rollout_id, force_sync=False):
+    def save_model(rollout_id, force_sync=False, scenario_step=None):
         group.save_calls.append((rollout_id, force_sync))
         Path(group.template.format(rollout_id=rollout_id)).symlink_to(target, target_is_directory=True)
 
@@ -1203,7 +1204,8 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
     assert "loss" not in stored
     assert stored["reward"] == pytest.approx(sum(row[4] for row in payload["samples"]) / 3)
 
-    second = {**payload, "rollout_id": 1}
+    # The next batch: new rows, since the same rows at a later step are the same job.
+    second = {**payload, "rollout_id": 1, "samples": [_row("d"), _row("e", reward=1.0), _row("f", reward=-1.0)]}
     blocked = _execute_and_update_weights(actor, second)
     assert blocked.outcome == "storage_blocked"
     assert blocked.storage["blocked"] is True

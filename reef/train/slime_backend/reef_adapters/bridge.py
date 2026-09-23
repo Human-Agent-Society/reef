@@ -275,7 +275,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         """Persist the paired model/optimizer checkpoints and record the step."""
         checkpoint = job.checkpoint
         rollout_id = checkpoint.rollout_id
-        self._group.save_model(rollout_id, force_sync=True)
+        self._group.save_model(rollout_id, force_sync=True, scenario_step=checkpoint.scenario_step)
         if self._critic_save_root is not None and critic_checkpoint_due(rollout_id, self.critic_save_interval):
             # Persist the critic's weights and optimizer alongside the actor
             # pair: every commit by default, critic-only warmup included,

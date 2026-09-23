@@ -59,6 +59,10 @@ class RuntimeCandidateBackend(CandidateBackend):
     def dispatched(self) -> bool:
         return True
 
+    @property
+    def colocated(self) -> bool:
+        return self.scheduler.colocated
+
     def experiment_config(self) -> Mapping[str, Any]:
         return {
             "runtime": type(self.training_runtime).__name__,

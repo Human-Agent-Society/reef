@@ -91,7 +91,7 @@ class _SlottedGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1]) - 1
 
-    def save_model(self, rollout_id, force_sync=False):
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
         checkpoint.mkdir(parents=True)
         (checkpoint / "weights").write_text("hf", encoding="utf-8")

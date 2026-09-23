@@ -321,6 +321,14 @@ def test_component_trainers_meet_at_the_commit_boundary(tmp_path: Path) -> None:
         dispatcher.close()
 
 
+class _ColocatedBackend(_DispatchedBackend):
+    """A dispatched job that holds the served engine while it runs, as a colocated Slime stack does."""
+
+    @property
+    def colocated(self) -> bool:
+        return True
+
+
 def _dispatched_pair(tmp_path: Path, job_id: str = "job-1") -> dict[str, _ComponentBackend]:
     return {
         WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", job_id),
@@ -375,6 +383,46 @@ def test_a_local_step_of_one_trainer_does_not_hold_up_the_others_or_the_status(t
             WEIGHTS: "weights step 1",
             HARNESS: "harness step 1",
         }
+    finally:
+        slow.release.set()
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_colocated_weights_job_waits_for_the_local_cycle_that_needs_the_engine(tmp_path: Path) -> None:
+    """A colocated job holds the served engine, so it starts only after the harness cycle mid evaluation ends."""
+    backends = {
+        WEIGHTS: _ColocatedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _SlowBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    slow = backends[HARNESS]
+    assert isinstance(slow, _SlowBackend)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        worker = threading.Thread(target=lambda: dispatcher._process_local_backend_step("agent", HARNESS))
+        worker.start()
+        assert slow.evaluating.wait(10)
+        assert scenario.reserve_training_batch(WEIGHTS) is not None
+        executions: list[Any] = []
+        trainer = threading.Thread(
+            target=lambda: executions.append(dispatcher._execute_dispatched_step(scenario, WEIGHTS))
+        )
+        trainer.start()
+        trainer.join(1)
+        # The job has not started: the harness cycle still holds the engine it evaluates through.
+        assert trainer.is_alive()
+        assert backends[WEIGHTS].prepared == 0
+        slow.release.set()
+        worker.join(10)
+        trainer.join(10)
+        assert not trainer.is_alive()
+        assert backends[WEIGHTS].prepared == 1
+        assert executions[0].outcome == "commit"
+        assert scenario.scenario_step == 1
     finally:
         slow.release.set()
         dispatcher.close()

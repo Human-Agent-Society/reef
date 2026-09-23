@@ -138,6 +138,11 @@ class CandidateBackend(CandidateEvaluator, ABC):
         return False
 
     @property
+    def colocated(self) -> bool:
+        """Whether a dispatched job holds the served engine, so no other component can evaluate meanwhile."""
+        return False
+
+    @property
     def stale_result_policy(self) -> str:
         """What a result prepared against a release another trainer has since replaced becomes.
 

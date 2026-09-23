@@ -248,6 +248,25 @@ def test_scenario_steps_can_use_a_separate_global_checkpoint_index(backend):
     assert (marker["rollout_id"], marker["scenario"], marker["scenario_step"]) == (12, "scenario-a", 0)
 
 
+def test_a_job_keeps_its_identity_when_another_component_moved_the_scenario_step(backend):
+    # A composite's other components advance the scenario step while a weight job is out;
+    # the retry of the same batch at the new step replays the job instead of conflicting with it.
+    assert training_job_id(PAYLOAD) == training_job_id({**PAYLOAD, "rollout_id": 4})
+    backend.checkpoint = TrainingCheckpoint(0, backend.checkpoint.path, scenario_step=0)
+    first = coordinator(backend).execute(PAYLOAD)
+    events = list(backend.events)
+    later = coordinator(backend).execute({**PAYLOAD, "rollout_id": 4})
+    assert (later.outcome, later.training_job_id) == (first.outcome, first.training_job_id)
+    assert backend.events == events
+    assert markers.read_marker(backend.path)["scenario_step"] == 0
+
+
+@pytest.mark.parametrize("scenario, scenario_step", [(None, -1), (None, True), ("scenario-a", None), ("", 0)])
+def test_checkpoint_refuses_a_bad_scenario_or_step(backend, scenario, scenario_step):
+    with pytest.raises(ValueError, match="checkpoint scenario"):
+        TrainingCheckpoint(0, backend.checkpoint.path, scenario, scenario_step)
+
+
 def test_scenario_steps_travel_beside_the_global_checkpoint_index(backend):
     # The other components of a composite advance the scenario step between two weight steps.
     backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path, scenario_step=4)

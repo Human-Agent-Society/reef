@@ -266,6 +266,7 @@ class _RecordingGroup:
         self.train_calls: list[tuple[int, object]] = []
         self.external_data: list[object] = []
         self.saved_model_rollouts: list[int] = []
+        self.saved_scenario_steps: list[int | None] = []
         self.saved_training_checkpoint_rollouts: list[int] = []
         self._actor_handlers = [_FakeRank(version=SERVING_VERSION, metrics=worker_metrics)]
 
@@ -304,11 +305,12 @@ class _RecordingGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         pass
 
-    def save_model(self, rollout_id, force_sync=False):
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
         if self.critic:
             self.saved_training_checkpoint_rollouts.append(rollout_id)
             return
         self.saved_model_rollouts.append(rollout_id)
+        self.saved_scenario_steps.append(scenario_step)
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
         checkpoint.mkdir(parents=True)
         (checkpoint / "weights").write_text("hf", encoding="utf-8")
@@ -389,13 +391,16 @@ def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_
 
     first = _execute_and_update_weights(actor, payload)
     actor.acknowledge_training_commit(first.training_job_id)
-    later = _execute_and_update_weights(
-        actor, {**payload, "rollout_id": 4, "expected_runtime_load_id": first.runtime_load_id}
-    )
+    # The next batch, reserved four scenario steps later.
+    next_batch = _payload([_sao_row("c", producing_runtime_load_id=first.runtime_load_id)])
+    next_batch.update(rollout_id=4, expected_runtime_load_id=first.runtime_load_id)
+    later = _execute_and_update_weights(actor, next_batch)
 
     assert (first.outcome, later.outcome) == ("complete", "complete")
     assert [rollout_id for rollout_id, _ in actor_group.train_calls] == [0, 1]
     assert actor_group.saved_model_rollouts == [0, 1]
+    # The adapter's metadata file names the scenario step, not the checkpoint index.
+    assert actor_group.saved_scenario_steps == [0, 4]
     marker = read_marker(tmp_path / LATEST_JOB_MARKER_FILENAME)
     assert (marker["rollout_id"], marker["scenario_step"]) == (1, 4)
     assert actor.health()["training_job"]["rollout_id"] == 4

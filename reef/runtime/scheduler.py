@@ -408,9 +408,15 @@ class InferenceMemory:
 
 
 def training_job_id(payload: Mapping[str, Any]) -> str:
-    """Preserve the retry-stable identity of the shared training payload."""
+    """Preserve the retry-stable identity of the shared training payload.
+
+    The identity is the batch and its admission fence, never the scenario step:
+    the other components of a composite advance that step while a job is out,
+    and the retry of the same batch must replay the job, not conflict with it.
+    """
     identity = dict(payload)
     identity.pop("max_staleness", None)
+    identity.pop("rollout_id", None)
     if uses_staleness_admission(payload):
         # A newer admission fence on retry must not repeat an optimizer step.
         identity.pop("expected_runtime_load_id", None)
@@ -628,6 +634,11 @@ class RuntimeScheduler:
         if not isinstance(candidate, ModelCandidate):
             raise RuntimeContractError("training runtime must return ModelCandidate")
         return replace(candidate, current_runtime_load_id=current)
+
+    @property
+    def colocated(self) -> bool:
+        """Whether the backend hands the engine's devices to training for the whole job."""
+        return self._colocated
 
     def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
         """Stage selected weights behind closed inference admission."""

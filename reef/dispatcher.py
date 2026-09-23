@@ -40,6 +40,7 @@ from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
+from reef.train.backend import StepExecution
 from reef.train.types import TrainStepResult
 
 logger = logging.getLogger(__name__)
@@ -892,7 +893,7 @@ class Dispatcher:
         )
         if (batch := current.reserve_training_batch(component)) is None:
             return False
-        execution = current.execute_reserved_training_step(component)
+        execution = self._execute_dispatched_step(current, component)
         if execution.outcome == "retry":
             if execution.storage is None:
                 raise RuntimeContractError("retry execution must carry storage status")
@@ -918,6 +919,19 @@ class Dispatcher:
         if result.training_job_id is not None:
             backend.acknowledge_commit(current.scenario_step, result.training_job_id)
         return True
+
+    def _execute_dispatched_step(self, current: Scenario, component: str | None) -> StepExecution:
+        """Run the reserved dispatched job.
+
+        A colocated backend hands the served engine to training for the whole
+        job, so a local worker's cycle (its evaluation goes through that
+        engine) takes turns with it instead of timing out under it.
+        """
+        backend = current.trainer_for(component).candidate_backend
+        if backend is None or not backend.colocated:
+            return current.execute_reserved_training_step(component)
+        with self._local_cycle_lock(current.name):
+            return current.execute_reserved_training_step(component)
 
     def _record_training_error(self, scenario: str, value: str | None) -> None:
         with self._training.lock:

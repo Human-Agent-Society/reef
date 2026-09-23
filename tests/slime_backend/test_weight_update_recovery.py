@@ -378,7 +378,7 @@ def test_lora_save_times_the_branch_that_does_not_delegate(monkeypatch: pytest.M
     monkeypatch.setattr(
         actor,
         "_save_lora_model",
-        lambda rollout_id, force_sync=False: saved.append((rollout_id, force_sync)),
+        lambda rollout_id, force_sync=False, scenario_step=None: saved.append((rollout_id, force_sync)),
         raising=False,
     )
 
