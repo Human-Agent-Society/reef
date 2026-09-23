@@ -247,3 +247,8 @@ def test_killed_worker_does_not_leave_running_harness(tmp_path):
             pytest.fail("harness survived worker death")
     finally:
         executor.shutdown()
+
+
+def test_mp_rejects_node_placement():
+    with pytest.raises(ValueError, match="cluster node"):
+        Executor.create(ExecutorConfig(backend="mp", workers=(WorkerSpec(Counter),), node_id="node-1"))
