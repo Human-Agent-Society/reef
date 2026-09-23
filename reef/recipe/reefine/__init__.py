@@ -80,25 +80,30 @@ class ReefineRecipe(CordisRecipe):
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("reefine requires an 'evolution' config mapping")
         adapter = str(evolution.get("adapter", "pi"))
-        shipped = ships_requests(adapter) and ships_version_check(adapter)
-        if not shipped and "requests" not in evolution and "version_check" not in evolution:
-            logger.info(
-                "adapter %r ships no /reefine command and no update notice; requests come through reef-%s evolve",
-                adapter,
-                adapter,
-            )
         defaults = {
             # A request goes to the agent proposer where the host can jail it; otherwise to the text proposer.
             "propose": "reef.recipe.reefine.agent:propose",
             "proposer_agent": {},
             "evaluate": "reef.recipe.reefine.evolution:evaluate",
-            # The /reefine command and the update notice are entries the adapter ships; pi ships both.
-            "requests": ships_requests(adapter),
-            "version_check": ships_version_check(adapter),
+            "requests": True,
+            "version_check": True,
             "review_kinds": ["code_extension"],
             "selection": "floor",
         }
-        kwargs = super()._recipe_kwargs({**settings, "evolution": {**defaults, **evolution}}, values)
+        merged = {**defaults, **evolution}
+        # The /reefine command and the update notice are entries the adapter ships; on an adapter that ships
+        # neither a request still arrives through the wrapper, so the profile runs there without them.
+        shipped = {"requests": ships_requests(adapter), "version_check": ships_version_check(adapter)}
+        dropped = [name for name, ships in shipped.items() if merged.get(name) is True and not ships]
+        if dropped:
+            merged.update(dict.fromkeys(dropped, False))
+            logger.info(
+                "adapter %r ships no /reefine command or update notice (%s off); requests come through reef-%s evolve",
+                adapter,
+                ", ".join(dropped),
+                adapter,
+            )
+        kwargs = super()._recipe_kwargs({**settings, "evolution": merged}, values)
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(evolution.get("multimodal"), values)
         except ValueError as exc:

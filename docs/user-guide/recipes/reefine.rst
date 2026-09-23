@@ -126,9 +126,8 @@ Adapters other than pi
 
 ``evolution.adapter`` runs the profile on any bundled adapter. The
 ``/reefine`` command and the update notice are entries pi ships, so on
-``dsh`` or ``hermes`` the profile seeds neither and a request goes through
-the wrapper: ``reef-dsh evolve "<text>" --wait``; the same ``requests`` and
-``version_check`` settings, set by hand, refuse an adapter that ships none.
+``dsh`` or ``hermes`` the profile seeds neither, says so in the log, and a
+request goes through the wrapper: ``reef-dsh evolve "<text>" --wait``.
 The agent proposer runs on pi alone; on another adapter the served model
 answers a request with rules, skills and commands and writes no
 ``code_extension``, since it knows pi's extension API and no other. Its
