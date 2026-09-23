@@ -629,6 +629,7 @@ class RequestService:
         kept_ids: set[str] = set()
         carried_by: dict[str, str] = {}  # each release not kept, to the kept release whose tree it carried
         previous: dict[str, Any] | None = None  # the newest older row that is served
+        previous_manifest: dict[str, Any] | None = None  # the newest older served row that names its components
         lineage: str | None = None  # the newest kept release that is served
         lineage_parent: str | None = None  # the parent that release lists
         head: str | None = None
@@ -638,7 +639,8 @@ class RequestService:
             release_id = str(row["release_id"])
             published = previous is None or previous["release_id"] != release_id
             own = None if not published else (row.get("components") or {}).get(files_component)
-            before = None if previous is None else (previous.get("components") or {}).get(files_component)
+            # A step that published nothing carries no manifest; the tree it served is the last one named.
+            before = None if previous_manifest is None else previous_manifest["components"].get(files_component)
             if own is not None and before is not None:
                 changed = own != before
             else:
@@ -670,6 +672,8 @@ class RequestService:
                     kept_ids.add(release_id)
             if not row.get("pending"):
                 previous = row
+                if row.get("components"):
+                    previous_manifest = row
             if lineage is not None and release_id not in kept_ids:
                 carried_by[release_id] = lineage
         kept.reverse()

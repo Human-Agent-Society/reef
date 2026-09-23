@@ -222,13 +222,21 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         if report_type is not None:
             try:
                 parsed_report = report_type.from_dict(item.payload)
-            except ReportValidationError:
+            except ReportValidationError as refusal:
                 # A scenario of several components admits what any of them accepts: a report the ingress
                 # contract takes and this one refuses is another component's, not this method's training
-                # data, and this trainer releases it. A report of this shape with a broken field still raises.
+                # data, and this trainer releases it. A report every component refuses still raises.
                 admitted = self.context.admitted_report_type
                 if admitted is None or admitted is report_type or not _accepted_by(admitted, item.payload):
                     raise
+                # Named in the log: a report meant for this trainer with a broken field also lands here.
+                logger.warning(
+                    "scenario %r releases report %s to the other components: %s refused it: %s",
+                    self.scenario,
+                    item.agent_record_id,
+                    report_type.__name__,
+                    refusal,
+                )
                 self._seen_reports.add(item.agent_record_id)
                 self._terminate(item)
                 return

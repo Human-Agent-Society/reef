@@ -759,7 +759,9 @@ A job's identity is its batch and admission fence: the scenario step is not
 part of it, since the other components of a composite advance that step while
 the job is out, nor is the processor's batch number, which a reload starts
 again. A marker an earlier build wrote for a job still in flight is matched by
-the step it recorded, so an upgrade mid job replays it. Scenario/global
+the step it recorded, so an upgrade mid job replays it on a Slime backend. A
+Tinker job in flight at an upgrade needs operator recovery: its earlier
+identity carried a batch number a restart does not keep. Scenario/global
 checkpoint indexes and persisted marker fields remain compatible with existing
 deployments.
 

@@ -82,13 +82,20 @@ class _ScenarioTrainingError(Exception):
 
 #: How soon a local worker that stood aside for closed admission looks again.
 STOOD_ASIDE_RETRY_SECONDS = 5.0
+#: The training thread's name in the error record; local workers are named by their component.
+TRAINING_THREAD_SOURCE = "training"
+
+
+def local_error_source(component: str | None) -> str:
+    return "local" if component is None else f"local:{component}"
 
 
 @dataclass
 class _TrainingState:
     lock: Lock = field(default_factory=Lock)
     ready: Event = field(default_factory=Event)
-    errors: dict[str, str] = field(default_factory=dict)
+    #: The last error per scenario, with the worker that recorded it: only that worker clears it.
+    errors: dict[str, tuple[str, str]] = field(default_factory=dict)
     failure_counts: dict[str, int] = field(default_factory=dict)
     status_build_error: str | None = None
     storage_status: Mapping[str, Any] | None = None
@@ -283,7 +290,7 @@ class Dispatcher:
             dropped = self._registry.remove(scenario)
             self._stop_local_backend_worker(scenario)
             self._publication.forget(scenario)
-            self._record_training_error(scenario, None)
+            self._record_training_error(scenario, None, source=None)
             with self._training.lock:
                 self._training.failure_counts.pop(scenario, None)
             if dropped is not None:
@@ -643,6 +650,7 @@ class Dispatcher:
             for key in keys:
                 self._training.stale_refusals_in_a_row.pop(key, None)
                 self._training.stale_refusals_total.pop(key, None)
+                self._training.stood_aside.discard(key)
         for worker in workers:
             worker.ready.set()
 
@@ -672,7 +680,7 @@ class Dispatcher:
                 self._drain_local_backend(scenario, component)
         except Exception as exc:
             logger.exception("local backend worker stopped unexpectedly for scenario %r", scenario)
-            self._record_training_error(scenario, self._error_text(exc))
+            self._record_training_error(scenario, self._error_text(exc), source=local_error_source(component))
 
     def _drain_local_backend(self, scenario: str, component: str | None) -> None:
         try:
@@ -681,7 +689,7 @@ class Dispatcher:
                 pass
         except Exception as exc:
             logger.exception("local backend failed to commit for scenario %r", scenario)
-            self._record_training_error(scenario, self._error_text(exc))
+            self._record_training_error(scenario, self._error_text(exc), source=local_error_source(component))
 
     def _reload_durable_local_scenario(self, scenario: str, current: Scenario) -> None:
         if not current.store.durable:
@@ -738,7 +746,7 @@ class Dispatcher:
             return False
         with self._training.lock:
             self._training.stood_aside.discard(key)
-        self._record_training_error(scenario, None)
+        self._record_training_error(scenario, None, source=local_error_source(component))
         # Local workers of one scenario take turns for a whole cycle, prepare
         # and commit together, under this lock alone: letting their commits
         # race only had the slower worker refused as stale on every cycle, and
@@ -747,6 +755,11 @@ class Dispatcher:
         with self._local_cycle_lock(scenario):
             if self._registry.get_optional(scenario) is not current:
                 # Deleted or reloaded while this worker waited for a job's turn.
+                return False
+            if runtime is not None and not runtime.inference_admission_status.get("open", True):
+                # The job whose turn this worker waited for left admission closed.
+                with self._training.lock:
+                    self._training.stood_aside.add(key)
                 return False
             try:
                 result = current.prepare_training_step(component)
@@ -806,7 +819,7 @@ class Dispatcher:
             "its batch is kept and prepared again on the next wake"
         )
         logger.warning("scenario %r: %s", scenario, message)
-        self._record_training_error(scenario, message)
+        self._record_training_error(scenario, message, source=local_error_source(component))
         return False
 
     def _run_training(self) -> None:
@@ -947,6 +960,12 @@ class Dispatcher:
             result = execution.result
             if execution.outcome != "commit" or result is None:
                 raise RuntimeContractError(f"training backend returned unsupported outcome: {execution.outcome!r}")
+            if self._registry.get_optional(current.name) is not current:
+                # A local worker's failure reloaded the scenario while the job ran: its result belongs to the
+                # instance that reserved the batch. The rebuilt trainer reserves the same rows and the
+                # backend replays the job under its marker, so the commit lands with the job's identity.
+                logger.warning("scenario %r was reloaded under its training job; the job replays", current.name)
+                return True
             # Another component may have moved the head while the job ran. The
             # committer merges a dispatched result rather than refusing it: the
             # backend has published the weights already and its job can only be
@@ -964,7 +983,9 @@ class Dispatcher:
             return turn
         # A colocated job holds the served engine, and admission is closed engine wide until it is
         # acknowledged: every scenario's local cycles take turns with it instead of timing out under it.
-        names = {row["scenario"] for row in self._registry.list()}
+        # Loaded scenarios only: a scenario not loaded runs no local cycle, and the registry's durable
+        # listing would consult the artifact repository on the training thread before every job.
+        names = set(self._registry.loaded_names())
         with self._training.lock:
             names.update(self._training.local_cycle_locks)
         names.add(current.name)
@@ -985,12 +1006,21 @@ class Dispatcher:
         for worker in workers:
             worker.ready.set()
 
-    def _record_training_error(self, scenario: str, value: str | None) -> None:
+    def _record_training_error(
+        self, scenario: str, value: str | None, *, source: str | None = TRAINING_THREAD_SOURCE
+    ) -> None:
+        """Record ``value`` for ``scenario`` under ``source``; ``None`` clears the error that source recorded.
+
+        A local cycle that runs after the training thread's failure must not wipe that failure from the
+        status; ``source=None`` clears whatever is recorded.
+        """
         with self._training.lock:
             if value is None:
-                self._training.errors.pop(scenario, None)
+                recorded = self._training.errors.get(scenario)
+                if recorded is not None and (source is None or recorded[0] == source):
+                    self._training.errors.pop(scenario, None)
             else:
-                self._training.errors[scenario] = value
+                self._training.errors[scenario] = (source or TRAINING_THREAD_SOURCE, value)
                 self._training.failure_counts[scenario] = self._training.failure_counts.get(scenario, 0) + 1
 
     def _record_status_build_error(self, value: str | None) -> bool:
@@ -1154,8 +1184,8 @@ class Dispatcher:
             error = "RuntimeError: training thread stopped unexpectedly"
             logger.error("%s: %s", training_scenario, error)
             self._record_training_error(training_scenario, error)
-            training_errors[training_scenario] = error
-        errors = [f"{key}: {training_errors[key]}" for key in sorted(training_errors)]
+            training_errors[training_scenario] = (TRAINING_THREAD_SOURCE, error)
+        errors = [f"{key}: {training_errors[key][1]}" for key in sorted(training_errors)]
         if status_build_error is not None:
             errors.append(status_build_error)
         return errors

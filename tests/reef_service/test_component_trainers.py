@@ -519,6 +519,27 @@ def test_a_dispatched_turn_wakes_every_local_worker_and_yields_before_the_next_c
 
 
 @pytest.mark.unit
+def test_a_job_whose_scenario_was_reloaded_under_it_is_not_committed_on_the_new_instance(tmp_path: Path) -> None:
+    """The rebuilt trainer reserves the same rows and the backend replays the job under its marker."""
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        old = dispatcher.get_or_create_scenario("agent")
+        assert old is not None
+        for record in _records(1):
+            old.records.append(record)
+        batch = old.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        backend = backends[WEIGHTS]
+        new = dispatcher._registry.reload("agent")
+        assert new is not old
+        assert dispatcher._run_dispatched_turn(old, WEIGHTS, backend, batch) is True
+        assert [row["component"] for row in new.releases() if row["operation"] == "training"] == []
+        assert new.reserve_training_batch(WEIGHTS) is not None
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_a_harness_only_rollback_keeps_the_proof_that_the_weights_job_was_committed(tmp_path: Path) -> None:
     """The backend must still finish a job whose weights a later rollback carried forward unchanged."""
     dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))

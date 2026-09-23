@@ -237,6 +237,9 @@ def test_a_batch_rejected_by_an_earlier_build_trains_again_under_the_current_ide
     coordinator(backend).execute({**PAYLOAD, "rollout_id": 3})
     marker = markers.read_marker(backend.path)
     marker.update(status="REJECTED", job_id=legacy_training_job_id(PAYLOAD, 3), runtime_load_id="engine:1")
+    # The shape an earlier build wrote: the step under rollout_id, no scenario_step.
+    marker["rollout_id"] = 3
+    marker.pop("scenario_step", None)
     markers.write_marker(backend.path, marker)
     backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path.with_name("checkpoint-1"), scenario_step=5)
     first = coordinator(backend).execute({**PAYLOAD, "rollout_id": 5})

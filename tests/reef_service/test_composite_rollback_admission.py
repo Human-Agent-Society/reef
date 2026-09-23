@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, replace
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from reef_service.test_component_trainers import (
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.release_chain import ReleaseNotRestorable
-from reef.dispatcher import Dispatcher
+from reef.dispatcher import Dispatcher, local_error_source
 from reef.runtime.interfaces import TrainingRuntime
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
@@ -119,6 +120,74 @@ def test_a_local_cycle_stands_aside_while_admission_is_closed_and_runs_once_it_r
         assert dispatcher._process_local_backend_step("agent", HARNESS) is True
         assert dispatcher._recipe.backends[HARNESS].prepared == 1
         assert ("agent", HARNESS) not in dispatcher._training.stood_aside
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_local_cycle_clears_only_the_errors_it_recorded(tmp_path: Path) -> None:
+    """The training thread's failure stays in the status while a harness cycle runs after the wake."""
+    training = _RestoringTraining()
+    dispatcher = _dispatcher(tmp_path)
+    try:
+        scenario = _scenario(dispatcher, training)
+        for record in _records(1):
+            scenario.records.append(record)
+        dispatcher._record_training_error("agent", "RuntimeError: training marker is UPDATING_WEIGHTS")
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        assert dispatcher._training_errors() == ["agent: RuntimeError: training marker is UPDATING_WEIGHTS"]
+        dispatcher._record_training_error("agent", "harness away", source=local_error_source(HARNESS))
+        for record in _records(2):
+            scenario.records.append(record)
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        assert dispatcher._training_errors() == []
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_local_cycle_that_waited_for_a_job_stands_aside_when_the_job_left_admission_closed(tmp_path: Path) -> None:
+    training = _RestoringTraining()
+    dispatcher = _dispatcher(tmp_path)
+    try:
+        scenario = _scenario(dispatcher, training)
+        for record in _records(1):
+            scenario.records.append(record)
+        outcomes: list[bool] = []
+        with dispatcher._local_cycle_lock("agent"):
+            worker = threading.Thread(
+                target=lambda: outcomes.append(dispatcher._process_local_backend_step("agent", HARNESS))
+            )
+            worker.start()
+            worker.join(0.5)
+            assert worker.is_alive()  # past the first admission check, waiting for the lock
+            training.inference.pause_admission()
+        worker.join(10)
+        assert outcomes == [False]
+        assert dispatcher._recipe.backends[HARNESS].prepared == 0
+        assert ("agent", HARNESS) in dispatcher._training.stood_aside
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_the_retry_of_a_promote_over_the_creation_leaves_held_admission_closed(tmp_path: Path) -> None:
+    """The release served before the promote is the creation: its manifest names the weights the promote kept."""
+    training = _RestoringTraining()
+    dispatcher = _dispatcher(tmp_path)
+    try:
+        scenario = _scenario(dispatcher, training)
+        dispatcher._recipe.backends[HARNESS].hold_next = True
+        _step(scenario, HARNESS, 1)
+        held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        training.inference.pause_admission()
+        training.inference._current_runtime_load_id = "before"
+        _fail_next_install(scenario)
+        with pytest.raises(RuntimeError, match="artifact backend away"):
+            scenario.rollback(held, operation="promote")
+        scenario.rollback(held, operation="promote")
+        assert not training.inference.inference_admission_status["open"]
+        assert training.inference.current_runtime_load_id() == "before"
     finally:
         dispatcher.close()
 

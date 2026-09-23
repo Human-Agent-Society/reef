@@ -503,6 +503,42 @@ def test_a_held_release_whose_parent_manifest_is_unavailable_is_not_promoted(tmp
 
 
 @pytest.mark.unit
+def test_a_rollback_of_the_weights_after_a_rejected_harness_step_is_not_a_harness_release(tmp_path: Path) -> None:
+    """The tree a rejected step served is the last one named; a rollback that keeps it stays off the catalog."""
+    initial = tmp_path / "initial"
+    _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})
+    _tree(initial / HARNESS, {"AGENTS.md": "seed"})
+    dispatcher = Dispatcher(
+        _TwoComponentRecipe(),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "store"),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        scenario.commit(
+            TrainStepResult(
+                state={}, artifact=Artifact.local(_tree(tmp_path / "h1", {"AGENTS.md": "one"})), component=HARNESS
+            )
+        )
+        first_harness = scenario.current_artifact_ref().release_id
+        weights = Artifact.local(
+            _tree(tmp_path / "w1", {"adapter_config.json": '{"r": 8}'}), metadata={"runtime_load_id": "inc:1"}
+        )
+        scenario.commit(TrainStepResult(state={}, artifact=weights, component=WEIGHTS))
+        scenario.commit(TrainStepResult(state={}, metrics={"selected": False}), component=HARNESS)
+        scenario.rollback(first_harness)
+        rows, head = RequestService._harness_lineage(scenario)
+        assert head == first_harness
+        # Newest first: the rejected step's row (named by the first harness release), that release, the creation.
+        assert [row["operation"] for row in rows] == ["training", "training", "creation"]
+        assert all(row.get("rollback_target_release_id") is None for row in rows)
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_a_promote_refused_by_validation_leaves_no_staged_release(tmp_path: Path, monkeypatch: Any) -> None:
     initial = tmp_path / "initial"
     _tree(initial / WEIGHTS, {"adapter_config.json": "{}"})

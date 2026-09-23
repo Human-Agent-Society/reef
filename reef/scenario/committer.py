@@ -255,22 +255,24 @@ class ScenarioCommitter:
         loaded = self._binding.surface.loader_component
         if loaded is None:
             return False
-        # The release served before the rollback: the newest earlier record that published a manifest and was
-        # not held for review; a rejected step publishes nothing and a held release was never served.
-        served = next(
-            (
-                entry
-                for entry in reversed(self._store.history())
-                if entry.step < recorded.step and entry.components is not None and not entry.pending
-            ),
-            None,
-        )
-        served_components = None if served is None else served.components
-        if recorded.components is None or served_components is None:
-            # Records without a manifest predate components: every rollback restored the weights then.
+        # The release served before the rollback: the newest earlier record that was not held for review, and
+        # the creation before any. A rollback that left the weights alone paused nothing; a dispatched job may
+        # still hold admission.
+        earlier = [
+            entry for entry in reversed(self._store.history()) if entry.step < recorded.step and not entry.pending
+        ]
+        if self._binding.surface.single:
+            served_id = next((entry.artifact_ref.content_id for entry in earlier), self._artifacts.base.content_id)
+            return recorded.artifact_ref.content_id != served_id
+        served_entry = next((entry.components[loaded] for entry in earlier if entry.components is not None), None)
+        if served_entry is None:
+            creation = self._releases.creation_components(self._step, retry=True)
+            served_entry = None if creation is None else creation.get(loaded)
+        recorded_entry = None if recorded.components is None else recorded.components.get(loaded)
+        if recorded_entry is None or served_entry is None:
+            # Nothing names the weights on one side: treat the retry as a restore, as every rollback once was.
             return True
-        # A rollback that left the weights alone paused nothing; a dispatched job may still hold admission.
-        return recorded.components.get(loaded) != served_components.get(loaded)
+        return recorded_entry != served_entry
 
     @staticmethod
     def leaves_component(later: CommitRecord, record: CommitRecord) -> bool:
