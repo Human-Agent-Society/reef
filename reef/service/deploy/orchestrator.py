@@ -366,8 +366,9 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
     install root under the home directory. The script's own default is
     ``./reef-harness`` in the directory it runs from, often the project the
     agent works in, where a session could change what the next one runs."""
-    evolution = config.get("evolution")
-    adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
+    # A schema-version 2 file (the shipped profiles) resolves the recipe's evolution section under reef; an
+    # unversioned file keeps it at the top level.
+    adapter = config_value(config, "reef", "evolution", "adapter") or config_value(config, "evolution", "adapter")
     if not isinstance(adapter, str) or not adapter:
         return None
     host = str(config_value(config, "reef", "host", default="127.0.0.1"))

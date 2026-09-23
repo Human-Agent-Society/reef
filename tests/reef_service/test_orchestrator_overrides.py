@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
+import yaml
 
 from reef.service.deploy.cli import InvalidOverrideError, _apply_overrides, _parse_overrides
 from reef.service.deploy.orchestrator import main
@@ -127,3 +130,21 @@ def test_the_install_hint_is_the_one_line_that_installs_the_deployments_harness(
         "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash -s -- ~/reef-harness/pi"
     )
     assert install_hint({"reef": {"recipe": "recipe"}}) is None
+
+
+@pytest.mark.unit
+def test_the_shipped_reefine_profile_gets_the_install_line_for_the_adapter_it_evolves(monkeypatch) -> None:
+    """The profile is schema-version 2, which resolves the recipe's evolution section under ``reef``: the line names
+    the adapter an override selects, at the port the profile listens on."""
+    import reef.service.deploy.orchestrator as orchestrator
+    from reef.service.deploy.orchestrator import install_hint, resolve_deployment_config
+
+    monkeypatch.setenv("REEF_UPSTREAM_URL", "http://127.0.0.1:11434")
+    monkeypatch.setenv("REEF_UPSTREAM_MODEL", "gemma4:26b")
+    monkeypatch.delenv("REEF_TOKEN", raising=False)
+    profile = Path(orchestrator.__file__).parents[1] / "profiles" / "reefine.yaml"
+    config = yaml.safe_load(profile.read_text(encoding="utf-8"))
+    resolved, _ = resolve_deployment_config(config, {"recipe.config.evolution.adapter": "codex"}, profile)
+    assert install_hint(resolved) == (
+        "curl -fsS 'http://127.0.0.1:8901/reef/harness/install?adapter=codex' | bash -s -- ~/reef-harness/codex"
+    )
