@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -168,21 +169,23 @@ def test_the_episode_keeps_the_services_docker_settings(tmp_path: Path, home: Pa
 
 @pytest.mark.unit
 def test_an_executor_other_than_the_local_one_gets_no_service_settings(tmp_path: Path, monkeypatch) -> None:
-    # A sandbox forwards only its env_from, and a remote executor runs elsewhere.
+    # A sandbox forwards only its env_from, and a remote executor runs no local container.
     monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
-    launched: list[dict[str, str]] = []
+    launched: list[tuple[Path, dict[str, str]]] = []
 
     class RecordingExecutor(EpisodeExecutor):
         def preflight(self) -> None:
             return None
 
         def launch(self, argv, *, root, workspace, env, timeout, writable_paths=(), readonly_paths=()):
-            launched.append(dict(env))
+            launched.append((root, dict(env)))
             return ProcessOutcome(exit_code=0, stdout="", stderr="")
 
     descriptor = get_adapter("terminus")
     run_episode(descriptor, render_composition(NODES, descriptor), "t", executor=RecordingExecutor())
-    assert launched and not {"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"} & set(launched[0])
+    [(root, env)] = launched
+    assert not {"DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG"} & set(env)
+    assert root.parent == Path(tempfile.gettempdir())
 
 
 @pytest.mark.unit

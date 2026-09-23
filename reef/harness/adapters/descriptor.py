@@ -29,8 +29,8 @@ everything the shared engines need to drive one harness binary:
   validates a compatible configuration (such as a remote task environment).
 - ``host_env`` (optional): service environment variables a local episode
   keeps, for a host tool the relocated ``HOME`` would otherwise hide.
-- ``is_root_under_home`` (optional): the episode root is made under the home
-  directory, for a container runtime that bind-mounts paths below it.
+- ``is_root_under_home`` (optional): a local episode makes its root under the
+  home directory, for a container runtime that bind-mounts paths below it.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -191,8 +191,9 @@ class AdapterDescriptor:
     #: the default, where ``{home}`` is the service's home directory; an empty default leaves the variable
     #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as terminus's docker CLI.
     host_env: Mapping[str, str] = field(default_factory=dict)
-    #: True when the episode root is made under ``~/.reef/episodes`` rather than the temp directory: a container
-    #: runtime bind-mounts paths below it, and colima shares the home directory but not ``$TMPDIR``.
+    #: True when an episode under the local executor makes its root under ``~/.reef/episodes`` rather than the temp
+    #: directory: a container runtime bind-mounts paths below it, and colima shares the home directory but not
+    #: ``$TMPDIR``.
     is_root_under_home: bool = False
     #: ``files.tree``: where the entries list travels with the rendered files (a JSON
     #: array of ``{id, name, config}``), so a resident process can reconcile the

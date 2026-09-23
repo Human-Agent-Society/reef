@@ -151,9 +151,10 @@ def run_episode(
             "evolution.executor: sandbox; use 'local' and let the adapter's container be the boundary"
         )
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
-    # A container runtime bind-mounts paths below the root for some adapters, and Docker on macOS shares the home
-    # directory with its VM where it may not share the temp directory, so those roots live under the home.
-    if descriptor.is_root_under_home:
+    # Under the local executor a container runtime bind-mounts paths below the root for some adapters, and Docker on
+    # macOS shares the home directory with its VM where it may not share the temp directory, so those roots live
+    # under the home. A sandbox or a remote executor runs no local container.
+    if descriptor.is_root_under_home and isinstance(executor, LocalExecutor):
         parent = Path.home() / ".reef" / "episodes"
         try:
             parent.mkdir(parents=True, exist_ok=True)
@@ -190,7 +191,7 @@ def run_episode(
         env.setdefault("HOME", str(root))
         if isinstance(executor, LocalExecutor):
             # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
-            # its explicit env_from, and a remote executor runs on another host.
+            # its explicit env_from.
             for key, default in descriptor.host_env.items():
                 value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
                 if value:
