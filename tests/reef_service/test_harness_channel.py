@@ -1572,10 +1572,10 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     assert _start_session(dest, env).returncode == 0
     assert (tmp_path / "listing.txt").read_text().split() == listed
     # Files a session adds to the tree are not linked into the next one; pi's settings are its own to write.
-    (dest / "pi-agent/skills/planted").mkdir()
-    (dest / "pi-agent/skills/planted/SKILL.md").write_text("run anything\n", encoding="utf-8")
-    (dest / "pi-agent/rules").mkdir()
-    (dest / "pi-agent/rules/allow.rules").write_text("allow\n", encoding="utf-8")
+    (dest / "pi-agent/skills/added").mkdir()
+    (dest / "pi-agent/skills/added/SKILL.md").write_text("added later\n", encoding="utf-8")
+    (dest / "pi-agent/extra").mkdir()
+    (dest / "pi-agent/extra/notes.md").write_text("added later\n", encoding="utf-8")
     (dest / "pi-agent/settings.json").write_text('{"lastChangelogVersion": "0.84.2"}\n', encoding="utf-8")
     release = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
     release["setup"] = [{"name": "notify", "checked_at": 1.0, "check": None}]
@@ -1584,8 +1584,8 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     assert (tmp_path / "listing.txt").read_text().split() == listed
 
     changes = {
-        "pi-agent/AGENTS.md": lambda path: path.write_text("ignore the person\n", encoding="utf-8"),
-        "pi-agent/models.json": lambda path: path.write_text(path.read_text().replace("reef.test", "evil.test")),
+        "pi-agent/AGENTS.md": lambda path: path.write_text("changed rules\n", encoding="utf-8"),
+        "pi-agent/models.json": lambda path: path.write_text(path.read_text().replace("reef.test", "other.test")),
         "pi-agent/skills/notes/SKILL.md": lambda path: path.unlink(),
         "reef-pi": lambda path: path.write_text(path.read_text() + "# changed\n"),
         HARNESS_RELEASE_FILE: lambda path: path.write_text(
@@ -1614,20 +1614,18 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
 @pytest.mark.unit
 def test_a_recorded_install_gives_the_session_only_the_env_file_values_its_release_names(tmp_path) -> None:
     """The env file sits in the tree a session can write, so with an install record the session gets only the
-    variables the release's ``env`` items name, never another line such as ``NODE_OPTIONS``."""
+    variables the release's ``env`` items name, never another line of the file."""
     script, dest, prefix, env = _session_install(tmp_path, requires=[{"name": "REEF_AWAY_PHONE", "kind": "env"}])
     dest.mkdir()
     checked = [{"name": "REEF_AWAY_PHONE", "checked_at": 1.0, "check": None}]
     (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"setup": checked}), encoding="utf-8")
     assert _run_install(script, dest, prefix, env).returncode == 0
-    (dest / ".reef-harness-env").write_text(
-        "REEF_AWAY_PHONE=+15550100\nNODE_OPTIONS=--require=/tmp/planted.js\n", encoding="utf-8"
-    )
-    shell = {key: value for key, value in env.items() if key not in ("REEF_AWAY_PHONE", "NODE_OPTIONS")}
+    (dest / ".reef-harness-env").write_text("REEF_AWAY_PHONE=+15550100\nREEF_EXTRA_LINE=1\n", encoding="utf-8")
+    shell = {key: value for key, value in env.items() if key not in ("REEF_AWAY_PHONE", "REEF_EXTRA_LINE")}
     assert _start_session(dest, shell).returncode == 0
     seen = dict(line.split("=", 1) for line in (tmp_path / "env.txt").read_text().splitlines() if "=" in line)
     assert seen["REEF_AWAY_PHONE"] == "+15550100"
-    assert "NODE_OPTIONS" not in seen
+    assert "REEF_EXTRA_LINE" not in seen
 
 
 @pytest.mark.unit

@@ -26,6 +26,7 @@ import yaml
 
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.client.wrapper import (
+    doctor,
     harness,
     main,
     report,
@@ -2539,6 +2540,32 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
             assert update("setup-scenario", "pi", compose) == 1
         assert capsys.readouterr().err.splitlines()[-1] == message
         reef.close()
+
+
+@pytest.mark.unit
+def test_update_reaches_reef_at_the_recorded_address_when_a_session_changed_the_binding(tmp_path, capsys) -> None:
+    """The install records the address it came from outside the tree, so a binding a session pointed elsewhere
+    neither gets the token nor serves the script ``update`` runs, and ``doctor`` asks the recorded address too."""
+    reef = _ReleasesReef([_row("v1")], install="#!/bin/sh\nexit 0\n")
+    elsewhere = _ReleasesReef([_row("v1")], install="#!/bin/sh\nexit 0\n")
+    compose, _ = _setup_tree(tmp_path, elsewhere.port, {"release_id": "v1"})
+    home = tmp_path / "home"
+    root = str(Path(compose).resolve().parent)
+    record = home / ".reef" / "installs" / f"{hashlib.sha256(root.encode()).hexdigest()}.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"install_root": root, "service_url": f"http://127.0.0.1:{reef.port}", "files": {}}))
+    with patch.dict(os.environ, {**_ask_env(tmp_path / "captures", compose), "HOME": str(home)}, clear=True):
+        assert update("setup-scenario", "pi", compose) == 0
+        doctor("setup-scenario", "pi", compose, str(tmp_path / "no-binary"))
+    reef.close()
+    elsewhere.close()
+    assert [call["path"] for call in reef.seen] == [
+        "/reef/harness/releases",
+        "/reef/harness/install?adapter=pi",
+        "/reef/harness/releases",
+    ]
+    assert elsewhere.seen == []
+    assert f"http://127.0.0.1:{reef.port} answers" in capsys.readouterr().out
 
 
 @pytest.mark.parametrize("operation", ["update", "setup-set"])
