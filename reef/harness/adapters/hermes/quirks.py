@@ -1,7 +1,8 @@
 """hermes adapter quirks: the config file, skill frontmatter, plugin manifests, and the boot scaffold.
 
 Config nodes write ``config.yaml`` as a JSON object and ``finalize_render``
-emits it as YAML. It also writes the ``.no-bundled-skills`` marker, so an
+emits it as YAML, and the ``env`` target as ``.env`` lines, where hermes
+reads a custom provider's key. It also writes the ``.no-bundled-skills`` marker, so an
 episode carries only the tree's skills instead of hermes's bundled catalog;
 synthesizes the ``name`` and ``description`` frontmatter hermes requires on a
 SKILL.md the node text left bare, under both skill roots; and, for every
@@ -24,6 +25,7 @@ import yaml
 from reef.harness.tree.render import RenderError
 
 _CONFIG = "hermes/config.yaml"
+_ENV = "hermes/.env"
 _MARKER = "hermes/.no-bundled-skills"
 _PLUGINS = "hermes/plugins/"
 _SKILL_ROOTS = ("hermes/skills/", "hermes-commands/")
@@ -90,6 +92,7 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
     if plugins:
         config = _granted(config, plugins)
     files[_CONFIG] = yaml.dump(config, sort_keys=True, default_flow_style=False, allow_unicode=True)
+    files[_ENV] = "".join(f"{key}={value}\n" for key, value in sorted(json.loads(files[_ENV]).items()))
     files[_MARKER] = ""
     for path, text in list(files.items()):
         if any(path.startswith(root) for root in _SKILL_ROOTS) and path.endswith("/SKILL.md"):

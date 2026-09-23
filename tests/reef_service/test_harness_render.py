@@ -273,12 +273,10 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
     binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
     files = render_composition([*_hermes_nodes(), *binding.compose_nodes(descriptor)], descriptor)
     config = yaml.safe_load(files[HERMES_CONFIG])
-    assert config["model"] == {
-        "provider": "custom",
-        "default": "m1",
-        "base_url": "http://127.0.0.1:9/v1",
-        "api_key": "k-1",
-    }
+    assert config["model"] == {"provider": "custom", "default": "m1", "base_url": "http://127.0.0.1:9/v1"}
+    # hermes reads a custom provider's key from its home's .env, never from config.yaml.
+    assert files["hermes/.env"] == "OPENAI_API_KEY=k-1\n"
+    assert "api_key" not in yaml.safe_load(files[HERMES_CONFIG])["model"]
     assert config["agent"] == {"max_turns": 40}
     # The defaults that keep an episode hermetic and single request, and the second skill root.
     assert config["approval"] == {"tirith_enabled": False}
