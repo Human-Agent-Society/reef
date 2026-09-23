@@ -10,6 +10,7 @@ one)."""
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import shutil
@@ -22,7 +23,7 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.client.wrapper import _create_temp_composition
+from reef.harness.client.wrapper import _create_temp_composition, run_agent
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
 from reef.harness.tree.render import render_composition
@@ -36,11 +37,13 @@ RULES_SENTENCE = "The reef smoke marker phrase is TIDEPOOL-STONE-41."
 
 
 class StubOpenAI(ThreadingHTTPServer):
-    """A canned /v1 endpoint that records every request it is sent."""
+    """A canned /v1 endpoint that records every request it is sent. It asks for ``tool_calls`` terminal calls, one
+    per answer, before it replies READY."""
 
-    def __init__(self) -> None:
+    def __init__(self, tool_calls: int = 0) -> None:
         super().__init__(("127.0.0.1", 0), StubHandler)
         self.requests: list[tuple[str, str | None, str]] = []
+        self.tool_calls = tool_calls
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -57,13 +60,22 @@ class StubHandler(BaseHTTPRequestHandler):
             self.end_headers()
             return
         usage = {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
-        if json.loads(body).get("stream"):
+        request = json.loads(body)
+        answered = sum(1 for message in request.get("messages", []) if message.get("role") == "tool")
+        delta: dict[str, Any] = {"role": "assistant", "content": "READY"}
+        finish = "stop"
+        if answered < self.server.tool_calls:
+            call = {"name": "terminal", "arguments": json.dumps({"command": f"echo step-{answered}"})}
+            tool_call = {"index": 0, "id": f"call-{answered}", "type": "function", "function": call}
+            delta = {"role": "assistant", "tool_calls": [tool_call]}
+            finish = "tool_calls"
+        if request.get("stream"):
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.end_headers()
             chunks = [
-                {"choices": [{"index": 0, "delta": {"role": "assistant", "content": "READY"}}]},
-                {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}], "usage": usage},
+                {"choices": [{"index": 0, "delta": delta}]},
+                {"choices": [{"index": 0, "delta": {}, "finish_reason": finish}], "usage": usage},
             ]
             for chunk in chunks:
                 event = {"id": "chatcmpl-smoke", "object": "chat.completion.chunk", "model": MODEL, **chunk}
@@ -158,3 +170,86 @@ def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_in_an_episode_
             assert json.loads(result.stdout.splitlines()[-1]) == [False, commands_root], layout
     finally:
         shutil.rmtree(session_home)
+
+
+def test_real_hermes_episode_makes_no_background_review_call_after_ten_tool_calls() -> None:
+    """hermes reviews the skill library in a background agent after ten tool calls in a turn; the defaults turn that
+    off, so an episode makes only its own model calls and writes no skill into the tree. The tree has no rules, like
+    a scenario's seed tree, so hermes writes its default SOUL.md, which is not residue."""
+    server = StubOpenAI(tool_calls=10)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    descriptor = get_adapter("hermes")
+    try:
+        binding = ModelBinding(
+            base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
+        )
+        files = render_composition(binding.compose_nodes(descriptor), descriptor)
+        result = run_episode(
+            descriptor, files, "Run ten echo commands, then reply READY", binary=REAL_HERMES, timeout=300.0
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    completions = [body for path, _, body in server.requests if path.endswith("/chat/completions")]
+    assert not [body for body in completions if "update the skill library" in body]
+    assert len(completions) == 11, len(completions)  # ten tool calls and the answer
+    assert result.residue == ()
+
+
+def test_real_hermes_session_keeps_its_snapshot_and_log_in_the_installed_tree(tmp_path, monkeypatch) -> None:
+    """A reef-hermes session runs on a temp copy of the home that the wrapper removes; the session snapshot and the
+    log hermes writes stay in the installed tree, so a second session keeps the first one's files."""
+    server = StubOpenAI()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    descriptor = get_adapter("hermes")
+    root = tmp_path / "reef-harness"
+    binding = ModelBinding(
+        base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
+    )
+    for relative, text in render_composition(binding.compose_nodes(descriptor), descriptor).items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    monkeypatch.setenv("REEF_HARNESS_CAPTURES_DIR", str(tmp_path / "captures"))
+    home = root / "hermes"
+    sessions: list[list[str]] = []
+    try:
+        for prompt in ("Reply with exactly the word READY", "Reply READY again"):
+            with contextlib.suppress(SystemExit):
+                run_agent(
+                    REAL_HERMES, str(home), "smoke", "hermes", "HERMES_HOME", ["chat", "-Q", "--oneshot", "-q", prompt]
+                )
+            sessions.append(sorted(path.name for path in (home / "sessions").glob("session_*.json")))
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert len(sessions[0]) == 1 and len(sessions[1]) == 2 and sessions[0][0] in sessions[1], sessions
+    for name in sessions[1]:
+        assert json.loads((home / "sessions" / name).read_text())["messages"][-1]["content"] == "READY"
+    assert (home / "logs" / "agent.log").is_file()
+
+
+def test_real_hermes_reads_the_curator_off(tmp_path) -> None:
+    """hermes's own curator gate, run in its venv on the rendered home: the curator is off, so a session start seeds
+    no curator state in the skills directory, which in a reef-hermes session is the installed release's."""
+    descriptor = get_adapter("hermes")
+    home = tmp_path / "hermes"
+    for relative, text in render_composition([], descriptor).items():
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(text, encoding="utf-8")
+    probe = (
+        "import json\nfrom agent import curator\nprint(json.dumps([curator.is_enabled(), curator.should_run_now()]))\n"
+    )
+    result = subprocess.run(
+        [str(Path(REAL_HERMES).parent / "python"), "-c", probe],
+        env={**os.environ, "HERMES_HOME": str(home)},
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout.splitlines()[-1]) == [False, False]
+    assert not (home / "skills" / ".curator_state").exists()

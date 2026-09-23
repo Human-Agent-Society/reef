@@ -27,9 +27,14 @@ env:
   HERMES_HOME: "{root}/hermes"
 # --resume, -c and `hermes sessions list` read state.db. It must already be
 # a database: hermes sets a zero-length file aside and creates a new one.
+# The session snapshots and logs hermes writes are kept beside it.
 client_state:
   - path: "hermes/state.db"
     kind: sqlite
+  - path: "hermes/sessions"
+    kind: directory
+  - path: "hermes/logs"
+    kind: directory
 files:
   config:
     primary:
@@ -38,11 +43,15 @@ files:
         # security.tirith_enabled downloads a scanner binary from GitHub at
         # boot, and the scanner blocks a command it cannot resolve, such as
         # "$REEF_HARNESS_WRAPPER" evolve; title_generation is one extra model
-        # call per episode; the memory nudge spawns a background review
-        # agent; the snapshot is the trajectory the reader parses.
+        # call per episode; the memory and skill nudges spawn a background
+        # review agent, which makes model calls and writes skills into the
+        # tree; the curator archives and backs up skills in the tree; the
+        # snapshot is the trajectory the reader parses.
         auxiliary:
           title_generation:
             enabled: false
+        curator:
+          enabled: false
         memory:
           nudge_interval: 0
         security:
@@ -54,6 +63,7 @@ files:
         # whose home is a temp copy. hermes skips an entry that names no
         # directory, such as the second one where REEF_HARNESS_DEST is unset.
         skills:
+          creation_nudge_interval: 0
           external_dirs:
             - "${HERMES_HOME}/../hermes-commands"
             - "${REEF_HARNESS_DEST}/hermes-commands"
@@ -76,7 +86,12 @@ trajectory:
 cleanup_whitelist:
   - "hermes/state.db"
   - "hermes/state.db*"
+  # hermes records each provider key it finds in its environment in the
+  # credential pool, as a fingerprint and never the key, and locks the file.
+  - "hermes/auth.json"
   - "hermes/auth.lock"
+  # hermes writes its default rules file when the tree has no rules.
+  - "hermes/SOUL.md"
   - "hermes/skills/.bundled_manifest"
   - "hermes/logs/**"
   - "hermes/cache/**"

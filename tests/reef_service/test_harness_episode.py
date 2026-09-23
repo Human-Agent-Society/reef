@@ -181,6 +181,35 @@ def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_pat
     assert result.residue == ()
 
 
+HERMES_FAKE = """\
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+home = Path(os.environ["HERMES_HOME"])
+snapshot = {"session_id": "s1", "model": "m", "messages": [{"role": "user", "content": sys.argv[-1]}]}
+(home / "sessions").mkdir()
+(home / "sessions" / "session_s1.json").write_text(json.dumps(snapshot))
+# Against an OpenRouter endpoint, hermes records the key it finds in its environment in the credential pool.
+(home / "auth.lock").write_text("")
+pool = {"openai-api": [{"source": "env:OPENAI_API_KEY", "secret_fingerprint": "sha256:0123456789abcdef"}]}
+(home / "auth.json").write_text(json.dumps({"version": 1, "providers": {}, "credential_pool": pool}))
+(home / "logs").mkdir()
+(home / "logs" / "agent.log").write_text("started\\n")
+if not (home / "SOUL.md").exists():
+    (home / "SOUL.md").write_text("You are Hermes Agent.\\n")  # the default rules file, for a tree with no rules
+print("done")
+"""
+
+
+def test_hermes_episode_whitelists_what_hermes_writes_at_boot(tmp_path: Path) -> None:
+    files = render_composition([("skill", {"name": "notes", "text": "Keep notes."})], get_adapter("hermes"))
+    result = run_episode(get_adapter("hermes"), files, "list files", binary=fake_binary(tmp_path, HERMES_FAKE))
+    assert result.exit_code == 0
+    assert [event["type"] for event in result.trajectory] == ["session", "message"]
+    assert result.residue == ()  # the credential pool, its lock, the default rules file and the log
+
+
 def test_missing_binary_raises_episode_error(tmp_path: Path) -> None:
     with pytest.raises(EpisodeError, match="not found"):
         run_episode(get_adapter("pi"), pi_files(), "x", binary=str(tmp_path / "no-such-binary"))

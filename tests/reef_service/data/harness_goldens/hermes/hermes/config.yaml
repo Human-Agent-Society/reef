@@ -3,6 +3,8 @@ agent:
 auxiliary:
   title_generation:
     enabled: false
+curator:
+  enabled: false
 memory:
   nudge_interval: 0
 plugins:
@@ -17,6 +19,7 @@ security:
 sessions:
   write_json_snapshots: true
 skills:
+  creation_nudge_interval: 0
   external_dirs:
   - ${HERMES_HOME}/../hermes-commands
   - ${REEF_HARNESS_DEST}/hermes-commands

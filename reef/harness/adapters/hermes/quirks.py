@@ -10,8 +10,9 @@ in ``config.yaml`` (``plugins.enabled`` and the ``tools.override``
 capability), since hermes discovers plugins but loads none without consent.
 
 The traps a mutated config could reopen: the scanner download, the session
-title call, and the snapshot the reader parses. A composition that flips any
-of them is rejected at render, the same gate that rejects an invalid node.
+title call, the background review and the curator that write skills into the
+tree, and the snapshot the reader parses. A composition that flips any of
+them is rejected at render, the same gate that rejects an invalid node.
 """
 
 from __future__ import annotations
@@ -76,6 +77,15 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
         raise RenderError(
             "hermes composition must keep auxiliary.title_generation.enabled false for benchmark episodes"
         )
+    memory_nudge_interval = (config.get("memory") or {}).get("nudge_interval")
+    skill_nudge_interval = (config.get("skills") or {}).get("creation_nudge_interval")
+    if memory_nudge_interval != 0 or skill_nudge_interval != 0:
+        raise RenderError(
+            "hermes composition must keep memory.nudge_interval and skills.creation_nudge_interval 0, "
+            "so no background review makes model calls or writes skills"
+        )
+    if (config.get("curator") or {}).get("enabled") is not False:
+        raise RenderError("hermes composition must keep curator.enabled false, so the curator leaves the skills alone")
     if (config.get("sessions") or {}).get("write_json_snapshots") is not True:
         raise RenderError(
             "hermes composition must keep sessions.write_json_snapshots true so Reef can read the trajectory"

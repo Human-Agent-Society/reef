@@ -98,11 +98,15 @@ from the merged JSON object; the defaults keep an episode hermetic and single
 request: the terminal scanner download off (``security.tirith_enabled``; the
 scanner would also block a command it cannot resolve, such as
 ``"$REEF_HARNESS_WRAPPER" evolve``), the session title call off
-(``auxiliary.title_generation.enabled``), the memory nudge that spawns a
-background review off (``memory.nudge_interval: 0``), and the per session
-JSON snapshot on (``sessions.write_json_snapshots``), which is the trajectory
-the ``hermes-session-json`` reader parses. A composition that
-flips any of them is refused at render. The quirks also write the
+(``auxiliary.title_generation.enabled``), the memory and skill nudges that
+spawn a background review off (``memory.nudge_interval: 0`` and
+``skills.creation_nudge_interval: 0``; the review makes model calls and
+writes skills into the tree), the curator off (``curator.enabled: false``;
+it archives and backs up the skills in the tree, which in a ``reef-hermes``
+session is the installed release), and the per session JSON snapshot on
+(``sessions.write_json_snapshots``), which is the trajectory the
+``hermes-session-json`` reader parses. A composition that flips any of them
+is refused at render. The quirks also write the
 ``.no-bundled-skills`` marker, so an episode carries the tree's skills and not
 hermes's bundled catalog. Rules render to ``SOUL.md``, the one home level
 rules file hermes reads (``AGENTS.md`` is project scoped, read from the
@@ -120,6 +124,9 @@ behind hermes's ``tool_search`` and ``tool_call`` discovery surface.
 (``${HERMES_HOME}/../hermes-commands``) for an episode, and under the install
 root (``${REEF_HARNESS_DEST}/hermes-commands``) for a ``reef-hermes`` session,
 whose home is a temp copy; hermes skips an entry that names no directory.
+A ``reef-hermes`` session keeps ``state.db``, the session snapshots under
+``sessions/`` and the logs under ``logs/`` in the installed tree, so a later
+session finds what an earlier one wrote.
 The model binding is a custom provider with a literal key in ``config.yaml``;
 only the ``openai`` dialect is bound. hermes's own default approval policy
 runs tools inside the working directory with no prompt and refuses a command

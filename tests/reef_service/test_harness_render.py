@@ -285,8 +285,11 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
     assert config["security"] == {"tirith_enabled": False} and "approval" not in config
     assert config["auxiliary"] == {"title_generation": {"enabled": False}}
     assert config["memory"] == {"nudge_interval": 0} and config["sessions"] == {"write_json_snapshots": True}
+    # No background review or curator writes skills into the tree: in a reef-hermes session it is the release.
+    assert config["curator"] == {"enabled": False}
     assert config["skills"] == {
-        "external_dirs": ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"]
+        "creation_nudge_interval": 0,
+        "external_dirs": ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"],
     }
     # A rendered plugin is enabled and granted, and gets its manifest.
     assert config["plugins"] == {
@@ -318,6 +321,11 @@ def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:
         render_composition([("config", {"data": {"auxiliary": {"title_generation": {"enabled": True}}}})], descriptor)
     with pytest.raises(RenderError, match="write_json_snapshots true"):
         render_composition([("config", {"data": {"sessions": {"write_json_snapshots": False}}})], descriptor)
+    for review in ({"memory": {"nudge_interval": 10}}, {"skills": {"creation_nudge_interval": 10}}):
+        with pytest.raises(RenderError, match=r"skills\.creation_nudge_interval 0"):
+            render_composition([("config", {"data": review})], descriptor)
+    with pytest.raises(RenderError, match=r"curator\.enabled false"):
+        render_composition([("config", {"data": {"curator": {"enabled": True}}})], descriptor)
 
 
 NATIVE_TOOL = (
@@ -405,7 +413,11 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
         "pi": (ClientState("pi-agent/sessions", "directory"),),
         "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
         "codex": (ClientState("codex/sessions", "directory"),),
-        "hermes": (ClientState("hermes/state.db", "sqlite"),),
+        "hermes": (
+            ClientState("hermes/state.db", "sqlite"),
+            ClientState("hermes/sessions", "directory"),
+            ClientState("hermes/logs", "directory"),
+        ),
         "dsh": (
             ClientState("dsh/.credentials.yaml", "file"),
             ClientState("dsh/settings.yaml", "file"),

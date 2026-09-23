@@ -500,6 +500,47 @@ def test_hermes_state_database_outlives_the_run_so_a_later_run_can_resume_it(tmp
 
 
 @pytest.mark.unit
+def test_hermes_session_snapshots_and_logs_outlive_the_run(tmp_path) -> None:
+    """hermes writes a session snapshot under sessions/ and its log under logs/ in the home, which a run points at
+    a temp copy; a second run sees what the first wrote, and both stay in the installed tree."""
+    compose = tmp_path / "compose"
+    compose.mkdir()
+    (compose / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
+    )
+    binary = tmp_path / "fake-hermes"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import os, sys
+            from pathlib import Path
+            home = Path(os.environ["HERMES_HOME"])
+            found = sorted(p.name for p in (home / "sessions").glob("*.json"))
+            logged = (home / "logs" / "agent.log").read_text().split() if (home / "logs" / "agent.log").exists() else []
+            open({str(seen)!r}, "a").write(f"{{found}} {{logged}}\\n")
+            (home / "sessions").mkdir(exist_ok=True)
+            (home / "sessions" / f"session_{{sys.argv[-1]}}.json").write_text("{{}}")
+            (home / "logs").mkdir(exist_ok=True)
+            with open(home / "logs" / "agent.log", "a") as log:
+                log.write(sys.argv[-1] + "\\n")
+            """
+        )
+    )
+    binary.chmod(0o755)
+
+    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["-q", prompt])
+
+    assert seen.read_text().splitlines() == ["[] []", "['session_first.json'] ['first']"]
+    assert sorted(p.name for p in (compose / "sessions").iterdir()) == ["session_first.json", "session_second.json"]
+    assert (compose / "logs" / "agent.log").read_text().split() == ["first", "second"]
+
+
+@pytest.mark.unit
 def test_hermes_finds_the_agent_commands_in_a_session_and_in_an_episode(tmp_path) -> None:
     """A reef-hermes session's home is a temp copy, so HERMES_HOME/.. is not the install root; the commands
     root is still found there, through REEF_HARNESS_DEST, and an episode home still finds it beside itself."""
