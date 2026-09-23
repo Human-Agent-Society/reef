@@ -122,3 +122,19 @@ assert recipe.model_binding().model == 'test-model'
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_the_profile_seeds_the_shipped_entries_only_on_the_adapter_that_ships_them() -> None:
+    """dsh and hermes take requests through reef-<adapter> evolve; the pi entries would refuse them at startup."""
+    for adapter in ("dsh", "hermes"):
+        built = ReefineRecipe.from_environment({}, config={"evolution": {"adapter": adapter, "tasks": ["[health] x"]}})
+        assert isinstance(built, ReefineRecipe)
+        assert built.adapter == adapter and built.seed == () and built.propose.adapter == adapter
+    # Asking for the entries by name still refuses an adapter that ships none.
+    with pytest.raises(RecipeConfigError, match="ships no requests extension"):
+        ReefineRecipe.from_environment(
+            {}, config={"evolution": {"adapter": "dsh", "tasks": ["[health] x"], "requests": True}}
+        )
+    pi = ReefineRecipe.from_environment({}, config={"evolution": {"tasks": ["[health] x"]}})
+    assert isinstance(pi, ReefineRecipe)
+    assert [entry["id"] for entry in pi.seed] == ["reef-version-check", "reef-requests", "reef-pi-extension-api"]

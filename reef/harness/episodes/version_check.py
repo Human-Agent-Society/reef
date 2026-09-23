@@ -21,6 +21,11 @@ _ASSETS = {
 }
 
 
+def ships_version_check(adapter: str) -> bool:
+    """Whether the adapter ships the update notice extension."""
+    return adapter in _ASSETS
+
+
 def version_check_entry(adapter: str) -> dict[str, Any]:
     """The seed entry options for the adapter's shipped update notice."""
     asset = _ASSETS.get(adapter)
@@ -33,4 +38,4 @@ def version_check_entry(adapter: str) -> dict[str, Any]:
     }
 
 
-__all__ = ["VERSION_CHECK_ENTRY_ID", "version_check_entry"]
+__all__ = ["VERSION_CHECK_ENTRY_ID", "ships_version_check", "version_check_entry"]

@@ -9,16 +9,21 @@ recognizes the profile's health task.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.harness.episodes.requests import ships_requests
+from reef.harness.episodes.version_check import ships_version_check
 from reef.recipe.config_fields import config_field
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine.agent import AgentProposer
 from reef.recipe.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
 from reef.runtime.interfaces import MultimodalRelay
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -50,8 +55,9 @@ class ReefineRecipe(CordisRecipe):
     def __post_init__(self) -> None:
         super().__post_init__()
         if isinstance(self.propose, AgentProposer):
-            # The agent's trials reach the same provider the harness will at run time.
-            object.__setattr__(self, "propose", AgentProposer(self.multimodal_provider))
+            # The agent's trials reach the same provider the harness will at run time; the text proposer
+            # writes for the adapter the deployment serves.
+            object.__setattr__(self, "propose", AgentProposer(self.multimodal_provider, adapter=self.adapter))
 
     @property
     def multimodal_provider(self) -> MultimodalProvider | None:
@@ -73,13 +79,22 @@ class ReefineRecipe(CordisRecipe):
         evolution = settings.get("evolution", {})
         if not isinstance(evolution, Mapping):
             raise RecipeConfigError("reefine requires an 'evolution' config mapping")
+        adapter = str(evolution.get("adapter", "pi"))
+        shipped = ships_requests(adapter) and ships_version_check(adapter)
+        if not shipped and "requests" not in evolution and "version_check" not in evolution:
+            logger.info(
+                "adapter %r ships no /reefine command and no update notice; requests come through reef-%s evolve",
+                adapter,
+                adapter,
+            )
         defaults = {
             # A request goes to the agent proposer where the host can jail it; otherwise to the text proposer.
             "propose": "reef.recipe.reefine.agent:propose",
             "proposer_agent": {},
             "evaluate": "reef.recipe.reefine.evolution:evaluate",
-            "requests": True,
-            "version_check": True,
+            # The /reefine command and the update notice are entries the adapter ships; pi ships both.
+            "requests": ships_requests(adapter),
+            "version_check": ships_version_check(adapter),
             "review_kinds": ["code_extension"],
             "selection": "floor",
         }

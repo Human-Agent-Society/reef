@@ -49,6 +49,36 @@ REQUEST_KINDS = {
     "code_extension": ("name", "code"),
 }
 
+#: The one adapter whose extension API this proposer knows; the others take rules, skills and commands from it.
+EXTENSION_ADAPTER = "pi"
+
+
+def request_kinds(adapter: str) -> tuple[str, ...]:
+    """The kinds a request may write on ``adapter``: every kind on pi, everything but a code extension elsewhere."""
+    if adapter == EXTENSION_ADAPTER:
+        return tuple(REQUEST_KINDS)
+    return tuple(kind for kind in REQUEST_KINDS if kind != "code_extension")
+
+
+#: One prompt line per kind a request may write, with the kind's config fields.
+KIND_LINES = {
+    "skill": (
+        '- skill: {"name": <id>, "text": <SKILL.md>}; the text must start with YAML frontmatter '
+        "(--- name: <id> / description: <one line> ---) followed by the skill's markdown\n"
+    ),
+    "rules": '- rules: {"text": <markdown appended to AGENTS.md>}\n',
+    "agent_command": '- agent_command: {"name": <id>, "text": <the prompt template of the /<id> command>}\n',
+    "code_extension": '- code_extension: {"name": <id>, "code": <a complete pi extension module>}\n',
+}
+
+#: What the prompt says about extensions on an adapter that takes none from this proposer.
+NO_EXTENSIONS_SECTION = (
+    "This harness is {adapter}, whose extension API this step does not know: write no code_extension. "
+    "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt, which the harness "
+    "offers as the /<id> command. When these kinds cannot deliver the behavior the request asks for, write "
+    "the design saying why and no entry. "
+)
+
 #: The skill entry that carries the pi extension API reference; its text goes into a request prompt when present.
 API_SKILL_NAME = "reef-pi-extension-api"
 
@@ -109,11 +139,43 @@ REQUEST_PROMPT = (
     "behavior is not an answer.\n\n"
     "Current harness entries (id, kind, and the start of each body):\n{entries}\n\n"
     "You may write entries of these kinds, with exactly these config fields:\n"
-    '- skill: {{"name": <id>, "text": <SKILL.md>}}; the text must start with YAML frontmatter '
-    "(--- name: <id> / description: <one line> ---) followed by the skill's markdown\n"
-    '- rules: {{"text": <markdown appended to AGENTS.md>}}\n'
-    '- agent_command: {{"name": <id>, "text": <the prompt template of the /<id> command>}}\n'
-    '- code_extension: {{"name": <id>, "code": <a complete pi extension module>}}\n'
+    "{kinds}"
+    "{extensions}"
+    "The user may be on macOS, Linux or Windows under WSL 2: branch on process.platform, "
+    "prefer commands that exist on all three, and name anything platform specific the user "
+    "must set up in requires. "
+    "Never touch these reserved entries: {reserved}.\n\n"
+    "{plan}"
+    "{api}"
+    "Respond with a JSON array and nothing else. Its first object is your design, points 1 to 4 in a few "
+    'sentences, ending with the How to use paragraph: {{"design": "<the design>"}}\n'
+    "Then one object per entry, each of the form:\n"
+    '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}} (the kind goes under the key name)\n'
+    "Reuse an existing entry's id to update it; use a new lowercase id to add one. "
+    "The id of a named kind must equal its config name. Give every entry you write an id of its own, "
+    "a lowercase name, a rules entry too.\n"
+    "When the change needs something only the user can provide or set up on their machine, end the array "
+    'with one more object, {{"requires": [...]}}, one item per need. Each item carries a prompt: one '
+    "sentence, under 200 characters, that reef-{wrapper} setup shows when it asks the user for the value or the "
+    "permission, once, at install time; the extension itself never asks. The kinds, each with an example:\n"
+    "- env, a value the user enters, which the extension reads at run time from process.env.NAME; name is "
+    "the variable name, there is no check, and the value is never written into the tree: "
+    '{{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}}\n'
+    "- permission, an OS permission the user grants; check is a shell command that exits 0 once granted: "
+    '{{"name": "messages-automation", "kind": "permission", "check": "osascript -e \'tell application '
+    '\\"Messages\\" to get name\'", "prompt": "Allow the agent to control Messages when macOS asks"}}\n'
+    "- service, an account or endpoint the user connects; check is a shell command that exits 0 once "
+    'connected: {{"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "Sign in to '
+    'the GitHub CLI"}}\n'
+    "- binary, a program the user installs, which an entry then spawns; name is the program looked for on "
+    "PATH, and check is optional, a shell command that exits 0 when the program is usable: "
+    '{{"name": "pdftotext", "kind": "binary", "prompt": "Install pdftotext: brew install poppler on macOS, '
+    'apt install poppler-utils on Linux"}}\n'
+    "Omit the object when the change needs nothing."
+)
+
+#: What the prompt says about extensions on pi: when to write one and how it must behave.
+EXTENSIONS_SECTION = (
     "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt and a "
     "code_extension only when the request needs behavior a prompt cannot give. "
     "Every new slash command must appear in the native / autocomplete dropdown alongside built-in commands, "
@@ -133,37 +195,6 @@ REQUEST_PROMPT = (
     "command, is a requires item with a check so reef-pi setup verifies it on the user's machine; branch on "
     "process.platform, and when no command is available at run time say so through ctx.ui rather than falling "
     "through to silence. "
-    "The user may be on macOS, Linux or Windows under WSL 2: branch on process.platform, "
-    "prefer commands that exist on all three, and name anything platform specific the user "
-    "must set up in requires. "
-    "Never touch these reserved entries: {reserved}.\n\n"
-    "{plan}"
-    "{api}"
-    "Respond with a JSON array and nothing else. Its first object is your design, points 1 to 4 in a few "
-    'sentences, ending with the How to use paragraph: {{"design": "<the design>"}}\n'
-    "Then one object per entry, each of the form:\n"
-    '{{"id": "<entry id>", "name": "<kind>", "config": {{...}}}} (the kind goes under the key name)\n'
-    "Reuse an existing entry's id to update it; use a new lowercase id to add one. "
-    "The id of a named kind must equal its config name. Give every entry you write an id of its own, "
-    "a lowercase name, a rules entry too.\n"
-    "When the change needs something only the user can provide or set up on their machine, end the array "
-    'with one more object, {{"requires": [...]}}, one item per need. Each item carries a prompt: one '
-    "sentence, under 200 characters, that reef-pi setup shows when it asks the user for the value or the "
-    "permission, once, at install time; the extension itself never asks. The kinds, each with an example:\n"
-    "- env, a value the user enters, which the extension reads at run time from process.env.NAME; name is "
-    "the variable name, there is no check, and the value is never written into the tree: "
-    '{{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}}\n'
-    "- permission, an OS permission the user grants; check is a shell command that exits 0 once granted: "
-    '{{"name": "messages-automation", "kind": "permission", "check": "osascript -e \'tell application '
-    '\\"Messages\\" to get name\'", "prompt": "Allow the agent to control Messages when macOS asks"}}\n'
-    "- service, an account or endpoint the user connects; check is a shell command that exits 0 once "
-    'connected: {{"name": "github-cli", "kind": "service", "check": "gh auth status", "prompt": "Sign in to '
-    'the GitHub CLI"}}\n'
-    "- binary, a program the user installs, which an entry then spawns; name is the program looked for on "
-    "PATH, and check is optional, a shell command that exits 0 when the program is usable: "
-    '{{"name": "pdftotext", "kind": "binary", "prompt": "Install pdftotext: brew install poppler on macOS, '
-    'apt install poppler-utils on Linux"}}\n'
-    "Omit the object when the change needs nothing."
 )
 
 #: The prompt of the review call: the model reads its own entries against the request and says what they cover.
@@ -258,6 +289,7 @@ def propose(
     *,
     requests: Sequence[Mapping[str, Any]] = (),
     entries: Sequence[Mapping[str, Any]] = (),
+    adapter: str = EXTENSION_ADAPTER,
 ) -> Mutation | StepProposal | None:
     """Ask the served model for one skill improvement over its own failures, or for the change a request names.
 
@@ -266,7 +298,8 @@ def propose(
     them over, and ``samples`` the batched failing requests. ``requests`` is
     what the person asked for through ``POST /reef/train`` in ``manual`` or
     ``hybrid`` mode, one per step; when one is present the model designs the
-    change, writes mutations of any kind the pi adapter renders and reviews
+    change, writes mutations of the kinds ``adapter`` takes from this
+    proposer (every kind on pi, no code extension elsewhere) and reviews
     them, with the failures beside it as context (``hybrid`` hands over what
     an automatic batch would take next, ``manual`` none), and the step gets
     a :class:`StepProposal` whose notes carry the design and the review;
@@ -277,7 +310,7 @@ def propose(
     the session's result line carry the reason.
     """
     if requests:
-        return _answer_request(nodes, requests[0], samples, models, entries)
+        return _answer_request(nodes, requests[0], samples, models, entries, adapter)
     if not samples:
         return None
 
@@ -323,6 +356,7 @@ def _answer_request(
     samples: Sequence[TrajectoryItem],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
+    adapter: str = EXTENSION_ADAPTER,
 ) -> StepProposal | None:
     """The served model's answer to one request: mutations of any of ``REQUEST_KINDS``, reserved ids dropped,
     with the notes the step records: the design written first, the review of the entries, the requires
@@ -341,7 +375,8 @@ def _answer_request(
     A ``{"requires": [...]}`` object beside the kept entries is what the
     change needs from the user's machine; its items are appended to the
     request mapping's ``requires``, where the backend reads them back."""
-    prompt = _request_prompt(nodes, request, samples, models, entries)
+    prompt = _request_prompt(nodes, request, samples, models, entries, adapter)
+    kinds = request_kinds(adapter)
     own = [dict(item) for item in request.get("requires") or () if isinstance(item, Mapping)]
     kept: tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | None = None
     undelivered: StepProposal | None = None
@@ -349,7 +384,7 @@ def _answer_request(
     attempt = 0
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
-        answer = _answer_once(prompt + retry, request, models, nodes, entries, own)
+        answer = _answer_once(prompt + retry, request, models, nodes, entries, own, kinds)
         if isinstance(answer, StepProposal):
             # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
             # earlier substitute says more about the request than the failed call does.
@@ -392,6 +427,7 @@ def _answer_once(
     nodes: Sequence[tuple[str, Any]],
     entries: Sequence[Mapping[str, Any]],
     own: Sequence[Mapping[str, Any]],
+    kinds: Sequence[str] = tuple(REQUEST_KINDS),
 ) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal:
     """One answer and its review: the mutations, the requires items the reply added and the notes, or a
     proposal without mutations whose notes say why there is nothing to apply."""
@@ -401,7 +437,7 @@ def _answer_once(
     reply, failure = _ask(models, prompt, max_tokens=_max_tokens(65536), timeout_s=_timeout_s(600.0))
     if reply is None:
         return StepProposal((), {"failure": failure})
-    proposals = _parse_proposal(reply, kinds=tuple(REQUEST_KINDS))
+    proposals = _parse_proposal(reply, kinds=tuple(kinds))
     if proposals is None:
         return _nothing_to_apply(reply, "the reply holds no usable entry")
     mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
@@ -476,6 +512,7 @@ def _request_prompt(
     samples: Sequence[TrajectoryItem],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
+    adapter: str = EXTENSION_ADAPTER,
 ) -> str:
     """The request prompt: the request fenced as data, the failures beside it when the step handed any, every
     entry of the tree with its id, the steps the plan call found need a tool, the reserved ids and the extension
@@ -495,9 +532,15 @@ def _request_prompt(
     entries_text = json.dumps(views, indent=2)
     # The plan call first: the steps the harness cannot perform get a tool written beside their rule.
     tool_steps = _tool_steps(models, request_text, entries_text)
+    kinds = request_kinds(adapter)
     return REQUEST_PROMPT.format(
         request=request_text,
         machine=client_text(request),
+        kinds="".join(KIND_LINES[kind] for kind in kinds),
+        extensions=(
+            EXTENSIONS_SECTION if "code_extension" in kinds else NO_EXTENSIONS_SECTION.format(adapter=adapter)
+        ),
+        wrapper=adapter,
         failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
         entries=entries_text,
         reserved=", ".join(sorted(RESERVED_ENTRY_IDS)),

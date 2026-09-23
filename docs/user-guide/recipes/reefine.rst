@@ -121,6 +121,19 @@ Behavior and configuration
   hardcodes it, and its review lists a value the extension asks for or
   stores itself as uncovered.
 
+Adapters other than pi
+----------------------
+
+``evolution.adapter`` runs the profile on any bundled adapter. The
+``/reefine`` command and the update notice are entries pi ships, so on
+``dsh`` or ``hermes`` the profile seeds neither and a request goes through
+the wrapper: ``reef-dsh evolve "<text>" --wait``; the same ``requests`` and
+``version_check`` settings, set by hand, refuse an adapter that ships none.
+The agent proposer runs on pi alone; on another adapter the served model
+answers a request with rules, skills and commands and writes no
+``code_extension``, since it knows pi's extension API and no other. Its
+design says when the request needs behavior those kinds cannot give.
+
 The agent proposer
 ------------------
 

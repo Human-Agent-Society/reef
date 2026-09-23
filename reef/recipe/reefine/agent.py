@@ -493,10 +493,14 @@ class AgentProposer(Proposer):
     ``provider`` is the deployment's multimodal provider, which the agent's
     trials reach for image, speech, embedding and decision calls; the recipe
     that serves this proposer hands it over, so the step never sees it.
+    ``adapter`` names the harness the deployment serves: the agent runs for
+    pi alone, and the text proposer writes the kinds the adapter takes from
+    it.
     """
 
-    def __init__(self, provider: MultimodalProvider | None = None) -> None:
+    def __init__(self, provider: MultimodalProvider | None = None, adapter: str = "pi") -> None:
         self.provider = provider
+        self.adapter = adapter
 
     def __call__(
         self,
@@ -513,7 +517,8 @@ class AgentProposer(Proposer):
     ) -> Mutation | StepProposal | None:
         # The text proposer reads none of manifest, rejected or sources; they are the contract's, unused here.
         if not requests or agent_host is None or agent_host.descriptor.name != "pi":
-            return evolution.propose(nodes, samples, models, requests=requests, entries=entries)
+            adapter = self.adapter if agent_host is None else agent_host.descriptor.name
+            return evolution.propose(nodes, samples, models, requests=requests, entries=entries, adapter=adapter)
         return answer_with_agent(nodes, requests[0], samples, models, entries, agent_host, self.provider)
 
 

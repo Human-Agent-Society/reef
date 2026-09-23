@@ -34,6 +34,11 @@ def _read(asset: Path, adapter: str) -> str:
         raise DescriptorError(f"adapter {adapter!r} requests asset {asset.name} cannot be read: {exc}") from exc
 
 
+def ships_requests(adapter: str) -> bool:
+    """Whether the adapter ships the requests extension and its API skill."""
+    return adapter in _ASSETS
+
+
 def request_entries(adapter: str) -> tuple[dict[str, Any], dict[str, Any]]:
     """The seed entry options for the adapter's shipped harness requests extension and its skill, in seed order."""
     assets = _ASSETS.get(adapter)
@@ -54,4 +59,4 @@ def request_entries(adapter: str) -> tuple[dict[str, Any], dict[str, Any]]:
     )
 
 
-__all__ = ["REQUESTS_ENTRY_ID", "REQUESTS_SKILL_ID", "request_entries"]
+__all__ = ["REQUESTS_ENTRY_ID", "REQUESTS_SKILL_ID", "request_entries", "ships_requests"]
