@@ -32,6 +32,7 @@ from reef.train.types import TrainingBatch, trajectories
 for _cookbook_package in (
     "reef.train.cordis_backend",
     "recipes.openclawrl",
+    "recipes.ppo_rlhf",
     "recipes.sao",
     "recipes.tttd",
 ):
