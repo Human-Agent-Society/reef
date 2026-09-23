@@ -5,9 +5,12 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import io
+import json
 import runpy
 import sys
 import tomllib
+import urllib.request
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
@@ -169,6 +172,15 @@ def test_reef_eval_entrypoint_dispatches_the_documented_workload(
 
     if task_name is not None:
         monkeypatch.setenv("TTTD_TASK", task_name)
+
+    if example == "sao":
+        # The entrypoint waits for training after each mocked rollout; keep that
+        # query local too, regardless of what is listening on the example port.
+        def _training_releases(request, timeout):
+            assert request.full_url.endswith("/reef/scenarios/sao-smoke/releases")
+            return io.BytesIO(json.dumps({"releases": [{"operation": "training"}] * (len(calls) * 6)}).encode())
+
+        monkeypatch.setattr(urllib.request, "urlopen", _training_releases)
 
     runpy.run_path(str(EXAMPLE_DIRS[example] / "run.py"))
 
