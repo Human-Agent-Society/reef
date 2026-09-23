@@ -21,6 +21,7 @@ import pytest
 import yaml
 
 from reef.core.training_request import CLIENT_COMMANDS
+from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import (
     harness,
     main,
@@ -2610,10 +2611,10 @@ def test_claude_session_runs_with_the_autoupdater_off_unless_the_shell_sets_it(t
 
 
 @pytest.mark.unit
-def test_claude_session_keeps_the_link_handler_off_when_claude_code_skips_the_trees_settings(tmp_path) -> None:
-    """Claude Code skips a whole settings.json that fails its schema, so the tree's
-    ``disableDeepLinkRegistration`` cannot keep the pinned binary off the person's claude-cli:// handler; the wrapper
-    passes it as ``--settings`` ahead of the person's arguments, and a ``--settings`` the person gives comes last."""
+def test_claude_session_gets_the_link_handler_setting_ahead_of_the_persons_arguments(tmp_path) -> None:
+    """The claude binary gets ``--settings`` with ``disableDeepLinkRegistration`` ahead of the person's arguments,
+    whatever the tree's settings.json holds (here a value Claude Code rejects), and a ``--settings`` the person gives
+    comes after it."""
     compose = tmp_path / "claude-tree" / "claude"
     compose.mkdir(parents=True)
     rejected = {"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}, "cleanupPeriodDays": 0}
@@ -2621,10 +2622,89 @@ def test_claude_session_keeps_the_link_handler_off_when_claude_code_skips_the_tr
     binary = _make_env_dump_binary(tmp_path)
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
     ours = ["--settings", '{"disableDeepLinkRegistration":"disable"}']
-    for args in (["-p", "hi"], ["--settings", "mine.json", "-p", "hi"]):
+    for args in (["-p", "hi"], ["--settings", "mine.json", "-p", "hi"], ["mcp", "list"]):
         with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
             run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", args)
         assert json.loads((tmp_path / "argv.json").read_text()) == [*ours, *args]
+
+
+@pytest.mark.unit
+def test_claude_version_flags_reach_the_binary_with_nothing_ahead(tmp_path) -> None:
+    """Claude Code prints its version early only when nothing is ahead of the flag (``-V`` is an unknown option
+    after ``--settings``), so a command line that starts with a version flag gets no ``--settings``."""
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    (compose / "settings.json").write_text(json.dumps({"env": {"ANTHROPIC_BASE_URL": "http://127.0.0.1:1"}}) + "\n")
+    binary = _make_env_dump_binary(tmp_path)
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    for args in (["--version"], ["-v"], ["-V"], ["-v", "--verbose"]):
+        with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "test-scenario", "claude", "CLAUDE_CONFIG_DIR", args)
+        assert json.loads((tmp_path / "argv.json").read_text()) == args
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("argument", ["--update", "--upgrade", "upgrade"])
+def test_main_answers_claudes_own_updater_and_never_runs_the_binary(tmp_path, argument: str) -> None:
+    """Claude Code's updater would replace the pinned binary, so reef-claude names its own update instead."""
+    ran: list[list[str]] = []
+    env = {**_main_env(tmp_path), "REEF_HARNESS_ADAPTER": "claude", "REEF_HARNESS_ENV_VAR": "CLAUDE_CONFIG_DIR"}
+    with (
+        patch.dict(os.environ, env),
+        patch("reef.harness.client.wrapper.run_agent", lambda *args: ran.append(args[-1])),
+        patch("sys.argv", ["reef-claude", argument]),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main()
+    version = get_adapter("claude").install.version
+    assert exited.value.code == (
+        f"reef-claude: reef pins claude {version} and does not run claude's own updater; "
+        "reef-claude update installs the served release"
+    )
+    assert ran == []
+
+
+@pytest.mark.unit
+def test_main_runs_update_as_reefs_install_and_passes_upgrade_on_for_an_adapter_without_updater_args(
+    tmp_path,
+) -> None:
+    """``update`` is the wrapper's own install for every adapter; ``upgrade`` is answered only where the descriptor
+    names it."""
+    installed: list[str] = []
+    ran: list[list[str]] = []
+    claude = {**_main_env(tmp_path), "REEF_HARNESS_ADAPTER": "claude", "REEF_HARNESS_ENV_VAR": "CLAUDE_CONFIG_DIR"}
+    with (
+        patch(
+            "reef.harness.client.wrapper.update",
+            lambda scenario, adapter, *args, **kwargs: installed.append(adapter) or 0,
+        ),
+        patch("reef.harness.client.wrapper.run_agent", lambda *args: ran.append(args[-1])),
+    ):
+        with patch.dict(os.environ, claude), patch("sys.argv", ["reef-claude", "update"]), pytest.raises(SystemExit):
+            main()
+        with patch.dict(os.environ, _main_env(tmp_path)), patch("sys.argv", ["reef-pi", "upgrade"]):
+            main()
+    assert installed == ["claude"]
+    assert ran == [["upgrade"]]
+
+
+@pytest.mark.unit
+def test_claude_help_names_the_settings_ahead_of_the_arguments_and_the_updater_it_answers(tmp_path, capsys) -> None:
+    env = {**_main_env(tmp_path), "REEF_HARNESS_ADAPTER": "claude", "REEF_HARNESS_ENV_VAR": "CLAUDE_CONFIG_DIR"}
+    with (
+        patch.dict(os.environ, env),
+        patch("reef.harness.client.wrapper.run_agent", lambda *args: None),
+        patch("sys.argv", ["reef-claude", "help"]),
+    ):
+        main()
+    out = capsys.readouterr().out.splitlines()
+    version = get_adapter("claude").install.version
+    assert out[-2:] == [
+        f"reef-claude upgrade | --update | --upgrade: reef pins claude {version} and does not run claude's own "
+        "updater; reef-claude update installs the served release.",
+        'Anything else runs claude with --settings \'{"disableDeepLinkRegistration":"disable"}\' ahead of the same '
+        "arguments, unless the first is one of --version, -v, -V; --help and -h print its help after this.",
+    ]
 
 
 @pytest.mark.unit

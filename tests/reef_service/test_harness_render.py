@@ -410,13 +410,22 @@ def test_claude_descriptor_turns_deep_link_registration_off_on_the_command_line(
     assert get_adapter("claude").client_args == ("--settings", '{"disableDeepLinkRegistration":"disable"}')
 
 
+def test_claude_descriptor_names_its_version_flags_and_its_own_updater() -> None:
+    """A version flag gets nothing ahead of it, and Claude Code's own updater is answered by reef-claude."""
+    descriptor = get_adapter("claude")
+    assert descriptor.client_version_args == ("--version", "-v", "-V")
+    assert descriptor.client_updater_args == ("upgrade", "--update", "--upgrade")
+    assert get_adapter("pi").client_updater_args == ()
+
+
+@pytest.mark.parametrize("key", ["client_args", "client_version_args", "client_updater_args"])
 @pytest.mark.parametrize("value", ["--settings", [1], [""]])
-def test_descriptor_client_args_is_a_list_of_strings(tmp_path, value: object) -> None:
+def test_descriptor_client_argument_lists_are_lists_of_strings(tmp_path, key: str, value: object) -> None:
     data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "claude" / "descriptor.yaml").read_text())
-    data["client_args"] = value
+    data[key] = value
     target = tmp_path / "descriptor.yaml"
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
-    with pytest.raises(DescriptorError, match="'client_args'"):
+    with pytest.raises(DescriptorError, match=f"'{key}'"):
         load_descriptor(target)
 
 

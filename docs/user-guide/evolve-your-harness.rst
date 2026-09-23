@@ -602,7 +602,10 @@ the tools on PATH, the installed release against the served head) and exits
 review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
 ``evolve``, ``page``, ``doctor``, ``setup``, ``update``; anything else
-runs pi) before pi's help. Pinning,
+runs pi) before pi's help. Reef pins Claude Code's version, so
+``reef-claude`` does not run Claude Code's own updater:
+``reef-claude upgrade``, ``--update`` and ``--upgrade`` say so and point
+at ``reef-claude update``, which installs the served release. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 

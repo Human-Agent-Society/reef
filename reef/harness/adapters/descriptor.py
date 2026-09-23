@@ -23,7 +23,10 @@ everything the shared engines need to drive one harness binary:
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
 - ``client_env`` and ``client_args`` (optional): the variables and the leading
-  arguments a ``reef-<adapter>`` run adds when a person runs the binary.
+  arguments a ``reef-<adapter>`` run adds when a person runs the binary;
+  ``client_version_args`` names the version flags that get no leading
+  arguments, and ``client_updater_args`` the binary's own update commands,
+  which the wrapper answers itself because reef pins the version.
 - ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
   keeps in the installed tree, so a later run finds them.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
@@ -200,6 +203,12 @@ class AdapterDescriptor:
     #: Arguments the ``reef-<adapter>`` wrapper puts ahead of the person's own when
     #: it runs the binary: a setting the rendered tree must not be able to undo.
     client_args: tuple[str, ...] = ()
+    #: First arguments that get no ``client_args``: the binary's version flags, which start no
+    #: session and which a binary may answer early only when nothing else is on the command line.
+    client_version_args: tuple[str, ...] = ()
+    #: First arguments that start the binary's own updater; the wrapper answers them itself and
+    #: never runs the binary, because an update would replace the version reef pins.
+    client_updater_args: tuple[str, ...] = ()
     #: Commands the binary expects on PATH at first start and otherwise fetches
     #: itself, as ``(command, package)``; the install script names the missing ones.
     client_tools: tuple[tuple[str, str], ...] = ()
@@ -285,6 +294,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     ):
         raise DescriptorError(f"{where} 'client_env' must map strings to strings")
     client_args = _str_list(data.get("client_args", []), f"{where} 'client_args'")
+    client_version_args = _str_list(data.get("client_version_args", []), f"{where} 'client_version_args'")
+    client_updater_args = _str_list(data.get("client_updater_args", []), f"{where} 'client_updater_args'")
     client_tools = _parse_client_tools(data.get("client_tools"), where)
     client_state = _parse_client_state(data.get("client_state"), where)
     finalize, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
@@ -308,6 +319,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         validate_execution=validate_execution,
         client_env=dict(client_env),
         client_args=client_args,
+        client_version_args=client_version_args,
+        client_updater_args=client_updater_args,
         client_tools=client_tools,
         client_state=client_state,
     )

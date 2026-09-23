@@ -11,9 +11,16 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
      needs to know about Reef headers.
   2. Rewrites the provider config in a temp copy of the composition to point
      the agent at the proxy instead of Reef directly.
-  3. Runs the agent binary as a subprocess.
+  3. Runs the agent binary as a subprocess, with the adapter's
+     ``client_args`` ahead of the person's arguments unless the first is one
+     of its ``client_version_args``.
   4. After the agent exits, persists the captured receipts (the
      ``x-reef-agent-record-id`` values from each response) to disk.
+
+  A first argument among the adapter's ``client_updater_args`` (for claude
+  ``upgrade``, ``--update`` and ``--upgrade``, which run Claude Code's own
+  updater) runs nothing: the wrapper says that reef pins the binary and that
+  ``update`` installs the served release, and exits 1.
 
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
@@ -161,6 +168,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -869,9 +877,11 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
+    # Ahead of the person's arguments: a binary that reads the last of a repeated flag keeps the person's.
+    # A version flag starts no session, and a binary may take it only when nothing is ahead of it.
+    leading_args = () if args and args[0] in descriptor.client_version_args else descriptor.client_args
     try:
-        # Ahead of the person's arguments: a binary that reads the last of a repeated flag keeps the person's.
-        result = subprocess.run([binary, *descriptor.client_args, *args], env=env)
+        result = subprocess.run([binary, *leading_args, *args], env=env)
     finally:
         proxy.publish_turn()
         proxy.stop()
@@ -1931,22 +1941,39 @@ def _waiting_for_review(rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Ma
     ]
 
 
+def pinned_version_line(adapter: str) -> str:
+    """What the wrapper says instead of running the binary's own updater."""
+    install = get_adapter(adapter).install
+    pinned = f"{adapter} {install.version}" if install is not None else adapter
+    return f"reef pins {pinned} and does not run {adapter}'s own updater; reef-{adapter} update installs the served release"
+
+
 def _usage(adapter: str) -> str:
     """The wrapper's own subcommands, printed before the agent's help."""
     prog = f"reef-{adapter}"
-    return "\n".join(
-        [
-            f"{prog}: run {adapter} through reef's capture proxy, or one of",
-            f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
-            f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
-            f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
-            f"  {prog} doctor                                                     check what the install needs",
-            f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
-            f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
-            f"  {prog} update [--release ID]                                       install the served release here",
-            f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.",
-        ]
-    )
+    descriptor = get_adapter(adapter)
+    lines = [
+        f"{prog}: run {adapter} through reef's capture proxy, or one of",
+        f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
+        f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
+        f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
+        f"  {prog} doctor                                                     check what the install needs",
+        f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
+        f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
+        f"  {prog} update [--release ID]                                       install the served release here",
+    ]
+    if descriptor.client_updater_args:
+        lines.append(f"{prog} {' | '.join(descriptor.client_updater_args)}: {pinned_version_line(adapter)}.")
+    if descriptor.client_args:
+        version_flags = ", ".join(descriptor.client_version_args)
+        exception = f", unless the first is one of {version_flags}" if version_flags else ""
+        lines.append(
+            f"Anything else runs {adapter} with {shlex.join(descriptor.client_args)} ahead of the same arguments"
+            f"{exception}; --help and -h print its help after this."
+        )
+    else:
+        lines.append(f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.")
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -2033,6 +2060,9 @@ def main() -> None:
         ns = parser.parse_args(args[1:])
         chosen = {"release": ns.release} if ns.release is not None else {}
         sys.exit(update(scenario, adapter, compose, **chosen))
+    elif args and args[0] in get_adapter(adapter).client_updater_args:
+        # The binary's own updater would replace the version reef pins, so it never runs from here.
+        sys.exit(f"reef-{adapter}: {pinned_version_line(adapter)}")
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)
 
