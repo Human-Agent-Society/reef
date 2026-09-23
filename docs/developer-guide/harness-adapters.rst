@@ -95,11 +95,13 @@ The ``hermes`` adapter runs Hermes Agent headless (``hermes chat -Q --oneshot
 -q "<task>"``) with its whole home relocated by ``HERMES_HOME``. Its
 ``primary`` config target is ``config.yaml``, which the quirks emit as YAML
 from the merged JSON object; the defaults keep an episode hermetic and single
-request: the terminal scanner download off (``approval.tirith_enabled``), the
-session title call off (``auxiliary.title_generation.enabled``), the memory
-nudge that spawns a background review off (``memory.nudge_interval: 0``), and
-the per session JSON snapshot on (``sessions.write_json_snapshots``), which is
-the trajectory the ``hermes-session-json`` reader parses. A composition that
+request: the terminal scanner download off (``security.tirith_enabled``; the
+scanner would also block a command it cannot resolve, such as
+``"$REEF_HARNESS_WRAPPER" evolve``), the session title call off
+(``auxiliary.title_generation.enabled``), the memory nudge that spawns a
+background review off (``memory.nudge_interval: 0``), and the per session
+JSON snapshot on (``sessions.write_json_snapshots``), which is the trajectory
+the ``hermes-session-json`` reader parses. A composition that
 flips any of them is refused at render. The quirks also write the
 ``.no-bundled-skills`` marker, so an episode carries the tree's skills and not
 hermes's bundled catalog. Rules render to ``SOUL.md``, the one home level
@@ -113,11 +115,15 @@ no other command surface; a ``code_extension`` to a plugin package
 (``plugins/<name>/__init__.py`` defining ``register(ctx)``) whose manifest,
 ``plugins.enabled`` entry, and ``tools.override`` grant the quirks write,
 because hermes loads no plugin without that consent; a plugin tool then sits
-behind hermes's ``tool_search`` and ``tool_call`` discovery surface. The model
-binding is a custom provider with a literal key in ``config.yaml``; only the
-``openai`` dialect is bound. hermes's own default approval policy runs tools
-inside the working directory with no prompt and refuses a command it flags as
-dangerous with a tool error, so no bypass flag is used.
+behind hermes's ``tool_search`` and ``tool_call`` discovery surface.
+``skills.external_dirs`` names the commands root twice: beside the home
+(``${HERMES_HOME}/../hermes-commands``) for an episode, and under the install
+root (``${REEF_HARNESS_DEST}/hermes-commands``) for a ``reef-hermes`` session,
+whose home is a temp copy; hermes skips an entry that names no directory.
+The model binding is a custom provider with a literal key in ``config.yaml``;
+only the ``openai`` dialect is bound. hermes's own default approval policy
+runs tools inside the working directory with no prompt and refuses a command
+it flags as dangerous with a tool error, so no bypass flag is used.
 
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which

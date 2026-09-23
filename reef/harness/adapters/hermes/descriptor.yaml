@@ -35,22 +35,28 @@ files:
     primary:
       path: "hermes/config.yaml"
       defaults:
-        # tirith_enabled downloads a scanner binary from GitHub at boot;
-        # title_generation is one extra model call per episode; the memory
-        # nudge spawns a background review agent; the snapshot is the
-        # trajectory the reader parses.
-        approval:
-          tirith_enabled: false
+        # security.tirith_enabled downloads a scanner binary from GitHub at
+        # boot, and the scanner blocks a command it cannot resolve, such as
+        # "$REEF_HARNESS_WRAPPER" evolve; title_generation is one extra model
+        # call per episode; the memory nudge spawns a background review
+        # agent; the snapshot is the trajectory the reader parses.
         auxiliary:
           title_generation:
             enabled: false
         memory:
           nudge_interval: 0
+        security:
+          tirith_enabled: false
         sessions:
           write_json_snapshots: true
+        # The commands root beside the home: HERMES_HOME/.. in an episode,
+        # and REEF_HARNESS_DEST, the install root, in a reef-hermes session,
+        # whose home is a temp copy. hermes skips an entry that names no
+        # directory, such as the second one where REEF_HARNESS_DEST is unset.
         skills:
           external_dirs:
             - "${HERMES_HOME}/../hermes-commands"
+            - "${REEF_HARNESS_DEST}/hermes-commands"
   # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
   # scoped and read from the working directory chain, never from the home.
   rules: "hermes/SOUL.md"

@@ -500,6 +500,93 @@ def test_hermes_state_database_outlives_the_run_so_a_later_run_can_resume_it(tmp
 
 
 @pytest.mark.unit
+def test_hermes_finds_the_agent_commands_in_a_session_and_in_an_episode(tmp_path) -> None:
+    """A reef-hermes session's home is a temp copy, so HERMES_HOME/.. is not the install root; the commands
+    root is still found there, through REEF_HARNESS_DEST, and an episode home still finds it beside itself."""
+    import subprocess
+
+    from reef.harness.adapters import get_adapter
+    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.tree.render import render_composition
+
+    descriptor = get_adapter("hermes")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy")
+    command = ("agent_command", {"name": "summarize", "text": "Summarize the request."})
+    root = tmp_path / "reef-harness"
+    for relative, text in render_composition([command, *binding.compose_nodes(descriptor)], descriptor).items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    home = root / "hermes"
+    script = tmp_path / "fake-hermes.py"
+    seen = tmp_path / "seen.txt"
+    # hermes's own lookup of skills.external_dirs: expand variables, resolve against the home, keep directories.
+    script.write_text(
+        textwrap.dedent(
+            f"""\
+            import os, yaml
+            from pathlib import Path
+            home = Path(os.environ["HERMES_HOME"])
+            found = []
+            for entry in yaml.safe_load((home / "config.yaml").read_text())["skills"]["external_dirs"]:
+                path = Path(os.path.expanduser(os.path.expandvars(entry)))
+                path = (path if path.is_absolute() else home / path).resolve()
+                if path.is_dir():
+                    found += sorted(child.name for child in path.iterdir())
+            open({str(seen)!r}, "a").write(f"{{home.resolve() == Path({str(home)!r}).resolve()}} {{found}}\\n")
+            """
+        )
+    )
+
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    env.pop("REEF_HARNESS_DEST", None)
+    with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+        run_agent(sys.executable, str(home), "test-scenario", "hermes", "HERMES_HOME", [str(script)])
+    subprocess.run([sys.executable, str(script)], env={**env, "HERMES_HOME": str(home)}, check=True)
+
+    # The session ran in the temp copy and the episode in the home itself; both found the command.
+    assert seen.read_text().splitlines() == ["False ['summarize']", "True ['summarize']"]
+
+
+@pytest.mark.unit
+def test_capture_proxy_prints_no_traceback_when_a_client_resets_a_kept_alive_connection(capsys) -> None:
+    """hermes drops a kept alive connection with a reset after its calls; the proxy ends it quietly, and any other
+    error still prints its traceback."""
+    import socket
+    import struct
+    import threading
+
+    from reef.harness.client.wrapper import CaptureProxy
+
+    proxy = CaptureProxy("http://127.0.0.1:9", "reset-scenario", None)
+    proxy.start()
+    try:
+        server = proxy._server
+        ended = threading.Event()
+        shutdown_request = server.shutdown_request
+
+        def shutdown_and_note(request) -> None:
+            shutdown_request(request)
+            ended.set()
+
+        with patch.object(server, "shutdown_request", side_effect=shutdown_and_note):
+            client = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
+            client.sendall(b"GET /_captures HTTP/1.1\r\nHost: proxy\r\n\r\n")
+            assert client.recv(65536).startswith(b"HTTP/1.1 200")
+            # The handler now waits for the next request on the connection; a zero linger closes it with a reset.
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+            assert ended.wait(5)
+        assert capsys.readouterr().err == ""
+        try:
+            raise ValueError("a real failure")
+        except ValueError:
+            server.handle_error(None, ("127.0.0.1", 1))
+        assert "ValueError: a real failure" in capsys.readouterr().err
+    finally:
+        proxy.stop()
+
+
+@pytest.mark.unit
 def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
     """A kept file the binary creates, or renames a new file over, is copied back with its mode after the run;
     a later run reads it through the link."""

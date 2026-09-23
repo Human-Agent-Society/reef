@@ -162,6 +162,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -589,6 +590,21 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
+class CaptureProxyServer(ThreadingHTTPServer):
+    """The proxy's HTTP server, quiet when a client resets a connection.
+
+    An agent that drops a kept alive connection with a reset, as hermes does
+    on every run, ends that connection normally, so no traceback reaches the
+    person's terminal; every other error still prints one."""
+
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        if isinstance(sys.exc_info()[1], ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
+
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
@@ -620,7 +636,7 @@ class CaptureProxy:
         self._store = _TaggedStore(self.tags)
         handler = build_handler(self._config, self._store)
         self._handler = handler if observer is None else _observing_handler(handler, observer)
-        self._server: ThreadingHTTPServer | None = None
+        self._server: CaptureProxyServer | None = None
 
     @property
     def port(self) -> int:
@@ -629,7 +645,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
+        server = CaptureProxyServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):

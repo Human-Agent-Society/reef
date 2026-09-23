@@ -70,8 +70,8 @@ def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     config = json.loads(files[_CONFIG])
-    if (config.get("approval") or {}).get("tirith_enabled") is not False:
-        raise RenderError("hermes composition must keep approval.tirith_enabled false for benchmark episodes")
+    if (config.get("security") or {}).get("tirith_enabled") is not False:
+        raise RenderError("hermes composition must keep security.tirith_enabled false for benchmark episodes")
     if ((config.get("auxiliary") or {}).get("title_generation") or {}).get("enabled") is not False:
         raise RenderError(
             "hermes composition must keep auxiliary.title_generation.enabled false for benchmark episodes"

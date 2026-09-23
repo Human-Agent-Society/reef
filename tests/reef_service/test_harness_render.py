@@ -280,11 +280,14 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
         "api_key": "k-1",
     }
     assert config["agent"] == {"max_turns": 40}
-    # The defaults that keep an episode hermetic and single request, and the second skill root.
-    assert config["approval"] == {"tirith_enabled": False}
+    # The defaults that keep an episode hermetic and single request, and the second skill root, found beside
+    # the episode home and, in a reef-hermes session whose home is a temp copy, at the install root.
+    assert config["security"] == {"tirith_enabled": False} and "approval" not in config
     assert config["auxiliary"] == {"title_generation": {"enabled": False}}
     assert config["memory"] == {"nudge_interval": 0} and config["sessions"] == {"write_json_snapshots": True}
-    assert config["skills"] == {"external_dirs": ["${HERMES_HOME}/../hermes-commands"]}
+    assert config["skills"] == {
+        "external_dirs": ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"]
+    }
     # A rendered plugin is enabled and granted, and gets its manifest.
     assert config["plugins"] == {
         "enabled": ["tracer"],
@@ -310,7 +313,7 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
 def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:
     descriptor = get_adapter("hermes")
     with pytest.raises(RenderError, match="tirith_enabled false"):
-        render_composition([("config", {"data": {"approval": {"tirith_enabled": True}}})], descriptor)
+        render_composition([("config", {"data": {"security": {"tirith_enabled": True}}})], descriptor)
     with pytest.raises(RenderError, match=r"title_generation\.enabled false"):
         render_composition([("config", {"data": {"auxiliary": {"title_generation": {"enabled": True}}}})], descriptor)
     with pytest.raises(RenderError, match="write_json_snapshots true"):
