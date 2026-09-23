@@ -15,7 +15,10 @@ key reaches its ``apiKeyEnv`` route. dsh ignores a SKILL.md without YAML
 frontmatter, so a skill node whose text has none gets ``name`` and
 ``description`` synthesized, and an agent_command renders under the second
 skill root as a user invocable skill (``/name``), the only command surface
-dsh has.
+dsh has. A command is always ``disable-model-invocation: true`` with no
+``user-invocable`` key: frontmatter the node text carries keeps its other
+keys and gets the missing ``name`` and ``description``, and frontmatter that
+does not parse is refused at render.
 
 The traps a mutated patch could reopen, in either profile: the session log
 must stay plain JSONL (the reader cannot parse zstd, and a compressed
@@ -28,6 +31,7 @@ rejected at render, the same check that rejects an invalid node.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import yaml
@@ -94,13 +98,31 @@ def _patch(entries: dict[str, Any], extensions: list[str], directory: str) -> st
 
 
 def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
-    if text.startswith("---\n"):
+    if text.startswith("---\n") and not user_only:
         return text
-    first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
-    header: dict[str, Any] = {"name": path.split("/")[-2], "description": first[:200] or path.split("/")[-2]}
+    header: dict[str, Any] = {}
+    body = text
+    if text.startswith("---\n"):
+        # A command's own frontmatter is read the way dsh reads it, up to the first line that is exactly ---,
+        # and written again with the command's invocation.
+        match = re.match(r"---\n(.*?)^---$\n?", text, re.DOTALL | re.MULTILINE)
+        if match is None:
+            raise RenderError(f"dsh command {path} opens its frontmatter with --- but never closes it")
+        try:
+            own = yaml.safe_load(match.group(1))
+        except yaml.YAMLError as exc:
+            raise RenderError(f"dsh command {path} has frontmatter that is not valid YAML: {exc}") from exc
+        if not isinstance(own, dict):
+            raise RenderError(f"dsh command {path} has frontmatter that is not a YAML mapping")
+        header, body = own, text[match.end() :]
+    name = path.split("/")[-2]
+    first = next((line.strip().lstrip("#").strip() for line in body.splitlines() if line.strip()), "")
+    header = {"name": name, "description": first[:200] or name, **header}
     if user_only:
+        # Only the person types a command: never the model, and never hidden from the / menu.
         header["disable-model-invocation"] = True
-    return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
+        header.pop("user-invocable", None)
+    return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + body
 
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:

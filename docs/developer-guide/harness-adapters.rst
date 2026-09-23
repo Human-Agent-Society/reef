@@ -87,7 +87,11 @@ any of them is refused at render. Rules render to dsh's user global
 frontmatter with ``name`` and ``description``, synthesized when the node
 text has none); an ``agent_command`` renders as a user invocable skill
 (``disable-model-invocation: true``, run as ``/name``) under the second
-skill root ``DSH_AGENTS_HOME``, the only command surface dsh has; a
+skill root ``DSH_AGENTS_HOME``, the only command surface dsh has. When the
+command text carries its own frontmatter, the adapter keeps its keys, adds a
+missing ``name`` or ``description``, sets ``disable-model-invocation: true``
+and removes ``user-invocable``, so the model never runs a command and the
+person always can; frontmatter that does not parse is refused at render. A
 ``code_extension`` renders as a plugin module the patch layer inserts by
 relative path. The model binding declares an ``llm-pi-ai`` route whose key
 is named by ``apiKeyEnv`` and supplied through the ``env`` target, dsh's

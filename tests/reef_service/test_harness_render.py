@@ -252,6 +252,36 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
     }
 
 
+def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
+    """A command's frontmatter keeps the node's keys, but only the person can run it, and dsh's required keys
+    are filled in; frontmatter that dsh would ignore is refused at render."""
+    descriptor = get_adapter("dsh")
+    path = "dsh-agents/skills/chat/SKILL.md"
+
+    def command(text: str) -> str:
+        return render_composition([("agent_command", {"name": "chat", "text": text})], descriptor)[path]
+
+    own = "---\nname: chat\ndescription: Enter chat mode\nwhenToUse: on request\n---\n# Chat\n\nSearch only.\n"
+    assert command(own) == (
+        "---\nname: chat\ndescription: Enter chat mode\nwhenToUse: on request\ndisable-model-invocation: true\n"
+        "---\n# Chat\n\nSearch only.\n"
+    )
+    # The node cannot make its command model invocable or hide it from the person.
+    flipped = "---\nname: chat\ndescription: Chat\ndisable-model-invocation: false\nuser-invocable: false\n---\nBody\n"
+    assert command(flipped) == "---\nname: chat\ndescription: Chat\ndisable-model-invocation: true\n---\nBody\n"
+    # dsh ignores a skill without name and description, so a description only header gets the name.
+    assert command("---\ndescription: Chat\n---\nBody\n") == (
+        "---\nname: chat\ndescription: Chat\ndisable-model-invocation: true\n---\nBody\n"
+    )
+    for broken, reason in (
+        ("---\nname: [chat\n---\nBody\n", "not valid YAML"),
+        ("---\n- chat\n---\nBody\n", "not a YAML mapping"),
+        ("---\nname: chat\ndescription: Chat\nBody\n", "never closes"),
+    ):
+        with pytest.raises(RenderError, match=f"{path} .*{reason}"):
+            command(broken)
+
+
 @pytest.mark.parametrize(
     ("api", "route_api", "base_url"),
     [

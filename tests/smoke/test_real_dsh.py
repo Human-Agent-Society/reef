@@ -107,3 +107,33 @@ def test_real_dsh_episode_renders_runs_and_cleans_up() -> None:
     assert kinds and kinds[0] == "session" and "assistant/message" in kinds and kinds[-1] == "turn/end", kinds
     # (c) The cleanup audit found nothing outside the declared whitelist.
     assert result.residue == ()
+
+
+def test_real_dsh_runs_a_command_that_the_model_cannot_list() -> None:
+    """A command whose text carries its own frontmatter is still a command: the model's skill catalog lists
+    the skill and not the command, and a task that types /marker gets the command's text."""
+    server = StubOpenAI()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    descriptor = get_adapter("dsh")
+    try:
+        binding = ModelBinding(
+            base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key"
+        )
+        skill = "---\nname: notes\ndescription: Keep short notes\n---\nKeep short notes.\n"
+        command = "---\nname: marker\ndescription: Reply with the reef marker\n---\nStart with TIDEPOOL-63.\n"
+        nodes = [
+            ("skill", {"name": "notes", "text": skill}),
+            ("agent_command", {"name": "marker", "text": command}),
+            *binding.compose_nodes(descriptor),
+        ]
+        files = render_composition(nodes, descriptor)
+        result = run_episode(descriptor, files, "/marker say hi", binary=REAL_DSH, timeout=180.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert any("- `notes`: Keep short notes" in body for body in server.bodies), server.bodies
+    assert not any("- `marker`:" in body for body in server.bodies), server.bodies
+    assert any('<skill_content name=\\"marker\\">' in body for body in server.bodies), server.bodies
+    assert any("Start with TIDEPOOL-63." in body for body in server.bodies), server.bodies
