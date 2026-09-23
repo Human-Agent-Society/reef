@@ -15,7 +15,6 @@ from typing import Any
 
 from reef.core.artifact_ref import ArtifactRef, decode_artifact_ref, encode_artifact_ref
 from reef.core.errors import ReefError
-from reef.storage.migrations import read_consumed_ids
 
 
 @dataclass(frozen=True)
@@ -28,6 +27,17 @@ class RecordProgress:
     high_water_sequence: int
     high_water_offset: int
     consumed_ids: frozenset[str] = frozenset()
+
+
+def read_consumed_ids(value: Mapping[str, object], *, context: str) -> frozenset[str]:
+    """Normalize old progress into the current consumption-only contract."""
+    consumed: set[str] = set()
+    for key in ("compacted_ids", "consumed_ids"):
+        ids = value.get(key, [] if key == "compacted_ids" else None)
+        if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
+            raise ValueError(f"{context} record_progress.{key} must be a list of strings")
+        consumed.update(ids)
+    return frozenset(consumed)
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:

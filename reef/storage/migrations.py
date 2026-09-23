@@ -6,23 +6,13 @@ import hashlib
 import json
 import time
 from collections import defaultdict
-from collections.abc import Mapping
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import Column, LargeBinary, MetaData, Table, cast, func, inspect, select
 from sqlalchemy.engine import Connection
 
-
-def read_consumed_ids(value: Mapping[str, object], *, context: str) -> frozenset[str]:
-    """Normalize old progress into the current consumption-only contract."""
-    consumed: set[str] = set()
-    for key in ("compacted_ids", "consumed_ids"):
-        ids = value.get(key, [] if key == "compacted_ids" else None)
-        if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
-            raise ValueError(f"{context} record_progress.{key} must be a list of strings")
-        consumed.update(ids)
-    return frozenset(consumed)
+from reef.storage.commits import read_consumed_ids
 
 
 def migrate_record_storage(connection: Connection, records: Table, consumption: Table) -> None:
