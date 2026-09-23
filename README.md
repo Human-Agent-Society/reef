@@ -230,10 +230,15 @@ harness, and ask for a change:
 curl -fsS -H "Content-Type: application/json" \
   -d '{"name": "my-harness"}' http://127.0.0.1:8901/reef/scenarios
 curl -fsS -H "x-reef-scenario: my-harness" \
-  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
+  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash -s -- ~/reef-harness/my-harness
 
 reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
+
+The last argument is the install root (`./reef-harness` when you name none).
+Keep it outside the project the agent works in: a session can write files in
+its project, so with the install root there it could change what the next
+session runs.
 
 Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
