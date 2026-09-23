@@ -567,7 +567,7 @@ API reference the service proposer reads before it writes an extension).
 The extension registers nothing under ``PI_OFFLINE``; otherwise it registers
 two commands, two tools and two event handlers:
 
-- ``/evolve <request>``: with a UI, clarifies the request in the
+- ``/reefine <request>``: with a UI, clarifies the request in the
   background instead of in the session. The command returns at once and a
   loop calls the session's model through ``ctx.modelRegistry.complete`` with
   the last six user and assistant messages of the session as background, the
@@ -577,7 +577,7 @@ two commands, two tools and two event handlers:
   with ``reef_ask_user`` and files with ``reef_file_request``. The filing,
   a cancel, a reply without a tool call, a failed model call or eight model
   calls end it. While it runs, a widget above the input shows the phase, and
-  ``ctrl+q``, or ``/evolve`` with no argument, opens its latest
+  ``ctrl+q``, or ``/reefine`` with no argument, opens its latest
   steps. When it ends, the chat keeps one
   custom entry (``pi.appendEntry``, type ``reef-harness-clarify``) whose
   line says what happened and whose expanded view (``ctrl+o``) holds the
@@ -620,7 +620,7 @@ two commands, two tools and two event handlers:
   harness``, ``running the step``, ``saving the result``), the time in the
   step, the request's page as a terminal hyperlink (OSC 8, which pi's TUI
   measures around, so a click opens the page where the terminal offers one)
-  and ``ctrl+q or /evolve to look in``. The frames turn every
+  and ``ctrl+q or /reefine to look in``. The frames turn every
   250 ms, so the step reads as alive between polls. ``ctrl+q``
   (``pi.registerShortcut``) expands the same widget in place with the
   request asked, its id, the evaluation's episode count and step record when
@@ -632,7 +632,7 @@ two commands, two tools and two event handlers:
   protocol or xterm's modifyOtherKeys (Apple Terminal among them) sends
   ``ctrl+shift+<letter>`` as the bare control byte, so a shifted key would
   reach pi as its own binding, and ``ctrl+r`` alone renames a session.
-  ``/evolve`` with no argument prints the same detail and needs
+  ``/reefine`` with no argument prints the same detail and needs
   neither the key nor a click. Expanding costs no request: it redraws what
   the last poll read. The widget is cleared when the step settles, and a
   headless session draws none.
