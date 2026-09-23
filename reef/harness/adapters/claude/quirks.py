@@ -13,8 +13,8 @@ off); a composition that sets ``settings.env`` to turn any of them back on,
 or that flips ``includeCoAuthoredBy`` on, is rejected at render — the same
 gate that rejects an invalid node. A composition that drops
 ``disableDeepLinkRegistration: "disable"`` is rejected too: without it an
-interactive ``reef-claude`` run registers the pinned binary as the
-person's ``claude-cli://`` link handler.
+interactive ``reef-claude`` run can point the person's ``claude-cli://``
+link handler at the pinned binary.
 """
 
 from __future__ import annotations
