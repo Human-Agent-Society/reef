@@ -383,6 +383,15 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
         render_composition([("config", {"data": {"env": {"DISABLE_AUTOUPDATER": "0"}}})], get_adapter("claude"))
 
 
+@pytest.mark.parametrize("value", [None, "enable", False])
+def test_claude_quirk_keeps_deep_link_registration_off(value: object) -> None:
+    """An interactive reef-claude run must not register the pinned binary as the person's claude-cli:// handler."""
+    rendered = json.loads(render_composition([], get_adapter("claude"))["claude/settings.json"])
+    assert rendered["disableDeepLinkRegistration"] == "disable"
+    with pytest.raises(RenderError, match="disableDeepLinkRegistration"):
+        render_composition([("config", {"data": {"disableDeepLinkRegistration": value}})], get_adapter("claude"))
+
+
 def test_bundled_adapters_are_discoverable() -> None:
     assert set(available_adapters()) >= {"claude", "codex", "dsh", "opencode", "pi"}
 

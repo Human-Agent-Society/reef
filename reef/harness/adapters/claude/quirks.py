@@ -11,7 +11,10 @@ reopen. The descriptor keeps a benchmark episode hermetic through
 environment variables (auto-update, telemetry, and non-essential traffic all
 off); a composition that sets ``settings.env`` to turn any of them back on,
 or that flips ``includeCoAuthoredBy`` on, is rejected at render — the same
-gate that rejects an invalid node.
+gate that rejects an invalid node. A composition that drops
+``disableDeepLinkRegistration: "disable"`` is rejected too: without it an
+interactive ``reef-claude`` run registers the pinned binary as the
+person's ``claude-cli://`` link handler.
 """
 
 from __future__ import annotations
@@ -40,6 +43,11 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
     config = json.loads(files[_CONFIG_PATH])
     if config.get("includeCoAuthoredBy") is True:
         raise RenderError("claude composition must keep includeCoAuthoredBy false for benchmark episodes")
+    if config.get("disableDeepLinkRegistration") != "disable":
+        raise RenderError(
+            'claude composition must keep disableDeepLinkRegistration "disable" so a reef-claude session '
+            "leaves the person's claude-cli:// handler alone"
+        )
     env = config.get("env")
     if isinstance(env, dict):
         for key in _HERMETIC_ENV:

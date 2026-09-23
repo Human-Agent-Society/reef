@@ -50,6 +50,12 @@ files:
         # No Co-Authored-By trailer written into commits an episode makes;
         # the updater is off through env and client_env, not here.
         includeCoAuthoredBy: false
+        # An interactive run otherwise registers the pinned binary as the
+        # claude-cli:// link handler, which replaces the handler of the
+        # person's own claude: on macOS the app
+        # "$HOME/Applications/Claude Code URL Handler.app", on Linux an
+        # xdg-mime default, on Windows a registry key.
+        disableDeepLinkRegistration: "disable"
   rules: "claude/CLAUDE.md"
   agent_command: "claude/commands/{name}.md"
   skill: "claude/skills/{name}/SKILL.md"
