@@ -10,7 +10,7 @@ from __future__ import annotations
 import math
 from abc import ABC, abstractmethod
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from reef.core.errors import ReefError
@@ -154,6 +154,10 @@ class RecordStore(ABC):
         is identified by scenario, receipt id, and the set of compacted ids;
         reusing that identity with different metadata raises ``RecordConflict``.
         """
+
+    @abstractmethod
+    def retired(self, scenario: str, agent_record_ids: Sequence[str]) -> frozenset[str]:
+        """The ids among ``agent_record_ids`` a compaction retired in ``scenario``."""
 
     @abstractmethod
     def purge_compacted(self, scenario: str, *, before: float, limit: int = 256) -> int:

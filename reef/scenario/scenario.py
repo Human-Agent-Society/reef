@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -253,10 +253,19 @@ class Scenario:
         with self._committer.lock:
             self.trainer_for(component).retry_pending(keep_candidate=keep_candidate)
 
-    def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None) -> None:
+    def reingest(
+        self,
+        *,
+        up_to_sequence: int,
+        consumed_ids: frozenset[str],
+        component: str | None = None,
+        consumed_by_step: Sequence[tuple[int, frozenset[str]]] = (),
+    ) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""
         with self._committer.lock:
-            self.trainer_for(component).reingest(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
+            self.trainer_for(component).reingest(
+                up_to_sequence=up_to_sequence, consumed_ids=consumed_ids, consumed_by_step=consumed_by_step
+            )
 
     def restore_record_progress(self, *, after_sequence: int, offset: int, component: str | None = None) -> None:
         """Resume record consumption at a recovered commit's high-water mark."""

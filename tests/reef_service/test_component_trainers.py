@@ -252,6 +252,16 @@ def _records(step: int) -> tuple[AgentRecord, AgentRecord]:
     return inference, report
 
 
+def _report(record_id: str, reference: str) -> AgentRecord:
+    return AgentRecord.create(
+        scenario="agent",
+        request_type=RequestType.REPORT,
+        payload={"score": 0.5, "references": [reference]},
+        agent_record_id=record_id,
+        references=(reference,),
+    )
+
+
 def _dispatcher(
     tmp_path: Path,
     *,
@@ -741,6 +751,111 @@ def test_a_deferred_reload_never_lands_under_a_cycle_that_runs_on_the_instance(t
         dispatcher.close()
 
 
+class _BlockingAwayBackend(_ComponentBackend):
+    """A local cycle whose preparation waits for the test to let it go, then fails."""
+
+    def __init__(self, component: str, artifact_dir: Path) -> None:
+        super().__init__(component, artifact_dir)
+        self.entered = threading.Event()
+        self.go = threading.Event()
+
+    def prepare_step(self, batch, state, scenario_step):
+        self.entered.set()
+        assert self.go.wait(30)
+        raise RuntimeError("proposer away")
+
+
+@pytest.mark.unit
+def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The failing cycle rebuilds the scenario under the lock; the sibling that read the old instance looks again
+    on the new one instead of sleeping with its rows unread."""
+    backends = {
+        WEIGHTS: _BlockingAwayBackend(WEIGHTS, tmp_path / "candidates"),
+        HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    away = backends[WEIGHTS]
+    assert isinstance(away, _BlockingAwayBackend)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        failures: list[BaseException] = []
+
+        def fail() -> None:
+            try:
+                dispatcher._process_local_backend_step("agent", WEIGHTS)
+            except RuntimeError as exc:
+                failures.append(exc)
+
+        failing = threading.Thread(target=fail)
+        failing.start()
+        assert away.entered.wait(10)
+        # The sibling reads the instance, then reaches the cycle lock the failing cycle holds.
+        reached = threading.Event()
+        cycle_lock = dispatcher._local_cycle_lock
+        outcome: list[bool] = []
+        sibling = threading.Thread(
+            target=lambda: outcome.append(dispatcher._process_local_backend_step("agent", HARNESS))
+        )
+
+        def observed(name: str):
+            lock = cycle_lock(name)
+            if threading.current_thread() is sibling:
+                reached.set()
+            return lock
+
+        monkeypatch.setattr(dispatcher, "_local_cycle_lock", observed)
+        sibling.start()
+        assert reached.wait(10)
+        away.go.set()
+        failing.join(10)
+        sibling.join(10)
+        assert [str(error) for error in failures] == ["proposer away"]
+        rebuilt = dispatcher._registry.get_optional("agent")
+        assert rebuilt is not None and rebuilt is not scenario
+        assert outcome == [True] and backends[HARNESS].prepared == 0
+        # Looking again on the rebuilt instance commits the rows that were there all along.
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        assert [row["component"] for row in rebuilt.releases() if row["operation"] == "training"] == [HARNESS]
+    finally:
+        away.go.set()
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_deleting_a_scenario_is_refused_while_the_runtime_cannot_say_whether_its_job_is_out(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """A runtime that does not answer gets a busy answer, not a crash: a blind delete could orphan a job. A full
+    weight runtime names no owner in its marker: the bound scenario owns the job, no other scenario does."""
+    training = StubTrainingRuntime()
+    dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"), training=training)
+    try:
+        assert dispatcher.get_or_create_scenario("agent") is not None
+
+        def unhealthy() -> None:
+            raise RuntimeError("train group is unhealthy")
+
+        monkeypatch.setattr(training, "training_job_status", unhealthy)
+        with pytest.raises(ScenarioBusy, match="does not say whether its job is out"):
+            dispatcher.delete_scenario("agent")
+        assert dispatcher._registry.get_optional("agent") is not None
+        marker: dict[str, Any] = {"status": "RUNNING", "training_job_id": "job-1"}
+        monkeypatch.setattr(training, "training_job_status", lambda: marker)
+        assert dispatcher.training_job_in_flight("agent") is True
+        assert dispatcher.training_job_in_flight("old") is False
+        with pytest.raises(ScenarioBusy, match="training job is out"):
+            dispatcher.delete_scenario("agent")
+        marker.update(status="COMPLETE", commit_acknowledged=True)
+        assert dispatcher.delete_scenario("agent")["scenario"] == "agent"
+    finally:
+        dispatcher.close()
+
+
 @pytest.mark.unit
 def test_deleting_a_scenario_whose_job_marker_is_out_at_the_backend_waits(tmp_path: Path, monkeypatch: Any) -> None:
     """The backend's marker outlives a rebuilt or unloaded instance; the delete reads it, not the reserved batch."""
@@ -999,6 +1114,70 @@ def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(tmp_p
         rebuilt = dispatcher._registry.reload("agent")
         assert rebuilt.prepare_training_step(HARNESS) is None
         assert "r1b" in rebuilt.trainer_for(HARNESS).releasable_agent_record_ids()
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_report_settled_between_two_commits_stays_settled_after_a_restart(tmp_path: Path) -> None:
+    """r1b arrived after commit A trained i1 and before commit B: the replay settles it at A's watermark, as it was."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        scenario.records.append(_report("r1b", "i1"))
+        assert scenario.prepare_training_step(HARNESS) is None
+        for record in _records(2):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        rebuilt = dispatcher._registry.reload("agent")
+        assert rebuilt.prepare_training_step(HARNESS) is None
+        assert "r1b" in rebuilt.trainer_for(HARNESS).releasable_agent_record_ids()
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_report_on_an_inference_the_sibling_commit_retired_is_released_not_raised(tmp_path: Path) -> None:
+    """The weights job holds i1 while the harness commits and r1b arrives; the job's commit retires i1 with r1b
+    still stored, unread by the weights trainer. Every later read releases r1b, on the live path and after a restart.
+    """
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        scenario.records.append(_report("r1b", "i1"))
+        assert scenario.prepare_training_step(HARNESS) is None
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        assert scenario.records.get("agent", "i1") is None
+        assert scenario.records.get("agent", "r1b") is not None
+        assert scenario.reserve_training_batch(WEIGHTS) is None
+        assert "r1b" in scenario.trainer_for(WEIGHTS).releasable_agent_record_ids()
+        for record in _records(2):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        assert harness is not None
+        scenario.commit(harness, component=HARNESS)
+        assert scenario.records.get("agent", "r1b") is None
+        rebuilt = dispatcher._registry.reload("agent")
+        assert rebuilt.prepare_training_step(HARNESS) is None
+        weights = rebuilt.reserve_training_batch(WEIGHTS)
+        assert weights is not None
+        assert [item.source_agent_record_ids for item in weights.items] == [("i2", "r2")]
     finally:
         dispatcher.close()
 

@@ -151,7 +151,8 @@ class Artifact:
         # Only the leaf is created, and only inside a release tree that is
         # there: a release directory that is gone must not come back empty.
         if materialized.local_path.is_dir() and not directory.exists():
-            directory.mkdir()
+            # Two readers of one release race here; the second finds the leaf made.
+            directory.mkdir(exist_ok=True)
         return Artifact(
             ArtifactRef(entry.content_id, self.ref.release_id, self.ref.parent_release_id),
             None,

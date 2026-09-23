@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import threading
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
@@ -568,3 +569,50 @@ def test_a_promote_refused_by_validation_leaves_no_staged_release(tmp_path: Path
         assert scenario.scenario_step == 1
     finally:
         dispatcher.close()
+
+
+def _seedless_release(tmp_path: Path) -> Artifact:
+    release = tmp_path / "release"
+    (release / "harness").mkdir(parents=True)
+    (release / "harness" / "AGENTS.md").write_text("seed", encoding="utf-8")
+    manifest = {
+        "harness": {"content_id": "content:harness", "metadata": {}},
+        "weights": {"content_id": "content:weights", "metadata": {}},
+    }
+    return Artifact(
+        ArtifactRef("composite:x", "rel-1", None),
+        None,
+        local_path=release,
+        metadata={COMPONENTS_METADATA_KEY: manifest},
+    )
+
+
+@pytest.mark.unit
+def test_two_readers_of_a_seedless_component_both_get_its_directory(tmp_path: Path, monkeypatch: Any) -> None:
+    """Two inference threads read one release after a harness commit: both find the weights leaf missing and
+    the second must not fail on the directory the first made."""
+    artifact = _seedless_release(tmp_path)
+    barrier = threading.Barrier(2)
+    original = Path.mkdir
+
+    def paced(self: Path, *args: Any, **kwargs: Any) -> None:
+        # Both threads are past the existence check when they get here.
+        barrier.wait(timeout=5)
+        original(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", paced)
+    errors: list[BaseException] = []
+
+    def read() -> None:
+        try:
+            artifact.component("weights")
+        except Exception as exc:
+            errors.append(exc)
+
+    threads = [threading.Thread(target=read) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+    assert [repr(error) for error in errors] == []
+    assert artifact.component("weights").local_path == tmp_path / "release" / "weights"

@@ -866,3 +866,28 @@ def test_a_composite_mode_is_every_components_mode_and_a_stepless_component_runs
         assert scenario.trainer_for("config").training_mode == "auto"
     finally:
         dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_composite_reads_the_hyphenated_mode_and_a_component_agreeing_in_it() -> None:
+    """``data.training-mode`` is the spelling every flat recipe accepts: the composite reads it, and a component
+    naming the same mode in it is not refused for naming the field twice."""
+    recipe = build_recipe(
+        "reef.recipe.composite:CompositeRecipe",
+        {},
+        config={
+            "implementation": "reef.recipe.composite:CompositeRecipe",
+            "model": {"path": "served-model"},
+            "data": {"training-mode": "hybrid"},
+            "components": {
+                "harness": {
+                    "implementation": "reef_service.test_composite_recipe:_HybridTreeRecipe",
+                    "data": {"training-mode": "hybrid"},
+                },
+                "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
+            },
+        },
+    )
+    assert isinstance(recipe, CompositeRecipe)
+    assert recipe.training_mode == "hybrid"
+    assert [component.training_mode for component in recipe.components.values()] == ["hybrid", "hybrid"]

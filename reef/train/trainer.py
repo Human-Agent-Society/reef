@@ -12,9 +12,10 @@ row is deleted.
 
 from __future__ import annotations
 
+import logging
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
@@ -68,6 +69,9 @@ class ComponentTrainer:
             raise ValueError("component must be a non-empty string")
         if not isinstance(self.trainer, Trainer):
             raise TypeError("trainer must be a Trainer")
+
+
+logger = logging.getLogger(__name__)
 
 
 class Trainer:
@@ -305,7 +309,7 @@ class Trainer:
             if not items:
                 return
             for sequence, item in items:
-                if item.request_type in self.processor.required_request_types:
+                if item.request_type in self.processor.required_request_types and not self._references_retired(item):
                     self._processor.ingest(item)
                 else:
                     self._released_stored_ids.add(item.agent_record_id)
@@ -313,6 +317,22 @@ class Trainer:
                 self._data_sequence = sequence
                 if self._processor.ready():
                     return
+
+    def _references_retired(self, item: AgentRecord) -> bool:
+        """Whether a report refers to a row a commit retired: another trainer's commit can retire an inference
+        this trainer has not read a later report on; the store settles such a report at append, this settles
+        one already stored."""
+        if item.request_type is not RequestType.REPORT or not item.references:
+            return False
+        retired = self._records.retired(self.scenario, item.references)
+        if retired:
+            logger.info(
+                "scenario %r releases report %s: its inference records %r were retired",
+                self.scenario,
+                item.agent_record_id,
+                sorted(retired),
+            )
+        return bool(retired)
 
     def run_once(self, scenario_step: int = 0, *, base_release_id: str | None = None) -> TrainStepResult | None:
         """Consume available data and, with a candidate backend, prepare one step.
@@ -650,7 +670,13 @@ class Trainer:
                 if self._candidate_backend is not None:
                     self._candidate_backend.close()
 
-    def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
+    def reingest(
+        self,
+        *,
+        up_to_sequence: int,
+        consumed_ids: frozenset[str],
+        consumed_by_step: Sequence[tuple[int, frozenset[str]]] = (),
+    ) -> None:
         """Rebuild processor memory from retained rows at or below a watermark.
 
         The committed high-water mark is a consumption cursor, not a liveness
@@ -666,9 +692,14 @@ class Trainer:
         while replaying the retained prefix reconstructs the live state the
         crash destroyed and nothing more; consumption accounting stays
         untouched, since the recovered mark already covers every replayed row.
+        ``consumed_by_step`` names each committed step's watermark with the
+        rows its batch consumed: a row above a step's watermark was ingested
+        after that step was acknowledged, so the step's consumed rows count
+        as trained from there on, as they did before the crash.
         """
         if up_to_sequence < 0:
             raise ValueError("up_to_sequence must be non-negative")
+        steps = sorted((watermark, frozenset(ids)) for watermark, ids in consumed_by_step)
         with self._lock:
             consumed: list[AgentRecord] = []
             sequence = 0
@@ -685,6 +716,8 @@ class Trainer:
                     if sequence > up_to_sequence:
                         replaying = False
                         break
+                    while steps and steps[0][0] < sequence:
+                        self._processor.consumed_restored(steps.pop(0)[1])
                     if item.agent_record_id in consumed_ids:
                         # Still stored, already trained: this trainer has released it and says so
                         # until every other trainer has too. The processor keeps it in view for the
@@ -693,13 +726,17 @@ class Trainer:
                         self._processor.restore_consumed(item)
                         consumed.append(item)
                         continue
-                    if item.request_type in self.processor.required_request_types:
+                    if item.request_type in self.processor.required_request_types and not self._references_retired(
+                        item
+                    ):
                         self._processor.ingest(item)
                     else:
                         self._released_stored_ids.add(item.agent_record_id)
             # After the replay, so a report that was live before the crash stays live as it was; a report
             # that arrives later on a consumed row is settled instead of resolved against it.
             self._processor.consumed_restored(frozenset(item.agent_record_id for item in consumed))
+            for _, ids in steps:
+                self._processor.consumed_restored(ids)
 
     def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
         """Resume consumption from a recovered commit record's high-water mark.

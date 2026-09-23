@@ -429,6 +429,10 @@ def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path
     binding = served.model_binding("agent")
     assert binding.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
     assert binding.api_key == "reef-local" and binding.model == "qwen3-8b"
+    # A free form name is quoted as the wrapper quotes it: one path segment, whatever it holds.
+    assert (
+        served.model_binding("org/project").base_url == "http://127.0.0.1:8900/reef/scenarios/org%2Fproject/evaluation"
+    )
     assert served.model_binding().base_url == "http://upstream.test"
     assert served._backend_kwargs("agent")["on_stale"] == "reevaluate"
     # A scenario with its own model binds through the same route, whether resolved at build or at every step.

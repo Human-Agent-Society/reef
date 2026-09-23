@@ -326,10 +326,20 @@ class Dispatcher:
         runtime = self._recipe.training_runtime
         if runtime is None:
             return False
-        marker = runtime.training_job_status()
+        try:
+            marker = runtime.training_job_status()
+        except Exception as exc:
+            # A runtime that does not answer cannot say whether a job is out; a blind delete could orphan one.
+            raise ScenarioBusy(
+                f"cannot delete scenario {scenario!r}: the training runtime does not say whether its job is out "
+                f"({self._error_text(exc)}); retry once it answers"
+            ) from exc
         if not marker_in_flight(marker):
             return False
         owner = marker.get("scenario") if marker is not None else None
+        if owner is None and not runtime.concurrent_training_scenarios:
+            # A runtime that trains one scenario per process names none in its marker: the bound scenario owns it.
+            owner = self._registry.training_scenario_name
         return owner is None or owner == scenario
 
     def _archive_scenario_state(self, scenario: str) -> list[str]:
@@ -825,9 +835,13 @@ class Dispatcher:
         # each refusal threw away a full candidate evaluation. A dispatched
         # commit still lands meanwhile; the stale policy answers it.
         with self._local_cycle_lock(scenario):
-            if self._registry.get_optional(scenario) is not current:
-                # Deleted or reloaded while this worker waited for a job's turn.
+            loaded = self._registry.get_optional(scenario)
+            if loaded is None:
+                # Deleted while this worker waited for its turn.
                 return False
+            if loaded is not current:
+                # Reloaded while this worker waited: look again on the rebuilt instance, whose rows are unread.
+                return True
             if runtime is not None and not runtime.inference_admission_status.get("open", True):
                 # The job whose turn this worker waited for left admission closed.
                 with self._training.lock:

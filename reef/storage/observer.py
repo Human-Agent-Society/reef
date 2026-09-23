@@ -11,7 +11,7 @@ part of record acceptance or the commit transaction.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
@@ -90,6 +90,9 @@ class ObservedRecordStore(RecordStore):
         receipt_metadata: Mapping[str, object] | None = None,
     ) -> None:
         self._inner.compact(scenario, agent_record_ids, receipt_id=receipt_id, receipt_metadata=receipt_metadata)
+
+    def retired(self, scenario: str, agent_record_ids: Sequence[str]) -> frozenset[str]:
+        return self._inner.retired(scenario, agent_record_ids)
 
     def purge_compacted(self, scenario: str, *, before: float, limit: int = 256) -> int:
         return self._inner.purge_compacted(scenario, before=before, limit=limit)

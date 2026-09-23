@@ -355,6 +355,19 @@ class SQLRecordStore(RecordStore):
             self._live_records[item.agent_record_id] = stored
             return AppendResult(stored, False)
 
+    def retired(self, scenario: str, agent_record_ids: Sequence[str]) -> frozenset[str]:
+        """The ids among ``agent_record_ids`` a compaction retired in this scenario."""
+        if not agent_record_ids:
+            return frozenset()
+        with self._transaction(scenario, write=False) as connection:
+            rows = connection.execute(
+                select(self._tables.consumed.c.agent_record_id).where(
+                    self._tables.condition(self._tables.consumed),
+                    self._tables.consumed.c.agent_record_id.in_(list(agent_record_ids)),
+                )
+            ).all()
+        return frozenset(str(row[0]) for row in rows)
+
     def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
         """Read a record still visible to training, scoped to its scenario."""
         with self._transaction(scenario, write=False) as connection:

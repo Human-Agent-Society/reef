@@ -70,6 +70,17 @@ def any_component_report(report_types: tuple[type[ReportBase], ...]) -> type[Rep
     return ComponentReport
 
 
+def configured_training_mode(config: Mapping[str, Any]) -> str | None:
+    """The ``data.training_mode`` a config names, in either spelling the field parser accepts; ``None`` unset."""
+    data = config.get("data")
+    if not isinstance(data, Mapping):
+        return None
+    for key in ("training_mode", "training-mode"):
+        if data.get(key) is not None:
+            return str(data[key])
+    return None
+
+
 @dataclass(frozen=True, kw_only=True)
 class CompositeRecipe(Recipe):
     """Bind one recipe per release component; the scenario runs their trainers side by side."""
@@ -129,7 +140,7 @@ class CompositeRecipe(Recipe):
                 )
         # Resolve the deployment's runtime once, so the composite and every component share it.
         runtime = cls._resolve_runtime(environ, runtime)
-        configured_mode = config.get("data", {}).get("training_mode")
+        configured_mode = configured_training_mode(config)
         components: dict[str, Recipe] = {}
         for component, component_config in raw.items():
             if not isinstance(component_config, Mapping):
@@ -137,11 +148,9 @@ class CompositeRecipe(Recipe):
             cls._refuse_checkpoint_cadence(component_config, f"components.{component}")
             merged = dict(component_config)
             merged.setdefault("model", dict(config.get("model", {})))
-            if configured_mode is not None:
+            if configured_mode is not None and configured_training_mode(merged) is None:
                 # The composite's mode is every component's mode: a component sets its own only to disagree.
-                data = dict(merged.get("data") or {})
-                data.setdefault("training_mode", configured_mode)
-                merged["data"] = data
+                merged["data"] = {**(merged.get("data") or {}), "training_mode": configured_mode}
             settings = recipe_config_from_mapping(merged)
             recipe_class = recipe_class_for(settings["implementation"])
             if recipe_class is None:
@@ -155,7 +164,6 @@ class CompositeRecipe(Recipe):
         if len(modes) != 1:
             raise RecipeConfigError(f"components run different training modes {sorted(modes)}; they share one")
         values = dict(field_values)
-        configured_mode = config.get("data", {}).get("training_mode")
         if configured_mode is None:
             values["training_mode"] = next(iter(modes))
         try:

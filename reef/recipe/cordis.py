@@ -19,6 +19,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import quote
 
 from reef.core.errors import ReefError
 from reef.core.reports import ScoredRolloutReport
@@ -667,7 +668,8 @@ class CordisRecipe(Recipe):
             return binding
         return replace(
             binding,
-            base_url=f"{self.served_endpoint.url}/reef/scenarios/{scenario}/evaluation",
+            # The name is free form: quoted as the wrapper quotes it, so a slash or a space stays one segment.
+            base_url=f"{self.served_endpoint.url}/reef/scenarios/{quote(scenario, safe='')}/evaluation",
             api_key=self.served_endpoint.token,
         )
 

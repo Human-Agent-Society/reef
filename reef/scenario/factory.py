@@ -69,6 +69,8 @@ class _RecoveredTrainerState:
     algorithm_state: Mapping[str, Any] | None
     high_water: tuple[int, int] | None
     consumed_ids: frozenset[str]
+    #: Each own committed step's watermark with the rows its batch consumed, in commit order.
+    consumed_by_step: tuple[tuple[int, frozenset[str]], ...] = ()
 
 
 def _recovered_trainer_states(
@@ -98,6 +100,7 @@ def _recovered_trainer_states(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
             consumed_ids=_consumed_by_committed_steps(own),
+            consumed_by_step=tuple((record.high_water_sequence, record.consumed_ids) for record in own),
         )
     return states
 
@@ -401,6 +404,7 @@ class ScenarioFactory:
                     up_to_sequence=recovered.high_water[0],
                     consumed_ids=recovered.consumed_ids,
                     component=bound.component,
+                    consumed_by_step=recovered.consumed_by_step,
                 )
                 scenario.restore_record_progress(
                     after_sequence=recovered.high_water[0], offset=recovered.high_water[1], component=bound.component
