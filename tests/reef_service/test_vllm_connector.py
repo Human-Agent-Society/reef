@@ -1,4 +1,4 @@
-"""The vLLM version connector stamps every sampled token with the weight version that produced it."""
+"""Reef's vLLM connector stamps every sampled token with the weight version that produced it."""
 
 from __future__ import annotations
 
@@ -122,7 +122,7 @@ def _step(*, new=(), cached=()):
 @pytest.mark.unit
 def test_connector_stamps_a_request_that_spans_a_weight_update(monkeypatch) -> None:
     module, role, engine_core_type, metadata_type = _import_connector_with_fake_vllm(monkeypatch)
-    connector = module.ReefVersionConnector("config", role.SCHEDULER, "kv-cache-config")
+    connector = module.ReefConnector("config", role.SCHEDULER, "kv-cache-config")
     assert connector.init_args == ("config", role.SCHEDULER, "kv-cache-config")
 
     request = _request("r1")
@@ -147,7 +147,7 @@ def test_connector_stamps_a_request_that_spans_a_weight_update(monkeypatch) -> N
 @pytest.mark.unit
 def test_connector_reads_the_index_from_the_live_request_for_resumed_and_async_batches(monkeypatch) -> None:
     module, role, engine_core_type, _ = _import_connector_with_fake_vllm(monkeypatch)
-    connector = module.ReefVersionConnector(None, role.SCHEDULER, None)
+    connector = module.ReefConnector(None, role.SCHEDULER, None)
     request = _request("r1")
     connector.on_new_request(request)
     connector.build_connector_meta(_step(new=["r1"]))
@@ -168,11 +168,11 @@ def test_connector_reads_the_index_from_the_live_request_for_resumed_and_async_b
 def test_worker_role_does_not_observe_versions_and_the_observer_installs_once(monkeypatch) -> None:
     module, role, engine_core_type, _ = _import_connector_with_fake_vllm(monkeypatch)
     original = engine_core_type.set_weight_version
-    module.ReefVersionConnector(None, role.WORKER, None)
+    module.ReefConnector(None, role.WORKER, None)
     assert engine_core_type.set_weight_version is original
-    first = module.ReefVersionConnector(None, role.SCHEDULER, None)
+    first = module.ReefConnector(None, role.SCHEDULER, None)
     wrapped = engine_core_type.set_weight_version
-    second = module.ReefVersionConnector(None, role.SCHEDULER, None)
+    second = module.ReefConnector(None, role.SCHEDULER, None)
     assert engine_core_type.set_weight_version is wrapped
     engine_core_type().set_weight_version("engine:9")
     assert first._tracker.version == second._tracker.version == "engine:9"

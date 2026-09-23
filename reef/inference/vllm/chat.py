@@ -145,7 +145,7 @@ class VLLMGenerateClient(NativeGenerateClient):
             if not is_local_release(artifact.ref.release_id):
                 raise ValueError(
                     "vLLM generate response lacks per-token runtime load IDs; "
-                    "select Reef's version connector in the engine's --kv-transfer-config"
+                    "select Reef's connector in the engine's --kv-transfer-config"
                 )
             # A local release serves one fixed version, so every token carries it.
             version = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id

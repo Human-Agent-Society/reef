@@ -2,7 +2,7 @@
 
 Select it on the engine with::
 
-    --kv-transfer-config '{"kv_connector": "ReefVersionConnector",
+    --kv-transfer-config '{"kv_connector": "ReefConnector",
                            "kv_connector_module_path": "reef.inference.vllm.connector",
                            "kv_role": "kv_both"}'
 
@@ -60,7 +60,7 @@ def install_weight_version_observer(tracker: TokenVersionTracker) -> None:
     _observer_installed = True
 
 
-class ReefVersionConnector(KVConnectorBase_V1, SupportsHMA):
+class ReefConnector(KVConnectorBase_V1, SupportsHMA):
     """A KV connector that carries per-token runtime load IDs and no KV."""
 
     def __init__(self, vllm_config: Any, role: KVConnectorRole, kv_cache_config: Any) -> None:
@@ -71,7 +71,7 @@ class ReefVersionConnector(KVConnectorBase_V1, SupportsHMA):
         self._requests: dict[str, Any] = {}
         if role == KVConnectorRole.SCHEDULER:
             install_weight_version_observer(self._tracker)
-            logger.info("Reef version connector installed on the scheduler")
+            logger.info("Reef connector installed on the scheduler")
 
     # -- Scheduler side -----------------------------------------------------------
 
@@ -127,4 +127,4 @@ class ReefVersionConnector(KVConnectorBase_V1, SupportsHMA):
         return None
 
 
-__all__ = ["ReefVersionConnector", "install_weight_version_observer"]
+__all__ = ["ReefConnector", "install_weight_version_observer"]

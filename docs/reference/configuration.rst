@@ -316,10 +316,10 @@ streaming request with the completed turn as one burst of protocol frames.
 Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
 ``sampling_defaults`` and ``force_reasoning``; per-request sampling extras pass
 through ``sglang_sampling_params`` or ``vllm_sampling_params``. A vLLM engine
-serving a training stack also needs Reef's version connector, which stamps every
+serving a training stack also needs Reef's connector, which stamps every
 sampled token with the weight version that produced it::
 
-   --kv-transfer-config '{"kv_connector": "ReefVersionConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
+   --kv-transfer-config '{"kv_connector": "ReefConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
 
 The connector moves no KV and composes with another connector under vLLM's
 ``MultiConnector``. A local release without it serves under its release id; a
