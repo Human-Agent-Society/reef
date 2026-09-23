@@ -4,7 +4,11 @@ Same DIS token-level ratio and double-sided mask as SAO, same rollout
 log-probabilities as the behaviour proxy, no value model: advantages are
 Slime's group-normalized GRPO estimate over ``--n-samples-per-prompt``
 rollouts of one prompt. This is the paper's "GRPO (+ DIS)" row, the baseline
-SAO is compared against once vanilla GRPO has collapsed.
+SAO is compared against once vanilla GRPO has collapsed. A loss family
+resolves its torch hooks from the ``objective`` module beside its class, and
+every hook registered there is projected onto the worker's args, so the
+control keeps its own package: sharing ``recipes.sao.slime`` would also hand
+it SAO's critic advantage hook.
 """
 
 from __future__ import annotations

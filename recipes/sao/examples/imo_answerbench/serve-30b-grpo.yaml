@@ -35,7 +35,7 @@ inference:
     max-running-requests: "16"
   model-path: ~/models/Qwen3-30B-A3B-Thinking-2507
 recipe:
-  implementation: recipes.sao.control_recipe:SAOGrpoControlRecipe
+  implementation: recipes.sao.recipe:SAOGrpoControlRecipe
   config:
     batch-size: ${SAO_BATCH}           # MUST equal training.config.global_batch_size and n-samples-per-prompt
     max-staleness: 18

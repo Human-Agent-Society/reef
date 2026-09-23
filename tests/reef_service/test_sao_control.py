@@ -8,8 +8,8 @@ import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAOGrpoControlRecipe, SAORecipe
-from recipes.sao.control import SaoGrpoControlAlgorithm
 from recipes.sao.processor import SAOProcessor
+from recipes.sao.slime.grpo_dis import SaoGrpoControlAlgorithm
 from reef.train.slime_backend.algorithm import TrainResult
 from reef.train.slime_backend.loss_families import resolve_loss_family
 

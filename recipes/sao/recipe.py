@@ -66,3 +66,25 @@ class SAORecipe(WeightTrainingRecipe):
             raise RecipeConfigError(
                 "SAO objective options are backend-owned; configure the Slime implementation with training.options"
             )
+
+
+@dataclass(frozen=True, kw_only=True)
+class SAOGrpoControlRecipe(SAORecipe):
+    """GRPO(+DIS) control (arXiv:2607.07508, Table 1): SAO's batches in complete groups of one prompt.
+
+    The driver posts each group's ``--n-samples-per-prompt`` reports together,
+    so a step of ``batch_size`` accepted rollouts holds only complete groups
+    and Slime's group-relative baseline never mixes prompts. ``batch_size``
+    is therefore a multiple of the group size (one group per step when the
+    two are equal) and, as for SAO, must equal the driver's
+    ``--global-batch-size``. It inherits SAO's default and environment key.
+    The Slime side is ``recipes.sao.slime.grpo_dis``.
+    """
+
+    name: str = "sao-grpo-dis"
+
+    @classmethod
+    def training_spec(cls) -> WeightTrainingSpec:
+        return WeightTrainingSpec(
+            objective="sao-grpo-dis", processor=SAOProcessor, scheduling=StepScheduling(unit="sample")
+        )

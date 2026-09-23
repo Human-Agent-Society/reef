@@ -75,12 +75,13 @@ Configuration
 GRPO(+DIS) control
 ~~~~~~~~~~~~~~~~~~
 
-``recipes.sao.control_recipe:SAOGrpoControlRecipe`` is the paper's baseline
+``recipes.sao.recipe:SAOGrpoControlRecipe`` is the paper's baseline
 for the comparison: the same DIS primitive and rollout columns, with Slime's
 group-relative advantages in place of the value model (loss family
-``sao-grpo-dis``). The driver posts each prompt's ``--n-samples-per-prompt``
-rollouts together, so a step of ``batch_size`` rollouts holds complete groups.
-The example's ``serve-30b-grpo*.yaml`` stacks select it.
+``sao-grpo-dis``, implemented in ``recipes.sao.slime.grpo_dis``). The driver
+posts each prompt's ``--n-samples-per-prompt`` rollouts together, so a step of
+``batch_size`` rollouts holds complete groups. The example's
+``serve-30b-grpo*.yaml`` stacks select it.
 
 Run the example
 ---------------
