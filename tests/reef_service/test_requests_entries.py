@@ -21,7 +21,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, REQUESTS_SKILL_ID, request_entries
+from reef.harness.episodes.requests import REQUESTS_COMMAND, REQUESTS_ENTRY_ID, REQUESTS_SKILL_ID, request_entries
 from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import RecipeConfigError
@@ -108,10 +108,45 @@ def test_request_entries_pass_the_backends_seed_validation_and_a_recovered_state
 
 
 def test_requests_refuses_an_adapter_without_a_shipped_extension(placeholders: tuple[Path, Path]) -> None:
-    with pytest.raises(RecipeConfigError, match="'opencode' ships no requests extension"):
-        CordisRecipe.from_environment({}, config=_config(adapter="opencode", requests=True))
+    with pytest.raises(RecipeConfigError, match="'terminus' ships no requests extension"):
+        CordisRecipe.from_environment({}, config=_config(adapter="terminus", requests=True))
     with pytest.raises(DescriptorError, match="'native' ships no requests extension"):
         request_entries("native")
+
+
+@pytest.mark.parametrize(
+    ("adapter", "path", "request_words"),
+    [
+        ("claude", "claude/commands/reefine.md", 'The request is "$ARGUMENTS".'),
+        ("codex", "codex/prompts/reefine.md", 'The request is "$ARGUMENTS".'),
+        ("opencode", "opencode/command/reefine.md", 'The request is "$ARGUMENTS".'),
+        (
+            "hermes",
+            "hermes-commands/reefine/SKILL.md",
+            "The request is the text after /reefine in the person's message.",
+        ),
+        (
+            "dsh",
+            "dsh-agents/skills/reefine/SKILL.md",
+            "The request is the text after /reefine in the person's message.",
+        ),
+    ],
+)
+def test_an_adapter_without_an_extension_seeds_one_reefine_command_the_wrapper_answers(
+    adapter: str, path: str, request_words: str
+) -> None:
+    """Off pi the requests entry is one agent_command, ``reefine``, rendered where the adapter keeps its commands:
+    it names the typed request and files it with the wrapper's evolve, then waits in pieces a shell tool allows."""
+    recipe = CordisRecipe.from_environment({}, config=_config(adapter=adapter, requests=True))
+    (options,) = [options for options in recipe.seed if options.get("id") == REQUESTS_ENTRY_ID]
+    assert options["name"] == "agent_command" and options["config"]["name"] == REQUESTS_COMMAND
+    files = render_composition(_nodes([options]), get_adapter(adapter))
+    text = files[path]
+    assert request_words in text
+    assert '"$REEF_HARNESS_WRAPPER" evolve "<the request>"' in text
+    assert '"$REEF_HARNESS_WRAPPER" wait <request id> --timeout 100' in text
+    assert f"reef-{adapter} setup" in text and "{" not in text
+    assert not any(options.get("id") == REQUESTS_SKILL_ID for options in recipe.seed)
 
 
 def test_requests_must_be_a_boolean(placeholders: tuple[Path, Path]) -> None:

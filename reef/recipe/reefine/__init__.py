@@ -92,15 +92,20 @@ class ReefineRecipe(CordisRecipe):
         }
         merged = {**defaults, **evolution}
         # The /reefine command and the update notice are entries the adapter ships; on an adapter that ships
-        # neither a request still arrives through the wrapper, so the profile runs there without them.
-        shipped = {"requests": ships_requests(adapter), "version_check": ships_version_check(adapter)}
-        dropped = [name for name, ships in shipped.items() if merged.get(name) is True and not ships]
-        if dropped:
-            merged.update(dict.fromkeys(dropped, False))
+        # one of them not, the profile runs without it: a request still arrives through reef-<adapter> evolve,
+        # and reef-<adapter> update installs a release.
+        if merged.get("requests") is True and not ships_requests(adapter):
+            merged["requests"] = False
             logger.info(
-                "adapter %r ships no /reefine command or update notice (%s off); requests come through reef-%s evolve",
+                "adapter %r ships no /reefine command (requests off); requests come through reef-%s evolve",
                 adapter,
-                ", ".join(dropped),
+                adapter,
+            )
+        if merged.get("version_check") is True and not ships_version_check(adapter):
+            merged["version_check"] = False
+            logger.info(
+                "adapter %r ships no update notice (version_check off); reef-%s update installs a release",
+                adapter,
                 adapter,
             )
         kwargs = super()._recipe_kwargs({**settings, "evolution": merged}, values)

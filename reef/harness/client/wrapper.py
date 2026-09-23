@@ -47,6 +47,15 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
   [y/N]`` and, on yes, posts the promote and installs the new head the same
   way. Declined, or without a terminal, the next commands are printed.
 
+When invoked with ``wait`` (e.g. ``reef-claude wait <request id> --timeout 500``):
+
+  Waits for the step that takes a request ``evolve`` already filed and
+  reports it as ``evolve --wait`` does, with the same exit statuses. The
+  shipped ``/reefine`` command of an adapter without its own extension
+  files the request with ``evolve`` and calls ``wait`` until it stops
+  answering 2, since the agent's shell tool stops a command after a few
+  minutes.
+
 When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
 
   Fetches the step's page (``GET /reef/harness/releases/<step>/page``) with
@@ -187,6 +196,7 @@ from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
+from reef.harness.episodes.version_check import ships_version_check
 
 
 def _captures_dir() -> Path:
@@ -1074,12 +1084,23 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
     ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
     release = str(row.get("release_id") or "")[:8]
     selection_result = result_of(row, rows)
+    notice = ships_version_check(adapter)
     if selection_result == "selected":
-        return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
+        if notice:
+            return (
+                f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it "
+                "(the update notice offers it)."
+            )
+        return f"'{ask}' is published as release {release}. Run reef-{adapter} update, then restart reef-{adapter}."
     if selection_result == "pending":
+        where = (
+            f"/versions v{step} opens the page, /versions v{step} install serves it"
+            if notice
+            else f"reef-{adapter} page {step} opens the page"
+        )
         return (
             f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
-            f"runs: /versions v{step} opens the page, /versions v{step} install serves it. Page: {page}"
+            f"runs: {where}. Page: {page}"
         )
     if selection_result == "rejected":
         selection = metrics.get("selection")
@@ -1145,9 +1166,12 @@ def _await_step(
         if step is not None:
             return step, rows
         if time.monotonic() >= deadline:
-            print(
-                f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; /versions shows it when it settles"
+            later = (
+                "/versions shows it when it settles"
+                if ships_version_check(adapter)
+                else f"reef-{adapter} wait {record_id} waits again"
             )
+            print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; {later}")
             return "timeout"
         if not started:
             state = _request_state(upstream, scenario, token, record_id)
@@ -1203,10 +1227,12 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
 
 def _next_commands(adapter: str, step: int, selection_result: str) -> str:
     """The commands that take the next step by hand, for a person who declined it or has no terminal."""
-    if selection_result == "pending":
+    if selection_result == "pending" and ships_version_check(adapter):
         return (
             f"/versions v{step} install in a reef-{adapter} session, or reef-{adapter} setup and reef-{adapter} update"
         )
+    if selection_result == "pending":
+        return f"reef-{adapter} page {step}, then reef-{adapter} wait on a terminal offers to serve it"
     return f"reef-{adapter} setup, then reef-{adapter} update"
 
 
@@ -1311,12 +1337,56 @@ def harness(
     print(f"reef-{adapter}: training request {record_id} accepted")
     print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, token, record_id)}")
     if not wait:
-        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /versions later")
+        later = (
+            "check /versions later" if ships_version_check(adapter) else f"run reef-{adapter} wait {record_id} later"
+        )
+        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or {later}")
         return 0
-    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
-    settled = _await_step(
-        upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
+    return _report_request(
+        scenario, adapter, compose_dir, upstream, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
+
+
+def wait_request(
+    scenario: str, adapter: str, compose_dir: str, record_id: str, *, timeout_s: float = 1800.0, poll_s: float = 5.0
+) -> int:
+    """Wait for the step that takes the filed request ``record_id`` and report its result, as ``evolve --wait`` does.
+
+    A harness whose shell tool stops a command after a few minutes files
+    the request with ``evolve`` and calls this until it stops answering 2."""
+    record_id = record_id.strip()
+    if not record_id:
+        sys.exit(f"reef-{adapter} wait: name the request id evolve printed")
+    upstream = _reef_url_of(adapter, compose_dir)
+    token = _reef_token(adapter, compose_dir)
+    return _report_request(
+        scenario,
+        adapter,
+        compose_dir,
+        upstream,
+        token,
+        record_id,
+        f"request {record_id[:8]}",
+        timeout_s=timeout_s,
+        poll_s=poll_s,
+    )
+
+
+def _report_request(
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    upstream: str,
+    token: str | None,
+    record_id: str,
+    ask: str,
+    *,
+    timeout_s: float,
+    poll_s: float,
+) -> int:
+    """Wait for the request's step and print its result; the status ``harness`` documents."""
+    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
+    settled = _await_step(upstream, scenario, adapter, token, record_id, ask, timeout_s=timeout_s, poll_s=poll_s)
     if isinstance(settled, str):
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
     step, rows = settled
@@ -1938,6 +2008,7 @@ def _usage(adapter: str) -> str:
             f"{prog}: run {adapter} through reef's capture proxy, or one of",
             f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
             f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
+            f"  {prog} wait <request id> [--timeout SECONDS]                     wait for a request's result",
             f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
             f"  {prog} doctor                                                     check what the install needs",
             f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
@@ -1987,6 +2058,14 @@ def main() -> None:
         # Intermixed, so the flags read the same before and after the request.
         ns = parser.parse_intermixed_args(args[1:])
         sys.exit(harness(scenario, adapter, compose, " ".join(ns.request), wait=ns.wait, timeout_s=ns.timeout))
+    elif args and args[0] == "wait":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} wait")
+        parser.add_argument("request", help="the request id evolve printed")
+        parser.add_argument(
+            "--timeout", type=float, default=1800.0, metavar="SECONDS", help="how long to wait (default 1800)"
+        )
+        ns = parser.parse_args(args[1:])
+        sys.exit(wait_request(scenario, adapter, compose, ns.request, timeout_s=ns.timeout))
     elif args and args[0] == "page":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} page")
         parser.add_argument("step", type=step_of_version, help="the version, as /versions lists it: v3 or 3")

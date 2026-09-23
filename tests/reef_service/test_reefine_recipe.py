@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.recipe.config_fields import recipe_config_fields
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine import ReefineRecipe
@@ -125,19 +126,29 @@ assert recipe.model_binding().model == 'test-model'
 
 
 def test_the_profile_seeds_the_shipped_entries_only_on_the_adapter_that_ships_them(caplog) -> None:
-    """dsh and hermes take requests through reef-<adapter> evolve; the pi entries would refuse them at startup."""
+    """dsh and hermes get the /reefine command file and no update notice; terminus, with no command surface, gets
+    neither and takes requests through reef-terminus evolve. The pi entries would refuse them at startup."""
     for adapter in ("dsh", "hermes"):
-        built = ReefineRecipe.from_environment({}, config={"evolution": {"adapter": adapter, "tasks": ["[health] x"]}})
+        with caplog.at_level("INFO", logger="reef.recipe.reefine"):
+            built = ReefineRecipe.from_environment(
+                {}, config={"evolution": {"adapter": adapter, "tasks": ["[health] x"]}}
+            )
         assert isinstance(built, ReefineRecipe)
-        assert built.adapter == adapter and built.seed == () and built.propose.adapter == adapter
-    # The profile names both entries; on an adapter that ships none they are off, with a log line saying so.
+        assert built.adapter == adapter and built.propose.adapter == adapter
+        assert [(options["id"], options["name"]) for options in built.seed] == [(REQUESTS_ENTRY_ID, "agent_command")]
+        assert f"reef-{adapter} update installs a release" in caplog.text
+    # The profile names both entries; on an adapter that ships none they are off, with a log line for each.
+    caplog.clear()
     with caplog.at_level("INFO", logger="reef.recipe.reefine"):
         built = ReefineRecipe.from_environment(
             {},
-            config={"evolution": {"adapter": "dsh", "tasks": ["[health] x"], "requests": True, "version_check": True}},
+            config={
+                "evolution": {"adapter": "terminus", "tasks": ["[health] x"], "requests": True, "version_check": True}
+            },
         )
     assert isinstance(built, ReefineRecipe) and built.seed == ()
-    assert "requests come through reef-dsh evolve" in caplog.text
+    assert "requests come through reef-terminus evolve" in caplog.text
+    assert "reef-terminus update installs a release" in caplog.text
     pi = ReefineRecipe.from_environment({}, config={"evolution": {"tasks": ["[health] x"]}})
     assert isinstance(pi, ReefineRecipe)
     assert [entry["id"] for entry in pi.seed] == ["reef-version-check", "reef-requests", "reef-pi-extension-api"]

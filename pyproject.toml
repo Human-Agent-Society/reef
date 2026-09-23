@@ -123,7 +123,7 @@ namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts", "recipe/reefine/trial_driver.mjs"]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "harness/episodes/reefine_command.md", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts", "recipe/reefine/trial_driver.mjs"]
 
 [tool.isort]
 profile = "black"  # black-compatible

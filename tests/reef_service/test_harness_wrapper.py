@@ -31,6 +31,7 @@ from reef.harness.client.wrapper import (
     setup_run,
     setup_set,
     update,
+    wait_request,
 )
 
 
@@ -1630,6 +1631,68 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     out = capsys.readouterr().out.splitlines()
     assert out[3] == "reef-pi: request q-1 is no longer on the service (its scenario was reset); ask again"
     assert len(out) == 4 and len([call for call in reef.seen if call["path"] == record_path]) == 2
+
+
+def _claude_ask_tree(tmp_path: Path, port: int) -> tuple[str, Path]:
+    """A claude composition bound to the reef at ``port``, the release file beside it, and an empty spool."""
+    compose = tmp_path / "claude-tree" / "claude"
+    compose.mkdir(parents=True)
+    binding = {"env": {"ANTHROPIC_BASE_URL": f"http://127.0.0.1:{port}", "ANTHROPIC_AUTH_TOKEN": "dummy"}}
+    (compose / "settings.json").write_text(json.dumps(binding) + "\n")
+    (compose.parent / ".reef-harness-release").write_text(json.dumps({"release_id": "rel-3"}), encoding="utf-8")
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    return str(compose), captures
+
+
+@pytest.mark.unit
+def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_path, capsys) -> None:
+    """``wait`` reports the step of a request evolve filed, as ``evolve --wait`` does; an adapter without pi's
+    update notice and /versions is told the wrapper commands instead."""
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    running = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    reef = _FakeReef(answer, rows=running, record={"agent_record_id": "q-1", "compacted_at": None})
+    compose, captures = _claude_ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert harness("ask-scenario", "claude", compose, "text me") == 0
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=0.05, poll_s=0.01) == 2
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    assert (
+        out[2] == "reef-claude: reef is running the step; add --wait to stay here, or run reef-claude wait q-1 later"
+    )
+    assert out[3:] == [
+        "reef-claude: reef is running the step; waiting up to 0.05 s for its result",
+        "reef-claude: no result yet for 'request q-1' after 0.05 s; reef-claude wait q-1 waits again",
+    ]
+
+    reef = _FakeReef(answer, rows=[CREATION_ROW, _step_row("rel-1111-selected", {"selected": True})])
+    (tmp_path / "settled").mkdir()
+    compose, captures = _claude_ask_tree(tmp_path / "settled", reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=5, poll_s=0.01) == 0
+    reef.close()
+    assert capsys.readouterr().out.splitlines() == [
+        "reef-claude: reef is running the step; waiting up to 5 s for its result",
+        "reef-claude: 'text me when you are blocked' is published as release rel-1111. Run reef-claude update, then "
+        "restart reef-claude.",
+        "reef-claude: next: reef-claude setup, then reef-claude update",
+    ]
+    assert [call["path"] for call in reef.seen] == ["/reef/harness/releases"]
+
+
+@pytest.mark.unit
+def test_main_dispatches_wait_with_the_request_and_the_timeout(tmp_path: Path) -> None:
+    waited: list[tuple] = []
+    with (
+        patch.dict(os.environ, _main_env(tmp_path)),
+        patch("reef.harness.client.wrapper.wait_request", lambda *args, **kwargs: waited.append((args, kwargs)) or 2),
+        patch("sys.argv", ["reef-pi", "wait", "q-1", "--timeout", "500"]),
+        pytest.raises(SystemExit) as exited,
+    ):
+        main()
+    assert exited.value.code == 2
+    assert waited == [(("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 500.0})]
 
 
 @pytest.mark.unit
