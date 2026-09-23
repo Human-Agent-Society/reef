@@ -132,15 +132,29 @@ class ScenarioReleases:
         return None
 
     def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
-        """The composition entries the training step that published ``release_id`` committed, if logged."""
+        """The composition entries the training step that published ``release_id`` committed, if logged.
+
+        A promote or rollback release serves another release's tree: its
+        entries are the ones the training step behind that release logged, so
+        the lookup follows ``rollback_target_release_id`` until it reaches a
+        training record."""
         if not self._store.durable:
             return None
-        for record in self._store.history():
-            if record.artifact_ref.release_id == release_id and record.operation == "training":
+        history = list(self._store.history())
+        seen: set[str] = set()
+        while release_id not in seen:
+            seen.add(release_id)
+            record = next((item for item in history if item.artifact_ref.release_id == release_id), None)
+            if record is None:
+                return None
+            if record.operation == "training":
                 entries = (record.algorithm_state or {}).get("entries")
                 if isinstance(entries, Sequence) and not isinstance(entries, str):
                     return tuple(dict(entry) for entry in entries if isinstance(entry, Mapping))
                 return None
+            if not isinstance(record.rollback_target_release_id, str) or not record.rollback_target_release_id:
+                return None
+            release_id = record.rollback_target_release_id
         return None
 
     def artifact_for_version(self, release_id: str) -> Artifact:

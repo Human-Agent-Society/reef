@@ -714,6 +714,11 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             (row,) = [row for row in rows if row["release_id"] == promoted]
             assert row["operation"] == "promote" and row["rollback_target_release_id"] == pending["release_id"]
             assert "metrics" not in row
+            # The promote serves the pending release's tree, so its entries are that release's: what the install
+            # binding re-renders the config from, and the base release's seed is not what it falls back to.
+            assert scenario.entries_for_version(promoted) == scenario.entries_for_version(pending["release_id"])
+            assert any(entry["id"] == "r1" for entry in scenario.entries_for_version(promoted))
+            assert scenario.entries_for_version(base) is None and scenario.entries_for_version("nope") is None
         finally:
             await client.close()
 

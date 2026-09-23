@@ -360,6 +360,30 @@ def test_config_nodes_deep_merge_in_tree_order() -> None:
     assert '"keep": 8' in files["pi-agent/settings.json"]
 
 
+def test_config_nodes_join_lists_without_repeating_an_item() -> None:
+    """Two nodes that each add a hook or a rule both keep theirs: a list merges by joining, an item already
+    there is not repeated, and a scalar is still replaced by the later node."""
+    files = render_composition(
+        [
+            ("config", {"data": {"hooks": {"Start": [{"command": "a"}]}, "deny": ["Edit"], "keep": 4}}),
+            (
+                "config",
+                {
+                    "data": {
+                        "hooks": {"Start": [{"command": "b"}, {"command": "a"}]},
+                        "deny": ["Edit", "Write"],
+                        "keep": 8,
+                    }
+                },
+            ),
+        ],
+        get_adapter("pi"),
+    )
+    settings = json.loads(files["pi-agent/settings.json"])
+    assert settings["hooks"]["Start"] == [{"command": "a"}, {"command": "b"}]
+    assert settings["deny"] == ["Edit", "Write"] and settings["keep"] == 8
+
+
 def test_unknown_config_target_is_rejected() -> None:
     with pytest.raises(RenderError, match="no config target 'models'"):
         render_composition([("config", {"target": "models", "data": {}})], get_adapter("opencode"))
