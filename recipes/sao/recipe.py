@@ -18,13 +18,17 @@ from reef.train.algos import StepScheduling
 class SAORecipe(WeightTrainingRecipe):
     """Single-Rollout Asynchronous Optimization (arXiv:2607.07508) on reef.
 
-    SAO is asynchronous by construction here: with ``batch_size=1`` the
-    dispatcher runs one training step per accepted rollout, so a rollout enters
-    training the moment its score arrives, with no comparison group or
-    slowest-sample barrier. The DIS ratio needs the rollout log-probabilities as
-    its behaviour proxy, so SAO requires an inference backend that attaches
-    engine-native tensors (``reef.inference_handler_factory``); reef never
-    re-tokenizes a rollout to reconstruct them.
+    "Single rollout" is one rollout per prompt: there is no comparison group
+    and no slowest-sample barrier, so each scored rollout is accepted on its
+    own as it lands. ``batch_size`` of them, from ``batch_size`` different
+    prompts, form one optimizer step; the paper trains with 128 (§4.1). The
+    value model is what makes a single sample per prompt usable, and it needs
+    that many samples per step to learn, so ``batch_size=1`` (one step per
+    rollout) is a smoke setting, not the paper's estimator. The DIS ratio
+    needs the rollout log-probabilities as its behaviour proxy, so SAO requires
+    an inference backend that attaches engine-native tensors
+    (``reef.inference_handler_factory``); reef never re-tokenizes a rollout to
+    reconstruct them.
 
     Objective settings such as the clipping bounds, actor/critic cadence, and GAE
     parameters belong to the training backend. For Slime they are configured by
@@ -36,7 +40,7 @@ class SAORecipe(WeightTrainingRecipe):
     """
 
     name: str = "sao"
-    batch_size: int = config_field(1, env="REEF_SAO_BATCH_SIZE")
+    batch_size: int = config_field(128, env="REEF_SAO_BATCH_SIZE")
 
     @property
     def report_type(self) -> type[ReportBase]:

@@ -2,9 +2,10 @@ SAO: learn from individual rollouts
 ===================================
 
 Single-Rollout Asynchronous Optimization (`arXiv:2607.07508
-<https://arxiv.org/abs/2607.07508>`__) trains on one graded rollout at a
-time. Each rollout is one training step, and the next attempt runs on the
-weights it produced.
+<https://arxiv.org/abs/2607.07508>`__) samples one rollout per prompt and
+grades each on its own. A scored rollout joins the next optimizer step
+without waiting for siblings, and the next attempt runs on the weights that
+step produced.
 
 +-------------+------------------------------------------------------------+
 | Evolves     | model weights                                              |
@@ -25,24 +26,30 @@ weights it produced.
 What it does
 ------------
 
-SAO has no comparison group. A rollout enters training as soon as its score
-arrives without waiting for siblings and without a barrier. It can be used for a
-stream of tasks where each attempt gets its own score.
+SAO has no comparison group. A rollout is accepted as soon as its score
+arrives, without waiting for siblings and without a barrier, and ``batch_size``
+accepted rollouts from as many prompts form one optimizer step. It can be used
+for a stream of tasks where each attempt gets its own score.
 
 .. flow::
    :loop: the next attempt runs on the updated weights
 
    Rollout :: one attempt at a task
    Feedback :: a score reported against the rollout's receipt
-   Step* :: train on that rollout immediately
+   Step* :: train once batch_size scored rollouts have accumulated
    Version :: publish the updated weights to the engine
 
 How Reef implements it
 ----------------------
 
 The processor turns every eligible ``ScoredRolloutReport`` into one
-``TrajectoryItem``. With the default ``batch_size`` of 1, each sample is its
-own training step. The ``sao`` loss family runs Slime's ``policy_loss`` with
+``TrajectoryItem``. "Single rollout" means one rollout per prompt, with no
+comparison group; ``batch_size`` such rollouts, from different prompts, form
+one optimizer step. The default is the paper's 128. Setting it to 1 makes
+every sample its own training step, which is convenient for a smoke run but
+is not the paper's estimator: the value model needs a full batch per step to
+learn, and without it the single-sample advantages are noise. The ``sao``
+loss family runs Slime's ``policy_loss`` with
 SAO's per-token primitive and a critic colocated on the actor GPUs. The
 critic supplies the values, and skip-observation GAE builds the advantages
 inside the training backend.
@@ -53,16 +60,16 @@ backend that attaches engine-native tensors.
 
 The value model carries the paper's cold-start mitigations: it trains at its
 own, higher learning rate (``--critic-lr``) and the first
-``--num-critic-only-steps`` rollout steps fit the zero-initialized value head
+``--num-critic-only-steps`` optimizer steps fit the zero-initialized value head
 before any policy update. Warmup steps still commit one training release per
-rollout; the policy's weights first move after the warmup.
+step; the policy's weights first move after the warmup.
 
 Configuration
 -------------
 
 .. config::
 
-   batch_size | 1 | rollouts per optimizer step. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit.
+   batch_size | 128 | rollouts (one per prompt) per optimizer step; the paper's value. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
    max_staleness | 0 | accepted lag between the producing and serving version.
 
 Run the example
@@ -82,8 +89,9 @@ receipt. The next problem is served by the weights the previous one produced.
    ./run.sh
 
 ``run.sh`` starts the stack that ``serve.yaml`` describes: one Megatron actor
-with the critic colocated on it and one SGLang rollout engine. Each scored
-rollout adds one ``training`` entry to the scenario's version chain:
+with the critic colocated on it and one SGLang rollout engine. The smoke
+config sets ``batch_size`` to 1, so each scored rollout adds one ``training``
+entry to the scenario's version chain:
 
 .. code:: bash
 
@@ -122,15 +130,19 @@ example's README records the reward-shaping choices and the recorded episodes.
 Results
 -------
 
-The example's README records two runs.
-
-The comparison on Qwen3-30B-A3B trains SAO and a GRPO(+DIS) control from the
-same checkpoint on the same three problems with 48 scored rollouts per arm.
-The mean rewards order as the paper predicts, SAO at 0.479 above the
-untrained base at 0.458 above GRPO(+DIS) at 0.417.
+The example's README records the batch-128 comparison on
+Qwen3-30B-A3B-Thinking-2507: SAO and a GRPO(+DIS) control trained from the
+same public checkpoint on a DeepMath pool, without tools, and evaluated on
+held-out AIME 2025, HMMT February 2025 and IMO-AnswerBench. The control is
+a reported baseline, not a shipped recipe. SAO trained
+stably for 99 steps and gained 2 to 4 points on AIME and IMO-AnswerBench,
+within per-checkpoint intervals. GRPO(+DIS) matched it through step 40, then
+shortened its responses and fell 5 to 13 points below SAO by step 80 and to
+a fraction of the base rate by step 140. The README lists the numbers and the
+distance from the paper's tool-integrated setting.
 
 .. image:: ../../assets/sao/learning-curve.png
-   :alt: Cumulative mean reward over the 48 scored rollouts per arm
+   :alt: Held-out accuracy and training dynamics of SAO and GRPO(+DIS) against optimizer step
 
 Related guides
 --------------

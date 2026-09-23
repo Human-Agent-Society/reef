@@ -239,7 +239,7 @@ An optional ``client`` reports the requesting machine, so a proposer builds
 for it rather than for the sandbox it tries changes in: ``platform``,
 ``arch`` and ``release`` (short words) and ``commands``, a map of command
 names to whether each is on the machine's PATH (at most 64). ``reef-pi`` and
-pi's ``/evolve`` send one, reading the PATH without running anything.
+pi's ``/reefine`` send one, reading the PATH without running anything.
 It only informs the proposer: what does not fit that shape is dropped, never
 a reason to refuse the request, and ``training_request.client`` carries what
 was kept.
@@ -664,7 +664,7 @@ directories.
 Harness requests
 ~~~~~~~~~~~~~~~~
 
-``reef-<adapter> harness "<request>"`` and pi's ``/evolve <request>``
+``reef-<adapter> harness "<request>"`` and pi's ``/reefine <request>``
 submit the user's instruction through ``POST /reef/train``, described under
 `Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
 (the deployment keeps learning from failures) or ``manual``, or switch an
@@ -802,7 +802,7 @@ Request page
 ``GET /reef/harness/requests/{record_id}/page`` answers one self contained
 HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
 harness request, ``record_id`` being the ``agent_record_id`` that
-``POST /reef/train`` answered; ``reef-pi evolve`` and pi's ``/evolve``
+``POST /reef/train`` answered; ``reef-pi evolve`` and pi's ``/reefine``
 print the link. Until the step settles the page reloads itself every five
 seconds. A four-stage progress strip and a status badge summarize the
 request. The responsive layout places Request beside Progress on desktop

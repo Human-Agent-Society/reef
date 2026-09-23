@@ -18,7 +18,7 @@ recipe:
       adapter: pi
       propose: tutorials.evolve-your-harness.harness.evolution:propose
       evaluate: tutorials.evolve-your-harness.harness.evolution:evaluate
-      # The seed carries the /evolve command and the pi extension API skill the proposer reads.
+      # The seed carries the /reefine command and the pi extension API skill the proposer reads.
       requests: true
       # The notice at session start offers the update once the head moved.
       version_check: true

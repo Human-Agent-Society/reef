@@ -34,7 +34,7 @@ ANTHROPIC_COUNT_TOKENS_PATH = "/v1/messages/count_tokens"
 
 #: Request keys forwarded from the provider request to the native payload
 #: unchanged; each engine reads the ones it understands.
-NATIVE_REQUEST_KEYS = ("lora_path", "rid", "sglang_sampling_params")
+NATIVE_REQUEST_KEYS = ("lora_path", "rid", "sglang_sampling_params", "vllm_sampling_params")
 
 
 @dataclass(frozen=True)
