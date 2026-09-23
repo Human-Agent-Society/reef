@@ -1,23 +1,28 @@
-"""dsh adapter quirks: the patch layer, the credential file, skill frontmatter, and the boot scaffold.
+"""dsh adapter quirks: the patch layers, the credential file, skill frontmatter, and the boot scaffold.
 
-dsh composes its plugin tree from bundle layers plus one user patch layer,
-``profiles/headless/cordis.patch.yml``: a YAML list of entries addressed by
-plugin id. Config nodes write that layer as a JSON object keyed by id, so
-two nodes touching one plugin deep merge, and ``finalize_render`` emits the
-list: one entry per id (a string starting with ``!!js `` becomes a js
-expression, the form dsh's own bundles use), then one ``insert`` entry per
-rendered code extension so the loader boots it from its relative path. The
-``env`` config target becomes ``.env``, the lowest trust layer of dsh's
-launch environment, which is how the model binding's key reaches its
-``apiKeyEnv`` route. dsh ignores a SKILL.md without YAML frontmatter, so a
-skill node whose text has none gets ``name`` and ``description``
-synthesized, and an agent_command renders under the second skill root as a
-user invocable skill (``/name``), the only command surface dsh has.
+dsh composes its plugin tree from bundle layers plus one user patch layer
+per profile, ``profiles/<profile>/cordis.patch.yml``: a YAML list of entries
+addressed by plugin id. Config nodes write each layer as a JSON object keyed
+by id, so two nodes touching one plugin deep merge, and ``finalize_render``
+emits the list for the headless profile an episode runs and the web profile
+``reef-dsh web`` boots: one entry per id (a string starting with ``!!js ``
+becomes a js expression, the form dsh's own bundles use), then one
+``insert`` entry per rendered code extension so the loader boots it from its
+path relative to the profile, the web profile loading the headless
+profile's module. The ``env`` config target becomes ``.env``, the lowest
+trust layer of dsh's launch environment, which is how the model binding's
+key reaches its ``apiKeyEnv`` route. dsh ignores a SKILL.md without YAML
+frontmatter, so a skill node whose text has none gets ``name`` and
+``description`` synthesized, and an agent_command renders under the second
+skill root as a user invocable skill (``/name``), the only command surface
+dsh has.
 
-The traps a mutated patch could reopen: the session log must stay plain
-JSONL (the reader cannot parse zstd), and the session telemetry and the LLM
-title call stay disabled. A composition that flips any of them is rejected
-at render, the same gate that rejects an invalid node.
+The traps a mutated patch could reopen, in either profile: the session log
+must stay plain JSONL (the reader cannot parse zstd, and a compressed
+profile refuses a sessions root that holds plain logs), and the session
+telemetry and the LLM title call stay disabled; the web profile's manifest
+keeps ``patchReload: startup``. A composition that flips any of them is
+rejected at render, the same check that rejects an invalid node.
 """
 
 from __future__ import annotations
@@ -29,23 +34,33 @@ import yaml
 
 from reef.harness.tree.render import RenderError
 
-_PATCH = "dsh/profiles/headless/cordis.patch.yml"
+#: Each profile's patch layer and the directory its inserts name an extension under, relative to the profile.
+PROFILE_PATCHES = {
+    "dsh/profiles/headless/cordis.patch.yml": "./extensions/",
+    "dsh/profiles/web/cordis.patch.yml": "../headless/extensions/",
+}
+#: The web profile's manifest: with dsh's default for a new web profile, live patch reload, ``dsh web`` exits at start.
+WEB_MANIFEST = "dsh/profiles/web/package.json"
 _ENV = "dsh/.env"
 _EXTENSIONS = "dsh/profiles/headless/extensions/"
 _SKILLS = "dsh/skills/"
 _COMMANDS = "dsh-agents/skills/"
 _JS = "!!js "
 
-# dsh's boot scaffolds the profile beside the rendered patch: a package
-# manifest, the empty root entry list, the pnpm workspace file, node_modules
-# symlinks into the installation, and the module fallback links. Episode
-# state, not residue.
+# dsh's boot scaffolds each profile beside the rendered patch: the empty root
+# entry list, node_modules symlinks into the installation, and the module
+# fallback links, plus a package manifest and the pnpm workspace file for a
+# profile without a manifest (the headless one; the web one is rendered).
+# Episode state, not residue.
 cleanup_whitelist = (
     "dsh/profiles/headless/package.json",
     "dsh/profiles/headless/cordis.yml",
     "dsh/profiles/headless/pnpm-workspace.yaml",
     "dsh/profiles/headless/node_modules/**",
     "dsh/profiles/headless/.dsh-module-fallback/**",
+    "dsh/profiles/web/cordis.yml",
+    "dsh/profiles/web/node_modules/**",
+    "dsh/profiles/web/.dsh-module-fallback/**",
     "dsh/profiles/node_modules/**",
 )
 
@@ -71,16 +86,10 @@ def _tagged(value: Any) -> Any:
     return value
 
 
-def _patch(entries: dict[str, Any], extensions: list[str]) -> str:
-    rows: list[dict[str, Any]] = []
-    for plugin, entry in sorted(entries.items()):
-        if not isinstance(entry, dict):
-            raise RenderError(f"dsh patch entry {plugin!r} must be an object holding config, disabled, or inject")
-        rows.append({"id": plugin, **_tagged(entry)})
+def _patch(entries: dict[str, Any], extensions: list[str], directory: str) -> str:
+    rows: list[dict[str, Any]] = [{"id": plugin, **_tagged(entry)} for plugin, entry in sorted(entries.items())]
     if extensions:
-        rows.append(
-            {"insert": [{"id": f"extension-{name}", "name": f"./extensions/{name}.mjs"} for name in extensions]}
-        )
+        rows.append({"insert": [{"id": f"extension-{name}", "name": f"{directory}{name}.mjs"} for name in extensions]})
     return yaml.dump(rows, Dumper=_Dumper, sort_keys=True, default_flow_style=False, allow_unicode=True)
 
 
@@ -95,21 +104,27 @@ def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
 
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    entries = json.loads(files[_PATCH])
-    log = entries.get("session-persistence-jsonl", {}).get("config", {})
-    if log.get("compression") != "none":
-        raise RenderError(
-            "dsh composition must keep the session log uncompressed (compression: none) so Reef can read it"
-        )
-    for plugin in ("session-telemetry-otel", "session-title-llm"):
-        if entries.get(plugin, {}).get("disabled") is not True:
-            raise RenderError(f"dsh composition must keep {plugin} disabled for benchmark episodes")
     extensions = sorted(
         path[len(_EXTENSIONS) : -len(".mjs")]
         for path in files
         if path.startswith(_EXTENSIONS) and path.endswith(".mjs") and "/" not in path[len(_EXTENSIONS) :]
     )
-    files[_PATCH] = _patch(entries, extensions)
+    for patch_path, directory in PROFILE_PATCHES.items():
+        entries = json.loads(files[patch_path])
+        for plugin, entry in entries.items():
+            if not isinstance(entry, dict):
+                raise RenderError(f"dsh patch entry {plugin!r} must be an object holding config, disabled, or inject")
+        if entries.get("session-persistence-jsonl", {}).get("config", {}).get("compression") != "none":
+            raise RenderError(
+                f"dsh composition must keep the session log uncompressed (compression: none) in {patch_path}: "
+                "Reef reads it, and the profiles share one sessions root"
+            )
+        for plugin in ("session-telemetry-otel", "session-title-llm"):
+            if entries.get(plugin, {}).get("disabled") is not True:
+                raise RenderError(f"dsh composition must keep {plugin} disabled in {patch_path}")
+        files[patch_path] = _patch(entries, extensions, directory)
+    if json.loads(files[WEB_MANIFEST]).get("dsh", {}).get("profile", {}).get("patchReload") != "startup":
+        raise RenderError(f"dsh composition must keep dsh.profile.patchReload startup in {WEB_MANIFEST}")
     files[_ENV] = "".join(f"{key}={value}\n" for key, value in sorted(json.loads(files[_ENV]).items()))
     for path, text in list(files.items()):
         for root, user_only in ((_SKILLS, False), (_COMMANDS, True)):

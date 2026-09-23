@@ -190,6 +190,7 @@ def test_terminus_binding_renders_the_litellm_provider() -> None:
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
+DSH_WEB_PATCH = "dsh/profiles/web/cordis.patch.yml"
 
 
 def _dsh_nodes():
@@ -236,6 +237,19 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
+    # The web profile reef-dsh web boots: the same defaults and binding (the config node targets the headless
+    # patch alone), the headless profile's extension by relative path, and a manifest that reads the patch once.
+    web = yaml.safe_load(files[DSH_WEB_PATCH].replace("!!js ", ""))
+    assert web[:-1] == [row for row in patch[:-1] if row["id"] != "agent-loop"]
+    assert web[-1] == {"insert": [{"id": "extension-tracer", "name": "../headless/extensions/tracer.mjs"}]}
+    assert json.loads(files["dsh/profiles/web/package.json"]) == {
+        "name": "dsh-profile-web",
+        "private": True,
+        "dependencies": {},
+        "dsh": {
+            "profile": {"bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"], "patchReload": "startup"}
+        },
+    }
 
 
 def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
@@ -248,6 +262,27 @@ def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
         render_composition([("config", {"data": {"session-telemetry-otel": {"disabled": False}}})], descriptor)
     with pytest.raises(RenderError, match="must be an object"):
         render_composition([("config", {"data": {"agent-loop": "nope"}})], descriptor)
+    with pytest.raises(RenderError, match="must be an object"):
+        render_composition([("config", {"data": {"session-persistence-jsonl": "zstd"}})], descriptor)
+    # The web profile's patch is held to the same checks: a compressed web profile refuses the shared sessions root.
+    with pytest.raises(RenderError, match=f"uncompressed .* in {DSH_WEB_PATCH}"):
+        render_composition(
+            [
+                (
+                    "config",
+                    {"target": "web", "data": {"session-persistence-jsonl": {"config": {"compression": "zstd"}}}},
+                )
+            ],
+            descriptor,
+        )
+    with pytest.raises(RenderError, match=f"session-title-llm disabled in {DSH_WEB_PATCH}"):
+        render_composition(
+            [("config", {"target": "web", "data": {"session-title-llm": {"disabled": False}}})], descriptor
+        )
+    # And its manifest keeps the patch read once at start: with live reload dsh web exits at start.
+    live = {"dsh": {"profile": {"patchReload": "live"}}}
+    with pytest.raises(RenderError, match="patchReload startup"):
+        render_composition([("config", {"target": "web_manifest", "data": live})], descriptor)
 
 
 HERMES_CONFIG = "hermes/config.yaml"

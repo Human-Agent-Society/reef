@@ -149,7 +149,9 @@ wrapper gets each variable unless the shell already sets it (the shell
 wins); the values never enter the tree and are never sent anywhere. The
 wrapper also exports ``REEF_HARNESS_WRAPPER``, the path of the ``reef-<adapter>``
 script at the install root, so an extension in the agent can run ``update``
-and ``setup`` from the session.
+and ``setup`` from the session, and the descriptor's ``client_env``
+variables, ``{root}`` in a value naming the install root, unless the shell
+already sets them.
 """
 
 from __future__ import annotations
@@ -842,18 +844,19 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             with contextlib.closing(sqlite3.connect(path)) as database:
                 database.execute("VACUUM")  # writes the database header, so the file is a database
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
+    install_root = Path(compose_dir).resolve().parent
     env = os.environ.copy()
     env[env_var] = temp_dir
-    # What an interactive run needs beyond the episode env; the person's own setting wins.
+    # What an interactive run needs beyond the episode env, {root} naming the install root (a directory
+    # outside the relocated composition is read in place); the person's own setting wins.
     for key, value in descriptor.client_env.items():
-        env.setdefault(key, value)
+        env.setdefault(key, value.replace("{root}", str(install_root)))
     # The values the person gave setup, for the extensions that read them; a variable the shell sets wins.
     for key, value in stored.items():
         if not env.get(key):
             env[key] = value
     # The update notice extension needs the service address, the scenario,
     # and the true install root; the relocated temp copy carries none of them.
-    install_root = Path(compose_dir).resolve().parent
     env["REEF_SERVICE_URL"] = upstream
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(install_root)

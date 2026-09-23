@@ -22,6 +22,9 @@ everything the shared engines need to drive one harness binary:
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
+- ``client_env`` (optional): the variables a ``reef-<adapter>`` run adds to
+  a person's session and an episode never gets (``{root}`` substituted with
+  the install root).
 - ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
   keeps in the installed tree, so a later run finds them.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
@@ -193,7 +196,8 @@ class AdapterDescriptor:
     #: Environment the ``reef-<adapter>`` wrapper adds when a person runs the
     #: binary: what an interactive run needs that an episode's ``env`` (offline,
     #: hermetic) must not carry, such as silencing the binary's self-updater
-    #: while reef pins its version.
+    #: while reef pins its version. ``{root}`` in a value is the install root,
+    #: for a directory of the installed tree outside the relocated composition.
     client_env: Mapping[str, str] = field(default_factory=dict)
     #: Commands the binary expects on PATH at first start and otherwise fetches
     #: itself, as ``(command, package)``; the install script names the missing ones.

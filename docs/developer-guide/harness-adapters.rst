@@ -11,30 +11,32 @@ so a mutation can add, rewrite, or remove a tool, or change what the loop
 does at an event; and ``terminus``, Terminal-Bench's Terminus 2, a Harbor
 agent class rather than a CLI, driven by a runner Reef owns.
 
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| Adapter      | Config targets                                            | Install pin                               |
-+==============+===========================================================+===========================================+
-| ``pi``       | ``primary`` → ``pi-agent/settings.json``,                 | npm ``@earendil-works/pi-coding-agent``   |
-|              | ``models`` → ``pi-agent/models.json``                     | 0.84.2                                    |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``opencode`` | ``primary`` → ``opencode/opencode.json``                  | npm ``opencode-ai`` 1.18.18               |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``claude``   | ``primary`` → ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``codex``    | ``primary`` → ``codex/config.toml``                       | npm ``@openai/codex`` 0.152.1             |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``dsh``      | ``primary`` → ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
-|              | ``env`` → ``dsh/.env``                                    |                                           |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``hermes``   | ``primary`` → ``hermes/config.yaml``                      | git ``NousResearch/hermes-agent``         |
-|              |                                                           | at ``v2026.8.31`` (0.21.0)                |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
-|              | ``models`` → ``native/models.json``                       |                                           |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``terminus`` | ``primary`` → ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
-|              |                                                           | reef-eval ships with reef-infra           |
-+--------------+-----------------------------------------------------------+-------------------------------------------+
++--------------+------------------------------------------------------------+-------------------------------------------+
+| Adapter      | Config targets                                             | Install pin                               |
++==============+============================================================+===========================================+
+| ``pi``       | ``primary`` -> ``pi-agent/settings.json``,                 | npm ``@earendil-works/pi-coding-agent``   |
+|              | ``models`` -> ``pi-agent/models.json``                     | 0.84.2                                    |
++--------------+------------------------------------------------------------+-------------------------------------------+
+| ``opencode`` | ``primary`` -> ``opencode/opencode.json``                  | npm ``opencode-ai`` 1.18.18               |
++--------------+------------------------------------------------------------+-------------------------------------------+
+| ``claude``   | ``primary`` -> ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
++--------------+------------------------------------------------------------+-------------------------------------------+
+| ``codex``    | ``primary`` -> ``codex/config.toml``                       | npm ``@openai/codex`` 0.152.1             |
++--------------+------------------------------------------------------------+-------------------------------------------+
+| ``dsh``      | ``primary`` -> ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
+|              | ``env`` -> ``dsh/.env``,                                   |                                           |
+|              | ``web`` -> ``dsh/profiles/web/cordis.patch.yml``,          |                                           |
+|              | ``web_manifest`` -> ``dsh/profiles/web/package.json``      |                                           |
++--------------+------------------------------------------------------------+-------------------------------------------+
+| ``hermes``   | ``primary`` -> ``hermes/config.yaml``                      | git ``NousResearch/hermes-agent``         |
+|              |                                                            | at ``v2026.8.31`` (0.21.0)                |
++--------------+------------------------------------------------------------+-------------------------------------------+
+| ``native``   | ``primary`` -> ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
+|              | ``models`` -> ``native/models.json``                       |                                           |
++--------------+------------------------------------------------------------+-------------------------------------------+
+| ``terminus`` | ``primary`` -> ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
+|              |                                                            | reef-eval ships with reef-infra           |
++--------------+------------------------------------------------------------+-------------------------------------------+
 
 The ``terminus`` adapter is the one that does not drive a CLI. Terminus 2 is
 a Harbor agent class, so the adapter ships its own runner,
@@ -90,6 +92,23 @@ skill root ``DSH_AGENTS_HOME``, the only command surface dsh has; a
 relative path. The model binding declares an ``llm-pi-ai`` route whose key
 is named by ``apiKeyEnv`` and supplied through the ``env`` target, dsh's
 ``.env`` launch environment layer.
+
+dsh has no terminal interface a person can use, so a person runs the tree in
+the browser with ``reef-dsh web``. The ``web`` target is that profile's patch
+layer: it carries the same defaults as the headless patch (the web template
+compresses its session log, and a compressed profile refuses a sessions root
+that holds plain logs), is checked the same way, and gets the model
+binding too, so the wrapper points it at its proxy. The ``web_manifest``
+target is the profile's ``package.json`` with ``patchReload: startup``: the
+manifest dsh writes for a new web profile sets ``live``, and with it
+``dsh web`` exits at start. A ``code_extension`` renders once; the web patch
+inserts it from the headless profile's directory
+(``../headless/extensions/<name>.mjs``). A ``config`` node reaches one
+profile, the one its target names. ``reef-dsh`` relocates ``DSH_HOME`` to its
+temp copy and sets ``DSH_AGENTS_HOME`` to ``<install root>/dsh-agents`` (a
+``client_env`` entry), so both profiles list the tree's commands and not the
+person's ``~/.agents/skills``; a shell that sets ``DSH_AGENTS_HOME`` keeps
+its own.
 
 The ``hermes`` adapter runs Hermes Agent headless (``hermes chat -Q --oneshot
 -q "<task>"``) with its whole home relocated by ``HERMES_HOME``. Its
@@ -500,6 +519,7 @@ agent.
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
+   client_env | variables the ``reef-<adapter>`` wrapper adds to a person's run and an episode never gets, such as a self-updater switch; ``{root}`` is substituted with the install root, for a directory of the installed tree outside the relocated composition. A variable the shell sets wins
    client_state | the sessions and settings the ``reef-<adapter>`` wrapper keeps in the installed tree, as ``{path, kind}`` below the relocated composition. The wrapper runs the binary on a temp copy of links that it removes afterwards, so state the binary creates there itself is lost. ``directory`` and ``sqlite`` (an empty database) are created before the run and linked; ``file`` is copied back with its mode after the run when the binary created it, or renamed a new file over its link
    cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations

@@ -1,0 +1,11 @@
+- config:
+    compression: none
+    root: !!js 'dshHomePath(''sessions'')'
+  id: session-persistence-jsonl
+- disabled: true
+  id: session-telemetry-otel
+- disabled: true
+  id: session-title-llm
+- insert:
+  - id: extension-tracer
+    name: ../headless/extensions/tracer.mjs

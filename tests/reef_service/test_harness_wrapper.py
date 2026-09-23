@@ -2591,6 +2591,41 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
 
 
 @pytest.mark.unit
+def test_dsh_run_reads_the_trees_commands_from_the_install_root(tmp_path) -> None:
+    """reef-dsh points DSH_HOME at the temp copy and DSH_AGENTS_HOME, a ``{root}`` value of ``client_env``, at the
+    installed tree's command root, where the rendered agent_commands are; a shell that sets its own keeps it."""
+    from reef.harness.adapters import get_adapter
+    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.tree.render import render_composition
+
+    descriptor = get_adapter("dsh")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m1", api_key="dummy")
+    nodes = [("agent_command", {"name": "reefine", "text": "File the request."}), *binding.compose_nodes(descriptor)]
+    root = tmp_path / "install"
+    for relative, text in render_composition(nodes, descriptor).items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    compose = str(root / "dsh")
+    binary = _make_env_dump_binary(tmp_path)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    env = _ask_env(captures, compose)
+    env.pop("DSH_AGENTS_HOME", None)
+    with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+        run_agent(str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", ["web"])
+    seen = json.loads((tmp_path / "env.json").read_text())
+    assert seen["DSH_AGENTS_HOME"] == str(root.resolve() / "dsh-agents")
+    assert (Path(seen["DSH_AGENTS_HOME"]) / "skills" / "reefine" / "SKILL.md").is_file()
+    assert Path(seen["DSH_HOME"]).name.startswith("reef-harness-")
+    with (
+        patch.dict(os.environ, {**env, "DSH_AGENTS_HOME": "/elsewhere/agents"}, clear=True),
+        contextlib.suppress(SystemExit),
+    ):
+        run_agent(str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", ["web"])
+    assert json.loads((tmp_path / "env.json").read_text())["DSH_AGENTS_HOME"] == "/elsewhere/agents"
+
+
+@pytest.mark.unit
 def test_main_dispatches_the_setup_forms_and_update(tmp_path) -> None:
     called: list[tuple[str, tuple, dict]] = []
 
