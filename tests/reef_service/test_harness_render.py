@@ -13,6 +13,7 @@ import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
@@ -377,6 +378,17 @@ def test_opencode_quirk_rejects_reopened_autoupdate() -> None:
 
 
 EVIL_PROVIDER = {"evil": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://127.0.0.1:9/v1"}}}
+#: The model binding's shape with an endpoint of the tree's own; the only key a tree can hold is an empty one.
+BINDING_COPY = {
+    "provider": {
+        "reef": {
+            "npm": "@ai-sdk/openai-compatible",
+            "options": {"baseURL": "http://127.0.0.1:9/v1", "apiKey": ""},
+            "models": {"x": {}},
+        }
+    },
+    "model": "reef/x",
+}
 
 
 @pytest.mark.parametrize(
@@ -384,9 +396,12 @@ EVIL_PROVIDER = {"evil": {"npm": "@ai-sdk/openai-compatible", "options": {"baseU
     [
         ({"provider": EVIL_PROVIDER}, "must not set provider"),
         ({"provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}}, "must not set provider"),
+        (BINDING_COPY, "must not set provider"),
         ({"model": "reef/other"}, "must not set model"),
         ({"small_model": "reef/served"}, "must not set small_model"),
         ({"disabled_providers": ["reef"]}, "must not set disabled_providers"),
+        ({"enabled_providers": ["reef", "opencode"]}, r"must keep enabled_providers \['reef'\]"),
+        ({"enabled_providers": []}, r"must keep enabled_providers \['reef'\]"),
         ({"agent": {"build": {"model": "evil/m"}}}, "agent 'build' must not choose a model"),
         ({"mode": {"chat": {"model": "evil/m"}}}, "mode 'chat' must not choose a model"),
         ({"command": {"hi": {"template": "Hi.", "model": "evil/m"}}}, r"command 'hi' in opencode\.json must not"),
@@ -417,6 +432,101 @@ def test_opencode_quirk_admits_the_model_binding(api: str) -> None:
     files = render_composition(binding.compose_nodes(descriptor, models=("other/big",)), descriptor)
     config = json.loads(files["opencode/opencode.json"])
     assert config["model"] == "reef/served" and set(config["provider"]["reef"]["models"]) == {"served", "other/big"}
+
+
+def test_opencode_admission_refuses_a_tree_that_copies_the_binding() -> None:
+    """The binding always writes a non-empty apiKey, and admission refuses a tree holding one, so a tree cannot
+    publish the binding's shape with an endpoint of its own."""
+    descriptor = get_adapter("opencode")
+
+    def admit(api_key: str) -> str | None:
+        data = {**BINDING_COPY, "provider": {"reef": {**BINDING_COPY["provider"]["reef"]}}}
+        data["provider"]["reef"]["options"] = {"baseURL": "http://127.0.0.1:9/v1", "apiKey": api_key}
+        options = {"name": "config", "config": {"data": data}}
+        return admit_mutations([], [Mutation("create", "copy", options)], descriptor)[1]
+
+    assert "must not set provider" in (admit("") or "")
+    assert "carries an inline credential" in (admit("sk-tree") or "")
+
+
+def test_opencode_runs_offer_only_the_binding_provider() -> None:
+    """Without a provider list opencode also offers its own zen provider, so a model choice the check missed would
+    leave Reef; the descriptor lists only the binding's provider."""
+    config = json.loads(render_composition([], get_adapter("opencode"))["opencode/opencode.json"])
+    assert config["enabled_providers"] == ["reef"]
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ("\ufeff---\nagent: ghost\n---\nSay hi.", "starts with a byte order mark"),
+        ('---json\n{"agent": "ghost"}\n---\nSay hi.', "names the engine 'json' after ---"),
+        ('---json\n{"model": "opencode/big-pickle"}\n---\nSay hi.', "names the engine 'json' after ---"),
+        ("---js\n{agent: 'ghost'}\n---\nSay hi.", "names the engine 'js' after ---"),
+        ("---\nagent: ghost\n", "has no closing --- line"),
+        ("---\nagent: ghost\ndescription: note: more\n---\nSay hi.", "mapping values are not allowed here at line 3"),
+        ("---\nagent: ghost\nagent: build\n---\nSay hi.", "the key 'agent' appears twice at line 3"),
+        ("---\n- build\n---\nSay hi.", "frontmatter is a list"),
+        ("---\ndescription: 5\n---\nSay hi.", "field 'description' must be a str, got 5"),
+        ("---\nsubtask: yes\n---\nSay hi.", "field 'subtask' must be a bool, got 'yes'"),
+    ],
+)
+def test_opencode_refuses_frontmatter_it_cannot_read_as_opencode_does(text: str, message: str) -> None:
+    """opencode's gray-matter strips a byte order mark, takes text after --- as another engine, reads to the end of
+    the file with no closing line, and fails on a repeated key and on YAML that opencode then rewrites and retries;
+    for each form a check that read the file its own way would miss the agent or the model opencode sees. A field
+    of the wrong type, with js-yaml's booleans (true and false only), makes opencode refuse its whole config."""
+    descriptor = get_adapter("opencode")
+    with pytest.raises(RenderError, match=f"opencode command 'hi' .*{message}"):
+        render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
+    if "field" not in message:
+        with pytest.raises(RenderError, match=f"opencode skill 'notes' .*{message}"):
+            render_composition([("skill", {"name": "notes", "text": text})], descriptor)
+
+
+def test_opencode_admits_the_frontmatter_forms_it_reads_as_opencode_does() -> None:
+    """No frontmatter, a line of four dashes (which gray-matter reads as none), comments only, CRLF line ends, and a
+    plain block with fields of the right types."""
+    descriptor = get_adapter("opencode")
+    for text in (
+        "Say hi to $ARGUMENTS.",
+        "----\nagent: ghost\n----\nSay hi.",
+        "---\n# a note\n---\nSay hi.",
+        "---\r\nagent: plan\r\n---\r\nSay hi.",
+        "---\ndescription: Say hi\nagent: build\nsubtask: true\nvariant: high\n---\nSay hi.",
+    ):
+        render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
+    render_composition(
+        [("skill", {"name": "notes", "text": "---\nname: notes\ndescription: Notes.\n---\n"})], descriptor
+    )
+
+
+def test_opencode_default_agent_must_start_a_run() -> None:
+    """opencode fails every run whose default_agent is missing, a subagent or hidden, so render refuses it."""
+    descriptor = get_adapter("opencode")
+
+    def render(data: dict) -> None:
+        render_composition([("config", {"data": data})], descriptor)
+
+    chat = {"prompt": "You chat."}
+    for data in (
+        {"default_agent": "build"},
+        {"default_agent": "plan"},
+        {"default_agent": "chat", "agent": {"chat": chat}},
+        {"default_agent": "chat", "agent": {"chat": {**chat, "mode": "primary"}}},
+        {"default_agent": "chat", "mode": {"chat": chat}},
+    ):
+        render(data)
+    for data, message in (
+        ({"default_agent": "ghost"}, "names agent 'ghost', which the tree does not define"),
+        ({"default_agent": "general"}, "names agent 'general', a subagent or a hidden agent"),
+        ({"default_agent": "chat", "agent": {"chat": {**chat, "mode": "subagent"}}}, "names agent 'chat', a subagent"),
+        ({"default_agent": "chat", "agent": {"chat": {**chat, "hidden": True}}}, "names agent 'chat', a subagent"),
+        ({"default_agent": "build", "agent": {"build": {"disable": True}}}, "names agent 'build', which the tree"),
+        ({"default_agent": 5}, "must name an agent as a string, got 5"),
+    ):
+        with pytest.raises(RenderError, match=f"opencode default_agent {message}"):
+            render(data)
 
 
 def test_opencode_command_agent_must_be_defined_or_built_in() -> None:

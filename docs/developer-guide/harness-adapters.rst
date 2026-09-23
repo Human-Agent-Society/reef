@@ -122,20 +122,33 @@ dangerous with a tool error, so no bypass flag is used.
 The ``opencode`` adapter runs opencode headless (``opencode run --format json
 --auto "<task>"``) with its config directory relocated by
 ``OPENCODE_CONFIG_DIR`` and its data, cache and state by the XDG variables.
-The defaults keep autoupdate off, sharing off and every permission allowed,
-and a composition that turns autoupdate or sharing back on is refused at
-render. The model binding is the only writer of ``provider`` and ``model``:
-a tree may hold them only in the binding's shape, whose values the binding
-replaces when it renders after the tree, and a tree that adds a provider,
-lists providers (``enabled_providers``, ``disabled_providers``) or chooses a
-model (``small_model``, or the ``model`` of an agent or a command) is refused
-at render. A command's ``agent`` must name an agent the tree defines under
-``agent`` (or the older ``mode``) or one of opencode's built in agents,
-``build``, ``plan``, ``general`` and ``explore``; opencode otherwise fails
-the command at run time with an unexplained server error. ``reef-opencode``
-sets ``OPENCODE_ENABLE_EXA=1``, which registers opencode's ``websearch``
-tool (Exa, no key needed) for provider ``reef``; episodes do not set it, so
-a benchmark episode does not search the web.
+The defaults keep autoupdate off, sharing off, every permission allowed and
+``enabled_providers`` set to ``["reef"]``, so opencode offers only the
+provider the model binding writes and not its own zen provider; a
+composition that turns autoupdate or sharing back on or changes that list is
+refused at render. The model binding is the only writer of ``provider`` and
+``model``: it renders after the tree, replaces every value it writes, and
+always writes a non empty ``apiKey``, which a tree cannot hold because
+admission refuses an inline credential. So a tree that sets ``provider`` or
+``model`` at all, sets ``disabled_providers``, or chooses a model elsewhere
+(``small_model``, or the ``model`` of an agent or a command) is refused at
+render. A command or a skill file must write its frontmatter in the plain
+form: a ``---`` line, a YAML mapping and a closing ``---`` line. opencode
+reads frontmatter with gray-matter, which also takes a byte order mark,
+another engine named after the opening ``---`` (JSON, JavaScript), a block
+with no closing line, and YAML it cannot read, which opencode reads again
+after rewriting; a check that read those forms another way could miss the
+agent or the model opencode sees, so render refuses them. A command's
+``agent`` must name an agent the tree defines under ``agent`` (or the older
+``mode``) and does not disable, or one of opencode's built in agents,
+``build``, ``plan``, ``general`` and ``explore``, and its ``description``,
+``agent``, ``variant`` and ``subtask`` must have the types opencode reads.
+``default_agent`` must name such an agent that is neither a subagent nor
+hidden. opencode otherwise fails the command, or every run, with an
+unexplained error. ``reef-opencode`` sets ``OPENCODE_ENABLE_EXA=1``, which
+registers opencode's ``websearch`` tool (Exa, no key needed) for provider
+``reef``; episodes do not set it, so a benchmark episode does not search the
+web.
 
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which

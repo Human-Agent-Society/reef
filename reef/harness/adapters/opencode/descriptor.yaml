@@ -6,7 +6,8 @@
 # auto-reject in `opencode run` without --auto, so --auto is part of the
 # canonical invocation. The config defaults pin the benchmarking traps:
 # autoupdate off, sharing off, permissions allowed (episodes are isolated
-# roots).
+# roots), and only provider reef, the model binding's, so a model choice the
+# render check misses cannot reach opencode's own zen provider.
 name: opencode
 binary: opencode
 # The vendor's install channel at the pinned version; consumed by the
@@ -38,6 +39,7 @@ files:
       defaults:
         autoupdate: false
         share: "disabled"
+        enabled_providers: ["reef"]
         permission:
           "*": "allow"
   rules: "opencode/AGENTS.md"
