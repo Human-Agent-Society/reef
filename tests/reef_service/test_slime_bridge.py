@@ -21,11 +21,12 @@ from slime.utils.misc import Box
 
 from reef.runtime.interfaces import TrainingJobResult
 from reef.runtime.recovery import read_marker, transition_marker, write_marker
-from reef.runtime.scheduler import TrainingCoordinator
+from reef.runtime.scheduler import LEGACY_SCHEDULE_KEY, TrainingCoordinator, legacy_training_job_id
 from reef.train.algos import StepScheduling
+from reef.train.algos.schedule import schedule_seed
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
-from reef.train.slime_backend.reef_adapters import bridge
+from reef.train.slime_backend.reef_adapters import bridge, preparation
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.preparation import _build_payload
 from reef.train.slime_backend.reef_adapters.training_job.storage import RetentionConfig, _allocated_bytes
@@ -1927,6 +1928,34 @@ def test_slime_preparation_shuffle_is_deterministic_per_batch_and_keeps_groups_c
     for row, advantage in zip(first["samples"], first["advantages"], strict=True):
         g, s = int(row[0][1]), int(row[0][-1])
         assert advantage == g * 2 + s
+
+
+@pytest.mark.unit
+def test_slime_preparation_names_the_row_order_an_earlier_build_shuffled_into_when_it_differs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An earlier Reef seeded the shuffle with the batch number; a job it left out resumes only if its identity can
+    put the rows back in that order. A shuffled payload names that order when it differs, and the legacy identity of
+    this build's payload is the one the earlier build gave the same batch."""
+    scheduling = StepScheduling(batch_size=2, epochs=2, shuffle=True)
+    batch = _grouped_batch(8, 2, "agent:batch:1")
+    head = _build_payload(batch, "pg", tuple(range(16)), scheduling)
+    assert set(head[LEGACY_SCHEDULE_KEY]) == {"head_rows", "row_indices", "rollout_ids"}
+    with monkeypatch.context() as patch:
+        patch.setattr(preparation, "batch_schedule_seed", lambda batch: schedule_seed(batch.batch_id))
+        earlier = _build_payload(batch, "pg", tuple(range(16)), scheduling)
+    assert LEGACY_SCHEDULE_KEY not in earlier and earlier["samples"] != head["samples"]
+
+    def wire(payload: dict[str, object]) -> dict[str, object]:
+        # The runtime layer consumes source_rows before the payload reaches the coordinator.
+        return {key: value for key, value in payload.items() if key != "source_rows"}
+
+    assert legacy_training_job_id(wire(head), 3) == legacy_training_job_id(wire(earlier), 3)
+    # No shuffle, or a shuffle both seeds agree on, names nothing.
+    assert LEGACY_SCHEDULE_KEY not in _build_payload(batch, "pg", None, StepScheduling(batch_size=2))
+    assert LEGACY_SCHEDULE_KEY not in _build_payload(
+        _grouped_batch(1, 2), "pg", None, replace(scheduling, batch_size=1)
+    )
 
 
 @pytest.mark.unit

@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import sys
 import traceback
 from collections.abc import Iterator, Mapping, Sequence
@@ -59,6 +60,7 @@ from reef.runtime.recovery import (
     TrainingRecovery,
     marker_checkpoint_result,
     marker_disposition,
+    marker_in_flight,
     marker_path,
     marker_result,
 )
@@ -411,12 +413,23 @@ class InferenceMemory:
 #: a job an earlier build started, whose payload named no owner, keeps its identity.
 JOB_OWNER_KEY = "owner"
 
+#: The payload key carrying the row order an earlier build shuffled the batch into, when this build's differs: that
+#: build seeded the shuffle from the batch id, this one from the rows. Only the legacy identity reads it; neither
+#: identity hashes it, and the job never carries it to the backend.
+LEGACY_SCHEDULE_KEY = "legacy_schedule"
+
+#: The payload lists that follow the wire rows, reordered to the earlier build's order for its identity.
+_ROW_ALIGNED_KEYS = ("samples", "advantages", "producing_runtime_load_ids", "producing_runtime_load_spans")
+
+logger = logging.getLogger(__name__)
+
 
 def training_job_id(payload: Mapping[str, Any]) -> str:
     """Preserve the retry-stable identity of the shared training payload: its batch and admission fence."""
     identity = dict(payload)
     identity.pop("max_staleness", None)
     identity.pop(JOB_OWNER_KEY, None)
+    identity.pop(LEGACY_SCHEDULE_KEY, None)
     # The other components of a composite advance the scenario step while a job is out; its retry must replay.
     identity.pop("rollout_id", None)
     # The processor numbers batches per process; a reload numbers the same rows again.
@@ -429,14 +442,45 @@ def training_job_id(payload: Mapping[str, Any]) -> str:
 
 
 def legacy_training_job_id(payload: Mapping[str, Any], rollout_id: int) -> str:
-    """The identity an earlier build wrote into its job marker: the payload with the scenario step in it."""
+    """The identity an earlier build wrote into its job marker: the payload with the scenario step in it, its rows
+    in the order that build's shuffle gave them when this payload says it differs."""
     identity = {**payload, "rollout_id": rollout_id}
     identity.pop("max_staleness", None)
     identity.pop(JOB_OWNER_KEY, None)
+    legacy = identity.pop(LEGACY_SCHEDULE_KEY, None)
+    if isinstance(legacy, Mapping):
+        identity.update(_legacy_row_order(identity, legacy))
     if uses_staleness_admission(payload):
         identity.pop("expected_runtime_load_id", None)
     encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _legacy_row_order(payload: Mapping[str, Any], legacy: Mapping[str, Any]) -> dict[str, Any]:
+    """The row aligned lists of ``payload`` in the earlier build's row order, with its rollout ids.
+
+    ``legacy`` names this payload's batch row per wire row (``head_rows``),
+    the earlier build's batch row per wire row (``row_indices``) and its
+    rollout id per wire row. Rows with one batch row carry one content, so
+    each earlier wire row takes the first wire row of the same batch row.
+    """
+    head_rows = legacy.get("head_rows")
+    row_indices = legacy.get("row_indices")
+    rollout_ids = legacy.get("rollout_ids")
+    if not isinstance(head_rows, list) or not isinstance(row_indices, list) or not isinstance(rollout_ids, list):
+        return {}
+    first: dict[int, int] = {}
+    for position, row in enumerate(head_rows):
+        first.setdefault(row, position)
+    if any(row not in first for row in row_indices):
+        return {}
+    order = [first[row] for row in row_indices]
+    reordered: dict[str, Any] = {"rollout_ids": list(rollout_ids)}
+    for key in _ROW_ALIGNED_KEYS:
+        values = payload.get(key)
+        if isinstance(values, list) and len(values) == len(head_rows):
+            reordered[key] = [values[position] for position in order]
+    return reordered
 
 
 def _rollout_id(payload: Mapping[str, Any]) -> int:
@@ -483,13 +527,16 @@ class TrainingExecution:
     def execute(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         job_id = training_job_id(payload)
         rollout_id = _rollout_id(payload)
+        legacy_payload = payload
+        # The backend trains the rows in this build's order; the earlier order serves only the legacy identity.
+        payload = {key: value for key, value in payload.items() if key != LEGACY_SCHEDULE_KEY}
         if self._store is None:
             raise RuntimeError("training job checkpoint path is not configured")
         marker = self._store.read()
         if marker is not None and marker["job_id"] != job_id:
             # A marker an earlier build wrote names the same batch by the step it ran at. Its job replays or
             # resumes under that name; a batch that trains again from the start carries the current identity.
-            legacy = legacy_training_job_id(payload, marker.get("scenario_step", marker["rollout_id"]))
+            legacy = legacy_training_job_id(legacy_payload, marker.get("scenario_step", marker["rollout_id"]))
             if marker["job_id"] == legacy and marker_disposition(marker, legacy) != "fresh":
                 job_id = legacy
         disposition = marker_disposition(marker, job_id)
@@ -507,6 +554,12 @@ class TrainingExecution:
                 # from here on, as for a marker this build wrote.
                 marker = {**marker, "scenario": owner}
                 self._store.write(marker)
+                logger.info(
+                    "training job %s from an earlier Reef resumes for scenario %r: its marker now names that owner, "
+                    "so a delete of the owner is refused until the job commits",
+                    marker["job_id"],
+                    owner,
+                )
             return marker_result(marker) if marker["status"] == "COMPLETE" else marker_checkpoint_result(marker)
         admission_metrics: Mapping[str, Any] = {}
         if self._context is not None:
@@ -851,9 +904,16 @@ class TrainingCoordinator:
         self._last_train_metrics: dict[str, Any] = {}
         self._operation_lock = Lock()
         self._training.start()
-        self._inference_url = TrainingRecovery(self._publication, self._weight_publisher).restore(
-            self._execution.recover()
-        )
+        recovered = self._execution.recover()
+        if marker_in_flight(recovered) and recovered is not None and "scenario" not in recovered:
+            logger.warning(
+                "training job %s (%s) was started by an earlier Reef and its marker names no owner: until the owner's "
+                "next training turn writes it in (the status shows training_job.owner), delete no scenario on this "
+                "runtime",
+                recovered["job_id"],
+                recovered["status"],
+            )
+        self._inference_url = TrainingRecovery(self._publication, self._weight_publisher).restore(recovered)
 
     def prepare_training_step(
         self,

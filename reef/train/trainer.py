@@ -53,10 +53,6 @@ class _PendingStep:
     base_release_id: str | None = None
     #: The prepared step behind ``result``; kept across a stale refusal when the candidate is evaluated again.
     prepared: PreparedStep | None = None
-    #: What the trainer released before its processor took this batch back (acknowledged, dropped or skipped).
-    #: Until a durable record says the batch is consumed, a sibling trainer reads this, not the processor's memory:
-    #: a commit that fails after the acknowledgment must not let another trainer's commit retire the batch's rows.
-    durable_releasable: frozenset[str] | None = None
 
     @property
     def batch_id(self) -> str:
@@ -157,6 +153,9 @@ class Trainer:
         # Stored rows this trainer's durable records already name as consumed or settled: a record names a
         # settled row once, so a sibling that holds it for many steps does not grow every record.
         self._recorded_ids: set[str] = set()
+        # Rows a settlement receipt names that a rebuilt trainer has not read again yet: read, they are settled as
+        # they were, not decided again without the rows a sibling's commit retired since.
+        self._recovered_settled: set[str] = set()
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -325,9 +324,15 @@ class Trainer:
                     return
 
     def _ingest_or_release(self, item: AgentRecord) -> None:
-        """Hand a stored row to the processor, or release it: a row of a type it does not take, or a report on a
-        retired row, which the processor settles instead of resolving."""
-        if item.request_type not in self.processor.required_request_types:
+        """Hand a stored row to the processor, or release it: a row of a type it does not take, a report on a
+        retired row, which the processor settles instead of resolving, or a row a settlement receipt names."""
+        if item.agent_record_id in self._recovered_settled:
+            self._recovered_settled.discard(item.agent_record_id)
+            if item.request_type in self.processor.required_request_types:
+                self._processor.restore_settled(item)
+            self._released_stored_ids.add(item.agent_record_id)
+            self._recorded_ids.add(item.agent_record_id)
+        elif item.request_type not in self.processor.required_request_types:
             self._released_stored_ids.add(item.agent_record_id)
         elif self._references_retired(item):
             # The processor's ownership rule releases what the report owns, as when it is read before the retirement.
@@ -450,7 +455,6 @@ class Trainer:
             if pending is None or pending.batch_id != batch.batch_id:
                 raise RuntimeError("trainer reservation changed while its instruction was being skipped")
             metadata = dict(self._processor.request_failure_metrics(request.id))
-            self._hold_durable_view(pending)
             self._processor.release_batch(batch.batch_id)
             pending.consumed_ids = self._processor.discard_request(request.id)
         metrics = {**metadata, "skipped": "instruction failed", "error": error}
@@ -490,17 +494,37 @@ class Trainer:
         that another component's commit has since replaced: the batch is still
         the right data, and the backend must evaluate it against the release
         served now. ``keep_candidate`` keeps the prepared candidate too, so the
-        next step evaluates it again instead of proposing anew.
+        next step evaluates it again instead of proposing anew. A batch the
+        processor already took back (an earlier attempt acknowledged it and its
+        commit failed) stays taken: the next step prepares it again and records
+        the rows that attempt consumed, and never acknowledges it twice.
         """
         with self._lock:
-            if self._pending is None:
+            pending = self._pending
+            if pending is None:
                 return
+            taken = pending.consumed_ids
+            if taken is None and pending.prepared_commit is not None:
+                taken = pending.prepared_commit.consumed_ids
             self._pending = _PendingStep(
-                batch=self._pending.batch,
+                batch=pending.batch,
                 result=None,
-                prepared=self._pending.prepared if keep_candidate else None,
-                durable_releasable=self._pending.durable_releasable,
+                consumed_ids=taken,
+                prepared=pending.prepared if keep_candidate else None,
             )
+
+    @property
+    def pending_has_candidate(self) -> bool:
+        """Whether the pending result carries a candidate its backend evaluated against a release: a skip (no
+        proposal, a failed instruction) and a dispatched result carry none, so a moved head cannot make them stale."""
+        with self._lock:
+            return self._pending is not None and self._pending.prepared is not None
+
+    @property
+    def pending_prepared_commit(self) -> PreparedCommit | None:
+        """The prepared commit of the pending step, once an attempt prepared it."""
+        with self._lock:
+            return None if self._pending is None else self._pending.prepared_commit
 
     def execute_reserved_step(self, scenario_step: int) -> StepExecution:
         """Run the dispatched backend for the currently reserved batch."""
@@ -522,24 +546,20 @@ class Trainer:
         return execution
 
     def releasable_agent_record_ids(self) -> frozenset[str]:
-        """The rows this trainer no longer needs and does not protect, as its durable state says.
+        """The rows this trainer no longer needs and does not protect, as a reload of it would decide them.
 
         Another trainer's commit retires only rows every trainer releases, so
-        what this reports must hold even if this trainer's own pending commit
-        fails: while a batch the processor took back has no durable record,
-        the rows that release made releasable stay out of this set.
+        what this reports must hold across a reload of this trainer: the rows
+        its durable records name as consumed or settled, and the rows a replay
+        releases the same way at every read (a type its processor never
+        takes, a report on a retired row), less what its processor protects
+        now. A release its processor decided in memory since its last record
+        (a batch taken back, a retry retired, a step discarded) depends on
+        what it read around the row, which a sibling's retirement changes;
+        it reaches the other trainers with the record that names it.
         """
         with self._lock:
-            released = self._releasable_ids()
-            pending = self._pending
-            if pending is not None and pending.durable_releasable is not None:
-                return released & pending.durable_releasable
-            return released
-
-    def _hold_durable_view(self, pending: _PendingStep) -> None:
-        """Remember what was releasable before the processor takes ``pending``'s batch back; the first time only."""
-        if pending.durable_releasable is None:
-            pending.durable_releasable = self._releasable_ids()
+            return self._releasable_ids() & frozenset(self._recorded_ids | self._released_stored_ids)
 
     def _releasable_ids(self) -> frozenset[str]:
         retention = self._processor.retention_decision()
@@ -577,7 +597,6 @@ class Trainer:
                 raise TypeError("training step state must be a mapping")
             consumed = self._pending.consumed_ids
             if consumed is None:
-                self._hold_durable_view(self._pending)
                 consumed = self._processor.acknowledge(batch_id)
             compacted = self._releasable_ids()
             if compactable is not None:
@@ -627,6 +646,40 @@ class Trainer:
             self._state = dict(prepared.algorithm_state)
             self._recorded_ids |= (prepared.consumed_ids | prepared.settled_ids) - prepared.compacted_ids
             self._pending = None
+
+    def settle_released(self, *, component: str | None) -> frozenset[str]:
+        """Put the releases this trainer decided in memory since its last record on record; returns what it named.
+
+        Between two commits a trainer releases rows it read (a retry retired,
+        a step discarded, a row it judged unusable); until a record names them
+        no sibling may retire them, and a trainer that does not step again for
+        a while would hold them stored for that long. With no batch reserved,
+        a settlement receipt names them durably, keyed by that content: the
+        other trainers' commits may then retire them, and a rebuilt trainer
+        settles them again when it reads them (``recover_settled``) instead of
+        deciding them anew. A receipt moves no cursor.
+        """
+        with self._lock:
+            if self._pending is not None:
+                return frozenset()
+            unrecorded = frozenset(self._releasable_ids() - self._recorded_ids - self._released_stored_ids)
+            if not unrecorded:
+                return frozenset()
+            content = {"component": component, "settled_ids": sorted(unrecorded)}
+            digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:16]
+            self._records.compact(
+                self.scenario,
+                frozenset(),
+                receipt_id=f"settled:{digest}",
+                receipt_metadata={"outcome": "settled", **content},
+            )
+            self._recorded_ids |= unrecorded
+            return unrecorded
+
+    def recover_settled(self, settled_ids: frozenset[str]) -> None:
+        """The rows this trainer's settlement receipts name, for a rebuilt trainer to settle when it reads them."""
+        with self._lock:
+            self._recovered_settled = set(settled_ids)
 
     def _unrecorded_settled(self, consumed: frozenset[str], compacted: frozenset[str]) -> frozenset[str]:
         """Rows this trainer released without training that stay stored for another trainer, not yet on record.
@@ -678,9 +731,10 @@ class Trainer:
             if self._pending is None:
                 return frozenset()
             batch_id = self._pending.batch_id
-            self._hold_durable_view(self._pending)
-            self._processor.dropped(batch_id)
-            consumed = self._processor.acknowledge(batch_id)
+            consumed = self._pending.consumed_ids
+            if consumed is None:
+                self._processor.dropped(batch_id)
+                consumed = self._processor.acknowledge(batch_id)
             compacted = self._releasable_ids()
             if compactable is not None:
                 compacted = compacted & compactable
@@ -814,6 +868,7 @@ class Trainer:
                             self._processor.restore_settled(item)
                         self._released_stored_ids.add(item.agent_record_id)
                         self._recorded_ids.add(item.agent_record_id)
+                        self._recovered_settled.discard(item.agent_record_id)
                         continue
                     self._ingest_or_release(item)
             # After the replay, so a report that was live before the crash stays live as it was; a report

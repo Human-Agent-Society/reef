@@ -985,6 +985,77 @@ def test_a_commit_runs_the_release_check_a_rollback_to_that_release_runs(tmp_pat
         dispatcher.close()
 
 
+class _CountedChecks(_RefuseUnvetted):
+    """Refuse what the parent refuses, and count the trees it judged."""
+
+    def __init__(self) -> None:
+        self.count = 0
+
+    def validate(self, artifact: Artifact) -> None:
+        self.count += 1
+        super().validate(artifact)
+
+
+@dataclass(frozen=True)
+class _CountedTreeRecipe(_LegacyTreeRecipe):
+    """The legacy tree recipe whose admission hook counts what it judged."""
+
+    checks: _CountedChecks | None = None
+
+    def build_artifact_validator(self) -> ArtifactValidator:
+        assert self.checks is not None
+        return self.checks
+
+
+@dataclass(frozen=True)
+class _UnseededConfigRecipe(_ConfigRecipe):
+    """A configuration recipe that seeds nothing: its component starts empty, which its own check would refuse."""
+
+    def base_artifact_files(self) -> Mapping[str, str] | None:
+        return None
+
+
+@pytest.mark.unit
+def test_a_rollback_or_promote_runs_the_checks_its_commit_ran_and_never_judges_a_carried_component_again(
+    tmp_path: Path,
+) -> None:
+    """A component whose recipe seeds nothing starts empty, and the other component's steps carry it as it is. A
+    rollback to one of those steps and a promote of a held one run what that step's commit ran, the release check and
+    the check of the component it published, so both go through; judging the carried component would refuse releases
+    their commits admitted."""
+    checks = _CountedChecks()
+    composite = CompositeRecipe(
+        components={
+            "harness": _CountedTreeRecipe(
+                label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}, checks=checks
+            ),
+            "config": _UnseededConfigRecipe(),
+        }
+    )
+    dispatcher = _serve(composite, tmp_path / "svc")
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "a", "one")), component="harness")
+        first = scenario.current_artifact_ref()
+        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "b", "two")), component="harness")
+        checks.count = 0
+        dispatcher.rollback("agent", first.release_id)
+        assert scenario.current_artifact_ref().content_id == first.content_id
+        assert checks.count == 1
+        head = scenario.current_artifact_ref()
+        scenario.commit(
+            TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "three"), pending=True), component="harness"
+        )
+        assert scenario.current_artifact_ref() == head
+        held = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
+        checks.count = 0
+        promoted = dispatcher.promote("agent", held)
+        assert promoted.release_id != head.release_id and checks.count == 1
+    finally:
+        dispatcher.close()
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("data", [[["training_mode", "hybrid"]], "hybrid", [], "", None])
 def test_a_component_data_section_that_is_not_an_object_is_refused_under_a_composite_mode(data: Any) -> None:

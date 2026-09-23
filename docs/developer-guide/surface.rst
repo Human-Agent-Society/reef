@@ -46,6 +46,14 @@ At most one component may load into a runtime and at most one may expose a
 client-pulled file tree. Inference hooks of several components run in
 declaration order, and their leases are released together.
 
+A step of a release with several components runs the release's own check and
+the check of the component it publishes; the other components are carried as
+they were admitted, or as the seed wrote them, which no check judges (a
+component whose recipe seeds nothing starts empty). A rollback or promote
+runs on the release it restores the checks its commit ran: the release's own
+check and the check of the component that commit published, never a carried
+component's, so it restores every release its commit admitted.
+
 Capabilities and call sites
 ---------------------------
 

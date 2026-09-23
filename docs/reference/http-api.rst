@@ -329,9 +329,12 @@ marker and a delete of the owner is refused from there on. Until then only
 the scenario that holds the job in the running service is refused. Deleting
 the owner in that window leaves the job with no scenario to finish it: the
 marker keeps inference admission closed and every later job is refused with
-``operator recovery required``. After upgrading with a job out, delete no
-scenario on that runtime until the job has committed or its owner's first
-training turn has run.
+``operator recovery required``. The service logs a warning at startup when
+it finds such a marker, and ``GET /reef/status`` shows the job under
+``training_job`` with ``owner`` ``null``. After upgrading with a job out,
+delete no scenario on that runtime while ``owner`` is ``null``: the window
+ends when ``owner`` names the scenario, or when ``training_job`` is ``null``
+because the job has committed or been rejected.
 Only a local artifact repository can be archived; a remote one answers 501.
 
 For a scenario that trains weights the deletion is Reef-side: the training
@@ -952,11 +955,16 @@ an update is being trained or published.
          "inference_admission": {"...": "..."}
        }
      },
-     "serving": {"...": "..."}
+     "serving": {"...": "..."},
+     "training_job": {"status": "CHECKPOINT", "training_job_id": "9c41...", "owner": "hello-reef"}
    }
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
-failures. ``batch_ready`` says whether the processor has a batch waiting.
+failures. ``training_job`` is the weight job the training runtime holds out:
+its marker ``status``, its ``training_job_id`` and its ``owner``, the scenario
+a delete refuses (see Deleting a scenario). It is ``null`` when no job is out
+or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
+not be read. ``batch_ready`` says whether the processor has a batch waiting.
 A scenario whose recipe runs one trainer per release component adds a
 ``components`` object: for each component, its own ``batch_ready``,
 ``training_mode``, ``processor`` status, ``last_committed_step`` (with

@@ -147,7 +147,10 @@ conditions when it ran; the commit metrics then name the release in
 against the new release, and ``refuse`` (the default for a backend that
 says nothing) drops the result and prepares the batch again; a refused
 worker reports its refusals in ``/reef/status`` and after a few in a row
-waits for its next wake instead of spinning. A dispatched result is always
+waits for its next wake instead of spinning. The batch prepared again keeps
+the rows the first attempt took from the processor, so the commit that lands
+acknowledges them once. A step that prepared no candidate (a skip) publishes
+nothing, so it is never stale and commits as it is. A dispatched result is always
 merged: the backend published its weights
 before the result arrived and its job can only be finished, so the step
 lands on the release served now and the record's ``base_release_id`` shows
@@ -155,7 +158,15 @@ what the batch was reserved against. A lone trainer is never refused: only
 its own retried attempt can have moved the head. Rows every trainer
 consumes are retired only once every trainer has released them, and on
 restart each trainer recovers its state and read cursor from its own
-commits, which needs durable commit storage.
+commits, which needs durable commit storage. A trainer's release counts for
+the others only once it is durable: named by one of its commit records, or,
+when it releases rows with no batch to commit (a retry it retired, a group it
+discarded, a row it judged unusable), by a settlement receipt it writes to the
+compaction log before another trainer commits. A receipt names those rows and
+moves no read cursor. A trainer rebuilt after a restart settles them again
+when it reads them, instead of deciding them anew without the rows another
+trainer has since retired, so a restarted run trains and keeps the same rows
+as one that never stopped.
 
 Without a durable store, live and local saved releases advance the serving
 head before settling the in-memory commit. A conflicting head therefore

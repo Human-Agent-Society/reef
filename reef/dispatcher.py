@@ -1215,6 +1215,31 @@ class Dispatcher:
             "preload_errors": preload_errors,
             "scenarios": scenarios,
             "serving": self._serving_status(),
+            "training_job": self._training_job_view(),
+        }
+
+    def _training_job_view(self) -> dict[str, Any] | None:
+        """The weight job the training runtime holds out, for an operator; ``None`` when none is out.
+
+        ``owner`` names the scenario whose job it is, the one a delete refuses.
+        A marker an earlier Reef wrote names none until the owner's next
+        training turn writes it in; until then ``owner`` is ``None`` and no
+        delete on the runtime is safe, since deleting the owner would leave the
+        job with nothing to finish it.
+        """
+        runtime = self._recipe.training_runtime
+        if runtime is None:
+            return None
+        try:
+            marker = runtime.training_job_status()
+        except Exception as exc:
+            return {"error": self._error_text(exc)}
+        if marker is None or not marker_in_flight(marker):
+            return None
+        return {
+            "status": marker.get("status"),
+            "training_job_id": marker.get("training_job_id", marker.get("job_id")),
+            "owner": marker.get("scenario"),
         }
 
     def _scenario_status(

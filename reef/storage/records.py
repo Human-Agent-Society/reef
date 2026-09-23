@@ -155,9 +155,15 @@ class RecordStore(ABC):
         reusing that identity with different metadata raises ``RecordConflict``.
         """
 
-    @abstractmethod
     def retired(self, scenario: str, agent_record_ids: Sequence[str]) -> frozenset[str]:
-        """The ids among ``agent_record_ids`` a compaction retired in ``scenario``."""
+        """The ids among ``agent_record_ids`` a compaction retired in ``scenario``.
+
+        A report names only rows the store took before it, so a named row the
+        store no longer answers for was retired. This default asks for each
+        row; a store that keeps its retirements in a table overrides it with
+        one read.
+        """
+        return frozenset(record_id for record_id in agent_record_ids if self.get(scenario, record_id) is None)
 
     @abstractmethod
     def purge_compacted(self, scenario: str, *, before: float, limit: int = 256) -> int:

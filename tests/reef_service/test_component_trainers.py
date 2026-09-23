@@ -1213,7 +1213,9 @@ def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(tmp_p
         assert scenario.prepare_training_step(HARNESS) is None
         rebuilt = dispatcher._registry.reload("agent")
         assert rebuilt.prepare_training_step(HARNESS) is None
-        assert "r1b" in rebuilt.trainer_for(HARNESS).releasable_agent_record_ids()
+        # Settled, not live: the harness releases it; the other trainers see that release with its next record.
+        decision = rebuilt.trainer_for(HARNESS).processor.retention_decision()
+        assert "r1b" in decision.releasable_agent_record_ids and "r1b" not in decision.protected_agent_record_ids
     finally:
         dispatcher.close()
 
@@ -1239,7 +1241,9 @@ def test_a_report_settled_between_two_commits_stays_settled_after_a_restart(tmp_
         scenario.commit(harness, component=HARNESS)
         rebuilt = dispatcher._registry.reload("agent")
         assert rebuilt.prepare_training_step(HARNESS) is None
-        assert "r1b" in rebuilt.trainer_for(HARNESS).releasable_agent_record_ids()
+        # Settled, not live: the harness releases it; the other trainers see that release with its next record.
+        decision = rebuilt.trainer_for(HARNESS).processor.retention_decision()
+        assert "r1b" in decision.releasable_agent_record_ids and "r1b" not in decision.protected_agent_record_ids
     finally:
         dispatcher.close()
 
@@ -1786,7 +1790,10 @@ def test_a_run_report_settled_for_a_retired_inference_releases_its_other_inferen
         for component in (WEIGHTS, HARNESS):
             decision = scenario.trainer_for(component).processor.retention_decision()
             assert "i2" not in decision.protected_agent_record_ids, component
-            assert {"i2", "run"} <= scenario.trainer_for(component).releasable_agent_record_ids(), component
+            assert "i2" in decision.releasable_agent_record_ids, component
+            # The report on a retired row is released at once, as a replay releases it; the inference its ownership
+            # rule released reaches the other trainer with this trainer's next record.
+            assert "run" in scenario.trainer_for(component).releasable_agent_record_ids(), component
     finally:
         dispatcher.close()
 
@@ -2695,3 +2702,175 @@ def test_component_trainers_must_match_the_surface() -> None:
         validate_component_trainers(
             (ComponentTrainer(HARNESS, trainer()), ComponentTrainer(HARNESS, trainer())), composed
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("policy", ["refuse", "reevaluate"])
+def test_a_stale_retry_of_a_batch_an_earlier_attempt_took_back_is_prepared_again_and_never_acknowledged_twice(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, policy: str
+) -> None:
+    """The harness acknowledged its batch and its record write failed while a weights job was out, so its reload
+    waits. The job lands and the next one goes out at once: the retry on the same instance is refused as stale. The
+    batch stays taken, so the next cycle prepares or evaluates it again and records what the first attempt consumed,
+    instead of asking the processor for a batch it gave back."""
+    weights = _DroppingBackend(WEIGHTS, tmp_path / "candidates", "job-0")
+    harness = _ComponentBackend(HARNESS, tmp_path / "candidates", stale_policy=policy)
+    dispatcher, _ = _dispatcher(tmp_path, backends={WEIGHTS: weights, HARNESS: harness})
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        first = scenario.reserve_training_batch(WEIGHTS)
+        assert first is not None
+        _fail_first_record_of(monkeypatch, scenario, HARNESS)
+        with pytest.raises(OSError, match="transient store write error"):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, weights, first) is True
+        for record in _records(2):
+            scenario.records.append(record)
+        second = scenario.reserve_training_batch(WEIGHTS)
+        assert second is not None
+        outcomes = [dispatcher._process_local_backend_step("agent", HARNESS) for _ in range(3)]
+        assert dispatcher._registry.get_optional("agent") is scenario
+        harness_rows = [row for row in scenario.store.history() if row.component == HARNESS]
+        assert harness_rows and sorted(harness_rows[0].consumed_ids) == ["i1", "r1"]
+        consumed = [row.consumed_ids for row in harness_rows]
+        assert all(not (a & b) for index, a in enumerate(consumed) for b in consumed[index + 1 :])
+        assert True in outcomes
+        if policy == "reevaluate":
+            assert harness.reevaluations >= 1
+    finally:
+        dispatcher.close()
+
+
+class _SkippingBackend(_ComponentBackend):
+    """A local cycle whose proposer produced nothing: a step with no candidate."""
+
+    def prepare_step(self, batch, state, scenario_step):
+        self.prepared += 1
+        return PreparedStep.skipped(state={"steps": int(state["steps"]) + 1}, metrics={"skipped": "no proposal"})
+
+
+@pytest.mark.unit
+def test_a_skip_meets_a_moved_head_and_commits_since_it_was_evaluated_against_no_release(tmp_path: Path) -> None:
+    """A step with no candidate is not stale whatever another trainer published meanwhile: refusing it would run
+    the backend again (a failed instruction's skip would run the failed instruction) for nothing."""
+    backends = {
+        WEIGHTS: _ComponentBackend(WEIGHTS, tmp_path / "candidates"),
+        HARNESS: _SkippingBackend(HARNESS, tmp_path / "candidates", stale_policy="refuse"),
+    }
+    dispatcher, backends = _dispatcher(tmp_path, backends=backends)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        harness = scenario.prepare_training_step(HARNESS)
+        weights = scenario.prepare_training_step(WEIGHTS)
+        assert harness is not None and weights is not None
+        scenario.commit(weights, component=WEIGHTS)
+        scenario.commit(harness, component=HARNESS)
+        assert [row.component for row in scenario.store.history()] == [WEIGHTS, HARNESS]
+        assert backends[HARNESS].prepared == 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fault", ["append", "install"])
+def test_a_sibling_commit_durable_but_not_settled_is_settled_before_the_next_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """The harness record reached the log and then its commit failed (a lost fsync acknowledgment, a failed ref
+    install) while a weights job was out, so its reload waits. The weights commit settles that record first, as
+    the harness's own retry would, and takes the next step: no conflict and no extra reload of the job."""
+    backends = _dispatched_pair(tmp_path, "job-1")
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2):
+            for record in _records(step):
+                scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        committer = scenario._committer
+        name = "_append_commit_record" if fault == "append" else "_install_committed_checkpoint"
+        original = getattr(committer, name)
+        failed: list[bool] = []
+
+        def fail_once(*args: Any, **kwargs: Any) -> Any:
+            outcome = original(*args, **kwargs)
+            if not failed:
+                failed.append(True)
+                raise OSError("acknowledgment lost")
+            return outcome
+
+        monkeypatch.setattr(committer, name, fail_once)
+        with pytest.raises(OSError, match="acknowledgment lost"):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        assert [row.component for row in scenario.store.history()] == [HARNESS]
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        assert [row.component for row in scenario.store.history()] == [HARNESS, WEIGHTS]
+        assert scenario.trainer_for(HARNESS).pending_batch is None
+        assert [row.step for row in scenario.store.history()] == [1, 2]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_the_status_names_the_job_out_and_its_owner_or_that_it_names_none(tmp_path: Path, monkeypatch: Any) -> None:
+    """An operator reads whose job the runtime holds out: a marker from before markers named their owner shows no
+    owner, the window in which no delete on the runtime is safe."""
+    training = StubTrainingRuntime()
+    dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"), training=training)
+    try:
+        assert dispatcher.get_or_create_scenario("agent") is not None
+        marker: dict[str, Any] | None = None
+        monkeypatch.setattr(training, "training_job_status", lambda: marker)
+        assert dispatcher.build_training_status()["training_job"] is None
+        marker = {"status": "READY_TO_COMMIT", "training_job_id": "job-1", "scenario": "agent"}
+        assert dispatcher.build_training_status()["training_job"] == {
+            "status": "READY_TO_COMMIT",
+            "training_job_id": "job-1",
+            "owner": "agent",
+        }
+        marker = {"status": "CHECKPOINT", "training_job_id": "job-0"}
+        assert dispatcher.build_training_status()["training_job"]["owner"] is None
+        marker = {"status": "COMPLETE", "training_job_id": "job-1", "commit_acknowledged": True, "scenario": "agent"}
+        assert dispatcher.build_training_status()["training_job"] is None
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_surface_built_with_the_flat_keywords_serves_one_component() -> None:
+    """The surface main documents, Surface(inference=..., files=...), is one component; dataclasses.replace of a
+    capability replaces it on that component; a surface of several components takes them per component."""
+    import dataclasses
+
+    from reef.surface.base import FLAT_COMPONENT
+
+    tree = TextFileTree()
+    surface = Surface(files=tree)
+    assert surface.names == (FLAT_COMPONENT,) and surface.single and surface.files is tree
+    named = Surface(components={HARNESS: ComponentSurface()})
+    replaced = dataclasses.replace(named, files=tree)
+    assert replaced.names == (HARNESS,) and replaced.components[HARNESS].files is tree
+    with pytest.raises(ValueError, match="per component"):
+        Surface(components={WEIGHTS: ComponentSurface(), HARNESS: ComponentSurface()}, files=tree)
+
+
+@pytest.mark.unit
+def test_a_record_store_without_its_own_retired_read_answers_by_the_rows_it_still_holds(tmp_path: Path) -> None:
+    """``retired`` is not abstract: a store complete against the contract before it existed still builds, and the
+    default names a referenced row the store no longer answers for."""
+    store = SQLiteRecordStore(tmp_path / "records.sqlite3")
+    for record in _records(1):
+        store.append(record)
+    store.compact("agent", frozenset({"i1"}))
+    from reef.storage.records import RecordStore
+
+    assert RecordStore.retired(store, "agent", ["i1", "r1", "never"]) == frozenset({"i1", "never"})
+    assert "retired" not in RecordStore.__abstractmethods__

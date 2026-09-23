@@ -16,7 +16,7 @@ from reef.runtime.interfaces import (
     TrainingMetrics,
 )
 from reef.runtime.recovery import FileTrainingJobStore
-from reef.runtime.scheduler import TrainingExecution, legacy_training_job_id, training_job_id
+from reef.runtime.scheduler import LEGACY_SCHEDULE_KEY, TrainingExecution, legacy_training_job_id, training_job_id
 
 PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 
@@ -33,6 +33,7 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
         self.reserved = False
         self.state = TrainingJobState()
         self.prior = None
+        self.payload = None
         self._config = TrainingCoordinationConfig(save_hf_template=None)
         self._context = TrainingContext()
 
@@ -88,6 +89,7 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
     @contextmanager
     def prepare(self, payload, *, job_id, rollout_id, prior_marker):
         self.prior = prior_marker
+        self.payload = payload
         self.reserved = True
         try:
             self.event("prepare")
@@ -341,6 +343,40 @@ def test_a_marker_an_earlier_build_left_takes_its_owner_when_its_own_job_resumes
     )
     coordinator(backend).execute(PAYLOAD)
     assert "scenario" not in markers.read_marker(backend.path)
+
+
+@pytest.mark.parametrize("status", ["CHECKPOINT", "READY_TO_COMMIT"])
+def test_a_marker_an_earlier_build_left_for_a_shuffled_batch_resumes_through_that_builds_row_order(backend, status):
+    """An earlier build seeded the shuffle with the batch number, so its marker names the rows in another order than
+    this build trains them. The payload carries that order: the job replays and takes its owner instead of asking for
+    operator recovery, and the backend never sees the earlier order."""
+    # This build's wire rows are batch rows 1, 0, 2; the earlier build's were 0, 1, 2.
+    head = {**PAYLOAD, "samples": [["b"], ["a"], ["c"]], "rollout_ids": [0, 1, 2]}
+    earlier = {**PAYLOAD, "samples": [["a"], ["b"], ["c"]], "rollout_ids": [0, 1, 2]}
+    order = {"head_rows": [1, 0, 2], "row_indices": [0, 1, 2], "rollout_ids": [0, 1, 2]}
+    backend.checkpoint.path.mkdir()
+    legacy = legacy_training_job_id(earlier, 3)
+    assert legacy_training_job_id({**head, LEGACY_SCHEDULE_KEY: order}, 3) == legacy
+    assert training_job_id({**head, LEGACY_SCHEDULE_KEY: order}) == training_job_id(head)
+    marker = {
+        "job_id": legacy,
+        "rollout_id": 3,
+        "checkpoint_path": str(backend.checkpoint.path),
+        "runtime_load_id": "engine:1",
+        "status": status,
+    }
+    markers.write_marker(backend.path, marker)
+    with pytest.raises(RuntimeError, match="operator recovery required"):
+        coordinator(backend).execute({**head, "owner": "agent", "rollout_id": 5})
+    assert "scenario" not in markers.read_marker(backend.path)
+    result = coordinator(backend).execute({**head, LEGACY_SCHEDULE_KEY: order, "owner": "agent", "rollout_id": 5})
+    assert result.training_job_id == legacy and backend.events == []
+    assert markers.read_marker(backend.path) == {**marker, "scenario": "agent"}
+    # A fresh job trains the rows in this build's order, without the earlier one.
+    backend.path.unlink()
+    backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path.with_name("checkpoint-1"))
+    coordinator(backend).execute({**head, LEGACY_SCHEDULE_KEY: order, "owner": "agent"})
+    assert backend.payload == {**head, "owner": "agent"}
 
 
 def test_scenario_steps_can_use_a_separate_global_checkpoint_index(backend):

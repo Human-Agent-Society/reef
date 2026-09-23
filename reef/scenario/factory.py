@@ -73,6 +73,8 @@ class _RecoveredTrainerState:
     consumed_by_step: tuple[tuple[int, frozenset[str]], ...] = ()
     #: The rows its records say it released without training while another trainer held them.
     settled_ids: frozenset[str] = frozenset()
+    #: The rows its settlement receipts name: released in memory between its commits, put on record without a step.
+    settlements: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -111,6 +113,20 @@ def _dropped_steps(store: ScenarioStore, scenario: str) -> tuple[_DroppedStep, .
     return tuple(dropped)
 
 
+def _settlements(store: ScenarioStore, scenario: str) -> dict[str | None, frozenset[str]]:
+    """The rows each trainer's settlement receipts name as released without training, by component."""
+    settled: dict[str | None, set[str]] = {}
+    for receipt in store.records.compaction_receipts(scenario):
+        metadata = receipt["metadata"]
+        if not isinstance(metadata, Mapping) or metadata.get("outcome") != "settled":
+            continue
+        component = metadata.get("component")
+        settled.setdefault(component if isinstance(component, str) else None, set()).update(
+            str(record_id) for record_id in metadata.get("settled_ids", ())
+        )
+    return {component: frozenset(ids) for component, ids in settled.items()}
+
+
 def _recovered_trainer_states(
     store: ScenarioStore, scenario: str, head_record: CommitRecord | None, surface: Surface
 ) -> dict[str, _RecoveredTrainerState]:
@@ -129,6 +145,7 @@ def _recovered_trainer_states(
         records = (head_record,)
     components = surface.names or (RECORDS_COMPONENT,)
     dropped = _dropped_steps(store, scenario)
+    settlements = _settlements(store, scenario)
     states: dict[str, _RecoveredTrainerState] = {}
     for component in components:
         own = tuple(
@@ -156,6 +173,7 @@ def _recovered_trainer_states(
             settled_ids=frozenset().union(
                 *(record.settled_ids for record in own), *(drop.settled_ids for drop in own_drops)
             ),
+            settlements=settlements.get(component, frozenset()),
         )
     return states
 
@@ -453,14 +471,18 @@ class ScenarioFactory:
             # rows for audit.
             for bound in trainers:
                 recovered = recovered_states.get(bound.component)
-                if recovered is None or recovered.high_water is None:
+                if recovered is None:
+                    continue
+                if recovered.settlements:
+                    scenario.recover_settled(recovered.settlements, component=bound.component)
+                if recovered.high_water is None:
                     continue
                 scenario.reingest(
                     up_to_sequence=recovered.high_water[0],
                     consumed_ids=recovered.consumed_ids,
                     component=bound.component,
                     consumed_by_step=recovered.consumed_by_step,
-                    settled_ids=recovered.settled_ids,
+                    settled_ids=recovered.settled_ids | recovered.settlements,
                 )
                 scenario.restore_record_progress(
                     after_sequence=recovered.high_water[0], offset=recovered.high_water[1], component=bound.component

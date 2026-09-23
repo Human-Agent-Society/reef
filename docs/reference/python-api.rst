@@ -555,6 +555,11 @@ those methods. Use these explicit methods for audit and retention work:
      - The number of bodies physically deleted, at most ``limit``. Only records
        with ``compacted_at < before`` are eligible. The cutoff must be a finite
        Unix timestamp and the limit a positive integer.
+   * - ``retired(scenario, agent_record_ids)``
+     - The ids among ``agent_record_ids`` that a compaction retired. The base
+       class answers with one ``get`` per id, so a store written before this
+       method needs no change; a store that keeps its retirements in a table
+       can override it with one read.
 
 ``StoredRecord`` contains ``sequence``, ``item`` (the original ``AgentRecord``),
 and ``compacted_at`` (a Unix timestamp or ``None``). Audit reads never restore a
@@ -1050,6 +1055,13 @@ complete record-only configuration. A one-component surface serves a flat
 release; a surface with several components serves a release with one
 directory per component, and ``Surface.loader``, ``inference``, and ``files``
 route to their components.
+
+Migration: code written before components keeps working.
+``Surface(loader=..., inference=..., files=...)`` builds a one-component
+surface whose component is named ``release``; beside one component in
+``components``, those keywords replace that component's fields, as
+``dataclasses.replace`` does. A surface of several components refuses them:
+set the capabilities on each ``ComponentSurface``.
 
 +---------------+-----------------------------+----------------------------------------------+
 | Field         | Type                        | Contract                                     |

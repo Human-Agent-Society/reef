@@ -229,6 +229,14 @@ class ScenarioCommitter:
                 if other is not bound:
                     other.trainer.compaction_applied(compacted)
 
+    def settle_released(self, component: str | None) -> None:
+        """Put on record what ``component``'s trainer released in memory, when another trainer may retire it."""
+        with self._lock:
+            bound = self._bound_trainer(component)
+            if self._compactable_for(bound.component) is None or bound.trainer.candidate_backend is None:
+                return
+            bound.trainer.settle_released(component=bound.component)
+
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
@@ -420,7 +428,7 @@ class ScenarioCommitter:
                 source = artifacts.stage_composed(next_step, components, parent=checkpoint)
                 staged = source
             try:
-                surface.validate(source)
+                self._admit_restored(source, release_id, promoted)
                 # The runtime-loaded component is restored only when the engine serves other content.
                 loaded_component = surface.loader_component
                 served = Artifact(current_ref, artifacts.repository)
@@ -501,6 +509,42 @@ class ScenarioCommitter:
                 self._resume_restored_weights()
             return published_ref
 
+    def _admit_restored(self, source: Artifact, release_id: str, promoted: str | None) -> None:
+        """Run on a release a rollback or promote restores the checks its commit ran, and no more.
+
+        A flat release runs the surface's checks as its commit did. A composed
+        one runs the release's own check and the check of the component its
+        commit published (a promote's held component); a carried component
+        was admitted when it was published, or entered as the seed, which no
+        check judged, so judging it again here would refuse a release its
+        commit admitted.
+        """
+        surface = self._binding.surface
+        if surface.single:
+            surface.validate(source)
+            return
+        surface.validator.validate(source)
+        component = promoted if promoted is not None else self._published_component(release_id)
+        if component is not None and component in surface.names:
+            surface.components[component].validator.validate(surface.component_artifact(source, component))
+
+    def _published_component(self, release_id: str) -> str | None:
+        """The component the training commit that minted ``release_id`` changed, read off the recorded manifests
+        as :meth:`_held_component` reads it (a trainer may publish another component's content); ``None`` for the
+        seed, for a release another operation minted, and when the manifests do not say."""
+        records = self._store.history() if self._store.durable else ()
+        record = next((item for item in records if item.artifact_ref.release_id == release_id), None)
+        if record is None or record.operation != "training" or record.components is None:
+            return None
+        parent_id = record.artifact_ref.parent_release_id
+        carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
+        if carried is None and parent_id is not None and self._releases.creation_artifact.release_id == parent_id:
+            carried = self._releases.creation_components(self._step)
+        if carried is None:
+            return None
+        changed = [name for name, content_id in record.components.items() if carried.get(name) != content_id]
+        return changed[0] if len(changed) == 1 else None
+
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Commit the backend's update of the content this Reef ships, when the served release is stale.
 
@@ -561,20 +605,30 @@ class ScenarioCommitter:
         admission paused for good.
         """
         with self._lock, self._publication_lock:
-            next_step = self._step + 1
             bound = self._bound_trainer(component)
             trainer, component = bound.trainer, bound.component
+            self._settle_sibling_record(component)
+            next_step = self._step + 1
             surface = self._binding.surface
             # Refuse a stale base before the trainer acknowledges its batch, so
-            # the batch stays whole for another preparation. Only another
-            # trainer can move the head under a reserved batch: a lone trainer
-            # finds its own failed attempt's head, and a step already in the
-            # log is a retry after a lost acknowledgment. Neither is stale.
+            # the batch stays whole for another preparation; a batch an earlier
+            # attempt acknowledged stays taken, and its retry records what that
+            # attempt consumed. Only another trainer can move the head under a
+            # reserved batch: a lone trainer finds its own failed attempt's
+            # head, and a step already in the log is a retry after a lost
+            # acknowledgment. Neither is stale. A result with no candidate (a
+            # skip) was not evaluated against any release, so it never is.
             records = self._store.history()
             retrying = bool(records) and records[-1].step == next_step
             base = trainer.pending_base_release_id
             served = self._artifacts.current.release_id
-            if not retrying and len(self._trainers) > 1 and base is not None and base != served:
+            if (
+                not retrying
+                and len(self._trainers) > 1
+                and base is not None
+                and base != served
+                and trainer.pending_has_candidate
+            ):
                 backend = trainer.candidate_backend
                 policy = "merge" if backend is None or backend.dispatched else backend.stale_result_policy
                 if policy != "merge":
@@ -857,6 +911,33 @@ class ScenarioCommitter:
         if record.operation == "training":
             self._latest_training_record = record
         self.advance_to(next_step)
+
+    def _settle_sibling_record(self, component: str | None) -> None:
+        """Settle another trainer's commit that reached the log but not memory, before ``component`` commits.
+
+        A commit can fail after its record is durable (a lost fsync
+        acknowledgment, a failed install); while a dispatched job is reserved
+        the failed trainer's reload waits, so the log holds a step the
+        committer has not advanced to. The failed trainer still holds the
+        prepared commit that record names: settling it here is the retry that
+        trainer would make, so the next commit takes the step after it.
+        """
+        records = self._store.history()
+        if not records or records[-1].step != self._step + 1:
+            return
+        record = records[-1]
+        if record.operation != "training" or self._own_record(record, component):
+            return
+        for bound in self._trainers:
+            if bound.component == component or not self._own_record(record, bound.component):
+                continue
+            prepared = bound.trainer.pending_prepared_commit
+            if prepared is None or not self._record_matches_prepared(record, prepared):
+                return
+            record = self._store.commit_step(expected_step=self._step, commit=record)
+            self._reconcile_recorded_artifact(record)
+            self._settle_trainer_commit(prepared, record, self._step + 1, bound.trainer)
+            return
 
     def _recorded_training_retry(
         self,

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from types import MappingProxyType
 from typing import Any
 
@@ -214,7 +214,11 @@ class _ComponentFileTree(FileTree):
         return self._tree.read_files(artifact.component(self._name))
 
 
-@dataclass(frozen=True)
+#: The component a surface built from the flat ``loader``, ``inference`` and ``files`` keywords serves.
+FLAT_COMPONENT = "release"
+
+
+@dataclass(frozen=True, init=False)
 class Surface:
     """The explicit serving capabilities bound to one scenario, per release component.
 
@@ -225,6 +229,13 @@ class Surface:
     views then route each capability to its component's directory. At most
     one component may load into a runtime, and at most one may expose a
     client-pulled file tree. Every recipe binds an instance of this same type.
+
+    The ``loader``, ``inference`` and ``files`` keywords of the surface before
+    components existed still build one: a single component,
+    ``FLAT_COMPONENT``, or, beside one declared component (as
+    ``dataclasses.replace`` passes it), that component with those
+    capabilities replaced. A surface of several components takes them per
+    component only.
     """
 
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
@@ -234,6 +245,43 @@ class Surface:
     #: one carries the ``build_artifact_validator`` of a recipe that serves no component, which admits the release as
     #: a whole, as every recipe's did before components existed (a composite moves it onto that recipe's component).
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
+
+    def __init__(
+        self,
+        components: Mapping[str, ComponentSurface] | None = None,
+        harness: HarnessInfo | None = None,
+        validator: ArtifactValidator | None = None,
+        *,
+        loader: ArtifactLoader | None = None,
+        inference: InferenceHooks | None = None,
+        files: FileTree | None = None,
+    ) -> None:
+        declared = {} if components is None else components
+        if loader is not None or inference is not None or files is not None:
+            if not isinstance(declared, Mapping):
+                raise ValueError("surface components must be a mapping of component name to ComponentSurface")
+            if not declared:
+                declared = {FLAT_COMPONENT: ComponentSurface(loader=loader, inference=inference, files=files)}
+            elif len(declared) == 1:
+                ((name, component),) = declared.items()
+                if not isinstance(component, ComponentSurface):
+                    raise ValueError(f"component {name!r} must be a ComponentSurface")
+                declared = {
+                    name: replace(
+                        component,
+                        loader=component.loader if loader is None else loader,
+                        inference=component.inference if inference is None else inference,
+                        files=component.files if files is None else files,
+                    )
+                }
+            else:
+                raise ValueError(
+                    f"surface serves components {list(declared)}: set loader, inference and files per component"
+                )
+        object.__setattr__(self, "components", declared)
+        object.__setattr__(self, "harness", harness)
+        object.__setattr__(self, "validator", AcceptAnyArtifact() if validator is None else validator)
+        self.__post_init__()
 
     def __post_init__(self) -> None:
         if not isinstance(self.components, Mapping):

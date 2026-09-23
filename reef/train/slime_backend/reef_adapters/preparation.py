@@ -12,9 +12,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.runtime.interfaces import PreparedTrainingStep
+from reef.runtime.scheduler import LEGACY_SCHEDULE_KEY
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
-from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
+from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule, schedule_seed
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
@@ -58,8 +59,9 @@ def prepare_slime_step(
     )
 
 
-def _materialize(batch: TrainingBatch, scheduling: StepScheduling) -> MaterializedSchedule:
-    """Rollout grouping for ``batch`` under ``scheduling``, expanded into a row order."""
+def _materialize(batch: TrainingBatch, scheduling: StepScheduling, *, seed: int | None = None) -> MaterializedSchedule:
+    """Rollout grouping for ``batch`` under ``scheduling``, expanded into a row order; ``seed`` replaces the
+    shuffle seed the rows give."""
     samples = trajectories(batch)
     if scheduling.unit == "sample":
         source_rollout_ids = list(range(len(samples)))
@@ -73,7 +75,9 @@ def _materialize(batch: TrainingBatch, scheduling: StepScheduling) -> Materializ
                 else ("sample", index)
             )
             source_rollout_ids.append(group_ids.setdefault(key, len(group_ids)))
-    return materialize_schedule(source_rollout_ids, scheduling, seed=batch_schedule_seed(batch))
+    return materialize_schedule(
+        source_rollout_ids, scheduling, seed=batch_schedule_seed(batch) if seed is None else seed
+    )
 
 
 def _build_payload(
@@ -111,4 +115,14 @@ def _build_payload(
         payload["external_step_sizes"] = list(schedule.step_sizes)
     else:
         payload["external_remainder"] = scheduling.remainder
+    if scheduling.shuffle:
+        # An earlier Reef seeded the shuffle from the batch id; its job marker names the rows in that order, so a
+        # job it left out resumes here only if the legacy identity can put them back in it.
+        earlier = _materialize(batch, scheduling, seed=schedule_seed(batch.batch_id))
+        if earlier.row_indices != schedule.row_indices:
+            payload[LEGACY_SCHEDULE_KEY] = {
+                "head_rows": list(schedule.row_indices),
+                "row_indices": list(earlier.row_indices),
+                "rollout_ids": list(earlier.rollout_ids),
+            }
     return payload

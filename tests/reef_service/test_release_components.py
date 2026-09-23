@@ -35,6 +35,7 @@ from reef.surface import (
     TextFileTree,
     WeightLoader,
 )
+from reef.surface.base import AcceptAnyArtifact
 from reef.train import ComponentTrainer
 from reef.train.types import TrainStepResult
 
@@ -559,10 +560,11 @@ def test_a_promote_refused_by_validation_leaves_no_staged_release(tmp_path: Path
         held_release = next(row["release_id"] for row in scenario.releases() if row.get("pending"))
         before = {path for path in staged_root.rglob("*") if path.is_dir()}
 
-        def refuse(self: Surface, artifact: Artifact) -> None:
+        def refuse(self: ArtifactValidator, artifact: Artifact) -> None:
             raise ReefError("refused by the validator")
 
-        monkeypatch.setattr(Surface, "validate", refuse)
+        # The promote runs the checks its commit ran: the release's own and the held component's.
+        monkeypatch.setattr(AcceptAnyArtifact, "validate", refuse)
         with pytest.raises(ReefError, match="refused by the validator"):
             scenario.rollback(held_release, operation="promote")
         assert {path for path in staged_root.rglob("*") if path.is_dir()} == before

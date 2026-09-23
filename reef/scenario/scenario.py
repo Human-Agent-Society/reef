@@ -230,14 +230,26 @@ class Scenario:
         if len(self.component_trainers) == 1:
             with self._committer.lock:
                 return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
-        return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+        result = trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+        if result is None:
+            # No step to record what it read: a settlement puts its releases on record for the other trainers.
+            self._committer.settle_released(component)
+        return result
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
         with self._committer.lock:
-            return self.trainer_for(component).reserve_training_batch(
+            batch = self.trainer_for(component).reserve_training_batch(
                 base_release_id=self.current_artifact_ref().release_id
             )
+            if batch is None:
+                self._committer.settle_released(component)
+            return batch
+
+    def recover_settled(self, settled_ids: frozenset[str], *, component: str | None = None) -> None:
+        """Hand a rebuilt trainer the rows its settlement receipts name."""
+        with self._committer.lock:
+            self.trainer_for(component).recover_settled(settled_ids)
 
     def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
         """Run the bound dispatched backend for the reserved batch."""
