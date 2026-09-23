@@ -36,8 +36,6 @@ harness/              agent harness (imports reef_client, not reef)
 serve.yaml            smoke stack config (batch 1): Reef + Ray + Slime/Megatron + SGLang, critic colocated
 serve-30b.yaml        Qwen3-30B-A3B-Thinking-2507 on one 8-GPU node, fed by stream.py
 serve-30b-multi.yaml  the same model with data-parallel training nodes and separate rollout engines, batch 128
-serve-30b-grpo.yaml   GRPO(+DIS) control on one node
-serve-30b-grpo-multi.yaml  GRPO(+DIS) control at batch 128
 run.py                the loop, written out: solve, verify, report, task by task
 run.sh                starts the Reef training stack, then runs run.py or SAO_DRIVER
 stream.py             the paper-shaped streaming driver: one rollout per prompt, many prompts in flight
@@ -268,9 +266,7 @@ verifier's rule and reports it against its receipt; `serve-30b.yaml` takes
 the optimizer step size from `SAO_BATCH` (the recipe's `batch-size` and the
 driver's `--global-batch-size`, which must agree). Held-out problem indices
 are never served, and `evaluate.py` scores the base and the trained weights
-on them afterwards with fresh samples. `SAO_GROUP=8` turns the same driver
-into the GRPO control: eight rollouts of one prompt per step, scored before
-the step, which is the barrier SAO removes.
+on them afterwards with fresh samples.
 
 ```bash
 python export_problems.py work/imo_answerbench.jsonl          # problem_idx, problem, gold
@@ -286,27 +282,27 @@ python plot_stream.py results/curve.png --records work/records/stream-*.jsonl \
 The host-side scripts need `aiohttp`, `datasets` and `matplotlib`; install
 them with `pip install -e ".[stream]"` from this directory.
 
-The batch-128 runs in Results use `serve-30b-multi.yaml` (SAO) and
-`serve-30b-grpo-multi.yaml` (the control) on an existing Ray cluster
-(`RAY_ADDRESS`): `SAO_TRAIN_NODES` 8-GPU nodes host the actor, tensor
-parallel 8 per node and data parallel across nodes with the critic colocated,
-and `SAO_ROLLOUT_GPUS` GPUs on other nodes host the engines, tensor parallel
-4 each. The runs kept `SAO_CKPT_DIR` on shared storage with the retention
-cap set in the stack file, so Reef's coordinator sees the exports it verifies
-from whichever node it lands on. `SAO_PROGRESS_FILE`
+The batch-128 SAO runs in Results use `serve-30b-multi.yaml` on an existing
+Ray cluster (`RAY_ADDRESS`): `SAO_TRAIN_NODES` 8-GPU nodes host the actor,
+tensor parallel 8 per node and data parallel across nodes with the critic
+colocated, and `SAO_ROLLOUT_GPUS` GPUs on other nodes host the engines,
+tensor parallel 4 each. The runs kept `SAO_CKPT_DIR` on shared storage with
+the retention cap set in the stack file, so Reef's coordinator sees the
+exports it verifies from whichever node it lands on. `SAO_PROGRESS_FILE`
 paces the driver on the trainer: write the number of completed optimizer
 steps into it from a host that sees `SAO_CKPT_DIR`, for example the highest
-exported step, `ls "$SAO_CKPT_DIR/hf" | sort -n | tail -1`. The control keeps
-the same topology and adds `SAO_GROUP=8`, so a step of `SAO_BATCH=128`
-rollouts is 16 complete groups. The problems JSONL has the same columns as
-`export_problems.py` writes, here filled from the DeepMath pools described
-in Results.
+exported step, `ls "$SAO_CKPT_DIR/hf" | sort -n | tail -1`. The problems
+JSONL has the same columns as `export_problems.py` writes, here filled from
+the DeepMath pools described in Results. The GRPO(+DIS) control is not part
+of the recipe: it ran the same topology with a loss family that keeps the
+DIS primitive and takes Slime's group-relative advantages without a critic,
+16 prompts of 8 rollouts per step with each prompt's group reported
+together; the Results tables record its configuration and numbers.
 
 ```bash
 export RAY_ADDRESS=<head>:6379 SAO_TRAIN_NODES=4 SAO_ROLLOUT_GPUS=<engine GPUs> SAO_CKPT_DIR=<shared dir>
 SAO_BATCH=128 SAO_IN_FLIGHT=256 SAO_SERVE_YAML=serve-30b-multi.yaml SAO_DRIVER=stream.py \
 SAO_PROBLEMS=work/deepmath.jsonl SAO_PROGRESS_FILE=work/progress SAO_BUDGET=12800 ./run.sh
-SAO_GROUP=8 SAO_SERVE_YAML=serve-30b-grpo-multi.yaml ... ./run.sh   # the GRPO(+DIS) control
 ```
 
 The cookbook configuration is a functional smoke rather than the paper's

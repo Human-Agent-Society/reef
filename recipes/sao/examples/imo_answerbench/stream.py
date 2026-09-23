@@ -22,10 +22,6 @@ Environment:
   SAO_POOL          optional comma-separated problem_idx values to train on
   SAO_IN_FLIGHT     concurrent rollouts (default 8; the paper-shaped runs keep at
                     least the recipe batch size in flight)
-  SAO_GROUP         GRPO control: rollouts per prompt (default 1 = SAO). With
-                    G > 1 the driver runs IN_FLIGHT // G groups at once; each
-                    group waits for all G of its rollouts and then posts their
-                    reports together, the barrier GRPO needs and SAO lacks.
   SAO_BUDGET        total scored rollouts before the driver stops (default 320)
   SAO_MAX_TOKENS    generation window per rollout (default 61440)
   SAO_RECORDS_PATH  where one JSON line per scored rollout is appended
@@ -69,7 +65,6 @@ SCENARIO = "sao-smoke"
 RECIPE = "sao"
 
 IN_FLIGHT = int(os.environ.get("SAO_IN_FLIGHT", "8"))
-GROUP = int(os.environ.get("SAO_GROUP", "1"))
 BUDGET = int(os.environ.get("SAO_BUDGET", "320"))
 MAX_TOKENS = int(os.environ.get("SAO_MAX_TOKENS", "61440"))
 RECORDS_PATH = Path(os.environ.get("SAO_RECORDS_PATH", "work/records/stream.jsonl"))
@@ -144,7 +139,6 @@ class TrainerPacer:
         self.progress_file = progress_file
         self.started_at = time.time()
         self.credit = 0
-        self.lock = threading.Lock()
 
     def trained_steps(self) -> tuple[int, float] | None:
         """(steps done, seconds since the progress file last changed); None when pacing is off."""
@@ -164,13 +158,12 @@ class TrainerPacer:
             if progress is None:
                 return
             steps, idle = progress
-            with self.lock:
-                if completed < (steps + 1 + AHEAD) * BATCH + self.credit:
-                    return
-                if idle > STALL_S:
-                    self.credit += BATCH
-                    print(f"pace: trainer idle {idle:.0f}s at step {steps}; releasing one more batch", flush=True)
-                    continue
+            if completed < (steps + 1 + AHEAD) * BATCH + self.credit:
+                return
+            if idle > STALL_S:
+                self.credit += BATCH
+                print(f"pace: trainer idle {idle:.0f}s at step {steps}; releasing one more batch", flush=True)
+                continue
             time.sleep(10)
 
 
@@ -188,21 +181,7 @@ def wait_for_training(expected: int) -> None:
     print(f"WARNING: only {trained}/{expected} steps trained within {TRAIN_DRAIN_TIMEOUT_S}s", flush=True)
 
 
-class RolloutCounts:
-    """Scored and failed rollouts so far; group workers update it from their own threads."""
-
-    def __init__(self) -> None:
-        self.done = 0
-        self.failures = 0
-        self.lock = threading.Lock()
-
-    def add(self, done: int = 0, failures: int = 0) -> None:
-        with self.lock:
-            self.done += done
-            self.failures += failures
-
-
-def one_rollout(client: ReefClient, model: str, problem: dict, position: int, report: bool = True) -> dict:
+def one_rollout(client: ReefClient, model: str, problem: dict, position: int) -> dict:
     started = time.time()
     release = serving_release()
     response, receipt = client.inference_with_record(
@@ -219,8 +198,7 @@ def one_rollout(client: ReefClient, model: str, problem: dict, position: int, re
     completion = response["choices"][0]["message"]["content"]
     predicted = extract_answer(completion)
     score = 1.0 if answers_equal(str(problem["gold"]), predicted) else 0.0
-    if report:
-        client.report(SCENARIO, {"score": score, "references": [receipt]}, recipe=RECIPE)
+    client.report(SCENARIO, {"score": score, "references": [receipt]}, recipe=RECIPE)
     record = {
         "position": position,
         "problem_idx": problem["problem_idx"],
@@ -253,97 +231,55 @@ def main() -> None:
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=7200)
     model = os.environ.get("SAO_MODEL_NAME", "reef")  # the name run.py sends; Reef's SGLang serves it
     pacer = TrainerPacer(PROGRESS_FILE)
-    counts = RolloutCounts()
     print(
         f"pool={len(problems)} problems, budget={BUDGET}, in_flight={IN_FLIGHT}, max_tokens={MAX_TOKENS}", flush=True
     )
 
-    if GROUP > 1:
-        # GRPO control: GROUP rollouts of one prompt form a group; IN_FLIGHT // GROUP
-        # groups run at once. A group's reports are posted together, in one
-        # go, so Slime's group-relative baseline sees complete groups in order.
-        report_lock = threading.Lock()
+    done = 0
+    failures = 0
+    streak = 0
+    problems_by_future: dict[Future, dict] = {}
 
-        def run_group(problem: dict, first_position: int) -> None:
-            pacer.wait(counts.done)
-            records: list[dict] = []
-            attempts = 0
-            with ThreadPoolExecutor(max_workers=GROUP) as members:
-                while len(records) < GROUP:
-                    if attempts >= MAX_FAILURE_STREAK:
-                        raise SystemExit("a group could not be completed; the serving stack is down")
-                    need = GROUP - len(records)
-                    futures = [
-                        members.submit(one_rollout, client, model, problem, first_position + len(records) + k, False)
-                        for k in range(need)
-                    ]
-                    for future in wait(futures).done:
-                        try:
-                            records.append(future.result())
-                        except ROLLOUT_FAILURES as error:
-                            counts.add(failures=1)
-                            attempts += 1
-                            print(f"rollout failed: {type(error).__name__}: {error}", flush=True)
-                    if len(records) < GROUP:
-                        time.sleep(FAILURE_PAUSE_S)
-            with report_lock:
-                for record in records:
-                    client.report(
-                        SCENARIO, {"score": record["score"], "references": [record["agent_record_id"]]}, recipe=RECIPE
-                    )
-            counts.add(done=GROUP)
-
-        groups_in_flight = max(1, IN_FLIGHT // GROUP)
-        with ThreadPoolExecutor(max_workers=groups_in_flight) as pool:
-            futures = [
-                pool.submit(run_group, problem, step * GROUP) for step, problem in enumerate(order[: BUDGET // GROUP])
-            ]
-            for future in futures:
+    def settle(futures) -> list[dict]:
+        """Count finished rollouts; a failure is retried later rather than spent from the budget."""
+        nonlocal done, failures, streak
+        retry = []
+        for future in futures:
+            problem = problems_by_future.pop(future)
+            try:
                 future.result()
-    else:
-        streak = 0
-        problems_by_future: dict[Future, dict] = {}
+            except ROLLOUT_FAILURES as error:
+                failures += 1
+                streak += 1
+                retry.append(problem)
+                print(f"rollout failed: {type(error).__name__}: {error}", flush=True)
+            else:
+                done += 1
+                streak = 0
+        if streak >= MAX_FAILURE_STREAK:
+            raise SystemExit(f"{streak} rollouts failed in a row; the serving stack is down")
+        if retry:
+            time.sleep(FAILURE_PAUSE_S)  # give the engine time to come back before re-sending
+        return retry
 
-        def settle(futures) -> list[dict]:
-            """Count finished rollouts; a failure is retried later rather than spent from the budget."""
-            nonlocal streak
-            retry = []
-            for future in futures:
-                problem = problems_by_future.pop(future)
-                try:
-                    future.result()
-                except ROLLOUT_FAILURES as error:
-                    counts.add(failures=1)
-                    streak += 1
-                    retry.append(problem)
-                    print(f"rollout failed: {type(error).__name__}: {error}", flush=True)
-                else:
-                    counts.add(done=1)
-                    streak = 0
-            if streak >= MAX_FAILURE_STREAK:
-                raise SystemExit(f"{streak} rollouts failed in a row; the serving stack is down")
-            if retry:
-                time.sleep(FAILURE_PAUSE_S)  # give the engine time to come back before re-sending
-            return retry
-
-        with ThreadPoolExecutor(max_workers=IN_FLIGHT) as pool:
-            pending: set[Future] = set()
-            queue = list(order)
-            position = 0
-            while counts.done < BUDGET:
-                while len(pending) < IN_FLIGHT and queue:
-                    pacer.wait(counts.done)  # the in-flight set stays full while the trainer catches up
-                    problem = queue.pop(0)
-                    future = pool.submit(one_rollout, client, model, problem, position)
-                    problems_by_future[future] = problem
-                    pending.add(future)
-                    position += 1
-                if not pending:
-                    break
-                finished, pending = wait(pending, return_when=FIRST_COMPLETED)
-                queue = settle(finished) + queue  # failed prompts go back to the front
-    print(f"finished: {counts.done} rollouts, {counts.failures} failures", flush=True)
-    wait_for_training(counts.done // BATCH)
+    with ThreadPoolExecutor(max_workers=IN_FLIGHT) as pool:
+        pending: set[Future] = set()
+        queue = list(order)
+        position = 0
+        while done < BUDGET:
+            while len(pending) < IN_FLIGHT and queue:
+                pacer.wait(done)  # the in-flight set stays full while the trainer catches up
+                problem = queue.pop(0)
+                future = pool.submit(one_rollout, client, model, problem, position)
+                problems_by_future[future] = problem
+                pending.add(future)
+                position += 1
+            if not pending:
+                break
+            finished, pending = wait(pending, return_when=FIRST_COMPLETED)
+            queue = settle(finished) + queue  # failed prompts go back to the front
+    print(f"finished: {done} rollouts, {failures} failures", flush=True)
+    wait_for_training(done // BATCH)
 
 
 if __name__ == "__main__":

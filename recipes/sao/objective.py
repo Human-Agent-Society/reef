@@ -27,11 +27,3 @@ class SaoObjective(TrainingObjective):
             {"steps": steps},
             {"steps": steps, "rollouts": len(samples)},
         )
-
-
-@register_objective
-class SaoGrpoControlObjective(SaoObjective):
-    """Same step signal as SAO; ``loss_family`` routes the payload to the control's Slime side."""
-
-    name = "sao-grpo-dis"
-    loss_family = "sao-grpo-dis"

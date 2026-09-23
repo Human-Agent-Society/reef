@@ -72,17 +72,6 @@ Configuration
    batch_size | 128 | rollouts (one per prompt) per optimizer step; the paper's value. Must equal the driver's ``--global-batch-size`` because each sample is its own data-parallel unit. 1 trains on every rollout as it lands and is a smoke setting only.
    max_staleness | 0 | accepted lag between the producing and serving version.
 
-GRPO(+DIS) control
-~~~~~~~~~~~~~~~~~~
-
-``recipes.sao.recipe:SAOGrpoControlRecipe`` is the paper's baseline
-for the comparison: the same DIS primitive and rollout columns, with Slime's
-group-relative advantages in place of the value model (loss family
-``sao-grpo-dis``, implemented in ``recipes.sao.slime.grpo_dis``). The driver
-posts each prompt's ``--n-samples-per-prompt`` rollouts together, so a step of
-``batch_size`` rollouts holds complete groups. The example's
-``serve-30b-grpo*.yaml`` stacks select it.
-
 Run the example
 ---------------
 
@@ -144,7 +133,8 @@ Results
 The example's README records the batch-128 comparison on
 Qwen3-30B-A3B-Thinking-2507: SAO and a GRPO(+DIS) control trained from the
 same public checkpoint on a DeepMath pool, without tools, and evaluated on
-held-out AIME 2025, HMMT February 2025 and IMO-AnswerBench. SAO trained
+held-out AIME 2025, HMMT February 2025 and IMO-AnswerBench. The control is
+a reported baseline, not a shipped recipe. SAO trained
 stably for 99 steps and gained 2 to 4 points on AIME and IMO-AnswerBench,
 within per-checkpoint intervals. GRPO(+DIS) matched it through step 40, then
 shortened its responses and fell 5 to 13 points below SAO by step 80 and to
