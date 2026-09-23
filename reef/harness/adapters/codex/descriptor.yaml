@@ -1,11 +1,11 @@
 # OpenAI Codex CLI, driven through its non-interactive exec mode.
 #
-# CODEX_HOME relocates user configuration, rules, hooks, prompts, and session
-# rollouts into the episode root. HOME is already relocated by run_episode;
-# Codex therefore discovers rendered user skills below .agents/skills without
-# reading the operator's real home. The CLI keeps model-generated commands in
-# a workspace-write sandbox and never waits for an approval during a benchmark
-# episode.
+# CODEX_HOME relocates user configuration, rules, hooks, skills, and session
+# rollouts into the episode root. Codex lists the skills below
+# $CODEX_HOME/skills in exec and in its TUI, so a reef-codex session, which
+# keeps the person's own HOME, finds the same skills an episode does. The CLI
+# keeps model-generated commands in a workspace-write sandbox and never waits
+# for an approval during a benchmark episode.
 name: codex
 binary: codex
 install:
@@ -13,10 +13,15 @@ install:
   package: "@openai/codex"
   version: "0.152.1"
   binary_path: "node_modules/.bin/codex"
+# An episode never searches the web, whatever web_search the tree sets: the
+# override wins over config.toml. A person's reef-codex session reads the
+# tree's value.
 argv:
   - exec
   - --json
   - --strict-config
+  - --config
+  - web_search="disabled"
   - --sandbox
   - workspace-write
   - --skip-git-repo-check
@@ -30,6 +35,16 @@ env:
 client_state:
   - path: "codex/sessions"
     kind: directory
+# A reef-codex session's shell runs in the workspace-write sandbox without
+# network, so the wrapper cannot reach reef from there. This rule runs the
+# wrapper's subcommands that talk to reef outside the sandbox, with no
+# prompt. It names the wrapper's absolute path: a rule on the bare name
+# would also run another reef-codex found first on PATH. Episodes never get
+# this file.
+client_files:
+  - path: "codex/rules/reef.rules"
+    text: |
+      prefix_rule(pattern=["{wrapper}", ["doctor", "evolve", "page", "setup", "update"]], decision="allow")
 files:
   config:
     primary:
@@ -57,12 +72,11 @@ files:
         sandbox_workspace_write:
           network_access: false
   rules: "codex/AGENTS.md"
-  # Custom prompts remain Codex's named command surface. They are deprecated
-  # upstream in favor of skills, but still provide the closest translation of
-  # Reef's distinct agent_command node without changing the shared schema.
-  agent_command: "codex/prompts/{name}.md"
-  # run_episode relocates HOME to {root}; Codex's user skill root follows it.
-  skill: ".agents/skills/{name}/SKILL.md"
+  # Codex 0.152.1 loads no custom prompts (its TUI refuses /name), so an
+  # agent_command renders as a skill the person types as $name. A skill and
+  # an agent_command with one name render to one path and are refused.
+  agent_command: "codex/skills/{name}/SKILL.md"
+  skill: "codex/skills/{name}/SKILL.md"
   # Kept as the shared schema's render target; the quirk rejects this node
   # until hook processes can be isolated separately from Codex itself.
   code_extension: "codex/extensions/{name}.mjs"

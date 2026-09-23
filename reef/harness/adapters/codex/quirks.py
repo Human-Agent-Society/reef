@@ -3,7 +3,11 @@
 Reef config nodes are JSON objects for every adapter, while Codex reads user
 configuration as TOML. ``finalize_render`` validates the benchmark invariants
 and performs that final serialization. Codex skills require ``name`` and
-``description`` frontmatter, synthesized when an evolved skill omits it.
+``description`` frontmatter, synthesized when an evolved skill omits it; an
+agent_command renders as a skill in the same root, so it gets the same
+frontmatter. ``web_search`` may take any value Codex reads, because the
+episode argv pins it disabled and only a person's reef-codex session reads
+the tree's value.
 
 Codex can run lifecycle hooks, but hook subprocesses do not share Codex's
 inner command sandbox. The finalizer therefore rejects ``code_extension``
@@ -22,7 +26,8 @@ from reef.harness.tree.render import RenderError
 
 _CONFIG = "codex/config.toml"
 _EXTENSIONS = "codex/extensions/"
-_SKILLS = ".agents/skills/"
+_SKILLS = "codex/skills/"
+_WEB_SEARCH_MODES = ("disabled", "cached", "indexed", "live")
 
 _ALLOWED_CONFIG_KEYS = {
     "analytics",
@@ -83,8 +88,8 @@ def _validate_config(config: dict[str, Any]) -> None:
         raise RenderError(f"codex config keys are not admitted for benchmark episodes: {', '.join(extra)}")
     if config.get("approval_policy") != "never":
         raise RenderError("codex composition must keep approval_policy never for non-interactive episodes")
-    if config.get("web_search") != "disabled":
-        raise RenderError("codex composition must keep web_search disabled for benchmark episodes")
+    if config.get("web_search") not in _WEB_SEARCH_MODES:
+        raise RenderError(f"codex web_search must be one of {', '.join(_WEB_SEARCH_MODES)}")
     if config.get("check_for_update_on_startup") is not False:
         raise RenderError("codex composition must keep check_for_update_on_startup false")
     for section in ("analytics", "feedback"):

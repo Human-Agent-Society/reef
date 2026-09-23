@@ -8,8 +8,10 @@ supplies the pinned binary through ``REEF_REAL_CODEX_BINARY``.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
+import re
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -168,6 +170,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
         files = _bound_files(
             ("rules", {"text": RULES_MARKER}),
             ("skill", {"name": "reef-smoke", "text": f"# Reef smoke skill\n\n{SKILL_MARKER}"}),
+            ("agent_command", {"name": "reef-command", "text": "Reef smoke command"}),
             binding=_binding(base_url),
         )
         capture = Path(os.environ.get("REEF_REAL_CODEX_SESSION_OUT", tmp_path / "real-codex-session.jsonl"))
@@ -189,9 +192,36 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert authorization == "Bearer reef-smoke-key"
     assert RULES_MARKER in body
     # Codex advertises skill metadata first and reads the body only when the
-    # model chooses the skill; discovery is the adapter contract here.
-    assert "reef-smoke: Reef smoke skill" in body and ".agents/skills" in body
+    # model chooses the skill; discovery is the adapter contract here. A
+    # command is a skill in the same root under $CODEX_HOME, which a
+    # reef-codex session lists too.
+    assert re.search(r"`r0` = `[^`]*/codex/skills`", body)
+    assert "reef-smoke: Reef smoke skill (file: r0/reef-smoke/SKILL.md)" in body
+    assert "reef-command: Reef smoke command (file: r0/reef-command/SKILL.md)" in body
     assert any(event.get("type") == "session_meta" for event in result.trajectory)
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)
     assert result.residue == ()
     assert capture.is_file() and capture.stat().st_size > 0
+
+
+def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> None:
+    """The tree's web_search is for a person's session; the episode argv turns it off again, and without that
+    override the same tree offers the model the hosted web_search tool."""
+    descriptor = get_adapter("codex")
+    unpinned = dataclasses.replace(
+        descriptor,
+        argv=tuple(token for token in descriptor.argv if token not in ("--config", 'web_search="disabled"')),
+    )
+    tools: dict[str, list[str]] = {}
+    for label, adapter in (("pinned", descriptor), ("unpinned", unpinned)):
+        server, base_url = _server()
+        try:
+            files = _bound_files(("config", {"data": {"web_search": "live"}}), binding=_binding(base_url))
+            result = run_episode(adapter, files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
+        finally:
+            server.shutdown()
+            server.server_close()
+        assert result.exit_code == 0, result.stderr
+        tools[label] = [tool.get("type", "") for _, _, body in server.requests for tool in json.loads(body)["tools"]]
+    assert tools["pinned"] and "web_search" not in tools["pinned"]
+    assert "web_search" in tools["unpinned"]

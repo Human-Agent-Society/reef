@@ -119,6 +119,34 @@ binding is a custom provider with a literal key in ``config.yaml``; only the
 inside the working directory with no prompt and refuses a command it flags as
 dangerous with a tool error, so no bypass flag is used.
 
+The ``codex`` adapter runs the Codex CLI headless (``codex exec --json``)
+with its user home relocated by ``CODEX_HOME``. Its ``primary`` config target
+is ``config.toml``, which the quirks emit as TOML from the merged JSON object
+after they check that the tree keeps an episode hermetic: approval ``never``,
+the update check, analytics, feedback and telemetry off, and the
+``workspace-write`` sandbox without network. Rules render to ``AGENTS.md``;
+skills to ``skills/<name>/SKILL.md`` below ``CODEX_HOME``, the root that both
+``codex exec`` and the interactive CLI list, with the ``name`` and
+``description`` frontmatter Codex requires synthesized when the node text has
+none. Codex 0.152.1 loads no custom prompts (the interactive CLI refuses an
+unknown ``/name``), so an ``agent_command`` renders as a skill in the same
+root, which the person types as ``$name``; a skill and an ``agent_command``
+with one name render to one path and are refused. A ``code_extension`` is
+refused, because Codex hooks run outside its command sandbox. The tree may
+set ``web_search`` (``disabled``, ``cached``, ``indexed`` or ``live``) for a
+person's ``reef-codex`` session; the episode argv overrides it with
+``--config web_search="disabled"``, so an episode never searches the web. A
+``reef-codex`` session keeps the sandbox, so its shell cannot reach Reef. The
+descriptor's ``client_files`` entry writes ``rules/reef.rules`` into the
+session's temp copy: an allow rule for the wrapper's absolute path and its
+``doctor``, ``evolve``, ``page``, ``setup`` and ``update`` subcommands, which
+Codex then runs outside the sandbox with no prompt. The rule names the
+absolute path, because a rule on the bare name would also run another
+``reef-codex`` found first on PATH; so the command must spell that path, the
+value of ``REEF_HARNESS_WRAPPER``, and a bare ``reef-codex`` or a
+``"$REEF_HARNESS_WRAPPER"`` stays in the sandbox. Only the ``responses``
+dialect is bound.
+
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which
 defines ``run(args, workdir) -> str``, and after it ``NAME``,
@@ -501,6 +529,7 @@ agent.
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
    client_state | the sessions and settings the ``reef-<adapter>`` wrapper keeps in the installed tree, as ``{path, kind}`` below the relocated composition. The wrapper runs the binary on a temp copy of links that it removes afterwards, so state the binary creates there itself is lost. ``directory`` and ``sqlite`` (an empty database) are created before the run and linked; ``file`` is copied back with its mode after the run when the binary created it, or renamed a new file over its link
+   client_files | files the ``reef-<adapter>`` wrapper writes into its temp copy when a run starts, as ``{path, text}`` below the relocated composition and apart from the config targets and the ``client_state`` paths; ``{wrapper}`` in the text becomes the wrapper's absolute path, escaped for a double quoted string. An episode never gets them
    cleanup_whitelist | files the agent itself writes at boot or during the run, tolerated instead of read as drift
    quirks | an optional module for adapter-specific render checks and boot mutations
 

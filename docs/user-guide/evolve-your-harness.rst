@@ -117,7 +117,10 @@ the model proposes a loop, a person serves it.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
 ``skill``. Codex rejects ``code_extension`` because lifecycle hooks run outside
-its command sandbox. Terminus accepts one Python module defining
+its command sandbox. Codex 0.152.1 loads no custom prompts, so a Codex
+``agent_command`` is a skill that you type as ``$name``. A Codex tree may turn
+on ``web_search`` for your ``reef-codex`` session; episodes always run with
+web search off. Terminus accepts one Python module defining
 ``Agent(Terminus2)`` when Reef's sandbox isolates the runner and Harbor uses
 remote E2B tasks. See the adapter guide for the required deployment settings.
 
