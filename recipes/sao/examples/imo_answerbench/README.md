@@ -30,10 +30,21 @@ harbor/               three IMOAnswerBench problems as Harbor tasks, run in orde
 harness/              agent harness (imports reef_client, not reef)
   __init__.py           lazily exports HarborAgent
   agent.py              HarborAgent: six scored rollouts per problem, one report each
+  grader.py             \boxed{} extraction and the strict equivalence rule, shared with stream.py and evaluate.py
   report.py             posts Harbor's verifier reward against the trial's receipts
-serve.yaml            Reef + Ray + Slime/Megatron + SGLang stack config, critic colocated
+serve.yaml            smoke stack config (batch 1): Reef + Ray + Slime/Megatron + SGLang, critic colocated
+serve-30b.yaml        Qwen3-30B-A3B-Thinking-2507 on one 8-GPU node, fed by stream.py
+serve-30b-multi.yaml  the same model with data-parallel training nodes and separate rollout engines, batch 128
+serve-30b-grpo.yaml   GRPO(+DIS) control on one node
+serve-30b-grpo-multi.yaml  GRPO(+DIS) control at batch 128
 run.py                the loop, written out: solve, verify, report, task by task
-run.sh                starts the Reef training stack, then runs run.py
+run.sh                starts the Reef training stack, then runs run.py or SAO_DRIVER
+stream.py             the paper-shaped streaming driver: one rollout per prompt, many prompts in flight
+export_problems.py    writes the problems JSONL that stream.py and evaluate.py read
+evaluate.py           held-out evaluation of a served model with the training grader
+plot_stream.py        training reward and held-out accuracy of one streaming run
+plot_paper.py         held-out accuracy and training dynamics against optimizer step (the Results figure)
+plot_curve.py         held-out accuracy per checkpoint, one panel per benchmark
 pyproject.toml        makes the harness importable
 results/              held-out accuracy and training curves of the batch-128 comparison
 ```
@@ -48,9 +59,10 @@ completion and compares it with the gold answer under the strict equivalence
 rule the Harbor verifier uses: an exact match after whitespace and `$` are
 stripped, or a numeric evaluation of simple LaTeX (fractions, roots, π) within
 a relative tolerance of `1e-6`. The reward is binary, 1.0 for a correct answer
-and 0.0 otherwise. The rule is copied into `harness/agent.py` rather than
+and 0.0 otherwise. The rule is copied into `harness/grader.py` rather than
 imported from the task, because the harness is installed on its own into
-reef-eval's environment.
+reef-eval's environment; `stream.py` and `evaluate.py` grade with the same
+module.
 
 The last completion is written to `/workspace/answer.txt`, where the Harbor
 verifier (`harbor/imo-*/tests/grade.py`) scores it independently and records

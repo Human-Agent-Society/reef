@@ -20,7 +20,8 @@ Environment:
   SAO_PROBLEMS      path to the problems JSONL (required)
   SAO_HOLDOUT       comma-separated problem_idx values to exclude (default: none)
   SAO_POOL          optional comma-separated problem_idx values to train on
-  SAO_IN_FLIGHT     concurrent rollouts (default 8; equal to the recipe batch size)
+  SAO_IN_FLIGHT     concurrent rollouts (default 8; the paper-shaped runs keep at
+                    least the recipe batch size in flight)
   SAO_GROUP         GRPO control: rollouts per prompt (default 1 = SAO). With
                     G > 1 the driver runs IN_FLIGHT // G groups at once; each
                     group waits for all G of its rollouts and then posts their
@@ -35,7 +36,7 @@ Environment:
   SAO_TRAIN_DRAIN_TIMEOUT_S  how long to wait for that drain (default 14400)
   SAO_PROGRESS_FILE  optional file holding the number of optimizer steps done
                     (written by whoever can see the trainer's checkpoints); with
-                    it the driver keeps at most SAO_AHEAD batches (default 2)
+                    it the driver keeps at most SAO_AHEAD batches (default 3)
                     generated beyond the trained ones, so engines do not run
                     far ahead of a slower trainer and pile up stale rollouts
   SAO_STALL_S       seconds without trainer progress before the pacer releases
