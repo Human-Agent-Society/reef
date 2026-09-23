@@ -407,10 +407,16 @@ class InferenceMemory:
 # -- Durable job execution ----------------------------------------------------
 
 
+#: The payload key naming the scenario that owns a job. The marker records it; the job identity leaves it out, so
+#: a job an earlier build started, whose payload named no owner, keeps its identity.
+JOB_OWNER_KEY = "owner"
+
+
 def training_job_id(payload: Mapping[str, Any]) -> str:
     """Preserve the retry-stable identity of the shared training payload: its batch and admission fence."""
     identity = dict(payload)
     identity.pop("max_staleness", None)
+    identity.pop(JOB_OWNER_KEY, None)
     # The other components of a composite advance the scenario step while a job is out; its retry must replay.
     identity.pop("rollout_id", None)
     # The processor numbers batches per process; a reload numbers the same rows again.
@@ -426,6 +432,7 @@ def legacy_training_job_id(payload: Mapping[str, Any], rollout_id: int) -> str:
     """The identity an earlier build wrote into its job marker: the payload with the scenario step in it."""
     identity = {**payload, "rollout_id": rollout_id}
     identity.pop("max_staleness", None)
+    identity.pop(JOB_OWNER_KEY, None)
     if uses_staleness_admission(payload):
         identity.pop("expected_runtime_load_id", None)
     encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
@@ -525,8 +532,10 @@ class TrainingExecution:
         parent_runtime_load_id = payload.get("expected_runtime_load_id")
         if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
             running["parent_runtime_load_id"] = parent_runtime_load_id
-        if checkpoint.scenario is not None:
-            running["scenario"] = checkpoint.scenario
+        # The owner: the adapter's scenario on a runtime training several, else the scenario the payload names.
+        owner = checkpoint.scenario if checkpoint.scenario is not None else payload.get(JOB_OWNER_KEY)
+        if isinstance(owner, str) and owner:
+            running["scenario"] = owner
         if checkpoint.scenario_step is not None:
             # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
             running["scenario_step"] = checkpoint.scenario_step

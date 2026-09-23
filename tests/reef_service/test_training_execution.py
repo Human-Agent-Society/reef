@@ -292,6 +292,26 @@ def test_job_identity_preserves_scenarios_but_excludes_staleness_fences():
     assert training_job_id(PAYLOAD) != training_job_id({**PAYLOAD, "expected_runtime_load_id": "new"})
 
 
+def test_every_job_marker_names_its_owner_and_the_owner_is_no_part_of_the_identity(backend):
+    """A runtime that trains one scenario per process names the owner the payload carries in the marker, so a delete
+    can tell whose job is out after a restart binds another registration; a job an earlier build started, whose
+    payload named no owner, keeps its identity and replays."""
+    assert training_job_id({**PAYLOAD, "owner": "c"}) == training_job_id(PAYLOAD)
+    assert legacy_training_job_id({**PAYLOAD, "owner": "c"}, 3) == legacy_training_job_id(PAYLOAD, 3)
+    coordinator(backend).execute({**PAYLOAD, "owner": "c"})
+    marker = markers.read_marker(backend.path)
+    assert marker["scenario"] == "c" and marker["job_id"] == training_job_id(PAYLOAD)
+    # The same job named by an earlier build's payload, without the owner, replays instead of training again.
+    backend.events.clear()
+    assert coordinator(backend).execute(PAYLOAD).outcome == "checkpoint"
+    assert backend.events == []
+    # A runtime training several scenarios names the adapter's scenario, the one its checkpoint carries.
+    backend.path.unlink()
+    backend.checkpoint = TrainingCheckpoint(4, backend.checkpoint.path.with_name("checkpoint-4"), "slot-a", 0)
+    coordinator(backend).execute({**PAYLOAD, "scenario": "slot-a", "owner": "slot-a", "samples": [["s2"]]})
+    assert markers.read_marker(backend.path)["scenario"] == "slot-a"
+
+
 def test_scenario_steps_can_use_a_separate_global_checkpoint_index(backend):
     backend.checkpoint = TrainingCheckpoint(12, backend.checkpoint.path, "scenario-a", 0)
     coordinator(backend).execute({**PAYLOAD, "scenario": "scenario-a"})

@@ -12,6 +12,8 @@ row is deleted.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import math
 import time
@@ -644,8 +646,11 @@ class Trainer:
         The batch is consumed without a commit. Where another trainer still
         holds some of its rows they stay stored, so the receipt then names
         what the drop consumed and settled and the cursor it read to, per
-        ``component``: recovery skips those rows as it skips a commit's. A drop
-        that retired every row it consumed writes the receipt it always did.
+        ``component``: recovery skips those rows as it skips a commit's. Such a
+        receipt is keyed by that content, not by the batch id alone, which a
+        rebuilt processor hands out again from 1: two drops are two receipts,
+        and one drop written twice is one. A drop that retired every row it
+        consumed writes the receipt it always did.
         """
         with self._lock:
             if self._pending is None:
@@ -658,15 +663,19 @@ class Trainer:
                 compacted = compacted & compactable
             settled = self._unrecorded_settled(consumed, compacted)
             receipt: dict[str, Any] = {"outcome": "stale", "metrics": dict(metrics or {})}
+            receipt_id = batch_id
             if (consumed | settled) - compacted:
-                receipt.update(
-                    component=component,
-                    consumed_ids=sorted(consumed),
-                    settled_ids=sorted(settled),
-                    high_water_sequence=self._data_sequence,
-                    high_water_offset=self._data_offset,
-                )
-            self._records.compact(self.scenario, compacted, receipt_id=batch_id, receipt_metadata=receipt)
+                content = {
+                    "component": component,
+                    "consumed_ids": sorted(consumed),
+                    "settled_ids": sorted(settled),
+                    "high_water_sequence": self._data_sequence,
+                    "high_water_offset": self._data_offset,
+                }
+                receipt.update(content)
+                digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:16]
+                receipt_id = f"{batch_id}:{digest}"
+            self._records.compact(self.scenario, compacted, receipt_id=receipt_id, receipt_metadata=receipt)
             self._processor.compaction_applied(compacted)
             self._released_stored_ids -= compacted
             self._recorded_ids |= (consumed | settled) - compacted

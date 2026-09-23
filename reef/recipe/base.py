@@ -263,7 +263,8 @@ class Recipe:
 
         Kept for recipes written before admission moved onto the component
         surface (``ComponentSurface.validator``, where a new recipe binds it):
-        it joins the check of the one component the recipe serves. A recipe
+        it joins the check of the one component the recipe serves, and on a
+        recipe that serves none it admits the release as a whole. A recipe
         that overrides it while serving several components is refused at
         build, since the check could not say which component it admits.
         """
@@ -274,6 +275,9 @@ class Recipe:
         surface = self.build_surface(scenario)
         if type(self).build_artifact_validator is Recipe.build_artifact_validator:
             return surface
+        if not surface.components:
+            # A release with no component is admitted as a whole, as it was before components existed.
+            return replace(surface, validator=_EveryCheck((surface.validator, self.build_artifact_validator())))
         if len(surface.components) != 1:
             raise RecipeConfigError(
                 f"{type(self).__name__} overrides build_artifact_validator but serves components "

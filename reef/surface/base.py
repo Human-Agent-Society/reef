@@ -229,6 +229,10 @@ class Surface:
 
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
     harness: HarnessInfo | None = None
+    #: The whole release's own admission check, run before each component's. A recipe binds its checks on
+    #: ``ComponentSurface.validator``; this one carries the ``build_artifact_validator`` of a recipe that serves no
+    #: component, which admits the release as a whole, as every recipe's did before components existed.
+    validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
 
     def __post_init__(self) -> None:
         if not isinstance(self.components, Mapping):
@@ -326,7 +330,8 @@ class Surface:
         return _ComponentFileTree(name, tree)
 
     def validate(self, artifact: Artifact) -> None:
-        """Run every component's admission check against its view of ``artifact``."""
+        """Run the release's own admission check, then every component's against its view of ``artifact``."""
+        self.validator.validate(artifact)
         for name, component in self.components.items():
             component.validator.validate(self.component_artifact(artifact, name))
 

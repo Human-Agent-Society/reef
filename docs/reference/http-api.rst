@@ -319,6 +319,12 @@ commit. While a weight training job of the scenario is out at its backend the
 request answers 409: the job could neither commit nor be acknowledged without
 its scenario, and its marker would keep inference admission closed for every
 scenario on the runtime. Retry once the job has committed or been rejected.
+The job's marker names the scenario that owns it, so deleting any other
+scenario goes through, a registration left by a create the runtime refused
+included: deleting that one and restarting lets the owner bind again and
+finish its job. A marker written by a Reef from before markers named their
+owner refuses no delete; only the scenario that holds the job in the running
+service is refused then.
 Only a local artifact repository can be archived; a remote one answers 501.
 
 For a scenario that trains weights the deletion is Reef-side: the training

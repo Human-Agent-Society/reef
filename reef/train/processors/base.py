@@ -320,13 +320,16 @@ class DataProcessor:
         """Learn of a report whose inference another commit retired; the trainer releases it, never ingests it."""
 
     def restore_settled(self, item: AgentRecord) -> None:
-        """Replay a row this processor released without a batch before a restart, still stored for another trainer.
+        """Learn of a row this processor released without a batch before a restart, still stored for another trainer.
 
-        The default ingests it again, so the processor derives its own
-        decision once more; a processor whose decision hangs on state the
-        replay does not rebuild settles it directly instead.
+        The trainer keeps it released and never hands it to ``ingest``: the
+        live processor had decided it would not train (a retry it retired, a
+        turn it judged unusable), and the replay does not rebuild what that
+        decision hung on, so ingesting it again could make it trainable. The
+        default keeps nothing, as ``restore_consumed`` does; a processor that
+        must know the row to decide the rows after it (the reported processor
+        keeps a retry's slot taken) overrides this.
         """
-        self.ingest(item)
 
     def derivation_pending(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.

@@ -320,10 +320,12 @@ class Dispatcher:
 
         A loaded instance knows its reserved batch; the marker also covers a
         scenario whose turn failed and was rebuilt, or one not loaded yet,
-        whose job the backend still holds. A marker that names no owner (a
-        runtime training one scenario per process names none) belongs to the
-        loaded scenario whose commit names its job; without such a commit it
-        counts for every scenario, since the job may be any registration's.
+        whose job the backend still holds. Every job's marker names the
+        scenario that owns it. One written before markers named an owner says
+        nothing about whose job is out: it refuses no delete, as before, and
+        the loaded scenario that holds the job's reservation is still refused
+        by the caller; refusing every delete would leave an owner that cannot
+        bind with no way out.
         """
         runtime = self._recipe.training_runtime
         if runtime is None:
@@ -338,24 +340,7 @@ class Dispatcher:
             ) from exc
         if marker is None or not marker_in_flight(marker):
             return False
-        owner = marker.get("scenario")
-        if owner is None:
-            owner = self._committed_job_owner(marker.get("training_job_id"))
-        return owner is None or owner == scenario
-
-    def _committed_job_owner(self, training_job_id: object) -> str | None:
-        """The loaded scenario whose newest dispatched commit names ``training_job_id``, or ``None``.
-
-        The scenario bound to the runtime is no proof: after a restart the
-        first registration binds, whoever's job the marker holds.
-        """
-        if not isinstance(training_job_id, str) or not training_job_id:
-            return None
-        for name in self._registry.loaded_names():
-            loaded = self._registry.get_optional(name)
-            if loaded is not None and loaded.committed_training_job_id == training_job_id:
-                return name
-        return None
+        return marker.get("scenario") == scenario
 
     def _archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""

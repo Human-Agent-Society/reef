@@ -863,6 +863,36 @@ def test_a_recipe_that_overrides_build_artifact_validator_still_admits_through_i
         guarded.serving_surface("agent")
 
 
+@dataclass(frozen=True)
+class _GuardedRecordOnlyRecipe(Recipe):
+    """A record only recipe (the default surface, no component) that keeps main's admission hook."""
+
+    def build_artifact_validator(self) -> ArtifactValidator:
+        return _RefuseAll()
+
+
+@pytest.mark.unit
+def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_validator(tmp_path: Path) -> None:
+    """With no component to join, the check admits the release as a whole, as every recipe's did before components
+    existed: the scenario builds, and a release the check refuses is not published."""
+    (tmp_path / "initial").mkdir()
+    dispatcher = _serve(_GuardedRecordOnlyRecipe(), tmp_path)  # type: ignore[arg-type]
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None and scenario.surface.names == ()
+        head = scenario.current_artifact_ref()
+        evolved = tmp_path / "evolved"
+        evolved.mkdir()
+        (evolved / "notes.txt").write_text("unvetted")
+        with pytest.raises(ValueError, match="validator refused the artifact"):
+            scenario.surface.validate(Artifact.local(evolved))
+        with pytest.raises(ValueError, match="validator refused the artifact"):
+            scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
+        assert scenario.current_artifact_ref() == head
+    finally:
+        dispatcher.close()
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("data", [[["training_mode", "hybrid"]], "hybrid", [], "", None])
 def test_a_component_data_section_that_is_not_an_object_is_refused_under_a_composite_mode(data: Any) -> None:

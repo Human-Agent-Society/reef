@@ -201,9 +201,11 @@ Common members
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``build_artifact_validator()``                    | ``ArtifactValidator``       | kept from before component     |
 |                                                   |                             | checks: joins the check of the |
-|                                                   |                             | one component served; an       |
-|                                                   |                             | override on a recipe serving   |
-|                                                   |                             | several is refused at build    |
+|                                                   |                             | one component served, admits   |
+|                                                   |                             | the whole release of a recipe  |
+|                                                   |                             | serving none; an override on a |
+|                                                   |                             | recipe serving several is      |
+|                                                   |                             | refused at build               |
 +---------------------------------------------------+-----------------------------+--------------------------------+
 | ``serving_status()``                              | ``Mapping | None``          | runtime-wide state for         |
 |                                                   |                             | ``/reef/status``               |

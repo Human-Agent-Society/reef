@@ -18,7 +18,7 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingRuntime,
 )
-from reef.runtime.scheduler import RuntimeScheduler
+from reef.runtime.scheduler import JOB_OWNER_KEY, RuntimeScheduler
 from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.types import TrainingBatch, TrainStepResult
@@ -109,6 +109,10 @@ class RuntimeCandidateBackend(CandidateBackend):
             raise RuntimeContractError("training runtime prepared a train step without a payload")
         runtime = self.training_runtime
         payload = dict(prepared.payload)
+        if self._scenario is not None:
+            # The job marker names the scenario that owns the job, so a delete can tell whose job is out;
+            # the job identity leaves the owner out.
+            payload[JOB_OWNER_KEY] = self._scenario
         if self._scenario is not None and runtime.concurrent_training_scenarios:
             # A runtime that trains several scenarios' adapters needs to know
             # whose slot this job fills; the job identity then includes it.

@@ -38,9 +38,12 @@ from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 from reef.train.processors.base import DataProcessor
+from reef.train.processors.computed import ComputedFeedbackProcessor, SupportsReceipt
 from reef.train.processors.reported import GroupDecision, ReportContext
+from reef.train.types import TrainingBatch
 
 from ._threshold_processor import ThresholdProcessor
+from ._trajectories import policy_trajectory
 from .runtime_stubs import StubTrainingRuntime
 
 WEIGHTS = "weights"
@@ -832,9 +835,9 @@ def test_a_sibling_waiting_at_the_cycle_lock_looks_again_after_a_reload_under_it
 def test_deleting_a_scenario_is_refused_while_the_runtime_cannot_say_whether_its_job_is_out(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
-    """A runtime that does not answer gets a busy answer, not a crash: a blind delete could orphan a job. A full
-    weight runtime names no owner in its marker: only a commit that names the job proves whose it is, and until one
-    does the job counts for every scenario."""
+    """A runtime that does not answer gets a busy answer, not a crash: a blind delete could orphan a job. A marker
+    names the scenario that owns its job and refuses that scenario's delete alone; a marker written before markers
+    named an owner refuses none, and the scenario holding the job's reservation is still refused."""
     training = StubTrainingRuntime()
     dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"), training=training)
     try:
@@ -848,36 +851,31 @@ def test_deleting_a_scenario_is_refused_while_the_runtime_cannot_say_whether_its
         with pytest.raises(ScenarioBusy, match="does not say whether its job is out"):
             dispatcher.delete_scenario("agent")
         assert dispatcher._registry.get_optional("agent") is not None
-        marker: dict[str, Any] = {"status": "RUNNING", "training_job_id": "job-1"}
+        marker: dict[str, Any] = {"status": "RUNNING", "training_job_id": "job-1", "scenario": "agent"}
         monkeypatch.setattr(training, "training_job_status", lambda: marker)
         assert dispatcher.training_job_in_flight("agent") is True
-        assert dispatcher.training_job_in_flight("old") is True
-        # The training thread commits the job under its identity; the backend has not acknowledged it yet, and
-        # agent's commit names it.
-        for record in _records(1):
-            dispatcher.accept_record(record)
-        deadline = time.monotonic() + 10
-        while scenario.committed_training_job_id != "job-1" and time.monotonic() < deadline:
-            time.sleep(0.02)
-        assert scenario.committed_training_job_id == "job-1"
-        marker = {"status": "COMPLETE", "training_job_id": "job-1", "commit_acknowledged": False}
-        assert dispatcher.training_job_in_flight("agent") is True
         assert dispatcher.training_job_in_flight("old") is False
+        marker = {"status": "COMPLETE", "training_job_id": "job-1", "commit_acknowledged": False, "scenario": "agent"}
         with pytest.raises(ScenarioBusy, match="training job is out"):
             dispatcher.delete_scenario("agent")
-        marker.update(commit_acknowledged=True)
+        # An earlier build's marker names no owner: it says nothing about whose job is out.
+        marker = {"status": "RUNNING", "training_job_id": "job-1"}
+        assert dispatcher.training_job_in_flight("agent") is False
+        assert dispatcher.training_job_in_flight("old") is False
+        marker = {"status": "COMPLETE", "training_job_id": "job-1", "commit_acknowledged": True, "scenario": "agent"}
         assert dispatcher.delete_scenario("agent")["scenario"] == "agent"
     finally:
         dispatcher.close()
 
 
 @pytest.mark.unit
-def test_a_restart_does_not_give_an_ownerless_job_to_the_scenario_that_bound_first(
+def test_after_a_restart_binds_a_stray_registration_its_delete_lets_the_jobs_owner_bind_and_finish(
     tmp_path: Path, monkeypatch: Any
 ) -> None:
     """b trains on a one scenario runtime; a create of a is refused but leaves a's registration. b's job is out when
-    the process dies, and after the restart a binds first. The marker names no owner and no commit names its job, so
-    neither scenario can be deleted: the job may be b's, whose log is the only one that can finish it."""
+    the process dies, and after the restart a binds first. The marker names b, so b cannot be deleted while its job
+    is out, and a, the stray, can: its delete and a restart let b bind again, the only log that can finish the job.
+    A marker an earlier build wrote names no owner and refuses neither delete, so the same way out stays open."""
     initial = tmp_path / "initial"
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True)
@@ -892,21 +890,30 @@ def test_a_restart_does_not_give_an_ownerless_job_to_the_scenario_that_bound_fir
             dispatcher.get_or_create_scenario("a")
     finally:
         dispatcher.close()
-    training = StubTrainingRuntime()
-    monkeypatch.setattr(
-        training, "training_job_status", lambda: {"status": "UPDATING_WEIGHTS", "training_job_id": "job-b"}
-    )
-    dispatcher, _ = _dispatcher(
-        tmp_path, backends=_dispatched_pair(tmp_path), training=training, backend_factory=factory
-    )
-    try:
-        thread = dispatcher._lifecycle.preload_thread
+
+    def restarted(marker: dict[str, Any]) -> Dispatcher:
+        training = StubTrainingRuntime()
+        monkeypatch.setattr(training, "training_job_status", lambda: marker)
+        restarted_dispatcher, _ = _dispatcher(
+            tmp_path, backends=_dispatched_pair(tmp_path), training=training, backend_factory=factory
+        )
+        thread = restarted_dispatcher._lifecycle.preload_thread
         if thread is not None:
             thread.join(30)
+        return restarted_dispatcher
+
+    dispatcher = restarted({"status": "UPDATING_WEIGHTS", "training_job_id": "job-b", "scenario": "b"})
+    try:
         assert dispatcher._registry.training_scenario_name == "a"
-        for name in ("a", "b"):
-            with pytest.raises(ScenarioBusy, match="training job is out"):
-                dispatcher.delete_scenario(name)
+        with pytest.raises(ScenarioBusy, match="training job is out"):
+            dispatcher.delete_scenario("b")
+        assert dispatcher.delete_scenario("a")["scenario"] == "a"
+    finally:
+        dispatcher.close()
+    dispatcher = restarted({"status": "UPDATING_WEIGHTS", "training_job_id": "job-b"})
+    try:
+        assert dispatcher._registry.training_scenario_name == "b"
+        assert dispatcher.training_job_in_flight("b") is False
     finally:
         dispatcher.close()
 
@@ -930,7 +937,12 @@ def test_the_delete_guard_reads_the_runtime_once(tmp_path: Path) -> None:
                 }
             return {
                 "ok": True,
-                "training_job": {"deferred_weight_update": True, "status": "RUNNING", "training_job_id": "j"},
+                "training_job": {
+                    "deferred_weight_update": True,
+                    "status": "RUNNING",
+                    "training_job_id": "j",
+                    "scenario": "x",
+                },
             }
 
     handle = Handle()
@@ -958,7 +970,7 @@ def test_deleting_a_scenario_whose_job_marker_is_out_at_the_backend_waits(tmp_pa
         marker["scenario"] = "other"
         assert dispatcher.delete_scenario("agent")["scenario"] == "agent"
         assert dispatcher.get_or_create_scenario("again") is not None
-        marker = {"status": "COMPLETE", "training_job_id": "job-2", "commit_acknowledged": False}
+        marker = {"status": "COMPLETE", "training_job_id": "job-2", "commit_acknowledged": False, "scenario": "again"}
         with pytest.raises(ScenarioBusy, match="training job is out"):
             dispatcher.delete_scenario("again")
         marker["commit_acknowledged"] = True
@@ -1426,6 +1438,186 @@ def test_a_batch_the_weights_backend_dropped_stays_consumed_after_a_restart(tmp_
         ]
         assert receipt["metadata"]["component"] == WEIGHTS
         assert set(receipt["metadata"]["consumed_ids"]) == {"i2", "r2"}
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_two_stale_drops_across_a_reload_are_two_receipts_and_the_rows_behind_them_train(tmp_path: Path) -> None:
+    """A rebuilt processor numbers its batches from 1 again, so a drop after a reload carries the batch id of a drop
+    before it, over other rows. Each drop's receipt is keyed by what it consumed: the second is a receipt of its
+    own, not a conflict with the first, and the weights trainer goes on to the rows behind both drops."""
+    weights = _DroppingBackend(WEIGHTS, tmp_path / "candidates", "job-0")
+    dispatcher, _ = _dispatcher(
+        tmp_path, backends={WEIGHTS: weights, HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")}
+    )
+
+    def turn(scenario: Scenario) -> tuple[str, list[tuple[str, ...]]]:
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        sources = [item.source_agent_record_ids for item in batch.items]
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, weights, batch) is True
+        return batch.batch_id, sources
+
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2, 3):
+            for record in _records(step):
+                scenario.records.append(record)
+        weights.drop_next = True
+        first_id, first = turn(scenario)
+        assert first == [("i1", "r1")]
+        rebuilt = dispatcher._registry.reload("agent")
+        weights.drop_next = True
+        second_id, second = turn(rebuilt)
+        assert (second_id, second) == (first_id, [("i2", "r2")])
+        rebuilt = dispatcher._registry.reload("agent")
+        assert turn(rebuilt)[1] == [("i3", "r3")]
+        stale = [row for row in rebuilt.records.compaction_receipts("agent") if row["metadata"]["outcome"] == "stale"]
+        assert sorted(sorted(row["metadata"]["consumed_ids"]) for row in stale) == [["i1", "r1"], ["i2", "r2"]]
+        assert len({row["receipt_id"] for row in stale}) == 2
+        assert all(str(row["receipt_id"]).startswith(f"{first_id}:") for row in stale)
+    finally:
+        dispatcher.close()
+
+
+@dataclass(frozen=True)
+class _Judgment(SupportsReceipt):
+    receipt: str
+
+
+class _JudgedAtOnce:
+    """A judge worker whose every judgment is ready at the next poll."""
+
+    def __init__(self) -> None:
+        self._done: list[_Judgment] = []
+
+    def submit(self, job: _Judgment) -> bool:
+        self._done.append(job)
+        return True
+
+    def poll(self) -> list[_Judgment]:
+        done, self._done = self._done, []
+        return done
+
+    def close(self) -> None:
+        return None
+
+
+class _RetiringRetriesProcessor(ComputedFeedbackProcessor):
+    """A turn is judged once its successor arrives, and a retry of a turn already seen is retired, as OpenClaw-RL
+    retires a client's duplicate turn."""
+
+    def __init__(self, context: Any) -> None:
+        super().__init__(context, worker=_JudgedAtOnce())
+        self._seen: set[str] = set()
+
+    def ingest(self, item: AgentRecord) -> None:
+        self.catch_up(time.monotonic())
+        if item.payload.get("completes"):
+            self.dispatch(_Judgment(item.payload["completes"]))
+        if item.payload["turn"] in self._seen:
+            self.retire(item.agent_record_id)
+            return
+        self._seen.add(item.payload["turn"])
+        self.track(item)
+
+    async def judge(self, job: _Judgment) -> _Judgment:
+        return job
+
+    def make_sample(self, record: AgentRecord, judgment: _Judgment) -> Any:
+        return policy_trajectory(
+            source_agent_record_id=record.agent_record_id,
+            tokens=(1, 2),
+            loss_mask=(1,),
+            rollout_log_probs=(-0.1,),
+            reward=1.0,
+            runtime_load_id="v1",
+        )
+
+    def make_batch(self, samples: Any, batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"{self.scenario}:retiring:{batch_number}", tuple(samples))
+
+
+@dataclass(frozen=True)
+class _ComputedWeightsRecipe(_TwoTrainerRecipe):
+    """The two trainer recipe whose weights trainer computes its own feedback."""
+
+    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+        def factory_for(component: str):
+            if component == WEIGHTS:
+                return lambda context: _RetiringRetriesProcessor(context.with_config({"batch_size": 1}))
+            return lambda context: ThresholdProcessor(context.with_config({"batch_size": 1}))
+
+        return tuple(
+            ComponentTrainer(
+                component,
+                Trainer.build(
+                    scenario,
+                    records,
+                    processor_factory=factory_for(component),
+                    candidate_backend=backend,
+                    algorithm_state=algorithm_states.get(component),
+                    experiment_logger=experiment_logger,
+                ),
+            )
+            for component, backend in self.backends.items()
+        )
+
+
+def _turn(record_id: str, turn: str, completes: str | None = None) -> AgentRecord:
+    payload: dict[str, Any] = {"turn": turn, "tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]}
+    if completes:
+        payload["completes"] = completes
+    return AgentRecord.create(
+        scenario="agent", request_type=RequestType.INFERENCE, payload=payload, agent_record_id=record_id
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("reload", [False, True])
+def test_a_retry_a_computed_processor_retired_never_trains_after_a_reload(tmp_path: Path, reload: bool) -> None:
+    """A retries turn t1 after A trained; the weights processor retires the retry, and its next commit names the
+    retry as settled because the harness still holds it. Settled means released without training: a reload keeps it
+    released, so a later turn that completes the retry finds nothing to judge, as on the live path."""
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    dispatcher = Dispatcher(
+        _ComputedWeightsRecipe(backends=backends),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+    )
+
+    def step(scenario: Scenario) -> list[tuple[str, ...]] | None:
+        result = scenario.prepare_training_step(WEIGHTS)
+        if result is None:
+            return None
+        batch = scenario.trainer_for(WEIGHTS).pending_batch
+        assert batch is not None
+        sources = [tuple(item.source_agent_record_ids) for item in batch.items]
+        scenario.commit(result, component=WEIGHTS)
+        return sources
+
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        scenario.records.append(_turn("A", "t1"))
+        scenario.records.append(_turn("B", "t2", completes="A"))
+        assert step(scenario) == [("A",)]
+        scenario.records.append(_turn("A-retry", "t1"))
+        scenario.records.append(_turn("C", "t3", completes="B"))
+        assert step(scenario) == [("B",)]
+        assert "A-retry" in scenario.store.history()[-1].settled_ids
+        if reload:
+            scenario = dispatcher._registry.reload("agent")
+        scenario.records.append(_turn("E", "t4", completes="A-retry"))
+        assert step(scenario) is None
     finally:
         dispatcher.close()
 
