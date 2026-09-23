@@ -145,7 +145,7 @@ const run = async (index) => {
   const step = process.env.TEST_STEP;
   if (step === "command") {
     const later = index > 0 && process.env.TEST_ARGS_2 !== undefined;
-    return commands["evolve"].handler(later ? process.env.TEST_ARGS_2 : process.env.TEST_ARGS || "", ctx);
+    return commands["reefine"].handler(later ? process.env.TEST_ARGS_2 : process.env.TEST_ARGS || "", ctx);
   }
   if (step === "versions") return commands["versions"].handler(process.env.TEST_ARGS || "", ctx);
   if (step === "ask_user") return tools.reef_ask_user.execute("call-1", params, undefined, undefined, ctx);
@@ -338,7 +338,7 @@ def test_a_missing_scenario_registers_nothing(tmp_path: Path) -> None:
 def test_registers_the_two_tools_the_commands_and_the_session_events(tmp_path: Path) -> None:
     out = _run(tmp_path, _install_root(tmp_path))
     assert out["tools"] == ["reef_ask_user", "reef_file_request"]
-    assert out["commands"] == ["evolve", "versions"]
+    assert out["commands"] == ["reefine", "versions"]
     assert out["handlers"] == ["session_shutdown", "session_start"]
     assert out["entryRenderers"] == ["reef-harness-clarify"]
     assert out["events"] == []
@@ -349,7 +349,7 @@ def test_the_command_prints_usage_with_no_argument(tmp_path: Path) -> None:
     for args in ("   ", "--direct", "--direct   "):
         out = _run(tmp_path, agent_dir, TEST_STEP="command", TEST_ARGS=args)
         assert out["events"] == [
-            {"kind": "notify", "message": "Usage: /evolve <what the harness should do>", "type": "warning"}
+            {"kind": "notify", "message": "Usage: /reefine <what the harness should do>", "type": "warning"}
         ]
 
 
@@ -896,7 +896,7 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
     assert request["body"]["text"] == "text me when you are blocked\n\nClarifications:\n- Q: Which channel?\n  A: SMS"
     # The filing ends it at once: no further model call, its widget is cleared, and the step's watch starts.
     widgets = [event for event in _of_kind(out, "widget") if event["key"] == "reef-harness-clarify"]
-    assert widgets[0]["content"][0].endswith("thinking it through - ctrl+q or /evolve to look in")
+    assert widgets[0]["content"][0].endswith("thinking it through - ctrl+q or /reefine to look in")
     assert widgets[-1]["content"] is None
     assert _of_kind(out, "status")[0] == {"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}
     (entry,) = _of_kind(out, "entry")
@@ -929,14 +929,14 @@ def test_the_command_without_an_argument_says_what_is_running(tmp_path: Path) ->
             (
                 "warning",
                 "reef: the clarification ended without filing: What should I file?; ask again, or file it as is "
-                "with /evolve --direct",
+                "with /reefine --direct",
             ),
         ),
         (
             [{"throw": "connection reset"}],
             [],
             "failed",
-            ("error", "reef: the clarification failed (connection reset); file it as is with /evolve --direct"),
+            ("error", "reef: the clarification failed (connection reset); file it as is with /reefine --direct"),
         ),
     ],
     ids=["cancelled", "no-tool-call", "model-error"],
@@ -967,7 +967,7 @@ def test_the_command_without_a_model_or_while_clarifying_starts_nothing(tmp_path
     assert _notices(out) == [
         {
             "kind": "notify",
-            "message": "reef: no model to clarify with; pick one with /model, or use /evolve --direct",
+            "message": "reef: no model to clarify with; pick one with /model, or use /reefine --direct",
             "type": "error",
         }
     ]
@@ -1243,7 +1243,7 @@ def test_the_spinner_sits_above_the_input_and_names_the_phase_the_service_report
     # One line while it is closed, above the input box, naming the phase in the person's words and the way in.
     assert all(len(content) == 1 for content in drawn)
     assert any("checking the harness" in content[0] for content in drawn)
-    assert all("ctrl+q or /evolve to look in" in content[0] for content in drawn)
+    assert all("ctrl+q or /reefine to look in" in content[0] for content in drawn)
     # The line carries the request's page as a terminal hyperlink, so a click opens it where the terminal offers one.
     assert all(f"\x1b]8;;{REQUEST_PAGE}\x1b\\open the page\x1b]8;;\x1b\\" in content[0] for content in drawn)
     # The frames turn, so the person sees the step is alive between the polls.
@@ -1281,7 +1281,7 @@ def test_the_look_in_key_opens_the_spinner_in_place_and_closes_it_again(tmp_path
     opened = [content for content in _widgets(out) if content and len(content) > 1]
     assert opened, "the key never opened the spinner"
     panel = opened[-1]
-    assert "ctrl+q or /evolve to close" in panel[0] and "writing the change" in panel[0]
+    assert "ctrl+q or /reefine to close" in panel[0] and "writing the change" in panel[0]
     body = "\n".join(panel[1:])
     assert "asked: text me when you are blocked" in body and "request: q-1" in body
     assert "step record: /work/steps/1" in body
@@ -1535,7 +1535,7 @@ def test_a_second_filing_replaces_the_first_watch(tmp_path: Path) -> None:
 
 def test_session_start_says_the_commands_exist_and_counts_the_releases_awaiting_review(tmp_path: Path) -> None:
     agent_dir = _install_root(tmp_path)
-    first = "reef: /evolve <what it should do> asks for a harness change; /versions lists the versions."
+    first = "reef: /reefine <what it should do> asks for a harness change; /versions lists the versions."
     out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(CATALOG))
     assert out["error"] is None
     review = "1 release(s) ready to install: /versions v3 (install with /versions v3 install)"
@@ -1628,7 +1628,7 @@ def test_session_start_reports_a_stored_request_that_settled_and_re_arms_the_wat
         TEST_WAIT_MS="60",
     )
     assert out["error"] is None
-    first = "reef: /evolve <what it should do> asks for a harness change; /versions lists the versions."
+    first = "reef: /reefine <what it should do> asks for a harness change; /versions lists the versions."
     report = (
         f"reef: '{ASK}' is published as release rel-1111. Install when ready with /versions v1 install."
         " Details: /versions v1.\nNot covered: two way replies; idle detection"
@@ -2050,7 +2050,7 @@ def test_a_request_the_service_no_longer_knows_ends_the_watch_with_one_notice_an
     }
     out = _ask(tmp_path, agent_dir, answers, text=LONG_TEXT, REEF_HARNESS_WATCH_MS="10", TEST_WAIT_MS="200")
     assert out["error"] is None
-    gone = "reef: request q-1 is no longer on the service (its scenario was reset); ask again with /evolve"
+    gone = "reef: request q-1 is no longer on the service (its scenario was reset); ask again with /reefine"
     assert [event for event in _notices(out) if event["type"] == "warning"] == [
         {"kind": "notify", "message": gone, "type": "warning"}
     ]
@@ -2072,7 +2072,7 @@ def test_session_start_drops_a_stored_request_the_service_no_longer_knows(tmp_pa
     }
     out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(answers), TEST_WAIT_MS="60")
     assert out["error"] is None
-    gone = "reef: request q-9 is no longer on the service (its scenario was reset); ask again with /evolve"
+    gone = "reef: request q-9 is no longer on the service (its scenario was reset); ask again with /reefine"
     assert {"kind": "notify", "message": gone, "type": "warning"} in _notices(out)
     assert _of_kind(out, "status") == []
     assert json.loads((tmp_path / REQUESTS_FILE).read_text(encoding="utf-8")) == []

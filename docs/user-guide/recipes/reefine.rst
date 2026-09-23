@@ -32,7 +32,7 @@ includes installation, bug-fix and research demos, and recorded measurements.
 How it works
 ------------
 
-1. Ask. In a ``reef-pi`` session, ``/evolve <what it should do>`` has
+1. Ask. In a ``reef-pi`` session, ``/reefine <what it should do>`` has
    the model think the change through in the background before anything is
    filed, while the chat shows one line (``ctrl+o`` expands the whole
    clarification) and the session keeps its input and context: when it
@@ -165,7 +165,7 @@ and has three tools of its own:
 While it runs, the request page's Activity lists each tool the agent calls,
 each check and trial with its result, and each image or speech call with the
 provider's status, so a long run shows what it is doing; opening the
-``/evolve`` spinner in pi lists the latest few.
+``/reefine`` spinner in pi lists the latest few.
 
 When the agent stops, its files are read back into the step's mutations,
 ``requires`` items and design, and the review runs as for the text
