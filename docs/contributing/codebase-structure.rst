@@ -190,12 +190,17 @@ package. Runtime coordination has no direct imports of concrete inference or
 training code; the deployment registry resolves the selected factory explicitly.
 Generic connection implementations live in ``inference/runtime.py`` and
 ``train/runtime.py``; HTTP provider handling lives in ``inference/http.py``.
-``inference/sglang/runtime.py`` supplies ``SGLangInferenceRuntime`` and
+``inference/sglang/runtime.py`` supplies ``SGLangInferenceRuntime``,
+``inference/vllm/runtime.py`` supplies ``VLLMInferenceRuntime``, and
 ``train/slime_backend/runtime.py`` supplies ``SlimeTrainingRuntime``. These
 implement the scheduling interfaces; their native Backend implementations retain
 model operations, checkpoint and tensor I/O.
-``inference/sglang/`` owns SGLang engine launch, capture and control independently
-of training. ``train/slime_backend/inference.py`` only translates Slime options
+``inference/chat.py`` holds the engine-neutral OpenAI and Anthropic chat facade
+over a token-native generate route: it renders the prompt, builds the training
+record from a ``CapturedGeneration`` and streams protocol frames. Each engine
+supplies a ``NativeGenerateClient`` that shapes its request, parses its response
+and builds its tool-call parser. ``inference/sglang/`` owns SGLang engine launch,
+capture and control independently of training; ``inference/vllm/`` owns vLLM capture. ``train/slime_backend/inference.py`` only translates Slime options
 into plain launch data; the selected inference factory constructs its own configuration.
 ``train/slime_backend/driver.py`` supplies Slime component definitions;
 ``service/slime_driver.py`` preserves the legacy explicit-process entrypoint.

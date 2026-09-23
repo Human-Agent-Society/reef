@@ -235,7 +235,7 @@ curl -fsS -H "x-reef-scenario: my-harness" \
 reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-Inside a `reef-pi` session, `/evolve <text>` files the same ask. The served
+Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
 extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
 non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it

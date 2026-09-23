@@ -655,14 +655,14 @@ evolution alone, use the same update endpoint with
 scenario is in ``auto``.
 
 With ``evolution.requests: true``, a tree that boots from the seed also
-carries the pi ``/evolve <request>`` command, which uses the same manual
+carries the pi ``/reefine <request>`` command, which uses the same manual
 training API with pi's current session id. In the session the model first
 thinks the request through and asks what is unclear, a few options plus a
 typed answer per question, then files the request with the answers. Every
 question also offers ``Cancel this request``, and Escape does the same: it
 drops the whole request rather than skipping the question, so nothing is
 filed and the agent is told you backed out.
-``/evolve --direct <request>`` files it as is, and either way the
+``/reefine --direct <request>`` files it as is, and either way the
 filing answers with the link to the request's page. A spinner then sits just
 above your input box with the step's phase (writing the change, checking the
 harness) and how long it has run; ``ctrl+q`` expands it in place with
