@@ -97,8 +97,8 @@ or Reef answers HTTP 400 ``missing or empty x-reef-scenario``. Write this in
 
 Then run ``REEF_TERMINUS_DIR=<root> REEF_TERMINUS_SESSION_DIR=<root>/terminus/sessions
 REEF_TERMINUS_TRIALS_DIR=<trials> reef-terminus --task <task directory>``. Harbor
-bind-mounts the trial directories under ``<trials>`` into the task container,
-so ``<trials>`` must be on a path your Docker shares with its VM: colima does
+mounts the trial directories under ``<trials>`` into the task container as bind
+mounts, so ``<trials>`` must be on a path your Docker shares with its VM: colima does
 not share ``$TMPDIR``, and container writes there never reach the host.
 When a trial has neither a reward nor the verifier's output, its error names
 this mount problem.
@@ -554,7 +554,7 @@ agent.
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted. The install script and the ``reef-<adapter>`` wrapper need one entry that relocates a directory above the primary config target with a ``{root}/<dir>`` value, the composition they write and point the binary at; ``terminus`` relocates the root itself and gets neither
    host_env | optional service variables an episode under the local executor keeps, each with a default for when the service has none (``{home}`` is the service's home directory; an empty default leaves it unset), for a host tool the relocated ``HOME`` would hide; otherwise the local executor passes only ``PATH``, ``SYSTEMROOT``, ``TMPDIR`` and ``CUDA_VISIBLE_DEVICES`` from the service
-   is_root_under_home | optional; ``true`` makes the root of an episode under the local executor under ``~/.reef/episodes`` rather than the temp directory, for an adapter whose container runtime bind-mounts paths below the root
+   is_root_under_home | optional; ``true`` makes the episode root under ``~/.reef/episodes`` rather than the temp directory when the local executor runs the episode, for an adapter whose container runtime mounts paths below the root
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only
