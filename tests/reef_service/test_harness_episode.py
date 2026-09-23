@@ -77,16 +77,16 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
-assert args[:8] == [
-    "exec", "--json", "--strict-config", "--config", 'web_search="disabled"', "--sandbox", "workspace-write",
-    "--skip-git-repo-check",
+assert args[:10] == [
+    "exec", "--json", "--strict-config", "--config", 'approval_policy="never"', "--config", 'web_search="disabled"',
+    "--sandbox", "workspace-write", "--skip-git-repo-check",
 ], args
-prompt = args[8]
+prompt = args[10]
 codex_home = Path(os.environ["CODEX_HOME"])
 assert Path(os.environ["HOME"]) == codex_home.parent
-assert not (codex_home / "rules").exists()  # the rule that runs reef-codex unsandboxed is a session's, never an episode's
 config = (codex_home / "config.toml").read_text()
-assert 'approval_policy = "never"' in config and 'web_search = "disabled"' in config
+# The argv pins approvals off; config.toml leaves them to Codex's default for a person's reef-codex session.
+assert "approval_policy" not in config and 'web_search = "disabled"' in config
 rollout = codex_home / "sessions" / "2026" / "09" / "02" / "rollout.jsonl"
 rollout.parent.mkdir(parents=True)
 events = [

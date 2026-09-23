@@ -12,6 +12,7 @@ import dataclasses
 import json
 import os
 import re
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -198,6 +199,8 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert re.search(r"`r0` = `[^`]*/codex/skills`", body)
     assert "reef-smoke: Reef smoke skill (file: r0/reef-smoke/SKILL.md)" in body
     assert "reef-command: Reef smoke command (file: r0/reef-command/SKILL.md)" in body
+    # config.toml sets no approval_policy; the argv keeps the episode from waiting on one.
+    assert "Approval policy is currently never" in body and "# Escalation Requests" not in body
     assert any(event.get("type") == "session_meta" for event in result.trajectory)
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)
     assert result.residue == ()
@@ -208,10 +211,8 @@ def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> 
     """The tree's web_search is for a person's session; the episode argv turns it off again, and without that
     override the same tree offers the model the hosted web_search tool."""
     descriptor = get_adapter("codex")
-    unpinned = dataclasses.replace(
-        descriptor,
-        argv=tuple(token for token in descriptor.argv if token not in ("--config", 'web_search="disabled"')),
-    )
+    pin = descriptor.argv.index('web_search="disabled"')
+    unpinned = dataclasses.replace(descriptor, argv=descriptor.argv[: pin - 1] + descriptor.argv[pin + 1 :])
     tools: dict[str, list[str]] = {}
     for label, adapter in (("pinned", descriptor), ("unpinned", unpinned)):
         server, base_url = _server()
@@ -225,3 +226,31 @@ def test_real_codex_episode_offers_no_web_search_when_the_tree_turns_it_on() -> 
         tools[label] = [tool.get("type", "") for _, _, body in server.requests for tool in json.loads(body)["tools"]]
     assert tools["pinned"] and "web_search" not in tools["pinned"]
     assert "web_search" in tools["unpinned"]
+
+
+def test_real_codex_session_config_lets_the_model_ask_the_person_to_leave_the_sandbox(tmp_path: Path) -> None:
+    """A reef-codex session runs the interactive CLI on the rendered config.toml, which sets no approval_policy:
+    Codex keeps its on-request default and tells the model how to ask the person before a command runs outside
+    the sandbox, which the wrapper's calls to reef need. The rendered tree holds no rule that skips that ask."""
+    files = _bound_files(binding=_binding("http://127.0.0.1:9"))
+    assert not any(path.startswith("codex/rules/") for path in files)
+    for relative, text in files.items():
+        (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / relative).write_text(text, encoding="utf-8")
+    result = subprocess.run(
+        [REAL_CODEX, "debug", "prompt-input", "hi"],
+        env={**os.environ, "HOME": str(tmp_path), "CODEX_HOME": str(tmp_path / "codex")},
+        cwd=tmp_path,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stderr
+    permissions = next(
+        part["text"]
+        for item in json.loads(result.stdout)
+        for part in item.get("content", [])
+        if "<permissions instructions>" in part.get("text", "")
+    )
+    assert "# Escalation Requests" in permissions and "Approval policy is currently never" not in permissions

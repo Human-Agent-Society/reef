@@ -7,7 +7,9 @@ and performs that final serialization. Codex skills require ``name`` and
 agent_command renders as a skill in the same root, so it gets the same
 frontmatter. ``web_search`` may take any value Codex reads, because the
 episode argv pins it disabled and only a person's reef-codex session reads
-the tree's value.
+the tree's value. ``approval_policy`` is refused: the episode argv pins it
+never, and a reef-codex session keeps Codex's on-request default, so the
+person approves each command that leaves the sandbox.
 
 Codex can run lifecycle hooks, but hook subprocesses do not share Codex's
 inner command sandbox. The finalizer therefore rejects ``code_extension``
@@ -31,7 +33,6 @@ _WEB_SEARCH_MODES = ("disabled", "cached", "indexed", "live")
 
 _ALLOWED_CONFIG_KEYS = {
     "analytics",
-    "approval_policy",
     "check_for_update_on_startup",
     "features",
     "feedback",
@@ -83,11 +84,14 @@ def _with_frontmatter(path: str, text: str) -> str:
 
 
 def _validate_config(config: dict[str, Any]) -> None:
+    if "approval_policy" in config:
+        raise RenderError(
+            "codex composition may not set approval_policy: episodes pin never, and a reef-codex session keeps"
+            " on-request so the person approves each command that leaves the sandbox"
+        )
     extra = sorted(set(config) - _ALLOWED_CONFIG_KEYS)
     if extra:
         raise RenderError(f"codex config keys are not admitted for benchmark episodes: {', '.join(extra)}")
-    if config.get("approval_policy") != "never":
-        raise RenderError("codex composition must keep approval_policy never for non-interactive episodes")
     if config.get("web_search") not in _WEB_SEARCH_MODES:
         raise RenderError(f"codex web_search must be one of {', '.join(_WEB_SEARCH_MODES)}")
     if config.get("check_for_update_on_startup") is not False:

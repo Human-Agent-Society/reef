@@ -120,9 +120,15 @@ Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
 its command sandbox. Codex 0.152.1 loads no custom prompts, so a Codex
 ``agent_command`` is a skill that you type as ``$name``. A Codex tree may turn
 on ``web_search`` for your ``reef-codex`` session; episodes always run with
-web search off. Terminus accepts one Python module defining
-``Agent(Terminus2)`` when Reef's sandbox isolates the runner and Harbor uses
-remote E2B tasks. See the adapter guide for the required deployment settings.
+web search off. The shell in a ``reef-codex`` session has no network, so Codex
+asks you to approve a command that reaches Reef, such as
+``reef-codex evolve``; episodes never ask. Answer "Yes, proceed". "Yes, and
+don't ask again" runs that command with no question until the session ends,
+also after the session changes the ``reef-codex`` file, which it can do when
+the harness is installed inside the project directory. Terminus accepts one
+Python module defining ``Agent(Terminus2)`` when Reef's sandbox isolates the
+runner and Harbor uses remote E2B tasks. See the adapter guide for the
+required deployment settings.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 

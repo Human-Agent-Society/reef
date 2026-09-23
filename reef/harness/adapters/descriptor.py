@@ -24,9 +24,6 @@ everything the shared engines need to drive one harness binary:
   or proxies binary bytes.
 - ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
   keeps in the installed tree, so a later run finds them.
-- ``client_files`` (optional): files a ``reef-<adapter>`` run writes into its
-  temp copy of the composition at start, such as a rule that names the
-  wrapper's own path; an episode never gets them.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
@@ -139,20 +136,6 @@ class ClientState:
 
 
 @dataclass(frozen=True)
-class ClientFile:
-    """A file below the relocated composition that the wrapper writes into its temp copy when a run starts.
-
-    ``{wrapper}`` in the text becomes the absolute path of the ``reef-<adapter>``
-    script, escaped for a double quoted string, so a rule can name that one
-    file. The file replaces any installed file at its path for the run, and
-    an episode never gets it.
-    """
-
-    path: str
-    text: str
-
-
-@dataclass(frozen=True)
 class InstallSpec:
     """How a consumer gets the harness binary: the vendor's channel and pin.
 
@@ -218,9 +201,6 @@ class AdapterDescriptor:
     #: Root-relative sessions and settings below the composition that a ``reef-<adapter>`` run
     #: keeps in the installed tree, so a later run resumes its sessions and skips its first-run setup.
     client_state: tuple[ClientState, ...] = ()
-    #: Root-relative files a ``reef-<adapter>`` run writes into its temp copy at start and an episode never
-    #: gets, such as a rule that lets the session's shell run the wrapper itself.
-    client_files: tuple[ClientFile, ...] = ()
 
     def compose_relocation(self) -> tuple[str, str]:
         """The env var and the composition subdirectory it relocates: the deepest directory above the primary config target that an env entry names as ``{root}/<dir>``.
@@ -301,7 +281,6 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         raise DescriptorError(f"{where} 'client_env' must map strings to strings")
     client_tools = _parse_client_tools(data.get("client_tools"), where)
     client_state = _parse_client_state(data.get("client_state"), where)
-    client_files = _parse_client_files(data.get("client_files"), where)
     finalize, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
     descriptor = AdapterDescriptor(
         name=name,
@@ -324,25 +303,12 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         client_env=dict(client_env),
         client_tools=client_tools,
         client_state=client_state,
-        client_files=client_files,
     )
-    if client_state or client_files:
+    if client_state:
         _, compose_dir = descriptor.compose_relocation()
         for state in client_state:
             if PurePosixPath(compose_dir) not in PurePosixPath(state.path).parents:
                 raise DescriptorError(f"{where} 'client_state' path {state.path!r} is not below {compose_dir!r}")
-        for client_file in client_files:
-            relative = PurePosixPath(client_file.path)
-            if PurePosixPath(compose_dir) not in relative.parents:
-                raise DescriptorError(f"{where} 'client_files' path {client_file.path!r} is not below {compose_dir!r}")
-            # The wrapper rewrites a config target in the temp copy, and a kept path must stay a link.
-            if any(client_file.path == target.path for target in config_targets.values()):
-                raise DescriptorError(f"{where} 'client_files' path {client_file.path!r} is a config target")
-            for state in client_state:
-                if PurePosixPath(state.path) == relative or PurePosixPath(state.path) in relative.parents:
-                    raise DescriptorError(
-                        f"{where} 'client_files' path {client_file.path!r} is inside 'client_state' path {state.path!r}"
-                    )
     return descriptor
 
 
@@ -482,23 +448,6 @@ def _parse_client_state(value: Any, where: str) -> tuple[ClientState, ...]:
         (path,) = _relative_paths([entry.get("path")], f"{where} 'client_state' 'path'")
         states.append(ClientState(path=path, kind=entry["kind"]))
     return tuple(states)
-
-
-def _parse_client_files(value: Any, where: str) -> tuple[ClientFile, ...]:
-    """``client_files``: a list of ``{path, text}`` a ``reef-<adapter>`` run writes into its temp copy."""
-    if value is None:
-        return ()
-    if not isinstance(value, list):
-        raise DescriptorError(f"{where} 'client_files' must be a list")
-    client_files: list[ClientFile] = []
-    for entry in value:
-        if not isinstance(entry, Mapping) or not isinstance(entry.get("text"), str) or not entry["text"]:
-            raise DescriptorError(f"{where} 'client_files' entries need a non-empty 'text'")
-        (path,) = _relative_paths([entry.get("path")], f"{where} 'client_files' 'path'")
-        if any(client_file.path == path for client_file in client_files):
-            raise DescriptorError(f"{where} 'client_files' path {path!r} is listed twice")
-        client_files.append(ClientFile(path=path, text=entry["text"]))
-    return tuple(client_files)
 
 
 def _load_quirks(

@@ -10,9 +10,7 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
      Reef, injecting ``x-reef-scenario`` so the user's agent binary never
      needs to know about Reef headers.
   2. Rewrites the provider config in a temp copy of the composition to point
-     the agent at the proxy instead of Reef directly, and writes the adapter's
-     ``client_files`` there (codex gets a rule that runs this wrapper outside
-     its command sandbox).
+     the agent at the proxy instead of Reef directly.
   3. Runs the agent binary as a subprocess.
   4. After the agent exits, persists the captured receipts (the
      ``x-reef-agent-record-id`` values from each response) to disk.
@@ -863,15 +861,6 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     if wrapper.is_file():
         # The wrapper the install wrote, so an extension can run its update and setup from the session.
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
-    # What this run needs that an episode never gets, such as a rule naming the wrapper; each replaces its link.
-    for client_file in descriptor.client_files:
-        relative = PurePosixPath(client_file.path).relative_to(descriptor.compose_relocation()[1])
-        destination = _materialize(Path(temp_dir), Path(compose_dir), relative)
-        if destination.is_symlink() or destination.exists():
-            destination.unlink()
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        quoted_wrapper = json.dumps(str(wrapper), ensure_ascii=False)[1:-1]
-        destination.write_text(client_file.text.replace("{wrapper}", quoted_wrapper), encoding="utf-8")
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
     # An evolved tool that starts a second agent session finds this harness's own binary first.

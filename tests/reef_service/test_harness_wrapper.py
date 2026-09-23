@@ -539,55 +539,6 @@ def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_codex_run_writes_the_rule_naming_the_wrapper_into_its_temp_copy_only(tmp_path) -> None:
-    """A codex session's shell reaches reef through the rule the run writes at start: it names the wrapper's
-    absolute path, quoted for its string literal, sits beside the installed rules, and never enters the tree."""
-    from reef.harness.adapters import get_adapter
-    from reef.harness.episodes.model_binding import ModelBinding
-    from reef.harness.tree.render import render_composition
-
-    descriptor = get_adapter("codex")
-    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy", api="responses")
-    root = tmp_path / 'tools "q"' / "reef-harness"
-    for relative, text in render_composition([*binding.compose_nodes(descriptor)], descriptor).items():
-        (root / relative).parent.mkdir(parents=True, exist_ok=True)
-        (root / relative).write_text(text, encoding="utf-8")
-    (root / "codex" / "rules").mkdir()
-    (root / "codex" / "rules" / "default.rules").write_text("# the person's own\n")
-    binary = tmp_path / "fake-codex"
-    seen = tmp_path / "seen.json"
-    binary.write_text(
-        textwrap.dedent(
-            f"""\
-            #!/usr/bin/env python3
-            import json, os
-            from pathlib import Path
-            rules = Path(os.environ["CODEX_HOME"]) / "rules"
-            found = {{path.name: [path.is_symlink(), path.read_text()] for path in sorted(rules.iterdir())}}
-            Path({str(seen)!r}).write_text(json.dumps(found))
-            """
-        )
-    )
-    binary.chmod(0o755)
-
-    with (
-        patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}),
-        contextlib.suppress(SystemExit),
-    ):
-        run_agent(str(binary), str(root / "codex"), "test-scenario", "codex", "CODEX_HOME", ["exec", "hi"])
-
-    wrapper = json.dumps(str(root.resolve() / "reef-codex"))
-    assert json.loads(seen.read_text()) == {
-        "default.rules": [True, "# the person's own\n"],
-        "reef.rules": [
-            False,
-            f'prefix_rule(pattern=[{wrapper}, ["doctor", "evolve", "page", "setup", "update"]], decision="allow")\n',
-        ],
-    }
-    assert [path.name for path in (root / "codex" / "rules").iterdir()] == ["default.rules"]
-
-
-@pytest.mark.unit
 def test_partial_per_receipt_failure_retries_only_the_unsent(tmp_path) -> None:
     """When a later per-receipt post fails, the restored claim holds only the
     receipts that never went out, so a retry cannot duplicate reports."""

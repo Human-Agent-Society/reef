@@ -13,13 +13,17 @@ install:
   package: "@openai/codex"
   version: "0.152.1"
   binary_path: "node_modules/.bin/codex"
-# An episode never searches the web, whatever web_search the tree sets: the
-# override wins over config.toml. A person's reef-codex session reads the
-# tree's value.
+# An episode never waits for an approval and never searches the web: these
+# overrides win over config.toml. The tree may not set approval_policy, so a
+# person's reef-codex session keeps Codex's own on-request default: the model
+# asks the person before it runs a command outside the sandbox, such as a
+# wrapper call that reaches reef. The session reads the tree's web_search.
 argv:
   - exec
   - --json
   - --strict-config
+  - --config
+  - approval_policy="never"
   - --config
   - web_search="disabled"
   - --sandbox
@@ -35,22 +39,11 @@ env:
 client_state:
   - path: "codex/sessions"
     kind: directory
-# A reef-codex session's shell runs in the workspace-write sandbox without
-# network, so the wrapper cannot reach reef from there. This rule runs the
-# wrapper's subcommands that talk to reef outside the sandbox, with no
-# prompt. It names the wrapper's absolute path: a rule on the bare name
-# would also run another reef-codex found first on PATH. Episodes never get
-# this file.
-client_files:
-  - path: "codex/rules/reef.rules"
-    text: |
-      prefix_rule(pattern=["{wrapper}", ["doctor", "evolve", "page", "setup", "update"]], decision="allow")
 files:
   config:
     primary:
       path: "codex/config.toml"
       defaults:
-        approval_policy: never
         web_search: disabled
         check_for_update_on_startup: false
         analytics:
