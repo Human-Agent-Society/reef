@@ -1,21 +1,22 @@
 // Before dev and build: write the repository numbers the header and the home page show.
-// The site is a static export, so the values are as of the build. Every request fails
-// independently and leaves its field empty; nothing here can fail the build.
+// The site is a static export, so the values are as of the build. Keep the last
+// complete snapshot when GitHub is unavailable rather than publishing missing numbers.
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repo = "Human-Agent-Society/reef";
 const api = "https://api.github.com";
 const target = resolve(dirname(fileURLToPath(import.meta.url)), "../lib/repo-stats.generated.json");
+const cache = resolve(dirname(target), "../.next/cache/repo-stats.json");
 // A token lifts the anonymous limits (the search endpoints allow ten calls a minute). CI passes one;
 // on a developer machine the GitHub CLI's token is used when it is logged in.
 function localToken() {
   const result = spawnSync("gh", ["auth", "token"], { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
   return result.status === 0 ? result.stdout.trim() : "";
 }
-const token = process.env.GITHUB_TOKEN ?? process.env.GH_TOKEN ?? localToken();
+const token = process.env.GITHUB_TOKEN || process.env.GH_TOKEN || localToken();
 const headers = {
   accept: "application/vnd.github+json",
   "user-agent": "reef-docs",
@@ -54,6 +55,16 @@ const stats = {
   commitsByDay: [],
   recentPulls: [],
 };
+
+function hasCompleteStats(stats) {
+  return stats && typeof stats.fetchedAt === "string" && Number.isFinite(Date.parse(stats.fetchedAt)) &&
+    Number.isFinite(stats.stars) && Number.isFinite(stats.forks) &&
+    Array.isArray(stats.contributors) && stats.contributors.length > 0 &&
+    Number.isFinite(stats.mergedPulls?.total) && Number.isFinite(stats.mergedPulls?.recent) &&
+    Number.isFinite(stats.mergedPulls?.windowDays) &&
+    Array.isArray(stats.commitsByDay) && stats.commitsByDay.length > 0 &&
+    Array.isArray(stats.recentPulls) && stats.recentPulls.length > 0;
+}
 
 await step("star count", async () => {
   const data = await get(`/repos/${repo}`);
@@ -133,9 +144,36 @@ await step("commit activity", async () => {
   stats.mergedPulls.windowDays = days.length;
 });
 
+let snapshot = stats;
+if (!hasCompleteStats(stats)) {
+  const snapshots = [];
+  for (const path of [target, cache]) {
+    if (!existsSync(path)) continue;
+    try {
+      const previous = JSON.parse(readFileSync(path, "utf8"));
+      if (hasCompleteStats(previous)) snapshots.push(previous);
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+      console.warn(`repo stats: ignoring invalid JSON in ${path}`);
+    }
+  }
+  snapshots.sort((a, b) => Date.parse(b.fetchedAt) - Date.parse(a.fetchedAt));
+  if (snapshots.length > 0) {
+    snapshot = snapshots[0];
+    console.warn(`repo stats: using complete snapshot from ${snapshot.fetchedAt}`);
+  } else if (process.env.npm_lifecycle_event === "prebuild") {
+    throw new Error("Repository statistics are incomplete and no complete snapshot is cached. " +
+      "Set GITHUB_TOKEN or GH_TOKEN in the build environment and retry.");
+  }
+}
+
 mkdirSync(dirname(target), { recursive: true });
-writeFileSync(target, JSON.stringify(stats) + "\n");
+writeFileSync(target, JSON.stringify(snapshot) + "\n");
+if (hasCompleteStats(snapshot)) {
+  mkdirSync(dirname(cache), { recursive: true });
+  writeFileSync(cache, JSON.stringify(snapshot) + "\n");
+}
 console.log(
-  `repo stats: stars=${stats.stars} version=${stats.version} contributors=${stats.contributors.length} ` +
-    `merged=${stats.mergedPulls.total} recent=${stats.mergedPulls.recent} commits=${stats.commitsByDay.reduce((sum, d) => sum + d.count, 0)}`,
+  `repo stats: stars=${snapshot.stars} version=${snapshot.version} contributors=${snapshot.contributors.length} ` +
+    `merged=${snapshot.mergedPulls.total} recent=${snapshot.mergedPulls.recent} commits=${snapshot.commitsByDay.reduce((sum, d) => sum + d.count, 0)}`,
 );
