@@ -17,6 +17,10 @@ from reef.storage.records import RecordRetention
 
 logger = logging.getLogger(__name__)
 _RECORD_RETENTION_INTERVAL_SECONDS = 60.0
+#: The largest request body the service reads. aiohttp's default is 1 MiB, and a coding agent's first call carries
+#: its whole context: Claude Code with a dozen MCP servers and a few hundred skills sends several MiB, which the
+#: default answered with 413 and the agent reported as a request too large.
+MAX_REQUEST_BYTES = 64 * 1024 * 1024
 
 
 async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, stopped: asyncio.Event) -> None:
@@ -46,7 +50,9 @@ def create_app(
     """Build the HTTP app around an existing dispatcher; close it only when requested."""
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     request_service_key = web.AppKey("reef_request_service", RequestService)
-    app = web.Application(middlewares=[create_authentication_middleware(tokens), translate_errors])
+    app = web.Application(
+        middlewares=[create_authentication_middleware(tokens), translate_errors], client_max_size=MAX_REQUEST_BYTES
+    )
     configure_browser_access(app, console_origins)
     app[request_service_key] = request_service
     register_routes(

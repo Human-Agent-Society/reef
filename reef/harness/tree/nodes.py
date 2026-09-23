@@ -58,7 +58,9 @@ NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
 NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
 #: Entry ids of reef's own shipped entries (the update notice, the harness requests extension and its skill): a seed or a
 #: recovered state carries them, and no mutation creates, updates or removes one.
-RESERVED_ENTRY_IDS = frozenset({"reef-version-check", "reef-requests", "reef-pi-extension-api"})
+RESERVED_ENTRY_IDS = frozenset(
+    {"reef-version-check", "reef-requests", "reef-pi-extension-api", "reef-claude-harness-api"}
+)
 #: The native graph's stage vocabulary: the keys a stage may carry and the outcomes its edges may name.
 NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "model": ((), ("tool_calls", "text")),
@@ -113,7 +115,9 @@ _DIRECTIVE_TEXT = re.compile(
 
 def _holds_literal(value: Any) -> bool:
     if isinstance(value, str):
-        return bool(value.strip())
+        # A number is a limit, not a credential: Claude Code's CLAUDE_CODE_MAX_OUTPUT_TOKENS ends in the
+        # word the name check looks for and holds "32000".
+        return bool(value.strip()) and not value.strip().isdigit()
     if isinstance(value, (list, tuple)):
         return any(_holds_literal(item) for item in value)
     return False

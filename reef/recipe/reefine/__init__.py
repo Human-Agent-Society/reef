@@ -80,7 +80,9 @@ class ReefineRecipe(CordisRecipe):
             "evaluate": "reef.recipe.reefine.evolution:evaluate",
             "requests": True,
             "version_check": True,
-            "review_kinds": ["code_extension"],
+            # What runs on the person's machine waits for their review: an extension, and a settings change
+            # (hooks are shell commands).
+            "review_kinds": ["code_extension", "config"],
             "selection": "floor",
         }
         kwargs = super()._recipe_kwargs({**settings, "evolution": {**defaults, **evolution}}, values)
