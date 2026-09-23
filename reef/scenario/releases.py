@@ -131,6 +131,10 @@ class ScenarioReleases:
             return found
         if self._creation_artifact.release_id == release_id:
             return self._creation_artifact, True
+        current = self._artifacts.current
+        if current.release_id == release_id:
+            # Without a durable log the served release is known by the chain alone.
+            return current, False
         return None
 
     def _resolve_creation_artifact(self, scenario_step: int) -> ArtifactRef:

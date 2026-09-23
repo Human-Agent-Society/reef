@@ -28,6 +28,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
+from functools import cached_property
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -65,6 +66,7 @@ def any_component_report(report_types: tuple[type[ReportBase], ...]) -> type[Rep
                     refusals.append(f"{report_type.__name__}: {exc}")
             raise ReportValidationError("no component accepts this report: " + "; ".join(refusals))
 
+    ComponentReport.__name__ = ComponentReport.__qualname__ = "AnyOf" + "".join(item.__name__ for item in report_types)
     return ComponentReport
 
 
@@ -223,6 +225,11 @@ class CompositeRecipe(Recipe):
         and a harness recipe with a plain scored one share a scenario: ingress
         refuses only a report no component would take.
         """
+        return self.report_contract
+
+    @cached_property
+    def report_contract(self) -> type[ReportBase] | None:
+        """The contract ``report_type`` answers, built once: the one the components share, or what any accepts."""
         declared: list[type[ReportBase]] = []
         for recipe in self.components.values():
             report_type = recipe.report_type

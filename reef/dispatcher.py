@@ -419,7 +419,9 @@ class Dispatcher:
             # Schema enforcement: reject a malformed report before it is durably
             # appended, so the producer's POST fails with the violation naming
             # the broken field instead of the record dying silently at training
-            # time. An undeclared schema keeps open ingress.
+            # time. An undeclared schema keeps open ingress; a scenario of several
+            # components admits what any of them accepts, and each trainer releases
+            # a report shaped for another.
             if item.request_type is RequestType.REPORT:
                 # An identical retry remains valid after its sources were compacted.
                 if (existing := current.records.existing_receipt(item)) is not None:
@@ -714,10 +716,10 @@ class Dispatcher:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         self._record_training_error(scenario, None)
         # Local workers of one scenario take turns for a whole cycle, prepare
-        # and commit together. Preparation already ran one at a time under
-        # the scenario lock; letting the commits race after it only had the
-        # slower worker refused as stale on every cycle, and each refusal
-        # threw away a full candidate evaluation.
+        # and commit together, under this lock alone: letting their commits
+        # race only had the slower worker refused as stale on every cycle, and
+        # each refusal threw away a full candidate evaluation. A dispatched
+        # commit still lands meanwhile; the stale policy answers it.
         with self._local_cycle_lock(scenario):
             try:
                 result = current.prepare_training_step(component)

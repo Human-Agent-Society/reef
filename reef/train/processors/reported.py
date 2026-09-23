@@ -208,7 +208,18 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             self._seen_reports.add(item.agent_record_id)
             self._terminate(item)
             return
-        context = self._report_context(item)
+        report_type = self.context.report_type
+        parsed_report: ReportBase | None = None
+        if report_type is not None:
+            try:
+                parsed_report = report_type.from_dict(item.payload)
+            except ReportValidationError:
+                # Ingress admits what any component of the scenario accepts; a report another component's
+                # contract shaped is not this method's training data, and this trainer releases it.
+                self._seen_reports.add(item.agent_record_id)
+                self._terminate(item)
+                return
+        context = self._report_context(item, parsed_report)
         # Retain the report before assembly: a contract failure must not let
         # compaction delete its inputs or turn a retry into a successful no-op.
         self._reports[item.agent_record_id] = item
@@ -294,13 +305,14 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         if self.exclusive_sources or len(report.references) > 1:
             self._terminal_owned_sources.update(report.references)
 
-    def _report_context(self, report: AgentRecord) -> ReportContext:
+    def _report_context(self, report: AgentRecord, parsed_report: ReportBase | None = None) -> ReportContext:
         missing = [ref for ref in report.references if ref not in self._inferences]
         if missing:
             raise ReportValidationError(f"report references unavailable inference records: {missing!r}")
         inferences = tuple(self._inferences[ref] for ref in report.references)
         report_type = self.context.report_type
-        parsed_report = None if report_type is None else report_type.from_dict(report.payload)
+        if parsed_report is None and report_type is not None:
+            parsed_report = report_type.from_dict(report.payload)
         return ReportContext(report, report_score(report), inferences, parsed_report)
 
     # ---------------------------------------------------------------- groups

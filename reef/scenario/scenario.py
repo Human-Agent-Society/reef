@@ -44,7 +44,7 @@ class Scenario:
         recovered_head_record: CommitRecord | None = None,
     ) -> None:
         self.operations = OperationMetrics(
-            ("serve/request", "serve/admission", "ingest/write"),
+            ("serve/request", "serve/admission", "evaluate/request", "evaluate/admission", "ingest/write"),
             counters=(
                 "serve/retries_total",
                 "serve/version_mismatch_total",
@@ -127,7 +127,9 @@ class Scenario:
         """Inspection-only view of the first trainer; the only one of a flat scenario.
 
         Every mutating path goes through a Scenario method so it is serialized
-        against rollback and commit by the committer lock. Reading state
+        against rollback and commit by the committer lock; the one exception
+        is a local step of a scenario with several trainers, which runs outside
+        it and meets the commits made meanwhile at the commit boundary. Reading state
         that is not part of a transaction (objective identity, consumption
         watermarks, processor schema) is safe here; do not reserve batches,
         replace results, or compact through this handle.
@@ -200,7 +202,8 @@ class Scenario:
         trainer's commit lands meanwhile and the result meets it at the commit
         boundary, where the backend's stale policy decides; a dispatched
         trainer still reserves its batch and the status stays readable while
-        a local evaluation takes its minutes.
+        a local evaluation takes its minutes. Callers run one preparation of
+        a trainer at a time, as the dispatcher's cycle lock does.
         """
         trainer = self.trainer_for(component)
         if len(self.component_trainers) == 1:

@@ -63,6 +63,55 @@ class GroupProcessor(SampleProcessor):
         return GroupDecision.DISCARD if self.discard else GroupDecision.READY
 
 
+def test_a_report_shaped_for_another_component_is_released_not_raised() -> None:
+    """Ingress of a scenario with several components admits what any accepts; this trainer keeps only its own."""
+    from recipes.tttd.report import TTTDGroupedRolloutReport
+
+    class GridProcessor(SampleProcessor):
+        def __init__(self) -> None:
+            ReportedFeedbackProcessor.__init__(
+                self, ProcessorContext("math", {"batch_size": 1}, report_type=TTTDGroupedRolloutReport)
+            )
+            self.assembled = []
+            self.fail_assembly = False
+
+    processor = GridProcessor()
+    processor.ingest(inference("i1"))
+    processor.ingest(inference("i2"))
+    processor.ingest(report("r1", "i1"))  # the harness component's plain scored report
+    assert processor.assembled == []
+    assert "r1" in processor.retention_decision().releasable_agent_record_ids
+    grid = AgentRecord.create(
+        scenario="math",
+        request_type=RequestType.REPORT,
+        payload={
+            "score": 1.0,
+            "references": ["i2"],
+            "metadata": {
+                "algorithm": "tttd",
+                "step": 0,
+                "group": 0,
+                "rollout": 0,
+                "groups_per_step": 1,
+                "rollouts_per_group": 2,
+            },
+        },
+        agent_record_id="r2",
+    )
+    processor.ingest(grid)
+    assert processor.assembled == ["r2"]
+    # A report of its own shape naming an unknown inference still raises, as it did.
+    with pytest.raises(ReportValidationError, match="unavailable"):
+        processor.ingest(
+            AgentRecord.create(
+                scenario="math",
+                request_type=RequestType.REPORT,
+                payload={**grid.payload, "references": ["i9"]},
+                agent_record_id="r3",
+            )
+        )
+
+
 def test_processor_requires_sample_assembly_instead_of_judge() -> None:
     with pytest.raises(TypeError, match="abstract"):
         ReportedFeedbackProcessor(ProcessorContext("math"))

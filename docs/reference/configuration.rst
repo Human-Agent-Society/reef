@@ -754,7 +754,9 @@ directory per component: the recipes' seeds are written there, a bootstrap
 model snapshot goes under the weight-training component's directory, and a
 component whose recipe seeds nothing starts empty. Each component's trainer
 runs as its own worker and commits into the same release chain, so every
-step checkpoints and the components share one ``training_mode``:
+step checkpoints and the components share one ``training_mode``. A report
+is admitted when any component's contract accepts it, and each trainer
+keeps the reports its own contract parses:
 
 .. code:: yaml
 
@@ -1135,6 +1137,10 @@ The following names are relative to ``operations/``:
    * - ``serve/admission/*``
      - Time acquiring runtime admission. ``active`` is the number waiting for
        admission; immediate admissions also contribute to count and duration.
+   * - ``evaluate/request/*``, ``evaluate/admission/*``
+     - The same measurements for calls on the evaluation route, a step's
+       episodes and proposer calls, which keep no record; counted apart so a
+       step does not read as served traffic.
    * - ``serve/retries_total``, ``serve/timeouts_total``
      - Additional buffered inference attempts and requests that exhaust the
        inference retry deadline. Retries do not create extra request counts.

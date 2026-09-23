@@ -198,7 +198,8 @@ class RequestService:
     ) -> tuple[dict[str, Any], AgentRecord | None]:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call."""
         operations = await self.inference_operations(headers)
-        measurement = operations.start("serve/request")
+        # Evaluation traffic is measured apart, so a step's episodes do not read as served requests.
+        measurement = operations.start("serve/request" if record else "evaluate/request")
         succeeded = False
         try:
             original_payload = dict(payload)
@@ -211,7 +212,9 @@ class RequestService:
                 attempt += 1
                 if attempt > 1:
                     operations.increment("serve/retries_total")
-                prepared, payload = await self._prepare_request(headers, original_payload, path, handler)
+                prepared, payload = await self._prepare_request(
+                    headers, original_payload, path, handler, record=record
+                )
                 try:
                     if prepared.durable:
                         payload = {**payload, "return_meta_info": True}
@@ -287,9 +290,9 @@ class RequestService:
         record: bool = True,
     ) -> tuple[InferenceStream, PendingInference]:
         operations = await self.inference_operations(headers)
-        measurement = operations.start("serve/request")
+        measurement = operations.start("serve/request" if record else "evaluate/request")
         try:
-            prepared, payload = await self._prepare_request(headers, payload, path, handler)
+            prepared, payload = await self._prepare_request(headers, payload, path, handler, record=record)
             admission = prepared.admission
             lease = prepared.lease
             try:
@@ -436,10 +439,12 @@ class RequestService:
         payload: Mapping[str, Any],
         path: str,
         handler: InferenceHandler | None,
+        *,
+        record: bool = True,
     ) -> tuple[PreparedInference, dict[str, Any]]:
         """The shared first half of every inference: freeze the serving state
         (headers, scenario, artifact, handler, surface) and let the surface
-        transform the request payload."""
+        transform the request payload. ``record`` names the measurement family."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
         initial = await asyncio.to_thread(
             self._dispatcher.get_or_create_scenario,
@@ -449,7 +454,7 @@ class RequestService:
         if initial is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
         if initial.runtime is not None:
-            with initial.operations.measure("serve/admission"):
+            with initial.operations.measure("serve/admission" if record else "evaluate/admission"):
                 admission = await initial.runtime.acquire_inference()
         else:
             admission = None

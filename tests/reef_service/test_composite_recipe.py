@@ -648,6 +648,40 @@ def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None
         asyncio.run(run())
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None and scenario.records.count("agent") == 1
+        # An evaluation call is measured apart from served traffic.
+        snapshot = scenario.operations.snapshot()
+        assert snapshot["evaluate/request/completed_total"] == 1
+        assert snapshot["serve/request/completed_total"] == 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: Path) -> None:
+    """The harness head of a flat scenario is the served release, found on the chain when the log keeps no rows."""
+    tree = tmp_path / "seed"
+    tree.mkdir()
+    (tree / "AGENTS.md").write_text("seed")
+    dispatcher = Dispatcher(
+        _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+        InMemoryRepositoryBackend.factory(tree, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        scenario_storage=SQLiteScenarioStorage(None),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None and not scenario.store.durable
+        service = RequestService(dispatcher)
+        headers = {"x-reef-scenario": "agent"}
+        evolved = tmp_path / "evolved"
+        evolved.mkdir()
+        (evolved / "AGENTS.md").write_text("evolved")
+        scenario.commit(TrainStepResult(state={}, artifact=Artifact.local(evolved)))
+        head = scenario.current_artifact_ref().release_id
+        assert service.harness_head(headers) == head
+        manifest = service.harness_manifest(headers)
+        assert manifest["release_id"] == head and manifest["files"] == {"AGENTS.md": "evolved"}
+        assert f'"release_id": "{head}"' in service.harness_install_script(headers, adapter="pi")
     finally:
         dispatcher.close()
 

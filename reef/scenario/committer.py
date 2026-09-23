@@ -101,8 +101,10 @@ class ScenarioCommitter:
         self._step = scenario_step
         self._store = store
         self._lock = RLock()
-        # Preparation holds the operation lock across proposer calls and
-        # evaluation episodes, neither of which changes committed releases.
+        # A lone trainer's preparation holds the operation lock across proposer
+        # calls and evaluation episodes, neither of which changes committed
+        # releases; with several trainers a preparation runs outside it and its
+        # result meets the commits made meanwhile at the commit boundary.
         # Readers share only the publication lock with commit and rollback.
         # Writers must acquire the operation lock first; readers never take it.
         self._publication_lock = RLock()
