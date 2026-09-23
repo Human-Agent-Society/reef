@@ -120,9 +120,10 @@ Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
 its command sandbox. Codex 0.152.1 loads no custom prompts, so a Codex
 ``agent_command`` is a skill that you type as ``$name``. A Codex tree may turn
 on ``web_search`` for your ``reef-codex`` session; episodes always run with
-web search off. The shell in a ``reef-codex`` session has no network, so Codex
-asks you to approve a command that reaches Reef, such as
-``reef-codex evolve``; episodes never ask. Answer "Yes, proceed". "Yes, and
+web search off. The shell in a ``reef-codex`` session has no network, so a
+command that reaches Reef, such as ``reef-codex evolve``, runs only after you
+approve it when Codex asks. Episodes never ask, and ``reef-codex exec``
+cannot ask, so its shell cannot reach Reef. Answer "Yes, proceed". "Yes, and
 don't ask again" runs that command with no question until the session ends,
 also after the session changes the ``reef-codex`` file, which it can do when
 the harness is installed inside the project directory. Terminus accepts one

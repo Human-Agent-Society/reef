@@ -199,7 +199,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert re.search(r"`r0` = `[^`]*/codex/skills`", body)
     assert "reef-smoke: Reef smoke skill (file: r0/reef-smoke/SKILL.md)" in body
     assert "reef-command: Reef smoke command (file: r0/reef-command/SKILL.md)" in body
-    # config.toml sets no approval_policy; the argv keeps the episode from waiting on one.
+    # config.toml sets no approval_policy; the episode still runs with approval never, so it never waits.
     assert "Approval policy is currently never" in body and "# Escalation Requests" not in body
     assert any(event.get("type") == "session_meta" for event in result.trajectory)
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)

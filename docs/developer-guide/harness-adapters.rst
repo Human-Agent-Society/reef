@@ -135,18 +135,20 @@ with one name render to one path and are refused. A ``code_extension`` is
 refused, because Codex hooks run outside its command sandbox. The tree may
 set ``web_search`` (``disabled``, ``cached``, ``indexed`` or ``live``) for a
 person's ``reef-codex`` session, but it may not set ``approval_policy``. The
-episode argv overrides both with ``--config approval_policy="never"`` and
-``--config web_search="disabled"``, so an episode never waits for an approval
-and never searches the web. A ``reef-codex`` session keeps Codex's own
-``on-request`` approvals and the sandbox without network, so a wrapper call
-that reaches Reef runs only after the model asks for an escalation and the
-person approves it. A command or skill that runs the wrapper therefore tells
-the model to ask on the first call: set ``sandbox_permissions`` to
+episode argv pins ``--config approval_policy="never"`` and
+``--config web_search="disabled"``, which win over ``config.toml``, so an
+episode never waits for an approval and never searches the web. An
+interactive ``reef-codex`` session keeps Codex's own ``on-request`` approvals
+and the sandbox without network, so a wrapper call that reaches Reef runs
+only after the model asks for an escalation and the person approves it.
+``reef-codex exec`` runs with approval ``never``, so its shell cannot reach
+Reef. A command or skill that runs the wrapper therefore tells the model to
+ask on the first call: set ``sandbox_permissions`` to
 ``"require_escalated"`` and put the question in ``justification``, because
 the command needs the network to reach Reef. Codex's answer "Yes, and don't
-ask again" writes a rule for that command to the temp copy's
-``rules/default.rules``, so it holds until the session ends. Only the
-``responses`` dialect is bound.
+ask again" writes a rule for that command to ``rules/default.rules`` in the
+temp copy, so it holds until the session ends. Only the ``responses``
+dialect is bound.
 
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which
