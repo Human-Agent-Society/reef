@@ -72,16 +72,16 @@ _COMMANDS = {
             "allowed-tools: Bash(reef-claude evolve:*), Bash(reef-claude wait:*)\n---\n"
         ),
     ),
-    # Codex refuses a custom /command, so the command is a skill typed $reefine; its sandbox lets only the
-    # wrapper's absolute path, which the session's rules name, reach Reef.
+    # Codex refuses a custom /command, so the command is a skill typed $reefine; its shell sandbox has no network,
+    # so each wrapper call asks the person to approve it outside the sandbox (Codex's on-request approvals).
     "codex": _Command(
         request="the text after $reefine in the person's message",
         command="$reefine",
-        wrapper="<wrapper>",
         wrapper_note=(
-            " Here <wrapper> is the absolute path REEF_HARNESS_WRAPPER holds: run printenv REEF_HARNESS_WRAPPER "
-            "once and write that path itself in each command, never the variable, since only that path may reach "
-            "Reef from the sandbox."
+            " The shell sandbox has no network, so run each wrapper command below outside it: set "
+            'sandbox_permissions to "require_escalated" and say in justification that the command reaches Reef, '
+            'which needs the network. The person approves it; answering "Yes, and don\'t ask again" keeps it for '
+            "the session."
         ),
         shell_timeout="If the shell tool returns while it still runs, wait for it to finish.",
     ),

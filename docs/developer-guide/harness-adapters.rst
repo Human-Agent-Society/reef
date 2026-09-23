@@ -572,8 +572,8 @@ option seeds one ``agent_command`` named ``reefine`` under the id
 ``reef/harness/episodes/requests.py``): the session's model runs
 ``reef-<adapter> evolve`` and ``reef-<adapter> wait`` through its shell tool,
 in the form that harness's permission check lets through (a named command
-on Claude Code, the absolute path on Codex, ``"$REEF_HARNESS_WRAPPER"``
-elsewhere). The `reefine recipe guide
+on Claude Code, ``"$REEF_HARNESS_WRAPPER"`` elsewhere; on Codex each call
+asks the person to approve it outside the sandbox). The `reefine recipe guide
 <../user-guide/recipes/reefine.rst#adapters-other-than-pi>`__ has the table.
 The pi extension registers nothing under ``PI_OFFLINE``; otherwise it
 registers two commands, two tools and two event handlers:

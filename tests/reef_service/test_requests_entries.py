@@ -124,7 +124,7 @@ def test_requests_refuses_an_adapter_without_a_shipped_extension(placeholders: t
     ("adapter", "typed", "request_words", "wrapper", "timeout"),
     [
         ("claude", "/reefine", 'The request is "$ARGUMENTS".', "reef-claude", "give it 150000"),
-        ("codex", "$reefine", "the text after $reefine", "<wrapper>", "wait for it to finish"),
+        ("codex", "$reefine", "the text after $reefine", '"$REEF_HARNESS_WRAPPER"', "wait for it to finish"),
         ("opencode", "/reefine", 'The request is "$ARGUMENTS".', '"$REEF_HARNESS_WRAPPER"', "give it 150000"),
         ("hermes", "/reefine", "alongside the skill invocation:", '"$REEF_HARNESS_WRAPPER"', "give it 150."),
         ("dsh", "/reefine", "the text after /reefine", '"$REEF_HARNESS_WRAPPER"', "timeoutMs 150000"),
@@ -158,7 +158,7 @@ def test_the_claude_command_pre_approves_only_the_wrapper_and_opencode_runs_it_a
     assert "agent: build\n---\n" in command_text("opencode")
     # The quirks modules write the frontmatter hermes and dsh read; codex is told to write the path itself.
     assert not command_text("hermes").startswith("---") and not command_text("dsh").startswith("---")
-    assert "printenv REEF_HARNESS_WRAPPER" in command_text("codex")
+    assert 'sandbox_permissions to "require_escalated"' in command_text("codex")
 
 
 def test_requests_must_be_a_boolean(placeholders: tuple[Path, Path]) -> None:
