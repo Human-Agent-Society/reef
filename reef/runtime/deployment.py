@@ -303,15 +303,6 @@ class ModelDeployment:
         inference = self.plan.inference
         if config is None or inference is None:
             return
-        options = dict(config.options)
-        # The coordinator verifies the checkpoints the trainer writes, so on a
-        # multi-node cluster it must run where the trainer runs, or node-local
-        # checkpoint storage is invisible to it.
-        node_id = getattr(self.plan.resources, "training_node_id", None)
-        if node_id is not None and config.backend == "ray":
-            from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
-
-            options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(node_id=node_id, soft=False)
         self._coordinator = Executor.create(
             ExecutorConfig(
                 backend=config.backend,
@@ -322,7 +313,7 @@ class ModelDeployment:
                         kwargs={"owns_training": True},
                     ),
                 ),
-                options=options,
+                options=config.options,
                 launch_timeout_s=config.launch_timeout_s,
             )
         )
