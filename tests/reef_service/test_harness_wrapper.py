@@ -22,9 +22,14 @@ import yaml
 
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.client.wrapper import (
+    _next_commands,
+    _usage,
     harness,
+    install,
     main,
+    notice,
     report,
+    result_line,
     run_agent,
     setup,
     setup_json,
@@ -1735,6 +1740,33 @@ class _ReleasesReef:
                 self.end_headers()
                 self.wfile.write(raw)
 
+            def do_POST(self):
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length) or b"{}")
+                seen.append(
+                    {"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}, "body": body}
+                )
+                promote = re.fullmatch(r"/reef/scenarios/([^/]+)/promote", self.path)
+                if promote is not None and any(row.get("release_id") == body.get("release_id") for row in rows):
+                    # The promote row names the pending release and becomes the head, as the service does it.
+                    head = f"promoted-{body['release_id']}"
+                    rows.append(
+                        {
+                            "release_id": head,
+                            "pending": False,
+                            "operation": "promote",
+                            "rollback_target_release_id": body["release_id"],
+                        }
+                    )
+                    code, raw = 200, json.dumps({"scenario": promote.group(1), "release_id": head}).encode()
+                else:
+                    code, raw = 404, b"{}"
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(raw)))
+                self.end_headers()
+                self.wfile.write(raw)
+
             def log_message(self, *args):
                 pass
 
@@ -2370,6 +2402,7 @@ INSTALL_SCRIPT = textwrap.dedent(
     set -eu
     printf '%s\\n' "$1" > "$1/dest-seen"
     printf '%s\\n' "${REEF_TOKEN:-}" > "$1/token-seen"
+    printf '%s\\n' "${REEF_PYTHON:-}" > "$1/python-seen"
     cp "$1/.reef-harness-release" "$1/release-before"
     printf '{"release_id": "v2", "files": []}\\n' > "$1/.reef-harness-release"
     echo "reef: done"
@@ -2416,6 +2449,8 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
     root = Path(compose).resolve().parent
     assert (tmp_path / "dest-seen").read_text().strip() == str(root)
     assert (tmp_path / "token-seen").read_text().strip() == "tok"
+    # The script keeps the wrapper's own interpreter instead of the python3 the calling shell resolves.
+    assert (tmp_path / "python-seen").read_text().strip() == sys.executable
     assert [item["name"] for item in json.loads((tmp_path / "release-before").read_text())["setup"]] == ["SMTP"]
     assert json.loads(release_file.read_text())["release_id"] == "v2"
     assert not list(Path(tempfile.gettempdir()).glob("reef-harness-install-*.sh"))
@@ -2429,11 +2464,11 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
         "Check the service and scenario, then refresh the release list before retrying.\n"
     )
     reef.close()
-    for name, install, message in (
+    for name, script, message in (
         ("failing", "#!/bin/sh\nexit 7\n", "reef-pi update: the install script exited 7"),
         ("missing", None, "reef-pi update: install script read failed (404): {}"),
     ):
-        reef = _ReleasesReef([_row("v1"), _row("v2", [])], install=install)
+        reef = _ReleasesReef([_row("v1"), _row("v2", [])], install=script)
         (tmp_path / name).mkdir()
         compose, _ = _setup_tree(tmp_path / name, reef.port, {"release_id": "v1"})
         with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
@@ -2627,6 +2662,161 @@ def test_main_dispatches_the_setup_forms_and_update(tmp_path) -> None:
         ("update", root, {}),
         ("update", root, {"release": "v4"}),
     ]
+
+
+@pytest.mark.unit
+def test_main_dispatches_install_and_notice(tmp_path) -> None:
+    called: list[tuple[str, tuple, dict]] = []
+
+    def record(name: str):
+        return lambda *args, **kwargs: called.append((name, args, kwargs)) or 0
+
+    with (
+        patch.dict(os.environ, _main_env(tmp_path, "setup-scenario")),
+        patch("reef.harness.client.wrapper.install", record("install")),
+        patch("reef.harness.client.wrapper.notice", record("notice")),
+    ):
+        for argv in (
+            ["reef-pi", "install"],
+            ["reef-pi", "install", "--release", "ab0617ad"],
+            ["reef-pi", "notice"],
+            ["reef-pi", "notice", "--hook", "claude"],
+        ):
+            with patch("sys.argv", argv), pytest.raises(SystemExit) as exited:
+                main()
+            assert exited.value.code == 0
+    root = ("setup-scenario", "pi", str(tmp_path))
+    assert called == [
+        ("install", root, {"release": None}),
+        ("install", root, {"release": "ab0617ad"}),
+        ("notice", root, {"hook": None}),
+        ("notice", root, {"hook": "claude"}),
+    ]
+    usage = _usage("claude")
+    assert "reef-claude install [--release ID]" in usage and "reef-claude notice [--hook claude]" in usage
+
+
+@pytest.mark.unit
+def test_install_promotes_a_pending_release_then_installs_it_and_takes_the_ids_first_characters(
+    tmp_path, capsys
+) -> None:
+    """``install --release`` names a release by its first characters, as the result lines print them; a pending
+    one is promoted first (the promote names the full id) and the head the promote made is what the install
+    script is asked for; a served, not pending release is installed as it is; an ambiguous prefix is refused."""
+    rows = [_row("v1"), _row("ab0617ad5aaacf06", pending=True), _row("ab0617ad9999", pending=True)]
+    reef = _ReleasesReef(rows, install=INSTALL_SCRIPT)
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    env = _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok")
+    with patch.dict(os.environ, env, clear=True):
+        assert install("setup-scenario", "pi", compose, release="ab0617ad") == 1
+        assert install("setup-scenario", "pi", compose, release="ab0617ad5") == 0
+    out, err = capsys.readouterr()
+    assert err.startswith("reef-pi install: no release ab0617ad in the catalog")
+    promote = next(call for call in reef.seen if call["path"].endswith("/promote"))
+    assert promote["path"] == "/reef/scenarios/setup-scenario/promote"
+    assert (
+        promote["body"] == {"release_id": "ab0617ad5aaacf06"} and promote["headers"]["authorization"] == "Bearer tok"
+    )
+    assert reef.seen[-1]["path"] == "/reef/harness/install?adapter=pi&release_id=promoted-ab0617ad5aaacf06"
+    assert "reef-pi: promoted; the served head is release promoted" in out
+    assert out.splitlines()[-1] == "reef-pi: Installed release promoted. Restart reef-pi to use it."
+    # A release already promoted is not promoted again; the install asks for it as it is.
+    seen_before = len(reef.seen)
+    with patch.dict(os.environ, env, clear=True):
+        assert install("setup-scenario", "pi", compose, release="ab0617ad5") == 0
+    assert not any(call["path"].endswith("/promote") for call in reef.seen[seen_before:])
+    reef.close()
+
+
+@pytest.mark.unit
+def test_install_without_a_release_installs_the_served_head_and_passes_an_unmet_setup_on(tmp_path, capsys) -> None:
+    rows = [_row("v1"), _row("v2", [{"name": "SMTP", "kind": "env", "prompt": "The SMTP host"}])]
+    reef = _ReleasesReef(rows, install=INSTALL_SCRIPT)
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    env = _ask_env(tmp_path / "captures", compose)
+    env.pop("SMTP", None)
+    with patch.dict(os.environ, env, clear=True):
+        assert install("setup-scenario", "pi", compose) == 3
+    err = capsys.readouterr().err.splitlines()
+    assert err[0] == "reef-pi update: release v2 requires setup first:"
+    assert err[-1] == "reef-pi install: then run reef-pi install --release v2 again"
+    with patch.dict(os.environ, {**env, "SMTP": "smtp.example"}, clear=True):
+        assert install("setup-scenario", "pi", compose) == 0
+    assert reef.seen[-1]["path"] == "/reef/harness/install?adapter=pi&release_id=v2"
+    assert capsys.readouterr().out.splitlines()[-1] == "reef-pi: Installed release v2. Restart reef-pi to use it."
+    reef.close()
+
+
+@pytest.mark.unit
+def test_notice_says_what_a_new_session_should_hear_and_nothing_when_the_tree_is_current(tmp_path, capsys) -> None:
+    """A served head this tree is behind and every release that waits for review are one line each; a current
+    tree with nothing waiting prints nothing; ``--hook claude`` wraps the lines as the SessionStart hook's JSON,
+    with the wrapper's shell commands replaced by the /reefine forms the session offers."""
+    rows = [_row("v1"), _row("v2"), _row("ab0617ad5aaacf06", pending=True)]
+    reef = _ReleasesReef(rows)
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    env = _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok")
+    with patch.dict(os.environ, env, clear=True):
+        assert notice("setup-scenario", "pi", compose) == 0
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[0] == (
+        "reef: release v2 is served and this session runs v1; reef-pi update installs it for the next session."
+    )
+    assert lines[1].startswith("reef: release ab0617ad waits for your review: http://127.0.0.1:")
+    assert lines[1].endswith(
+        "/reef/harness/releases/2/page?scenario=setup-scenario&token=tok ; "
+        "reef-pi install --release ab0617ad promotes and installs it."
+    )
+    with patch.dict(os.environ, env, clear=True):
+        assert notice("setup-scenario", "pi", compose, hook="claude") == 0
+    hook = json.loads(capsys.readouterr().out)
+    assert "/reefine update installs it" in hook["systemMessage"]
+    assert "/reefine install ab0617ad promotes" in hook["systemMessage"]
+    assert "reef-pi" not in hook["systemMessage"]
+    assert hook["hookSpecificOutput"]["hookEventName"] == "SessionStart"
+    assert hook["hookSpecificOutput"]["additionalContext"].startswith(hook["systemMessage"])
+    with patch.dict(os.environ, env, clear=True):
+        assert notice("setup-scenario", "pi", compose, hook="cursor") == 2
+    assert capsys.readouterr().err.strip() == "reef-pi notice: no hook shape named 'cursor'"
+    reef.close()
+
+    current = _ReleasesReef([_row("v1"), _row("v2")])
+    (tmp_path / "current").mkdir()
+    compose, _ = _setup_tree(tmp_path / "current", current.port, {"release_id": "v2"})
+    with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
+        assert notice("setup-scenario", "pi", compose) == 0
+        assert notice("setup-scenario", "pi", compose, hook="claude") == 0
+    assert capsys.readouterr().out == ""
+    current.close()
+    # A reef that cannot be reached is no reason to speak at a session start.
+    with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
+        assert notice("setup-scenario", "pi", compose, hook="claude") == 0
+    assert capsys.readouterr().out == ""
+
+
+@pytest.mark.unit
+def test_the_result_line_and_the_next_step_name_the_wrappers_commands_for_adapters_other_than_pi() -> None:
+    rows = [
+        {"release_id": "v1", "pending": False, "operation": "training"},
+        {
+            "release_id": "ab0617ad5aaacf06",
+            "pending": True,
+            "operation": "training",
+            "metrics": {"training_request": {"id": "q", "text": "add /chat"}, "selection": {"result": "pending"}},
+        },
+    ]
+    pi_line = result_line("pi", 1, rows, "http://reef/page")
+    claude_line = result_line("claude", 1, rows, "http://reef/page")
+    assert "/versions v1 install serves it" in pi_line
+    assert (
+        "reef-claude page 1 opens the page, reef-claude install --release ab0617ad serves and installs it"
+        in claude_line
+    )
+    assert "/versions" not in claude_line
+    assert _next_commands("claude", 1, "pending", "ab0617ad5aaacf06") == (
+        "reef-claude install --release ab0617ad (promotes it, then installs it)"
+    )
+    assert _next_commands("pi", 1, "pending", "ab0617ad5aaacf06").startswith("/versions v1 install")
 
 
 # -- reef-<adapter> doctor: one report of what the install needs ---------------------------------

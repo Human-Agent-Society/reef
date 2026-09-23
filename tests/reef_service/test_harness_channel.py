@@ -811,10 +811,11 @@ else
     exit 1
 fi
 
-# One interpreter for the install and the wrapper it writes: the python3 this shell resolves,
-# followed through to the interpreter behind it (a version manager's shim would re-decide it at
-# every run), by absolute path. -P (Python 3.11 and newer) keeps the working directory off sys.path.
-PYTHON="$(command -v python3 || true)"
+# One interpreter for the install and the wrapper it writes: REEF_PYTHON when the caller names one (the
+# wrapper's update names its own), else the python3 this shell resolves, followed through to the
+# interpreter behind it (a version manager's shim would re-decide it at every run), by absolute path.
+# -P (Python 3.11 and newer) keeps the working directory off sys.path.
+PYTHON="${REEF_PYTHON:-$(command -v python3 || true)}"
 if [ -z "$PYTHON" ]; then
     echo 'reef: python3 not found on PATH' >&2
     exit 1

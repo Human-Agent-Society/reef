@@ -589,6 +589,21 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
+class _QuietHTTPServer(ThreadingHTTPServer):
+    """The proxy's server, with a dropped connection kept off the terminal.
+
+    ``ThreadingHTTPServer`` prints a traceback to stderr when a client closes
+    a connection mid-request, which an agent does whenever it retries a call;
+    the wrapper shares the terminal with the agent's own UI, so that traceback
+    would land inside a drawn frame."""
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError)):
+            return
+        super().handle_error(request, client_address)
+
+
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
@@ -629,7 +644,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
+        server = _QuietHTTPServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):
@@ -863,8 +878,9 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
-    # An evolved tool that starts a second agent session finds this harness's own binary first.
-    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), env.get("PATH", "")])
+    # An evolved tool that starts a second agent session finds this harness's own binary first, and a command
+    # or hook of the tree runs reef-<adapter> by name whether or not the person's shell has ~/.local/bin on PATH.
+    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), str(install_root), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -1077,9 +1093,15 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
     if selection_result == "selected":
         return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
     if selection_result == "pending":
+        if adapter == "pi":
+            return (
+                f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
+                f"runs: /versions v{step} opens the page, /versions v{step} install serves it. Page: {page}"
+            )
         return (
-            f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
-            f"runs: /versions v{step} opens the page, /versions v{step} install serves it. Page: {page}"
+            f"'{ask}' is ready as release {release}. This release changes what runs on your machine, so read it "
+            f"before it runs: reef-{adapter} page {step} opens the page, reef-{adapter} install --release {release} "
+            f"serves and installs it. Page: {page}"
         )
     if selection_result == "rejected":
         selection = metrics.get("selection")
@@ -1200,12 +1222,12 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
     return head
 
 
-def _next_commands(adapter: str, step: int, selection_result: str) -> str:
+def _next_commands(adapter: str, step: int, selection_result: str, release: str = "") -> str:
     """The commands that take the next step by hand, for a person who declined it or has no terminal."""
     if selection_result == "pending":
-        return (
-            f"/versions v{step} install in a reef-{adapter} session, or reef-{adapter} setup and reef-{adapter} update"
-        )
+        if adapter == "pi":
+            return f"/versions v{step} install in a reef-pi session, or reef-pi setup and reef-pi update"
+        return f"reef-{adapter} install --release {release[:8]} (promotes it, then installs it)"
     return f"reef-{adapter} setup, then reef-{adapter} update"
 
 
@@ -1217,6 +1239,111 @@ def _install(scenario: str, adapter: str, compose_dir: str, release: str) -> int
     if status != 0:
         return status
     print(f"reef-{adapter}: Installed release {release[:8]}. Restart reef-{adapter} to use it.")
+    return 0
+
+
+def install(scenario: str, adapter: str, compose_dir: str, *, release: str | None = None) -> int:
+    """Install ``release`` here, promoting it first when it waits for review; without one, the served head.
+
+    ``release`` may be the id's first characters, as the result lines print
+    them. Setup is not asked for: what the release requires and is not met
+    is printed by the update, which exits 3, and ``setup`` takes it from
+    there. 0 once the tree is written, else the failing step's status."""
+    state = _load_setup(scenario, adapter, compose_dir, release, "install")
+    if state is None:
+        return 1
+    if state.row is None:
+        print(f"reef-{adapter} install: no served release yet", file=sys.stderr)
+        return 1
+    full = str(state.row.get("release_id") or "")
+    promoted = {row.get("rollback_target_release_id") for row in state.rows if row.get("operation") == "promote"}
+    if state.row.get("pending") and full not in promoted:
+        head = _promote(state.upstream, scenario, adapter, state.token, full)
+        if head is None:
+            return 1
+        full = head
+    status = update(scenario, adapter, compose_dir, release=full)
+    if status == 3:
+        print(f"reef-{adapter} install: then run reef-{adapter} install --release {full[:8]} again", file=sys.stderr)
+    if status != 0:
+        return status
+    print(f"reef-{adapter}: Installed release {full[:8]}. Restart reef-{adapter} to use it.")
+    return 0
+
+
+def notice_lines(scenario: str, adapter: str, compose_dir: str) -> list[str]:
+    """What a session should hear at its start, one line each: a served head this tree is behind, and every
+    release that waits for a review; nothing when the tree is current, and nothing when reef cannot be reached
+    (a session start is no place for an error)."""
+    installed = _installed_release(compose_dir)
+    if installed is None:
+        return []
+    try:
+        upstream = _extract_reef_url(adapter, Path(compose_dir))
+    except WrapperError:
+        return []
+    if upstream is None:
+        return []
+    token = _reef_token(adapter, compose_dir)
+    req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
+    try:
+        with urllib.request.urlopen(req, timeout=10) as response:
+            listed = json.loads(response.read()).get("releases")
+    except (OSError, ValueError):
+        return []
+    rows = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
+    lines = []
+    head = next((row.get("release_id") for row in reversed(rows) if not row.get("pending")), None)
+    if isinstance(head, str) and head != installed:
+        lines.append(
+            f"reef: release {head[:8]} is served and this session runs {installed[:8]}; "
+            f"reef-{adapter} update installs it for the next session."
+        )
+    for step, waiting in _waiting_for_review(rows):
+        held = str(waiting.get("release_id") or "")
+        page = _step_page_link(upstream, scenario, token, step)
+        lines.append(
+            f"reef: release {held[:8]} waits for your review: {page} ; "
+            f"reef-{adapter} install --release {held[:8]} promotes and installs it."
+        )
+    return lines
+
+
+def notice(scenario: str, adapter: str, compose_dir: str, *, hook: str | None = None) -> int:
+    """Print the session start notice; with ``hook`` the shape that adapter's session start hook consumes.
+
+    ``claude``: one JSON object whose ``systemMessage`` Claude Code shows the
+    person and whose ``additionalContext`` tells the model what the person
+    can ask for, with ``/reefine update`` and ``/reefine install <id>`` in
+    place of the shell commands. Silent, exit 0, when there is nothing to say."""
+    lines = notice_lines(scenario, adapter, compose_dir)
+    if not lines:
+        return 0
+    if hook is None:
+        print("\n".join(lines))
+        return 0
+    if hook != "claude":
+        print(f"reef-{adapter} notice: no hook shape named {hook!r}", file=sys.stderr)
+        return 2
+    text = (
+        "\n".join(lines)
+        .replace(f"reef-{adapter} update", "/reefine update")
+        .replace(f"reef-{adapter} install --release", "/reefine install")
+    )
+    print(
+        json.dumps(
+            {
+                "systemMessage": text,
+                "hookSpecificOutput": {
+                    "hookEventName": "SessionStart",
+                    "additionalContext": (
+                        f"{text}\nWhen the user asks for it, /reefine update installs the served release and "
+                        "/reefine install <id> promotes and installs a release that waits for review."
+                    ),
+                },
+            }
+        )
+    )
     return 0
 
 
@@ -1239,12 +1366,12 @@ def _next_step(
     if selection_result not in ("selected", "pending") or not release:
         return 0
     if not sys.stdin.isatty():
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
+        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result, release)}")
         return 0
     if selection_result == "pending":
         print(f"reef-{adapter}: read the change first: reef-{adapter} page {step}")
         if not _confirm(adapter, "Promote now? [y/N]", default_yes=False):
-            print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
+            print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result, release)}")
             return 0
         head = _promote(upstream, scenario, adapter, token, release)
         if head is None:
@@ -1407,10 +1534,21 @@ def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> l
 
 
 def _release_to_set_up(rows: Sequence[Mapping[str, Any]], release: str | None) -> Mapping[str, Any] | None:
-    """The row ``setup`` reads: the one named, else the newest that is not pending; a pending release waits for a promote."""
+    """The row ``setup`` reads: the one named, else the newest that is not pending; a pending release waits for a promote.
+
+    A name may be the id's first characters, as the result lines print them, when they pick out one row."""
     if release is not None:
-        return next((row for row in rows if row.get("release_id") == release), None)
+        return _row_named(rows, release)
     return next((row for row in reversed(rows) if not row.get("pending")), None)
+
+
+def _row_named(rows: Sequence[Mapping[str, Any]], release: str) -> Mapping[str, Any] | None:
+    """The catalog row whose release id is ``release`` or, when none is, the one row whose id starts with it."""
+    exact = next((row for row in rows if row.get("release_id") == release), None)
+    if exact is not None:
+        return exact
+    prefixed = [row for row in rows if str(row.get("release_id") or "").startswith(release)] if release else []
+    return prefixed[0] if len(prefixed) == 1 else None
 
 
 @dataclass
@@ -1420,7 +1558,8 @@ class _Setup:
     ``row`` is the catalog row to set up, None when nothing is served yet;
     ``requires`` its chain's union; ``recorded`` the check offs the release
     file holds and ``checked`` the working copy a form fills; ``values`` the
-    env file; ``upstream`` and ``token`` reach reef for what comes next."""
+    env file; ``upstream`` and ``token`` reach reef for what comes next;
+    ``rows`` is the catalog the row came from."""
 
     record: dict[str, Any]
     row: Mapping[str, Any] | None
@@ -1431,6 +1570,7 @@ class _Setup:
     scenario: str
     upstream: str
     token: str | None
+    rows: Sequence[Mapping[str, Any]] = ()
 
     @property
     def release_id(self) -> str | None:
@@ -1511,7 +1651,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     requires = required_by(rows, release_id if isinstance(release_id, str) else None)
     recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
     return _Setup(
-        record, row, requires, recorded, dict(recorded), _read_env_file(compose_dir), scenario, upstream, token
+        record, row, requires, recorded, dict(recorded), _read_env_file(compose_dir), scenario, upstream, token, rows
     )
 
 
@@ -1756,10 +1896,13 @@ def _run_install_script(script: bytes, install_root: Path, token: str | None) ->
     """Run a fetched install script with ``bash`` for ``install_root``; its exit status, 127 when bash cannot run.
 
     ``REEF_TOKEN`` rides in the script's environment, so the binding it
-    writes keeps the token the wrapper reaches reef with."""
+    writes keeps the token the wrapper reaches reef with; ``REEF_PYTHON`` is
+    this wrapper's own interpreter, so the script keeps it instead of the
+    python3 the calling shell happens to resolve."""
     env = os.environ.copy()
     if token:
         env["REEF_TOKEN"] = token
+    env["REEF_PYTHON"] = sys.executable
     with tempfile.NamedTemporaryFile(prefix="reef-harness-install-", suffix=".sh", delete=False) as handle:
         handle.write(script)
         path = Path(handle.name)
@@ -1942,6 +2085,8 @@ def _usage(adapter: str) -> str:
             f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
             f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
             f"  {prog} update [--release ID]                                       install the served release here",
+            f"  {prog} install [--release ID]                                      promote a release that waits for review, then install it",
+            f"  {prog} notice [--hook claude]                                      what a new session should hear: a newer release, a review that waits",
             f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.",
         ]
     )
@@ -1961,7 +2106,8 @@ def main() -> None:
 
     args = sys.argv[1:]
     if args and args[0] in ("--help", "-h", "help"):
-        print(_usage(adapter))
+        # Flushed before the agent's own help, which the agent writes to the same pipe.
+        print(_usage(adapter), flush=True)
         if args[0] == "help":
             return
         # --help and -h go on to the agent below, so its own help follows.
@@ -2031,6 +2177,20 @@ def main() -> None:
         ns = parser.parse_args(args[1:])
         chosen = {"release": ns.release} if ns.release is not None else {}
         sys.exit(update(scenario, adapter, compose, **chosen))
+    elif args and args[0] == "install":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} install")
+        parser.add_argument(
+            "--release", default=None, metavar="ID", help="the release to install, its first characters suffice"
+        )
+        ns = parser.parse_args(args[1:])
+        sys.exit(install(scenario, adapter, compose, release=ns.release))
+    elif args and args[0] == "notice":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} notice")
+        parser.add_argument(
+            "--hook", default=None, metavar="ADAPTER", help="print the shape that adapter's hook reads"
+        )
+        ns = parser.parse_args(args[1:])
+        sys.exit(notice(scenario, adapter, compose, hook=ns.hook))
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)
 
