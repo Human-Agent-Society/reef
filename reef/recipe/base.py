@@ -235,7 +235,7 @@ class WeightTrainingRecipe(Recipe):
     method-specific config fields.
 
     Configuration is declared as fields: a config field
-    (``batch_size: int = config_field(1, env="REEF_SAO_BATCH_SIZE")``, see
+    (``batch_size: int = config_field(128, env="REEF_SAO_BATCH_SIZE")``, see
     :mod:`reef.recipe.config_fields`) is simultaneously the YAML key, the
     environment fallback, and the type-aware parser. :meth:`service_config`
     and :meth:`from_environment` derive everything from those fields, so a
