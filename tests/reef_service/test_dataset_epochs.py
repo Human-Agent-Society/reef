@@ -29,7 +29,7 @@ class InferenceDatasetProcessor(DataProcessor):
 
     def ingest(self, item):
         if item.request_type is RequestType.INFERENCE:
-            self.add_dataset_unit(
+            self.add_samples(
                 item.agent_record_id,
                 (TaskItem(Path(item.agent_record_id), source_agent_record_ids=(item.agent_record_id,)),),
             )

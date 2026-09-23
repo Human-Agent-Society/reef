@@ -136,16 +136,17 @@ class DataProcessor:
         self.dataset_released_records: set[str] = set()
         self.dataset_pending_units: tuple[str, ...] = ()
 
-    def add_dataset_unit(self, record_id: str, items: tuple[TrainDataItem, ...]) -> None:
-        """Buffer a sample or group for all dataset passes, once, in arrival order.
+    def add_samples(self, record_id: str, items: tuple[TrainDataItem, ...]) -> None:
+        """Buffer samples from persisted records in memory for all dataset passes.
 
         ``record_id`` must be one of the unit's source records and uniquely
-        identify it. Recipes assembling inference records directly can call
-        this from ``ingest``; the reported engine does so automatically.
+        identify it. One call adds a sample or an indivisible group in arrival
+        order; it does not write records to storage. Recipes assembling inference
+        records directly can call this from ``ingest``; the reported engine does so automatically.
         A report carrying metadata.dataset_end seals the queue before training starts.
         """
         if not self.dataset_enabled:
-            raise ValueError("add_dataset_unit requires dataset_epochs in processor config")
+            raise ValueError("add_samples requires dataset_epochs in processor config")
         if record_id in self.dataset_seen_units:
             return
         if self.dataset_sealed:

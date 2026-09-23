@@ -345,7 +345,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             if self._groups.keys() - self._ready_groups:
                 raise ValueError("cannot finish a dataset with incomplete report groups")
             for unit in sorted(self._ordered_units(), key=lambda unit: unit[0].order):
-                self.add_dataset_unit(
+                self.add_samples(
                     unit[0].report.agent_record_id,
                     tuple(pending.item for pending in unit),
                 )

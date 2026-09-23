@@ -70,8 +70,10 @@ for another dataset. An empty dataset produces no automatic batches.
 ``ReportedFeedbackProcessor`` uses its existing ``make_sample`` and
 ``make_batch`` hooks. One report or complete group is one unit; incomplete
 groups at completion are rejected. Direct ``DataProcessor`` subclasses can
-call ``add_dataset_unit(record_id, (sample,))`` in ``ingest``; the identifying
-receipt must appear in the sample's ``source_agent_record_ids``. The base
+call ``add_samples(record_id, (sample,))`` in ``ingest``; the identifying
+receipt must appear in the sample's ``source_agent_record_ids``. This only
+queues samples in memory; input records must already be persisted
+through the record store's ``append`` interface. The base
 owns passes and reservations, and existing batch hooks can read the selected
 samples through ``dataset_items()``. Asynchronous computed-feedback engines
 need to assemble stable units before using this queue.
