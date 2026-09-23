@@ -13,6 +13,7 @@ import dataclasses
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -934,6 +935,43 @@ esac
 command -v rg >/dev/null 2>&1 || echo "reef: warning: pi wants ripgrep (rg) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install ripgrep with your package manager" >&2
 command -v fd >/dev/null 2>&1 || echo "reef: warning: pi wants fd (fd) on PATH and otherwise downloads it from GitHub at first start, which GitHub rate-limits; install fd with your package manager" >&2
 
+# A link at a path this install writes would take the write elsewhere and pass as current: one inside the
+# install root is replaced with a regular file (or removed, for a directory); one leading outside is refused.
+"$PYTHON" - "$DEST" '.reef-harness-release' 'pi-agent/AGENTS.md' 'reef-pi' <<'REEF_LINKS_EOF'
+import os, shutil, sys, tempfile
+dest = sys.argv[1]
+root = os.path.realpath(dest)
+links, outside = {}, []
+for relative in sys.argv[2:]:
+    parts = relative.split("/")
+    for depth in range(1, len(parts) + 1):
+        shown = "/".join(parts[:depth])
+        path = os.path.join(dest, shown)
+        if os.path.islink(path):
+            target = os.path.realpath(path)
+            if os.path.commonpath([root, target]) == root:
+                links[shown] = path
+            else:
+                outside.append("reef: " + shown + " in " + root + " is a link to " + target)
+            break
+        if depth == len(parts) and os.path.isfile(path) and os.stat(path).st_nlink > 1:
+            links[shown] = path
+if outside:
+    print("\n".join(sorted(set(outside))), file=sys.stderr)
+    sys.exit("reef: the install writes only inside the install root; remove the links named above, then install again")
+for shown, path in sorted(links.items()):
+    if os.path.isfile(path):
+        # A copy renamed over the link: the file it pointed at, or shared with, stays as it is.
+        handle, staging = tempfile.mkstemp(dir=os.path.dirname(path))
+        os.close(handle)
+        shutil.copy2(path, staging)
+        os.replace(staging, path)
+        print("reef: " + shown + " was a link; it is a regular file now")
+    else:
+        os.unlink(path)
+        print("reef: " + shown + " was a link; removed it, and the install writes it again")
+REEF_LINKS_EOF
+
 # The checksum stream, as baked into CHECKSUM: each sorted relative path,
 # its byte length, then its bytes, newline separated. The unquoted wc
 # substitution word-splits away the padding BSD wc prints.
@@ -1609,6 +1647,131 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     (dest / "pi-agent/AGENTS.md").unlink()
     (dest / "pi-agent/AGENTS.md").symlink_to(tmp_path / "copy.md")
     assert _start_session(dest, env).returncode == 3
+
+
+def _refusal(root: str, *entries: str) -> list[str]:
+    """The lines ``reef-pi`` prints when it refuses to start on a tree whose recorded files changed."""
+    return [
+        f"reef-pi: cannot start agent; these files in {root} changed since the install wrote them:",
+        *(f"  {entry}" for entry in entries),
+        "reef-pi: run reef-pi update to restore them, then start the agent again",
+    ]
+
+
+@pytest.mark.unit
+def test_a_link_inside_the_install_root_counts_as_changed_and_the_install_puts_a_regular_file_there(
+    tmp_path,
+) -> None:
+    """``cat >`` writes through a link, and a link that reads the same bytes passes as current. So a start names a
+    file reached through a link (at the file, at a directory above it, or a second hard link) as changed, and a
+    rerun of the install (what ``update`` runs) puts a regular file there without writing through the link: what
+    the link reached keeps its bytes, and the next start runs."""
+    script, dest, prefix, env = _session_install(tmp_path)
+    assert _run_install(script, dest, prefix, env).returncode == 0
+    root = str(dest.resolve())
+    moved = dest / "moved"
+
+    def link_file(relative: str, text: str | None) -> Path:
+        # The recorded file moves inside the root, optionally rewritten, and a link to it takes its place.
+        target = moved / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        (dest / relative).rename(target)
+        if text is not None:
+            target.write_text(text, encoding="utf-8")
+        (dest / relative).symlink_to(target)
+        return target
+
+    def link_directory() -> Path:
+        target = moved / "skills"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        (dest / "pi-agent/skills").rename(target)
+        (dest / "pi-agent/skills").symlink_to(target)
+        return target / "notes/SKILL.md"
+
+    def hard_link() -> Path:
+        other = tmp_path / "hard.md"
+        os.link(dest / "pi-agent/AGENTS.md", other)
+        other.write_text("session rules\n", encoding="utf-8")
+        return other
+
+    cases = [
+        ("pi-agent/AGENTS.md", "pi-agent/AGENTS.md (a link)", lambda: link_file("pi-agent/AGENTS.md", None)),
+        (HARNESS_RELEASE_FILE, f"{HARNESS_RELEASE_FILE} (a link)", lambda: link_file(HARNESS_RELEASE_FILE, None)),
+        # The wrapper runs before its own check, so only a link that reads its bytes reaches the check.
+        ("reef-pi", "reef-pi (a link)", lambda: link_file("reef-pi", None)),
+        ("pi-agent/models.json", "pi-agent/models.json (a link)", lambda: link_file("pi-agent/models.json", "{}\n")),
+        (
+            "pi-agent/skills/notes/SKILL.md",
+            "pi-agent/skills/notes/SKILL.md (pi-agent/skills is a link)",
+            link_directory,
+        ),
+        ("pi-agent/AGENTS.md", "pi-agent/AGENTS.md (a hard link)", hard_link),
+    ]
+    for relative, entry, make_link in cases:
+        shutil.rmtree(moved, ignore_errors=True)
+        reached = make_link()
+        kept = reached.read_bytes()
+        refused = _start_session(dest, env)
+        assert refused.returncode == 3 and refused.stderr.splitlines() == _refusal(root, entry)
+        rerun = _run_install(script, dest, prefix, env)
+        assert rerun.returncode == 0, rerun.stderr
+        assert "was a link" in rerun.stdout
+        path = dest / relative
+        assert not any((dest / part).is_symlink() for part in [*PurePosixPath(relative).parents, relative])
+        assert path.is_file() and path.stat().st_nlink == 1
+        assert reached.read_bytes() == kept
+        started = _start_session(dest, env)
+        assert started.returncode == 0, (entry, started.stderr)
+
+
+@pytest.mark.unit
+def test_the_install_refuses_a_link_that_leads_outside_the_install_root_and_writes_nothing_through_it(
+    tmp_path,
+) -> None:
+    """A link to a place outside the install root, at a file the install writes or at the composition directory,
+    would take the install's write there. The start names what it reaches as changed (the record names the root,
+    so a linked composition directory does not move it), the install refuses, naming the link and its target, and
+    writes nothing; once the link is gone the install restores the tree."""
+    script, dest, prefix, env = _session_install(tmp_path)
+    assert _run_install(script, dest, prefix, env).returncode == 0
+    root = str(dest.resolve())
+    outside = tmp_path / "outside.json"
+    outside.write_text("the person's own file\n", encoding="utf-8")
+    (dest / "pi-agent/models.json").unlink()
+    (dest / "pi-agent/models.json").symlink_to(outside)
+    refused = _start_session(dest, env)
+    assert refused.returncode == 3 and refused.stderr.splitlines() == _refusal(root, "pi-agent/models.json (a link)")
+    rerun = _run_install(script, dest, prefix, env)
+    assert rerun.returncode == 1
+    assert rerun.stderr.splitlines()[-2:] == [
+        f"reef: pi-agent/models.json in {root} is a link to {outside.resolve()}",
+        "reef: the install writes only inside the install root; remove the links named above, then install again",
+    ]
+    assert outside.read_text(encoding="utf-8") == "the person's own file\n"
+    (dest / "pi-agent/models.json").unlink()
+    assert _run_install(script, dest, prefix, env).returncode == 0
+    assert _start_session(dest, env).returncode == 0
+
+    elsewhere = tmp_path / "elsewhere/pi-agent"
+    elsewhere.parent.mkdir()
+    (dest / "pi-agent").rename(elsewhere)
+    (dest / "pi-agent").symlink_to(elsewhere)
+    (elsewhere / "AGENTS.md").write_text("session rules\n", encoding="utf-8")
+    refused = _start_session(dest, env)
+    assert refused.returncode == 3
+    assert refused.stderr.splitlines() == _refusal(
+        root,
+        "pi-agent/AGENTS.md (pi-agent is a link)",
+        "pi-agent/models.json (pi-agent is a link)",
+        "pi-agent/skills/notes/SKILL.md (pi-agent is a link)",
+    )
+    rerun = _run_install(script, dest, prefix, env)
+    assert rerun.returncode == 1
+    assert f"reef: pi-agent in {root} is a link to {elsewhere.resolve()}" in rerun.stderr.splitlines()
+    assert (elsewhere / "AGENTS.md").read_text(encoding="utf-8") == "session rules\n"
+    (dest / "pi-agent").unlink()
+    assert _run_install(script, dest, prefix, env).returncode == 0
+    assert _start_session(dest, env).returncode == 0
 
 
 @pytest.mark.unit

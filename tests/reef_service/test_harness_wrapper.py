@@ -755,7 +755,7 @@ def _make_native_launcher(tmp_path: Path) -> Path:
 
 
 @pytest.mark.unit
-def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp_path) -> None:
+def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp_path, capsys) -> None:
     """The native adapter path: the wrapper rewrites models.json base_url to the proxy, the loop reads it
     through REEF_NATIVE_DIR, its session log lands beside the installed tree, and the receipt reports."""
     import http.server
@@ -805,6 +805,8 @@ def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp
     with patch.dict(os.environ, env, clear=True):
         with contextlib.suppress(SystemExit):
             run_agent(str(binary), compose, "native-scenario", "native", "REEF_NATIVE_DIR", ["-p", "say ok"])
+        # No install script serves native, so no record is missing and none is announced.
+        assert "install record" not in capsys.readouterr().err
 
         # The loop talked to reef through the proxy: the scenario header rode along and the rules were the system prompt.
         (request,) = seen
@@ -1256,6 +1258,14 @@ def _ask_env(captures: Path, compose: str, **extra: str) -> dict[str, str]:
     if "REEF_TOKEN" not in extra:
         env.pop("REEF_TOKEN", None)
     return env
+
+
+def _unrecorded_notice(compose: str) -> str:
+    """The line ``reef-pi`` prints first when it starts a session on a tree no install recorded."""
+    return (
+        f"reef-pi: {Path(compose).parent.resolve()} has no install record (an install made before Reef kept one), "
+        "so its files were not checked before this session; reef-pi update records them"
+    )
 
 
 @pytest.mark.unit
@@ -2013,6 +2023,7 @@ def test_run_agent_refuses_unmet_requirements_and_shows_setup_without_running_ch
     proxy.assert_not_called()
     err = capsys.readouterr().err
     assert err.splitlines() == [
+        _unrecorded_notice(compose),
         "reef-pi: cannot start agent; this release has unmet requirements:",
         f"  notify (permission): touch {ran}",
         "    Allow notifications",
@@ -2704,7 +2715,7 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     assert (seen["FILE_ONLY"], seen["BOTH"]) == ("from-file", "from-shell")
     assert seen["REEF_HARNESS_WRAPPER"] == str(Path(compose).resolve().parent / "reef-pi")
     assert seen["REEF_HARNESS_DEST"] == str(Path(compose).resolve().parent)
-    assert capsys.readouterr().err == ""
+    assert capsys.readouterr().err == _unrecorded_notice(compose) + "\n"
     # Without a wrapper at the install root nothing names one, and the shell's own setting is kept.
     wrapper.unlink()
     with (
@@ -2714,6 +2725,28 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
         run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
     assert json.loads((tmp_path / "env.json").read_text())["REEF_HARNESS_WRAPPER"] == "/elsewhere/reef-pi"
     reef.close()
+
+
+@pytest.mark.unit
+def test_a_start_on_a_tree_no_install_recorded_says_its_files_were_not_checked(tmp_path, capsys) -> None:
+    """An install made before Reef kept the record has none, so its sessions start unchecked; each such start says
+    so in one line that names ``update``, and a start on a recorded tree prints no such line."""
+    compose = _make_compose(tmp_path, 1)
+    binary = _make_env_dump_binary(tmp_path)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    home = tmp_path / "home"
+    env = {**_ask_env(captures, compose), "HOME": str(home)}
+    with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+        run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+    assert capsys.readouterr().err.splitlines() == [_unrecorded_notice(compose)]
+    root = str(Path(compose).parent.resolve())
+    record = home / ".reef" / "installs" / f"{hashlib.sha256(root.encode()).hexdigest()}.json"
+    record.parent.mkdir(parents=True)
+    record.write_text(json.dumps({"install_root": root, "service_url": None, "files": {}}), encoding="utf-8")
+    with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+        run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+    assert capsys.readouterr().err == ""
 
 
 @pytest.mark.unit

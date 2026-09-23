@@ -612,10 +612,17 @@ The script also records what it wrote in ``~/.reef/installs``, outside the
 install root: the sha256 of every file, of the release file without the
 check offs ``setup`` adds, and the address the script came from. A
 ``reef-pi`` session starts only while those files are as the install wrote
-them. When one differs, ``reef-pi`` prints ``cannot start agent; these
-files in <install root> changed since the install wrote them:``, the file
-names and ``run reef-pi update to restore them``, and exits 3 without
-starting the agent; ``reef-pi update`` writes them again. The sessions and
+them. A file counts as changed also when a link reaches it: a link at the
+file or at a directory above it, or a second hard link to it. When one
+differs, ``reef-pi`` prints ``cannot start agent; these files in <install
+root> changed since the install wrote them:``, the file names (a link is
+named after its file, for example ``pi-agent/models.json (a link)``) and
+``run reef-pi update to restore them``, and exits 3 without starting the
+agent; ``reef-pi update`` writes them again. The install never writes
+through a link: it replaces a link inside the install root with a regular
+file, or removes a link to a directory and writes the directory again, and
+it refuses a link that leads outside the install root, naming the link and
+its target, and writes nothing until you remove that link. The sessions and
 settings the adapter keeps (``client_state`` in its descriptor, such as
 pi's ``settings.json``) are the agent's own to write and are not checked.
 A session gets the files the install wrote and that client state, so a
@@ -625,8 +632,10 @@ values the release's ``env`` items name. ``update``, ``setup``,
 not at the one in the model binding. The check cannot cover ``reef-pi``
 itself, which runs before it, so a changed ``reef-pi`` runs as changed:
 one more reason for an install root outside the project. An install made
-before Reef kept this record has none, and its sessions start without the
-check until ``reef-pi update`` writes one.
+before Reef kept this record has none: its sessions start without the
+check, and each such start prints ``<install root> has no install record``
+and that ``reef-pi update`` records the files, until the update writes the
+record.
 
 ``reef-pi doctor`` prints one line per thing the install needs
 (the interpreter and its imports, the service and its token, the binary,

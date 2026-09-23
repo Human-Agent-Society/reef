@@ -4,8 +4,9 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
 
   First checks the files the install wrote against what it recorded in
   ``~/.reef/installs``, outside the install root: a file that changed since
-  (client state aside) is named and the wrapper exits 3, and ``update``
-  restores it. A tree no install recorded is not checked. Then checks the
+  or is reached through a link (client state aside) is named and the wrapper
+  exits 3, and ``update`` restores it. A tree no install recorded is not
+  checked, and the wrapper says so on stderr. Then checks the
   installed release's requirements before starting the proxy or agent.
   Unmet items print their setup hints and exit 3. Required programs must
   still be on PATH, even when setup previously checked them off.
@@ -700,24 +701,21 @@ def _write_release_info(compose_dir: str, record: Mapping[str, Any]) -> None:
     os.replace(staging, release_file)
 
 
-def _install_record_path(install_root: Path) -> Path:
-    """Where the install script records what it wrote into ``install_root``, outside the install root.
-
-    ``~/.reef/installs/<sha256 of the resolved root>.json``: the tree may sit
-    in the project a session can write, and the record must not."""
-    return Path.home() / ".reef" / "installs" / f"{hashlib.sha256(str(install_root).encode()).hexdigest()}.json"
-
-
 def _read_install_record(compose_dir: str) -> dict[str, Any] | None:
     """What the install script recorded for this install root: ``install_root``, ``service_url`` (the address the
     script was served from), ``release_file`` (the checksum of the release file without its check offs) and
-    ``files`` (each file it wrote, relative to the root, with its sha256). None when no install recorded one."""
-    install_root = Path(compose_dir).resolve().parent
+    ``files`` (each file it wrote, relative to the root, with its sha256). None when no install recorded one.
+
+    The record is ``~/.reef/installs/<sha256 of the resolved root>.json``: the tree may sit in the project a session
+    can write, and the record must not. The root is the composition directory's parent, resolved without following
+    a link at the composition directory itself, which would move the root, and with it the record, elsewhere."""
+    install_root = str(Path(compose_dir).parent.resolve())
+    record_path = Path.home() / ".reef" / "installs" / f"{hashlib.sha256(install_root.encode()).hexdigest()}.json"
     try:
-        record = json.loads(_install_record_path(install_root).read_text(encoding="utf-8"))
+        record = json.loads(record_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
-    if not isinstance(record, dict) or record.get("install_root") != str(install_root):
+    if not isinstance(record, dict) or record.get("install_root") != install_root:
         return None
     return record
 
@@ -736,28 +734,51 @@ def _is_client_state(descriptor: AdapterDescriptor, relative: PurePosixPath) -> 
     return any(relative == state or state in relative.parents for state in states)
 
 
+def _link_on_path(install_root: Path, relative: str) -> str | None:
+    """How a link reaches ``relative`` below ``install_root``, in the words the refusal prints; None when none does.
+
+    The install writes a recorded file where it is, so a link at the file,
+    a link at a directory above it (the composition directory included) or
+    a second hard link to it would take that write elsewhere."""
+    parts = PurePosixPath(relative).parts
+    for depth in range(1, len(parts) + 1):
+        part = PurePosixPath(*parts[:depth])
+        if (install_root / part).is_symlink():
+            return "a link" if depth == len(parts) else f"{part} is a link"
+    path = install_root / relative
+    if path.is_file() and path.stat().st_nlink > 1:
+        return "a hard link"
+    return None
+
+
 def _changed_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapping[str, Any]) -> list[str]:
     """The files the install recorded that differ from the record now, relative to the install root.
 
-    A file is changed when it is gone, is no longer a regular file (a link
-    to anywhere included) or holds other bytes. Client state is skipped. The
-    release file counts by the part the install wrote, without the check
-    offs ``setup`` adds."""
-    install_root = Path(compose_dir).resolve().parent
+    A file is changed when it is gone, holds other bytes or is reached
+    through a link, which is named after it: the next install would write
+    through the link, and a link that reads the same bytes would pass as the
+    file. Client state is skipped. The release file counts by the part the
+    install wrote, without the check offs ``setup`` adds."""
+    install_root = Path(str(record["install_root"]))
     changed = []
     for relative, checksum in sorted(_recorded_files(record).items()):
         if _is_client_state(descriptor, PurePosixPath(relative)):
             continue
         path = install_root / relative
-        if path.is_symlink() or not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
+        link = _link_on_path(install_root, relative)
+        if link is not None:
+            changed.append(f"{relative} ({link})")
+        elif not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
             changed.append(relative)
     release_checksum = record.get("release_file")
     if isinstance(release_checksum, str):
-        release_file = _release_file_path(compose_dir)
-        info = None if release_file.is_symlink() else _read_release_info(compose_dir)
+        link = _link_on_path(install_root, HARNESS_RELEASE_FILE)
+        info = _read_release_info(compose_dir)
         written = {key: value for key, value in (info or {}).items() if key != "setup"}
         text = json.dumps(written, indent=2) + "\n"
-        if info is None or hashlib.sha256(text.encode("utf-8")).hexdigest() != release_checksum:
+        if link is not None:
+            changed.append(f"{HARNESS_RELEASE_FILE} ({link})")
+        elif info is None or hashlib.sha256(text.encode("utf-8")).hexdigest() != release_checksum:
             changed.append(HARNESS_RELEASE_FILE)
     return changed
 
@@ -888,33 +909,40 @@ def _keep_client_files(kept: Mapping[ClientState, PurePosixPath], temp: Path, co
 
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
     descriptor = get_adapter(adapter)
-    install_root = Path(compose_dir).resolve().parent
+    install_root = Path(compose_dir).parent.resolve()
     # A session can write a tree installed in its project, and the next session must not run what it wrote.
     install_record = _read_install_record(compose_dir)
-    if install_record is not None:
-        changed = _changed_files(descriptor, compose_dir, install_record)
-        if changed:
-            print(
-                f"reef-{adapter}: cannot start agent; these files in {install_root} changed since the install wrote them:",
-                file=sys.stderr,
-            )
-            for changed_path in changed:
-                print(f"  {changed_path}", file=sys.stderr)
-            print(
-                f"reef-{adapter}: run reef-{adapter} update to restore them, then start the agent again",
-                file=sys.stderr,
-            )
-            sys.exit(3)
+    if install_record is None and descriptor.install is not None:
+        # Said on every such start: an unchecked start must not look like a checked one.
+        print(
+            f"reef-{adapter}: {install_root} has no install record (an install made before Reef kept one), so its "
+            f"files were not checked before this session; reef-{adapter} update records them",
+            file=sys.stderr,
+        )
+    changed = [] if install_record is None else _changed_files(descriptor, compose_dir, install_record)
+    if changed:
+        print(
+            f"reef-{adapter}: cannot start agent; these files in {install_root} changed since the install wrote them:",
+            file=sys.stderr,
+        )
+        for changed_path in changed:
+            print(f"  {changed_path}", file=sys.stderr)
+        print(
+            f"reef-{adapter}: run reef-{adapter} update to restore them, then start the agent again",
+            file=sys.stderr,
+        )
+        sys.exit(3)
     upstream = _reef_url_of(adapter, compose_dir)
 
     record = _read_release_info(compose_dir) or {}
     release = _installed_release(compose_dir)
-    stored = _read_env_file(compose_dir)
-    if install_record is not None:
+    if install_record is None:
+        stored = _read_env_file(compose_dir)
+    else:
         # The check above covers the release file, so these env items are the release's own: another line in the
         # env file, which a session can write too, never reaches the agent's environment.
         wanted = {_env_variable(item) for item in _named_items(record.get("requires")) if item.get("kind") == "env"}
-        stored = {name: value for name, value in stored.items() if name in wanted}
+        stored = {name: value for name, value in _read_env_file(compose_dir).items() if name in wanted}
     checked = {item["name"]: item for item in _named_items(record.get("setup"))}
     unmet = []
     missing_programs: set[str] = set()
@@ -965,8 +993,10 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             with contextlib.closing(sqlite3.connect(path)) as database:
                 database.execute("VACUUM")  # writes the database header, so the file is a database
     # With a record, the session gets the files the install wrote and the client state, nothing else in the tree.
-    linked = None
-    if install_record is not None:
+    linked: list[PurePosixPath] | None
+    if install_record is None:
+        linked = None
+    else:
         recorded = [PurePosixPath(relative) for relative in _recorded_files(install_record)]
         below = {
             path.relative_to(subdir)
@@ -1649,7 +1679,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
         session_root
         and session_service
         and session_scenario
-        and Path(session_root).resolve() == Path(compose_dir).resolve().parent
+        and Path(session_root).resolve() == Path(compose_dir).parent.resolve()
     ):
         upstream = _strip_v1(session_service.rstrip("/"))
         scenario = session_scenario
@@ -1972,7 +2002,7 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     except OSError as exc:
         print(f"reef-{adapter} update: reef unreachable at {state.upstream}: {exc}", file=sys.stderr)
         return 1
-    status = _run_install_script(script, Path(compose_dir).resolve().parent, state.token)
+    status = _run_install_script(script, Path(compose_dir).parent.resolve(), state.token)
     if status != 0:
         print(f"reef-{adapter} update: the install script exited {status}", file=sys.stderr)
         return 1

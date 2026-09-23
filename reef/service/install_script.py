@@ -17,7 +17,10 @@ release requires of the person (``requires``) and the check offs
 release file). A release with an item the release file on disk does not check off is
 refused first of all, before the binary is installed or a directory is
 made, with the setup list and the release that installs on a machine with
-nothing set up as the message; the refusal needs python3 only. Rerunning when everything already matches
+nothing set up as the message; the refusal needs python3 only. Before the
+tree is written, a link at a path the script writes, or at a directory above
+one, is replaced with a regular file (or removed, for a directory) while it
+stays inside the install root, and refused, naming it, when it leads outside. Rerunning when everything already matches
 writes nothing at all, not even the release file, and says "already current".
 Last, the script records what it wrote in ``~/.reef/installs``, outside the
 install root: the sha256 of each composition, binding and wrapper file, the
@@ -323,6 +326,59 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
 TOKEN_PLACEHOLDER = "__REEF_TOKEN__"
 
 
+def _link_lines(written: Sequence[str]) -> list[str]:
+    """Shell that replaces the links at the paths in ``written``, relative to ``$DEST``, before the tree is written.
+
+    ``cat >`` writes through a link, and a link that reads the same bytes
+    lets a tree pass as current, so a link a session put at a file the
+    install writes, or at a directory above one, would take the next write
+    wherever it points and keep every start refused. A link that stays
+    inside the install root is replaced: a link to a file, and a second hard
+    link to one, by a regular file with the same bytes and mode, which the
+    writes below then correct; a link to a directory, or to nothing, is
+    removed, and the writes below make it again. A link that leads outside
+    the install root is refused, naming it and its target, before anything
+    is written."""
+    return [
+        "# A link at a path this install writes would take the write elsewhere and pass as current: one inside the",
+        "# install root is replaced with a regular file (or removed, for a directory); one leading outside is refused.",
+        f'"$PYTHON" - "$DEST" {" ".join(_single_quoted(path) for path in written)} <<\'REEF_LINKS_EOF\'',
+        "import os, shutil, sys, tempfile",
+        "dest = sys.argv[1]",
+        "root = os.path.realpath(dest)",
+        "links, outside = {}, []",
+        "for relative in sys.argv[2:]:",
+        '    parts = relative.split("/")',
+        "    for depth in range(1, len(parts) + 1):",
+        '        shown = "/".join(parts[:depth])',
+        "        path = os.path.join(dest, shown)",
+        "        if os.path.islink(path):",
+        "            target = os.path.realpath(path)",
+        "            if os.path.commonpath([root, target]) == root:",
+        "                links[shown] = path",
+        "            else:",
+        '                outside.append("reef: " + shown + " in " + root + " is a link to " + target)',
+        "            break",
+        "        if depth == len(parts) and os.path.isfile(path) and os.stat(path).st_nlink > 1:",
+        "            links[shown] = path",
+        "if outside:",
+        '    print("\\n".join(sorted(set(outside))), file=sys.stderr)',
+        '    sys.exit("reef: the install writes only inside the install root; remove the links named above, then install again")',
+        "for shown, path in sorted(links.items()):",
+        "    if os.path.isfile(path):",
+        "        # A copy renamed over the link: the file it pointed at, or shared with, stays as it is.",
+        "        handle, staging = tempfile.mkstemp(dir=os.path.dirname(path))",
+        "        os.close(handle)",
+        "        shutil.copy2(path, staging)",
+        "        os.replace(staging, path)",
+        '        print("reef: " + shown + " was a link; it is a regular file now")',
+        "    else:",
+        "        os.unlink(path)",
+        '        print("reef: " + shown + " was a link; removed it, and the install writes it again")',
+        "REEF_LINKS_EOF",
+    ]
+
+
 def _install_record_lines(wrapper_name: str, written: Sequence[str]) -> list[str]:
     """Record what this install wrote in ``~/.reef/installs``, where ``reef-<adapter>`` reads it before a session.
 
@@ -547,6 +603,8 @@ def render_install_script(
             raise ValueError(f"composition path {relative!r} escapes the destination")
     items = parse_requires(list(requires), limit=None)
     ordered = sorted(files)
+    # What this install writes, besides the release file: the composition, the binding and the wrapper.
+    recorded = sorted({*ordered, *bindings, wrapper_name})
     checksum = composition_checksum(files)
     release_info_text = (
         json.dumps(
@@ -608,6 +666,8 @@ def render_install_script(
         f'[ "$REQUIRES" = "[]" ] || release_info_tool check "$DEST/{HARNESS_RELEASE_FILE}" "$REQUIRES" "$FALLBACK" || exit 1',
         "",
         *_ensure_binary_lines(descriptor, install),
+        "",
+        *_link_lines([HARNESS_RELEASE_FILE, *recorded]),
         "",
         "# The checksum stream, as baked into CHECKSUM: each sorted relative path,",
         "# its byte length, then its bytes, newline separated. The unquoted wc",
@@ -671,7 +731,7 @@ def render_install_script(
         "",
         *_wrapper_lines(descriptor, env_var, compose_dir, release_id, scenario),
         *_binding_lines(bindings),
-        *_install_record_lines(wrapper_name, sorted({*ordered, *bindings, wrapper_name})),
+        *_install_record_lines(wrapper_name, recorded),
         "",
         'echo "reef: done"',
         f'echo "run:     $DEST/{wrapper_name}"',
