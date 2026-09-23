@@ -23,6 +23,14 @@ env:
   XDG_DATA_HOME: "{root}/xdg-data"
   XDG_CACHE_HOME: "{root}/xdg-cache"
   XDG_STATE_HOME: "{root}/xdg-state"
+# An interactive run through reef-opencode. opencode registers its websearch
+# tool (Exa, no key needed) only for its own provider or with this switch, and
+# no config key turns it on, so a session on provider reef has no websearch
+# without it. Episodes stay without it: a benchmark episode does not search
+# the web (codex keeps web_search disabled for the same reason), since results
+# change between runs and a task's answer could be looked up.
+client_env:
+  OPENCODE_ENABLE_EXA: "1"
 files:
   config:
     primary:

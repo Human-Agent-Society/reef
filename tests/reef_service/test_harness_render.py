@@ -376,6 +376,80 @@ def test_opencode_quirk_rejects_reopened_autoupdate() -> None:
         render_composition([("config", {"data": {"autoupdate": True}})], get_adapter("opencode"))
 
 
+EVIL_PROVIDER = {"evil": {"npm": "@ai-sdk/openai-compatible", "options": {"baseURL": "http://127.0.0.1:9/v1"}}}
+
+
+@pytest.mark.parametrize(
+    ("data", "message"),
+    [
+        ({"provider": EVIL_PROVIDER}, "must not set provider"),
+        ({"provider": {"reef": {"options": {"baseURL": "http://127.0.0.1:9/v1"}}}}, "must not set provider"),
+        ({"model": "reef/other"}, "must not set model"),
+        ({"small_model": "reef/served"}, "must not set small_model"),
+        ({"disabled_providers": ["reef"]}, "must not set disabled_providers"),
+        ({"agent": {"build": {"model": "evil/m"}}}, "agent 'build' must not choose a model"),
+        ({"mode": {"chat": {"model": "evil/m"}}}, "mode 'chat' must not choose a model"),
+        ({"command": {"hi": {"template": "Hi.", "model": "evil/m"}}}, r"command 'hi' in opencode\.json must not"),
+    ],
+)
+def test_opencode_quirk_refuses_a_composition_that_chooses_the_model(data: dict, message: str) -> None:
+    """Only the binding reef appends writes provider and model, so admission, which renders the tree alone, refuses
+    a tree that sets either or picks a model elsewhere. With the binding appended, the binding wins the keys it
+    writes, and a provider or a model choice beyond them is still refused."""
+    descriptor = get_adapter("opencode")
+    with pytest.raises(RenderError, match=message):
+        render_composition([("config", {"data": data})], descriptor)
+    bound = [("config", {"data": data}), *ModelBinding("http://127.0.0.1:8900", "served").compose_nodes(descriptor)]
+    if set(data) <= {"provider", "model"} and set(data.get("provider", {})) <= {"reef"}:
+        config = json.loads(render_composition(bound, descriptor)["opencode/opencode.json"])
+        assert config["provider"]["reef"]["options"]["baseURL"] == "http://127.0.0.1:8900/v1"
+        assert config["model"] == "reef/served"
+    else:
+        with pytest.raises(RenderError, match=message):
+            render_composition(bound, descriptor)
+
+
+@pytest.mark.parametrize("api", ["openai", "anthropic"])
+def test_opencode_quirk_admits_the_model_binding(api: str) -> None:
+    """The binding's own provider and model pass the quirk, with the client models listed beside the served one."""
+    descriptor = get_adapter("opencode")
+    binding = ModelBinding(base_url="http://127.0.0.1:8900", model="served", api_key="k", api=api)
+    files = render_composition(binding.compose_nodes(descriptor, models=("other/big",)), descriptor)
+    config = json.loads(files["opencode/opencode.json"])
+    assert config["model"] == "reef/served" and set(config["provider"]["reef"]["models"]) == {"served", "other/big"}
+
+
+def test_opencode_command_agent_must_be_defined_or_built_in() -> None:
+    """opencode fails a command whose agent does not exist at run time, so render refuses it."""
+    descriptor = get_adapter("opencode")
+
+    def command(agent: str) -> tuple[str, dict]:
+        return ("agent_command", {"name": "hi", "text": f"---\nagent: {agent}\n---\nSay hi to $ARGUMENTS."})
+
+    chat = {"mode": "primary", "permission": {"*": "deny", "websearch": "allow"}}
+    for agent in ("build", "plan", "general", "explore"):
+        render_composition([command(agent)], descriptor)
+    render_composition([("config", {"data": {"agent": {"chat": chat}}}), command("chat")], descriptor)
+    render_composition([("config", {"data": {"mode": {"chat": chat}}}), command("chat")], descriptor)
+    with pytest.raises(RenderError, match="command 'hi' names agent 'ghost', which the tree does not define"):
+        render_composition([command("ghost")], descriptor)
+    with pytest.raises(RenderError, match="names agent 'plan'"):
+        render_composition([("config", {"data": {"agent": {"plan": {"disable": True}}}}), command("plan")], descriptor)
+    inline = {"command": {"hi": {"template": "Hi.", "agent": "ghost"}}}
+    with pytest.raises(RenderError, match=r"command 'hi' in opencode\.json names agent 'ghost'"):
+        render_composition([("config", {"data": inline})], descriptor)
+    model = ("agent_command", {"name": "hi", "text": "---\nmodel: evil/m\n---\nSay hi."})
+    with pytest.raises(RenderError, match="command 'hi' must not choose a model"):
+        render_composition([model], descriptor)
+
+
+def test_opencode_descriptor_turns_on_websearch_for_interactive_runs_only() -> None:
+    """opencode registers websearch for provider reef only with OPENCODE_ENABLE_EXA; episodes do not search the web."""
+    descriptor = get_adapter("opencode")
+    assert descriptor.client_env == {"OPENCODE_ENABLE_EXA": "1"}
+    assert "OPENCODE_ENABLE_EXA" not in descriptor.env
+
+
 def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
     with pytest.raises(RenderError, match="includeCoAuthoredBy"):
         render_composition([("config", {"data": {"includeCoAuthoredBy": True}})], get_adapter("claude"))
