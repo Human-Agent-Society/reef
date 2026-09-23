@@ -173,7 +173,21 @@ type a command there, which file holds the rules, which tools the harness
 has (web search among them, with what it needs: ``DEEPSEEK_API_KEY`` on
 dsh) and how the harness offers a mode. The review judges new commands by
 the same facts. Its design says when the request needs behavior these
-kinds cannot give.
+kinds cannot give. On ``claude``, ``codex``, ``hermes`` and ``dsh`` a
+command cannot take a tool away, so a mode there is guidance the model
+follows while every tool stays offered: the design and the command's reply
+say so, and the review lists a request for a hard restriction as partly
+covered. On ``opencode`` an agent with a permission map is the mode, and
+the model gets only the tools it allows.
+
+An answer whose form slipped is written again while attempts remain: JSON
+that does not parse, entries every one of which was dropped, or entries the
+harness's own admission refuses (the admission the step meets next runs on
+each answer). Each dropped answer's reason is recorded
+(``proposal_notes.dropped_attempts``) and shows under Review on the request
+and step pages. A review reply whose JSON a stray quote broke is asked once
+more. The review reads the whole design; the step records it cut to 4000
+characters with its last paragraph, the How to use, kept whole.
 
 The agent proposer
 ------------------

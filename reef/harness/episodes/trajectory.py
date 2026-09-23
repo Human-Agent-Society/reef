@@ -28,7 +28,7 @@ from __future__ import annotations
 import importlib
 import json
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 from typing import Any
 
@@ -321,3 +321,20 @@ class NativeSessionReader(TrajectoryReader):
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
         return PiSessionReader()(path)
+
+
+def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
+    """The final assistant text in a session log, tolerant of both flat
+    role/content events and pi's wrapped message events with text parts."""
+    for event in reversed(trajectory):
+        message = event.get("message") or event
+        if message.get("role") != "assistant":
+            continue
+        content = message.get("content")
+        if isinstance(content, str):
+            return content
+        if isinstance(content, list):
+            texts = [part["text"] for part in content if part.get("type") == "text"]
+            if texts:
+                return "\n".join(texts)
+    return None

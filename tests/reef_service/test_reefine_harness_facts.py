@@ -131,3 +131,27 @@ def test_a_reply_the_provider_filtered_says_so_instead_of_naming_no_entry() -> N
     assert failure_of(evolution.propose(NODES, (), models, requests=(REQUEST,), adapter="opencode")) == (
         "the provider refused the reply (content_filter)"
     )
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex", "hermes", "dsh"])
+def test_a_prompt_level_mode_is_named_guidance_and_a_hard_restriction_stays_uncovered(adapter: str) -> None:
+    """On a harness whose command cannot take a tool away, the proposer says the mode is followed by the model while
+    every tool stays offered, and the review lists a hard restriction as uncovered rather than calling it delivered."""
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(request_reply(CHAT, RULES), review)
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter=adapter)
+    assert "every tool stays in its list" in model.prompt
+    assert "never claim the other tools are unavailable" in model.prompt
+    (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
+    assert "the review lists that point as uncovered" in text
+    assert "it is the behavior itself, not a substitute" not in model.prompt
+
+
+def test_opencode_enforces_a_mode_with_an_agent_and_leaves_it_through_agents() -> None:
+    model = Model(request_reply(RULES))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
+    assert "enforces the mode" in model.prompt and "every tool stays in its list" not in model.prompt
+    assert (
+        "/agents, choosing build" in model.prompt and "Put the restriction in the chat agent's prompt" in model.prompt
+    )
+    assert "Quote a frontmatter value that holds ': '" in model.prompt

@@ -159,6 +159,17 @@ def test_the_claude_command_pre_approves_only_the_wrapper_and_opencode_runs_it_a
     # The quirks modules write the frontmatter hermes and dsh read; codex is told to write the path itself.
     assert not command_text("hermes").startswith("---") and not command_text("dsh").startswith("---")
     assert 'sandbox_permissions to "require_escalated"' in command_text("codex")
+    # Codex's "don't ask again" writes a rule for that exact command: the text promises no more than that.
+    assert "lets that same command run again without asking" in command_text("codex")
+    assert "keeps it for the session" not in command_text("codex")
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex", "opencode", "hermes", "dsh"])
+def test_the_command_checks_it_runs_under_the_wrapper_except_where_the_check_costs_an_approval(adapter: str) -> None:
+    """The check is one more shell call: on Claude Code it asks the person to approve a variable expansion, and the
+    command exists only in the tree reef-claude runs, so there it is left out."""
+    checked = "When REEF_HARNESS_WRAPPER is not set, this session was not started through" in command_text(adapter)
+    assert checked is (adapter != "claude")
 
 
 def test_requests_must_be_a_boolean(placeholders: tuple[Path, Path]) -> None:

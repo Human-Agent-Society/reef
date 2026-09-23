@@ -573,7 +573,10 @@ option seeds one ``agent_command`` named ``reefine`` under the id
 ``reef-<adapter> evolve`` and ``reef-<adapter> wait`` through its shell tool,
 in the form that harness's permission check lets through (a named command
 on Claude Code, ``"$REEF_HARNESS_WRAPPER"`` elsewhere; on Codex each call
-asks the person to approve it outside the sandbox). The `reefine recipe guide
+asks the person to approve it outside the sandbox). Off Claude Code the text
+ends by telling the model to stop when ``REEF_HARNESS_WRAPPER`` is not set;
+on Claude Code that check would cost an approval prompt, and the command
+exists only in the tree ``reef-claude`` runs. The `reefine recipe guide
 <../user-guide/recipes/reefine.rst#adapters-other-than-pi>`__ has the table.
 The pi extension registers nothing under ``PI_OFFLINE``; otherwise it
 registers two commands, two tools and two event handlers:

@@ -13,5 +13,4 @@ File the request with Reef and report what Reef does with it. Do not make the ch
 2. Run `{wrapper} wait <request id> --timeout 100` with the id it printed. Its --timeout counts seconds. {shell_timeout} While it exits with status 2 the step still runs (a step usually takes a few minutes): say so in one line and run it again.
 
 3. Tell the person the result line it printed. When it names a release to install, ask whether to install it now. On yes run `{wrapper} update`: the new version takes effect when the person starts reef-{adapter} again. If update says the release requires setup first, show the items it printed and tell the person to run `reef-{adapter} setup` in a terminal, then `reef-{adapter} update`.
-
-When REEF_HARNESS_WRAPPER is not set, this session was not started through reef-{adapter}: say so and stop.
+{absent}

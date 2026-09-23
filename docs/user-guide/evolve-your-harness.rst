@@ -622,8 +622,10 @@ no mode switch there; a scenario in ``auto`` takes asks after a switch to
 ``reef-pi harness`` remains a compatibility alias for ``reef-pi evolve``.
 
 The wrapper submits to ``POST /reef/train`` with the installed release id
-from the release metadata file and the oldest pending session's id, or a fresh session id
-when nothing is spooled. A request can execute without inference receipts;
+from the release metadata file and a session id: inside a session the
+wrapper started, that session's (``REEF_HARNESS_SESSION``, the tag every
+call of the run carries); outside one, the oldest pending session's, or a
+fresh session id when nothing is spooled. A request can execute without inference receipts;
 captured receipts remain available for a later feedback report. Acceptance
 returns a training record id and does not mean the change has passed the
 evaluation: the wrapper prints ``watch it here: <link>``, the request's page
@@ -633,14 +635,20 @@ running the step; add --wait to stay here, or check /versions later``.
 With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
 release catalog every 5 s for the step that consumed the request, says
 ``the step started; usually one to three minutes`` once the request's
-record shows a step took it, and prints one line with the result and the
+progress (``GET /reef/harness/requests/<id>/progress``) shows a step took it,
+and prints one line with the result and the
 next action, quoting the request: a selected release to restart ``reef-pi``
 for; a pending one with ``This release changes an extension, so read it before
 it runs: /versions <version> opens the page, /versions <version> install
-serves it. Page: <link>``; a rejected step with the evaluation's reason; a skipped step with why
-(the proposer's own reason when the step recorded one, such as a failed
+serves it. Page: <link>``; a rejected step with the evaluation's reason and
+the first task it missed, with why the episode failed (``no transcript was
+read from the episode's session log`` when the harness's log could not be
+read) or its score and the reply that was graded, and ``rephrase or split
+the request`` only when the episodes ran and scored low; a skipped step with
+why (the proposer's own reason when the step recorded one, such as a failed
 model call); ``not covered: ...`` follows when the step's review lists
-points the change left out. The exit status is 0 for a selected or pending
+points the change left out, and after a rejection the same points read as
+``review notes (they did not decide this result)``. The exit status is 0 for a selected or pending
 release, 1 for a rejected or skipped step, 2 when the timeout passes first.
 On a terminal the wrapper then hands you the next step: a selected release
 asks ``Install now? [Y/n]`` and, on yes, runs ``reef-pi setup`` for it and
@@ -648,7 +656,9 @@ then ``reef-pi update``, closing with ``Installed release <id>. Restart
 reef-pi to use it.``; a pending release names ``reef-pi page <version>`` to
 read it, asks ``Promote now? [y/N]`` and, on yes, promotes it and installs
 the new head the same way. Declined, or in a script without a terminal,
-it prints the commands to run instead.
+it prints the commands to run instead: ``reef-pi update``, with ``reef-pi
+setup`` first only while the release requires something this machine has
+not met. ``update`` keeps the binary where the first install put it.
 ``reef-pi wait <request id> [--timeout SECONDS]`` waits for a request that
 ``evolve`` already filed and reports it the same way, with the same exit
 statuses; a harness whose shell tool stops a command after a few minutes

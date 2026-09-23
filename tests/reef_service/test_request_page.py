@@ -228,6 +228,41 @@ def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_r
     assert "What changed" in _sections(page)
 
 
+def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
+    selection = {"reason": "candidate missed the floor on 1 of 1 tasks", "metrics": {"floor_score": 1.0}}
+    episode = {"task": "[health] echo", "score": 0.0, "failure": "no transcript was read", "reply": None}
+    notes = {"review": {"result": "partial", "covered": [], "uncovered": ["no off switch"]}}
+    row = _row(
+        _answered(
+            selected=False, selection=selection, candidate_episodes=[episode], mutation=MUTATION, proposal_notes=notes
+        )
+    )
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    result = _section(page, "Result")
+    assert "the task &#x27;[health] echo&#x27; failed: no transcript was read" in result or (
+        "the task '[health] echo' failed: no transcript was read" in result
+    )
+    assert "rephrase" not in result and "the change itself was not judged" in result
+    review = _section(page, "Review")
+    assert "Review notes" in review and "The checks decided this result" in review
+    version = build_release_page(1, [CREATION, row])
+    assert "Missed" in version and "no transcript was read" in version
+
+
+def test_answers_the_proposer_wrote_again_show_under_review_on_both_pages() -> None:
+    """An answer whose form slipped is written again; the Review says what the kept one replaced."""
+    notes = {
+        "review": {"result": "complete", "covered": ["chat"], "uncovered": []},
+        "dropped_attempts": ["answer 1: the harness refused the entries: bad frontmatter"],
+    }
+    row = _row(_answered(selected=True, published=True, mutation=MUTATION, proposal_notes=notes))
+    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    review = _section(page, "Review")
+    assert "Answers written again" in review and "the harness refused the entries: bad frontmatter" in review
+    version = build_release_page(1, [CREATION, row])
+    assert "Answers written again" in version and "bad frontmatter" in version
+
+
 def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_session() -> None:
     """hermes has no /versions and no reef-pi: a published release is installed with reef-hermes update, a
     release waiting for review is served with reef-hermes wait on the request, and the version page's Setup
@@ -449,6 +484,12 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             # The version page opens the same way; the wrong token, no token or a token elsewhere does not.
             response = await client.get("/reef/harness/releases/0/page", params=QUERY)
             assert response.status == 200 and "<title>Harness v0</title>" in await response.text()
+            # The step the request is running has no row yet: its page says so and links the request, not a 404.
+            response = await client.get("/reef/harness/releases/1/page", params=QUERY)
+            running = await response.text()
+            assert response.status == 200 and "This step is running" in running and REFRESH in running
+            assert f'href="{link}?scenario=agents&amp;token=secret">Follow the request' in running
+            assert (await client.get("/reef/harness/releases/2/page", params=QUERY)).status == 404
             response = await client.get(link, params={**QUERY, "token": "nope"})
             assert response.status == 401 and await response.text() == "invalid service token"
             response = await client.get(link, params={"scenario": SCENARIO})

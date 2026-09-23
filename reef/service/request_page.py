@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 
+from reef.core.training_request import missed_episode_text, missed_episodes
 from reef.harness.episodes.version_check import ships_version_check
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import design_sections, mutations_of, result_of, served_step, step_href
@@ -238,7 +239,22 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
     if selection_result == "rejected":
         selection = metrics.get("selection")
         reason = selection.get("reason") if isinstance(selection, Mapping) else None
-        return f"did not pass the checks ({reason or 'the checks failed'}); nothing changed: rephrase or split the request"
+        missed = missed_episodes(metrics)
+        if not missed:
+            return (
+                f"did not pass the checks ({reason or 'the checks failed'}); nothing changed: rephrase or split the "
+                "request"
+            )
+        # An episode that failed was the harness's run, not the request: no rephrasing would change it.
+        advice = (
+            "the episode failed, so the change itself was not judged"
+            if any(episode.get("failure") for episode in missed)
+            else "rephrase or split the request"
+        )
+        return (
+            f"did not pass the checks ({reason or 'the checks failed'}): {missed_episode_text(missed[0])}; "
+            f"nothing changed: {advice}"
+        )
     if selection_result == "skipped":
         return f"produced no change ({metrics.get('skipped')}); nothing changed"
     if selection_result == "failed":
@@ -329,19 +345,29 @@ def what_changed(metrics: Mapping[str, object]) -> str:
     return '<ul class="mutations">' + "".join(items) + "</ul>"
 
 
-def review_html(metrics: Mapping[str, object]) -> str:
+def review_html(metrics: Mapping[str, object], rejected: bool = False) -> str:
     """The Review section: the result and what the entries left uncovered, or, when the review call failed, the
     reason it did not run, so a step never quietly publishes with nothing checking that it delivers the request."""
     notes = metrics.get("proposal_notes")
     notes = notes if isinstance(notes, Mapping) else {}
     review = notes.get("review")
+    reasons = notes.get("dropped_attempts")
+    dropped = [item for item in reasons if isinstance(item, str)] if isinstance(reasons, list) else []
+    # Answers the proposer wrote again because their form slipped (broken JSON, refused entries), so the page says
+    # what the kept one replaced.
+    again = (
+        "<h3>Answers written again</h3><ul>" + "".join(f"<li>{escape(item)}</li>" for item in dropped) + "</ul>\n"
+        if dropped
+        else ""
+    )
     if not isinstance(review, Mapping):
         failure = notes.get("review_failure")
         if not isinstance(failure, str) or not failure.strip():
-            return ""
+            return f'<section class="card review-card">\n<h2>Review</h2>\n{again}</section>\n' if again else ""
         return (
             f'<section class="card review-card">\n<h2>Review</h2>\n<p>The review of the entries against your '
-            f"request did not run, so nothing checked whether they deliver it: {escape(failure)}</p>\n</section>\n"
+            f"request did not run, so nothing checked whether they deliver it: {escape(failure)}</p>\n{again}"
+            "</section>\n"
         )
     uncovered = review.get("uncovered")
     items = [item for item in uncovered if isinstance(item, str)] if isinstance(uncovered, Sequence) else []
@@ -349,7 +375,17 @@ def review_html(metrics: Mapping[str, object]) -> str:
     return (
         f'<section class="card review-card">\n<h2>Review</h2>\n<p>Coverage of the request: '
         f'{status_span(str(review.get("result", review.get("verdict")) or "unknown"))}</p>\n'
-        + (f"<h3>Still uncovered</h3>{listed}\n" if items else '<p class="empty">Nothing left uncovered.</p>\n')
+        + (
+            (
+                "<h3>Review notes</h3><p>The checks decided this result; these are the review's notes on the change."
+                f"</p>{listed}\n"
+                if rejected
+                else f"<h3>Still uncovered</h3>{listed}\n"
+            )
+            if items
+            else '<p class="empty">Nothing left uncovered.</p>\n'
+        )
+        + again
         + "</section>\n"
     )
 
@@ -407,7 +443,7 @@ def build_request_page(
         body = (
             f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query, adapter, record_id)}</section>\n'
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
-            f"{review_html(metrics)}{design_html(metrics)}"
+            f"{review_html(metrics, rejected=state == 'rejected')}{design_html(metrics)}"
         )
         subtitle = "Your request has a result. Review the outcome below."
         current_stage = 3

@@ -40,7 +40,7 @@ from reef.harness.compose.loader import EntryOptions, Loader
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError
+from reef.harness.episodes.trajectory import TrajectoryError, final_assistant_text
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.mutations import (
     Mutation,
@@ -186,13 +186,21 @@ class EpisodeEvaluationWorker:
         )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
+        reply = final_assistant_text(result.trajectory)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return _ScoredEpisode(
-                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path
+                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path, reply
             )
-        return _ScoredEpisode(score, None, residue, agents, path)
+        if not result.trajectory:
+            # The reader found no session log where the adapter writes one: a grader that reads the reply scored
+            # nothing, which is the harness's record and not the answer's fault, so the episode says so.
+            cause = "no transcript was read from the episode's session log"
+            return _ScoredEpisode(
+                score, FailureObservation(task=task, stage="trajectory", cause=cause), residue, agents, path, reply
+            )
+        return _ScoredEpisode(score, None, residue, agents, path, reply)
 
 
 def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
@@ -1247,6 +1255,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             self._step_progress = replace(progress, phase="evaluating", episodes_total=len(pairings))
         scored = self._evaluate_pairings(pairings)
         runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
+        tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
         scores = {side: tuple(run.score for run in runs[side]) for side in sides}
         metrics: dict[str, Any] = {
             "candidate_scores": scores.get("candidate", ()),
@@ -1264,6 +1273,17 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics[f"{side}_agents"] = _sum_agents(run.agents for run in runs[side])
             # Per episode, in pairing order: the root's stage path and how its turn ended.
             metrics[f"{side}_paths"] = tuple(run.path for run in runs[side])
+        if "candidate" in sides:
+            # What the first candidate episodes were graded on, so a rejected step names the task, the reply and why.
+            metrics["candidate_episodes"] = [
+                {
+                    "task": _clip_to(task, EPISODE_SUMMARY_CHARS),
+                    "score": run.score,
+                    "failure": None if run.failure is None else _clip_to(run.failure.cause, EPISODE_SUMMARY_CHARS),
+                    "reply": None if run.reply is None else _clip_to(run.reply, EPISODE_SUMMARY_CHARS),
+                }
+                for task, run in list(zip(tasks["candidate"], runs["candidate"], strict=True))[:EPISODE_SUMMARIES]
+            ]
         if sides != EVALUATION_SIDES:
             metrics["evaluation_sides"] = list(sides)
         return EvaluationResult(evaluator="harness_episode_pairs", evaluator_version="1", metrics=metrics)
@@ -1625,8 +1645,22 @@ class _ScoredEpisode:
     agents: dict[str, dict[str, int]] = field(default_factory=dict)
     #: The root's stage path and end reason; ``None`` when no trajectory was read.
     path: dict[str, Any] | None = None
+    #: The final assistant text the trajectory holds, the reply a text grader reads; ``None`` when it holds none.
+    reply: str | None = None
     #: Remote workers return the kept trajectory; the driver owns its durable path.
     record_archive: bytes | None = field(default=None, repr=False)
+
+
+#: How many candidate episodes a step's evaluation summarizes, and how much of each text it keeps: a summary for
+#: the pages, never the traffic.
+EPISODE_SUMMARIES = 8
+EPISODE_SUMMARY_CHARS = 240
+
+
+def _clip_to(text: str, limit: int) -> str:
+    """``text`` redacted as the record is, cut at ``limit`` characters with an ellipsis marker."""
+    text = redact_secret_shaped(text).strip()
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
 def _write_episode_record(

@@ -31,7 +31,7 @@ from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceAdmissionHandle, InferenceHandler, InferenceStream
 from reef.scenario.scenario import Scenario
 from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
-from reef.service.release_page import before_release_id, build_release_page, result_of
+from reef.service.release_page import before_release_id, build_release_page, build_running_step_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
@@ -657,6 +657,12 @@ class RequestService:
         """
         scenario = self._file_scenario(headers)
         rows = list(reversed(scenario.releases()))
+        if step == len(rows):
+            # The next step, while a request runs it: the catalog has no row yet, so the page says so and links the
+            # request's page, which follows the step live.
+            running = self._running_request_id(scenario)
+            if running is not None:
+                return build_running_step_page(step, running, link_query)
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
@@ -687,6 +693,16 @@ class RequestService:
             link_query=link_query,
             adapter="pi" if descriptor is None else descriptor.name,
         )
+
+    @staticmethod
+    def _running_request_id(scenario: Scenario) -> str | None:
+        """The id of the request the scenario's step is running: the reserved batch's, else the backend's progress."""
+        reserved = scenario.trainer.pending_batch
+        if reserved is not None and reserved.request is not None:
+            return str(reserved.request.id)
+        backend = scenario.trainer.candidate_backend
+        progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
+        return None if progress is None or progress.request_id is None else str(progress.request_id)
 
     def harness_request_page(
         self, headers: Mapping[str, str], record_id: str, link_query: Mapping[str, str] | None = None

@@ -1072,8 +1072,8 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
 
 class _FakeReef:
     """A reef that records every call: inference answers with a receipt, the request route with ``answer``,
-    ``GET /reef/harness/releases`` with ``rows``, the request's record route with ``record`` (404 without one) and
-    the scenario's promote route with ``promote``."""
+    ``GET /reef/harness/releases`` with ``rows``, the request's progress route with ``progress`` (404 without
+    one) and the scenario's promote route with ``promote``."""
 
     def __init__(
         self,
@@ -1082,7 +1082,7 @@ class _FakeReef:
         status: int = 200,
         receipt: str = "ask-receipt",
         rows: list[dict] | None = None,
-        record: dict | None = None,
+        progress: dict | None = None,
         promote: dict | None = None,
     ) -> None:
         import http.server
@@ -1106,8 +1106,8 @@ class _FakeReef:
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if self.path == "/reef/harness/releases":
                     self._answer(200, {"scenario": "ask-scenario", "releases": rows or []})
-                elif self.path == "/reef/scenarios/ask-scenario/records/q-1" and record is not None:
-                    self._answer(200, record)
+                elif self.path == "/reef/harness/requests/q-1/progress" and progress is not None:
+                    self._answer(200, progress)
                 else:
                     self._answer(404, {})
 
@@ -1226,6 +1226,20 @@ def test_run_agent_reaches_reef_with_the_bindings_token_when_the_shell_has_none(
 
     (call,) = [seen for seen in reef.seen if seen["path"].startswith("/v1/chat/completions")]
     assert call["headers"]["authorization"] == "Bearer dummy"  # models.json's apiKey, written by the install
+
+
+@pytest.mark.unit
+def test_harness_inside_a_session_names_that_session_not_the_spool(tmp_path) -> None:
+    """A request filed from inside a session names the session the wrapper tagged its calls with; the spool, which
+    the run writes only after it ends, would name an earlier run."""
+    reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
+    compose, captures = _ask_tree(tmp_path, reef.port)
+    _write_spool_entry(captures, "ask-scenario", "pending")
+    with patch.dict(os.environ, _ask_env(captures, compose, REEF_HARNESS_SESSION="the-live-session"), clear=True):
+        harness("ask-scenario", "pi", compose, "text me")
+    reef.close()
+    (request,) = reef.posts("/reef/train")
+    assert request["body"]["session"] == "the-live-session"
 
 
 @pytest.mark.unit
@@ -1395,7 +1409,8 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
                 "reef-pi: 'text me when you are blocked' is published as release rel-1111. Restart reef-pi to install "
                 "it (the update notice offers it).",
                 "reef-pi: not covered: idle detection; two way replies",
-                "reef-pi: next: reef-pi setup, then reef-pi update",
+                # The release requires nothing, so the next step is the update alone.
+                "reef-pi: next: reef-pi update",
             ],
         ),
         (
@@ -1405,7 +1420,7 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
                 "reef-pi: 'text me when you are blocked' is ready as release rel-3333. This release changes an "
                 "extension, so read it before it runs: /versions v1 opens the page, /versions v1 install "
                 "serves it. Page: {page}",
-                "reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi setup and reef-pi update",
+                "reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi update",
             ],
         ),
         (
@@ -1468,6 +1483,51 @@ def test_harness_wait_prints_the_result_line_and_exits_by_it(tmp_path, capsys, r
     assert reef.seen[1]["headers"]["authorization"] == "Bearer dummy"  # the catalog read carries the token too
 
 
+@pytest.mark.unit
+def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_the_episode_failed(
+    tmp_path, capsys
+) -> None:
+    """The result line names what the checks saw: the task and why it failed, or its score and the reply that was
+    graded; the review's points after a rejection are notes that did not decide it."""
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    floor = {
+        "selected": False,
+        "selection": {"reason": "candidate missed the floor on 1 of 1 tasks", "metrics": {"floor_score": 1.0}},
+    }
+    review = {"proposal_notes": {"review": {"result": "partial", "uncovered": ["no off switch"]}}}
+    cases = [
+        (
+            {
+                "task": "[health] echo",
+                "score": 0.0,
+                "failure": "no transcript was read from the episode's session log",
+                "reply": None,
+            },
+            "the task '[health] echo' failed: no transcript was read from the episode's session log. Nothing changed; "
+            "the episode failed, so the change itself was not judged.",
+        ),
+        (
+            {"task": "[health] echo", "score": 0.0, "failure": None, "reply": "hello"},
+            "the task '[health] echo' scored 0.0; the reply graded was 'hello'. Nothing changed; rephrase or split "
+            "the request.",
+        ),
+    ]
+    for index, (episode, tail) in enumerate(cases):
+        row = _step_row("rel-0", {**floor, **review, "candidate_episodes": [episode]})
+        reef = _FakeReef(answer, rows=[CREATION_ROW, row])
+        (tmp_path / str(index)).mkdir()
+        compose, captures = _ask_tree(tmp_path / str(index), reef.port)
+        with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+            assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=5, poll_s=0.01) == 1
+        reef.close()
+        out = capsys.readouterr().out.splitlines()
+        assert out[-2] == (
+            "reef-pi: 'text me when you are blocked' did not pass the checks (candidate missed the floor on 1 of 1 "
+            f"tasks): {tail}"
+        )
+        assert out[-1] == "reef-pi: review notes (they did not decide this result): no off switch"
+
+
 class _Tty(io.StringIO):
     """A stdin that reads as a terminal, so the wait hands over the next step and reads the answers from here."""
 
@@ -1503,7 +1563,7 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
             selected,
             "n\n",
             0,
-            "reef-pi: Install now? [Y/n] reef-pi: next: reef-pi setup, then reef-pi update",
+            "reef-pi: Install now? [Y/n] reef-pi: next: reef-pi update",
         ),
         (
             "pending-yes",
@@ -1517,7 +1577,7 @@ def test_harness_wait_hands_over_the_next_step_on_a_terminal(tmp_path, capsys) -
             pending,
             "\n",
             0,
-            "reef-pi: Promote now? [y/N] reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi setup and reef-pi update",
+            "reef-pi: Promote now? [y/N] reef-pi: next: /versions v1 install in a reef-pi session, or reef-pi update",
         ),
         ("selected-failed", selected, "yes\n", 3, "reef-pi: Install now? [Y/n] "),
     ]
@@ -1573,7 +1633,7 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     reef = _FakeReef(
         {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"},
         rows=rows,
-        record={"agent_record_id": "q-1", "compacted_at": None},  # queued the whole wait
+        progress={"state": "queued", "settled": False},  # queued the whole wait
     )
     compose, captures = _ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -1594,12 +1654,13 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
 
 @pytest.mark.unit
 def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path, capsys) -> None:
-    """Until a step takes the request its record's compacted_at is null; once it is set the wait says so, once,
-    and stops reading the record. A record the service does not answer is no reason to stop waiting."""
+    """Until a step takes the request its progress reads queued; once a step works on it (the request page's
+    reading, not the record's compacted_at, which a commit sets only as the step ends) the wait says so, once, and
+    stops reading it. A progress the service does not answer is no reason to stop waiting."""
     rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
-    record_path = "/reef/scenarios/ask-scenario/records/q-1"
-    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "compacted_at": 1700000000.5})
+    record_path = "/reef/harness/requests/q-1/progress"
+    reef = _FakeReef(answer, rows=rows, progress={"state": "proposing", "settled": False})
     compose, captures = _ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
         assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
@@ -1610,8 +1671,8 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     record_reads = [call for call in reef.seen if call["path"] == record_path]
     assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
-    # Queued (compacted_at null): no line, and the record is read again at every poll.
-    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "compacted_at": None})
+    # Queued: no line, and the progress is read again at every poll.
+    reef = _FakeReef(answer, rows=rows, progress={"state": "queued", "settled": False})
     (tmp_path / "queued").mkdir()
     compose, captures = _ask_tree(tmp_path / "queued", reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -1622,7 +1683,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     assert len([call for call in reef.seen if call["path"] == record_path]) >= 3
     # Unanswered (404) twice in a row: the service no longer knows the request (its scenario was reset), so the
     # wait ends with one line and exit 1 instead of polling until the timeout.
-    reef = _FakeReef(answer, rows=rows, record=None)
+    reef = _FakeReef(answer, rows=rows, progress=None)
     (tmp_path / "missing").mkdir()
     compose, captures = _ask_tree(tmp_path / "missing", reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -1651,7 +1712,7 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
     update notice and /versions is told the wrapper commands instead."""
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     running = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
-    reef = _FakeReef(answer, rows=running, record={"agent_record_id": "q-1", "compacted_at": None})
+    reef = _FakeReef(answer, rows=running, progress={"state": "queued", "settled": False})
     compose, captures = _claude_ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
         assert harness("ask-scenario", "claude", compose, "text me") == 0
@@ -1676,9 +1737,32 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
         "reef-claude: reef is running the step; waiting up to 5 s for its result",
         "reef-claude: 'text me when you are blocked' is published as release rel-1111. Run reef-claude update, then "
         "restart reef-claude.",
-        "reef-claude: next: reef-claude setup, then reef-claude update",
+        "reef-claude: next: reef-claude update",
     ]
     assert [call["path"] for call in reef.seen] == ["/reef/harness/releases"]
+
+
+@pytest.mark.unit
+def test_the_next_step_names_setup_only_while_the_release_requires_something_unmet(tmp_path, capsys) -> None:
+    """A release whose chain requires an env item the machine has not set is set up first; once the variable is set
+    (in the shell or the env file), the next step is the update alone."""
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    row = _step_row("rel-1111-selected", {"selected": True})
+    row["metrics"]["training_request"]["requires"] = [{"name": "SMTP_HOST", "kind": "env", "prompt": "The host"}]
+    for shell, line in (
+        ({}, "reef-claude setup, then reef-claude update"),
+        ({"SMTP_HOST": "x"}, "reef-claude update"),
+    ):
+        reef = _FakeReef(answer, rows=[CREATION_ROW, row])
+        (tmp_path / line[:14].replace(" ", "-")).mkdir()
+        compose, captures = _claude_ask_tree(tmp_path / line[:14].replace(" ", "-"), reef.port)
+        env = {**_ask_env(captures, compose), **shell}
+        if not shell:
+            env.pop("SMTP_HOST", None)
+        with patch.dict(os.environ, env, clear=True):
+            assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=5, poll_s=0.01) == 0
+        reef.close()
+        assert capsys.readouterr().out.splitlines()[-1] == f"reef-claude: next: {line}"
 
 
 @pytest.mark.unit
@@ -2577,6 +2661,25 @@ def test_session_update_without_the_token_variable_sends_the_trees_token_and_the
         reef.close()
 
 
+def test_update_keeps_the_binary_prefix_of_the_first_install(tmp_path, capsys) -> None:
+    """The install script puts the binary under its second argument; update passes the prefix the baked binary path
+    names, so an install made with its own prefix stays there, and a binary of the person's own passes none."""
+    script = INSTALL_SCRIPT + 'printf \'%s\\n\' "${2:-none}" > "$1/prefix-seen"\n'
+    reef = _ReleasesReef([_row("v2")], install=script)
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    prefix = tmp_path / "prefixes" / "pi"
+    for binary, seen in (
+        (str(prefix / "node_modules" / ".bin" / "pi"), str(prefix)),
+        ("/usr/local/bin/pi", "none"),
+    ):
+        with patch.dict(
+            os.environ, {**_ask_env(tmp_path / "captures", compose), "REEF_HARNESS_BINARY": binary}, clear=True
+        ):
+            assert update("setup-scenario", "pi", compose, release="v2") == 0
+        assert (tmp_path / "prefix-seen").read_text().strip() == seen
+    reef.close()
+
+
 def test_session_recovery_does_not_substitute_another_catalog_or_release(tmp_path, capsys) -> None:
     reef = _ReleasesReef([_row("new-head")], install=INSTALL_SCRIPT)
     other = _ReleasesReef([_row("selected-release")], install=INSTALL_SCRIPT)
@@ -2669,6 +2772,8 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
         run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
     seen = json.loads((tmp_path / "env.json").read_text())
     assert (seen["FILE_ONLY"], seen["BOTH"]) == ("from-file", "from-shell")
+    # The run's session tag, which a request filed from inside the session names.
+    uuid.UUID(seen["REEF_HARNESS_SESSION"])
     assert seen["REEF_HARNESS_WRAPPER"] == str(Path(compose).resolve().parent / "reef-pi")
     assert seen["REEF_HARNESS_DEST"] == str(Path(compose).resolve().parent)
     # The harness binary's directory, then the install root, so reef-pi by name is this install's wrapper.

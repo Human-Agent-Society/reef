@@ -45,9 +45,12 @@ class _Command:
     in the command text: the binary's own placeholder where it substitutes
     one, else where the model finds it. ``wrapper`` is how the command runs
     the wrapper, the form the harness's own permission check lets through;
-    ``shell_timeout`` says how its shell tool counts a timeout.
-    ``frontmatter`` is written before the text when the binary reads one;
-    empty, the adapter's quirks module synthesizes it."""
+    ``shell_timeout`` says how its shell tool counts a timeout. ``absent``
+    closes the text with what to do when the session did not come through
+    the wrapper; it is empty where checking would cost the person an
+    approval prompt and the command could not exist outside the wrapper's
+    tree. ``frontmatter`` is written before the text when the binary reads
+    one; empty, the adapter's quirks module synthesizes it."""
 
     request: str
     shell_timeout: str
@@ -55,6 +58,10 @@ class _Command:
     wrapper: str = '"$REEF_HARNESS_WRAPPER"'
     wrapper_note: str = ""
     frontmatter: str = ""
+    absent: str = (
+        "\nWhen REEF_HARNESS_WRAPPER is not set, this session was not started through reef-{adapter}: say so and "
+        "stop.\n"
+    )
 
 
 _TYPED = "the text after /reefine in the person's message"
@@ -67,6 +74,8 @@ _COMMANDS = {
         request='"$ARGUMENTS"',
         wrapper="reef-claude",
         shell_timeout="The Bash tool's own timeout counts milliseconds: give it 150000.",
+        # The command lives only in the tree reef-claude runs, and checking the variable costs an approval prompt.
+        absent="",
         frontmatter=(
             "---\ndescription: Ask Reef to change this harness\nargument-hint: <what it should do>\n"
             "allowed-tools: Bash(reef-claude evolve:*), Bash(reef-claude wait:*)\n---\n"
@@ -80,8 +89,8 @@ _COMMANDS = {
         wrapper_note=(
             " The shell sandbox has no network, so run each wrapper command below outside it: set "
             'sandbox_permissions to "require_escalated" and say in justification that the command reaches Reef, '
-            'which needs the network. The person approves it; answering "Yes, and don\'t ask again" keeps it for '
-            "the session."
+            'which needs the network. The person approves each call; answering "Yes, and don\'t ask again" lets that '
+            "same command run again without asking."
         ),
         shell_timeout="If the shell tool returns while it still runs, wait for it to finish.",
     ),
@@ -126,6 +135,7 @@ def command_text(adapter: str) -> str:
         wrapper=command.wrapper,
         wrapper_note=command.wrapper_note,
         shell_timeout=command.shell_timeout,
+        absent=command.absent.format(adapter=adapter),
     )
     return command.frontmatter + body
 

@@ -19,6 +19,7 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from reef.core.requirements import parse_requires
@@ -26,6 +27,8 @@ from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.recipe.reefine.harness_facts import harness_facts
 from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
@@ -303,6 +306,12 @@ def review_commands(adapter: str) -> str:
     return HARNESS_REVIEW_COMMANDS.format(title=facts.title, command=facts.command, mode=facts.mode)
 
 
+#: What the review prompt gets when its first reply carried no result object.
+REVIEW_AGAIN = (
+    "\n\nYour previous reply held no JSON object this prompt could read. Answer with the one JSON object alone, "
+    "every double quote inside a string escaped."
+)
+
 #: How many answers a request may get: the first, then one more each time the review finds the last one short.
 REQUEST_ATTEMPTS = 3
 
@@ -311,6 +320,13 @@ RETRY_SECTION = (
     "An earlier answer to this request was reviewed and fell short.{delivered} Its design was:\n{design}\n"
     "The review found:\n{findings}\n"
     "Write the whole answer again, design first, so that it covers these points.\n\n"
+)
+
+#: The prompt section a request gets again after an answer that could not be used at all: JSON that does not parse,
+#: entries every one of which was dropped, or entries the harness's admission refuses.
+RETRY_UNUSABLE_SECTION = (
+    "An earlier answer to this request could not be used: {reason}. Write the whole answer again, design first, "
+    "as the one JSON array described above; escape every double quote inside a JSON string.\n\n"
 )
 
 #: What the retry section adds when the earlier answer only put a substitute in place of the behavior.
@@ -461,18 +477,28 @@ def _answer_request(
     own = [dict(item) for item in request.get("requires") or () if isinstance(item, Mapping)]
     kept: tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | None = None
     undelivered: StepProposal | None = None
+    unusable: _Unusable | None = None
+    # Why each answer that could not be used was dropped, so the page says what the kept one replaced.
+    dropped_attempts: list[str] = []
     retry = ""
     attempt = 0
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
         answer = _answer_once(prompt + retry, request, models, nodes, entries, own, kinds, adapter)
+        if isinstance(answer, _Unusable):
+            # A slip in the answer's form is asked again while attempts remain.
+            unusable = answer
+            dropped_attempts.append(f"answer {attempt}: {answer.reason}")
+            retry = RETRY_UNUSABLE_SECTION.format(reason=answer.reason)
+            continue
         if isinstance(answer, StepProposal):
             # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
             # earlier substitute says more about the request than the failed call does.
             if kept is None:
                 if undelivered is not None:
-                    return undelivered
-                return answer if attempt == 1 else StepProposal((), {**answer.notes, "attempts": attempt})
+                    return _with_dropped(undelivered, dropped_attempts)
+                notes = answer.notes if attempt == 1 else {**answer.notes, "attempts": attempt}
+                return _with_dropped(StepProposal((), notes), dropped_attempts)
             break
         mutations, added, notes = answer
         review = notes.get("review")
@@ -492,14 +518,30 @@ def _answer_request(
             delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
         )
     if kept is None:
-        return undelivered
+        if undelivered is not None:
+            return _with_dropped(undelivered, dropped_attempts)
+        # Every answer was unusable: the last one's reason, with its design when it wrote one.
+        notes = {"failure": "no answer was written" if unusable is None else unusable.reason, "attempts": attempt}
+        if unusable is not None and unusable.design is not None:
+            notes = {"design": _kept_design(unusable.design), **notes}
+        return _with_dropped(StepProposal((), notes), dropped_attempts)
     mutations, added, notes = kept
     if attempt > 1:
         notes["attempts"] = attempt
+    if dropped_attempts:
+        notes["dropped_attempts"] = dropped_attempts
     # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
     if added and isinstance(request, dict):
         request["requires"] = [*own, *added]
     return StepProposal(tuple(mutations), notes)
+
+
+@dataclass(frozen=True)
+class _Unusable:
+    """An answer the loop may ask again: why it could not be used, and the design it carried."""
+
+    reason: str
+    design: str | None = None
 
 
 def _answer_once(
@@ -511,9 +553,11 @@ def _answer_once(
     own: Sequence[Mapping[str, Any]],
     kinds: Sequence[str] = tuple(REQUEST_KINDS),
     adapter: str = EXTENSION_ADAPTER,
-) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal:
-    """One answer and its review: the mutations, the requires items the reply added and the notes, or a
-    proposal without mutations whose notes say why there is nothing to apply."""
+) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal | _Unusable:
+    """One answer and its review: the mutations, the requires items the reply added and the notes; an
+    ``_Unusable`` the loop asks again (JSON that does not parse, every entry dropped, entries the harness's
+    admission refuses); or a proposal without mutations whose notes say why there is nothing to apply (a failed
+    call, a reply whose design says no entry can deliver the request)."""
     # An extension is longer than a skill, and a thinking model reasons for tens of thousands of tokens before
     # it writes one, answering with no text when the budget ends inside that reasoning; the request path pays
     # for the room and the minutes, the failure path and the review keep their shorter budgets.
@@ -521,25 +565,31 @@ def _answer_once(
     if reply is None:
         return StepProposal((), {"failure": failure})
     proposals = _parse_proposal(reply, kinds=tuple(kinds), config_keys=request_config_keys(adapter))
+    design = _design_text(reply)
     if proposals is None:
         refusal = _provider_refusal(models)
-        return _nothing_to_apply(
-            reply,
-            "the reply holds no usable entry" if refusal is None else f"the provider refused the reply ({refusal})",
-        )
+        if refusal is not None:
+            return _nothing_to_apply(reply, f"the provider refused the reply ({refusal})")
+        if reply.strip() and not _items_in(reply):
+            # No JSON parsed at all (a stray quote broke it): a slip, asked again. A design with no entry is an answer.
+            return _Unusable("the reply holds no usable entry", design)
+        return _nothing_to_apply(reply, "the reply holds no usable entry")
     mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
     if not mutations:
-        return _nothing_to_apply(
-            reply, "every entry in the reply was dropped: a reserved id, or an id another kind holds"
-        )
+        return _Unusable("every entry in the reply was dropped: a reserved id, or an id another kind holds", design)
+    if entries:
+        # The admission the step meets next, run here so a refused entry is written again instead of losing the step.
+        _, refusal = admit_mutations(entries, mutations, get_adapter(adapter))
+        if refusal is not None:
+            return _Unusable(f"the harness refused the entries: {refusal}", design)
     added, refused = _parse_requires(reply)
-    design = _parse_design(reply)
     notes: dict[str, Any] = {}
     if design is not None:
-        notes["design"] = design
+        notes["design"] = _kept_design(design)
     misnamed = _misnamed(reply, kinds)
     if misnamed:
         notes["dropped"] = misnamed
+    # The review reads the whole design; the step records it cut to the record's size.
     review, review_failure = _review(
         models, str(request.get("text", "")), design, mutations, [*own, *added], adapter=adapter
     )
@@ -553,6 +603,13 @@ def _answer_once(
     if undeclared:
         notes["undeclared_env"] = undeclared
     return mutations, added, notes
+
+
+def _with_dropped(proposal: StepProposal, dropped_attempts: Sequence[str]) -> StepProposal:
+    """``proposal`` with the reasons earlier answers were dropped in its notes, when any were."""
+    if not dropped_attempts:
+        return proposal
+    return StepProposal(proposal.mutations, {**proposal.notes, "dropped_attempts": list(dropped_attempts)})
 
 
 def _uncovered_count(notes: Mapping[str, Any]) -> int:
@@ -706,7 +763,7 @@ def _review(
     prompt = REVIEW_PROMPT.format(
         request=untrusted_text(request_text, "user request"),
         design="(none written)" if design is None else design,
-        entries=json.dumps(written, indent=2),
+        entries=json.dumps(written, indent=2, ensure_ascii=False),
         commands=review_commands(adapter),
     )
     # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live,
@@ -717,6 +774,13 @@ def _review(
     if reply is None:
         return None, reason
     review = _parse_review(reply)
+    if review is None and _json_in(reply, openers=("{",)) is None and '"result"' in reply:
+        # The model wrote the object but a stray quote broke its JSON: asked once more before the step records that
+        # no review ran.
+        reply, reason = _ask(models, prompt + REVIEW_AGAIN, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
+        if reply is None:
+            return None, reason
+        review = _parse_review(reply)
     if review is None:
         return None, "the review reply carried no result object"
     return review, None
@@ -748,12 +812,30 @@ def _strings_of(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()][:_REVIEW_ITEMS]
 
 
-def _parse_design(reply: str) -> str | None:
-    """The text of the reply's ``{"design": "..."}`` object, cut at ``_DESIGN_CHARS``; ``None`` when it wrote none."""
+def _design_text(reply: str) -> str | None:
+    """The whole text of the reply's ``{"design": "..."}`` object; ``None`` when it wrote none."""
     for value in _items_in(reply):
         if isinstance(value, dict) and isinstance(value.get("design"), str) and value["design"].strip():
-            return value["design"].strip()[:_DESIGN_CHARS]
+            return value["design"].strip()
     return None
+
+
+def _kept_design(design: str) -> str:
+    """The design as the step records it: whole up to ``_DESIGN_CHARS``, and past it the start cut so the last
+    paragraph, the How to use the person reads, stays whole."""
+    if len(design) <= _DESIGN_CHARS:
+        return design
+    head, _, last = design.rpartition("\n\n")
+    if not head or len(last) >= _DESIGN_CHARS // 2:
+        return design[:_DESIGN_CHARS]
+    marker = "\n\n[...]\n\n"
+    return head[: _DESIGN_CHARS - len(last) - len(marker)].rstrip() + marker + last
+
+
+def _parse_design(reply: str) -> str | None:
+    """The reply's design as the step records it (``_kept_design``); ``None`` when it wrote none."""
+    design = _design_text(reply)
+    return None if design is None else _kept_design(design)
 
 
 def _undeclared_env(mutations: Sequence[Mutation], requires: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -1092,20 +1174,3 @@ def _misnamed(reply: str, kinds: Sequence[str]) -> list[str]:
         if kind in kinds and kind in REQUEST_KINDS and "name" in REQUEST_KINDS[kind] and name not in (None, entry_id):
             lines.append(f"{kind} {entry_id!r} was dropped: its id must equal its config name {name!r}")
     return lines
-
-
-def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
-    """The final assistant text in a session log, tolerant of both flat
-    role/content events and pi's wrapped message events with text parts."""
-    for event in reversed(trajectory):
-        message = event.get("message") or event
-        if message.get("role") != "assistant":
-            continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            texts = [part["text"] for part in content if part.get("type") == "text"]
-            if texts:
-                return "\n".join(texts)
-    return None

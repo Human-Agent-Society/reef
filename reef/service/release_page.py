@@ -24,9 +24,10 @@ import json
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from reef.core.requirements import required_by
+from reef.core.training_request import missed_episode_text, missed_episodes
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
@@ -386,7 +387,8 @@ def _review(metrics: Mapping[str, Any]) -> str:
     review = notes.get("review")
     failure = notes.get("review_failure")
     undeclared = _strings(notes.get("undeclared_env"))
-    if not isinstance(review, Mapping) and not isinstance(failure, str) and not undeclared:
+    dropped = _strings(notes.get("dropped_attempts"))
+    if not isinstance(review, Mapping) and not isinstance(failure, str) and not undeclared and not dropped:
         return ""
     parts = []
     if isinstance(review, Mapping):
@@ -406,6 +408,8 @@ def _review(metrics: Mapping[str, Any]) -> str:
             '<div class="failure"><h3>Undeclared variables</h3><p>The extension reads these and no requires item '
             f'names them: <span class="id">{escape(", ".join(undeclared))}</span></p></div>'
         )
+    if dropped:
+        parts.append("<h3>Answers written again</h3>" + _listed(dropped, ""))
     return _card("Review", "".join(parts) + "\n")
 
 
@@ -457,6 +461,12 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     selection = metrics.get("selection")
     if isinstance(selection, Mapping) and selection.get("reason"):
         details.append(f"<div><dt>Reason</dt><dd>{escape(selection['reason'])}</dd></div>")
+    if selection_result == "rejected":
+        # What the checks saw: each missed episode's task, and why it failed or the reply that was graded.
+        details.extend(
+            f"<div><dt>Missed</dt><dd>{escape(missed_episode_text(episode))}</dd></div>"
+            for episode in missed_episodes(metrics)
+        )
     if metrics.get("step_record"):
         details.append(f'<div><dt>Step record</dt><dd class="id">{escape(metrics["step_record"])}</dd></div>')
     listed = f'<dl class="details">{"".join(details)}</dl>' if details else ""
@@ -602,6 +612,37 @@ def _steps_nav(step: int, rows: Sequence[Mapping[str, Any]], link_query: Mapping
     return f'<nav class="steps" aria-label="Catalog steps">{"".join(parts)}</nav>\n'
 
 
+def build_running_step_page(
+    step: int, request_id: str, link_query: Mapping[str, str] | None = None, *, refresh_seconds: int = 5
+) -> str:
+    """The page of step ``step`` while the request ``request_id`` runs it: the catalog has no row for it yet, so the
+    page says the step is running, links the request's page, which follows it live, and reloads until the row lands."""
+    href = f"/reef/harness/requests/{quote(request_id, safe='')}/page"
+    if link_query:
+        href += "?" + urlencode(dict(link_query))
+    body = (
+        '<div class="stack">\n'
+        + _card(
+            "Running",
+            "<p>This step is running: the catalog records it when it settles, and this page then shows it.</p>"
+            f'<p><a class="version-link" href="{escape(href)}">Follow the request</a></p>\n',
+        )
+        + "</div>\n"
+    )
+    return document(
+        title=f"Harness v{step}",
+        style=STYLE,
+        breadcrumb="Versions",
+        context=link_query.get("scenario", "") if link_query else "",
+        state="running",
+        eyebrow="Harness evolution",
+        heading=f"Harness v{step}",
+        subtitle="Running",
+        body=body,
+        head=f'<meta http-equiv="refresh" content="{refresh_seconds}">\n',
+    )
+
+
 def build_release_page(
     step: int,
     rows: Sequence[Mapping[str, Any]],
@@ -675,6 +716,7 @@ __all__ = [
     "VERDICT_FIELDS",
     "before_release_id",
     "build_release_page",
+    "build_running_step_page",
     "mutations_of",
     "result_of",
     "served_step",

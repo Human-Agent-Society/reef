@@ -122,3 +122,34 @@ class TrainingRequest:
             # Only when the client reported one, so a request without it keeps its earlier shape.
             **({"client": dict(self.client)} if self.client else {}),
         }
+
+
+def missed_episodes(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """The candidate episodes a step's evaluation names that failed or scored below its floor, from the row's
+    ``candidate_episodes`` summary (``task``, ``score``, ``failure``, ``reply``); none when the step recorded none."""
+    episodes = metrics.get("candidate_episodes")
+    if not isinstance(episodes, list):
+        return []
+    selection = metrics.get("selection")
+    decided = selection.get("metrics") if isinstance(selection, Mapping) else None
+    floor = decided.get("floor_score") if isinstance(decided, Mapping) else None
+    missed = []
+    for episode in episodes:
+        if not isinstance(episode, Mapping):
+            continue
+        score = episode.get("score")
+        below = isinstance(floor, (int, float)) and isinstance(score, (int, float)) and score < floor
+        if episode.get("failure") or score is None or below:
+            missed.append(episode)
+    return missed
+
+
+def missed_episode_text(episode: Mapping[str, Any]) -> str:
+    """One missed episode in words: the task, then why it failed, or its score and the reply that was graded."""
+    task = str(episode.get("task") or "").strip()
+    failure = episode.get("failure")
+    if failure:
+        return f"the task '{task}' failed: {failure}"
+    reply = episode.get("reply")
+    graded = f"the reply graded was '{str(reply).strip()}'" if reply else "no reply was graded"
+    return f"the task '{task}' scored {episode.get('score')}; {graded}"
