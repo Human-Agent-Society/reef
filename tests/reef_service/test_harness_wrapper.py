@@ -2579,6 +2579,24 @@ def test_update_reaches_reef_at_the_recorded_address_when_a_session_changed_the_
     assert f"http://127.0.0.1:{reef.port} answers" in capsys.readouterr().out
 
 
+@pytest.mark.unit
+def test_update_installs_into_the_install_root_when_the_composition_directory_is_a_link(tmp_path) -> None:
+    """A session can replace the composition directory with a link to a directory elsewhere; ``update`` still runs
+    the install for the install root, whose install then deals with that link, never for the parent of the link's
+    target."""
+    reef = _ReleasesReef([_row("v1")], install="#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$1/dest-seen\"\n")
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    Path(compose).rename(elsewhere / "compose")
+    Path(compose).symlink_to(elsewhere / "compose")
+    with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok"), clear=True):
+        assert update("setup-scenario", "pi", compose) == 0
+    reef.close()
+    assert (tmp_path / "dest-seen").read_text().strip() == str(tmp_path.resolve())
+    assert not (elsewhere / "dest-seen").exists()
+
+
 @pytest.mark.parametrize("operation", ["update", "setup-set"])
 @pytest.mark.parametrize("changed", ["scenario", "service", "missing-binding"])
 def test_session_setup_and_update_recover_using_the_sessions_service_and_scenario(
