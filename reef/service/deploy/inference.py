@@ -61,6 +61,38 @@ INFERENCE_COMMANDS = {
             "dist-init-addr",
         ),
     ),
+    "vllm": InferenceCommand(
+        command=(
+            "{python}",
+            "-m",
+            "vllm.entrypoints.openai.api_server",
+            "--model",
+            "{model_path}",
+            "--served-model-name",
+            "{served_model_name}",
+            "--host",
+            "{host}",
+            "--port",
+            "{port}",
+            "--tensor-parallel-size",
+            "{tensor_parallel_size}",
+        ),
+        health_path="/health",
+        reserved_options=(
+            "tp",
+            "tp-size",
+            "api-key",
+            "dp",
+            "data-parallel-size",
+            "pp",
+            "pipeline-parallel-size",
+            "nnodes",
+            "node-rank",
+            "master-addr",
+            "master-port",
+            "headless",
+        ),
+    ),
 }
 
 

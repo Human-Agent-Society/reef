@@ -1,4 +1,4 @@
-// Harness requests: the /evolve and /versions commands and the
+// Harness requests: the /reefine and /versions commands and the
 // reef_ask_user and reef_file_request tools for reef-pi. The person asks in
 // plain words. With a UI the command clarifies the request in the background:
 // a loop beside the session calls the session's model with the request, the
@@ -495,7 +495,7 @@ export default function requests(pi) {
 
   // A request the service no longer knows is dropped and said once, instead of a watch that never settles.
   const goneText = (id8) =>
-    `reef: request ${id8} is no longer on the service (its scenario was reset); ask again with /evolve`;
+    `reef: request ${id8} is no longer on the service (its scenario was reset); ask again with /reefine`;
 
   // A promoted row stays pending in the catalog; the promote is a later row naming it, so with the rows given
   // the pending row reads "promoted at vN".
@@ -765,7 +765,7 @@ export default function requests(pi) {
     const frame = SPINNER_FRAMES[watch.frame % SPINNER_FRAMES.length];
     const page = link(requestPageLink(watch.recordId), "open the page");
     const head =
-      `${frame} reef: ${phase}${since} - ${page}, ${WATCH_SHORTCUT} or /evolve to ` +
+      `${frame} reef: ${phase}${since} - ${page}, ${WATCH_SHORTCUT} or /reefine to ` +
       `${watch.expanded ? "close" : "look in"}`;
     ctx.ui.setWidget(WIDGET_KEY, watch.expanded ? [head, ...watchLines()] : [head]);
   };
@@ -950,7 +950,7 @@ export default function requests(pi) {
     const since = elapsedText(Date.now() - clarification.startedAt);
     const head =
       `${frame} reef: clarifying '${clarification.ask}' ${since} - ${clarification.phase} - ` +
-      `${WATCH_SHORTCUT} or /evolve to ${clarification.expanded ? "close" : "look in"}`;
+      `${WATCH_SHORTCUT} or /reefine to ${clarification.expanded ? "close" : "look in"}`;
     ctx.ui.setWidget(CLARIFY_WIDGET_KEY, clarification.expanded ? [head, ...clarifyLines()] : [head]);
   };
 
@@ -1111,7 +1111,7 @@ export default function requests(pi) {
         const why = reply.errorMessage || reply.stopReason;
         note("error", why);
         finish("failed", `the clarification failed: ${why}`);
-        ctx.ui.notify(`reef: the clarification failed (${why}); file it as is with /evolve --direct`, "error");
+        ctx.ui.notify(`reef: the clarification failed (${why}); file it as is with /reefine --direct`, "error");
         return;
       }
       messages.push(reply);
@@ -1126,7 +1126,7 @@ export default function requests(pi) {
         finish("unfiled", "the clarification ended without filing");
         ctx.ui.notify(
           `reef: the clarification ended without filing${said ? `: ${clip(said, 300)}` : ""}; ` +
-            "ask again, or file it as is with /evolve --direct",
+            "ask again, or file it as is with /reefine --direct",
           "warning",
         );
         return;
@@ -1173,11 +1173,11 @@ export default function requests(pi) {
       }
     }
     finish("failed", `the clarification took more than ${CLARIFY_MAX_TURNS} model calls`);
-    ctx.ui.notify("reef: the clarification did not settle; file it as is with /evolve --direct", "error");
+    ctx.ui.notify("reef: the clarification did not settle; file it as is with /reefine --direct", "error");
   };
 
-  pi.registerCommand("evolve", {
-    description: "Ask reef to grow this harness: /evolve [--direct] <what it should do>",
+  pi.registerCommand("reefine", {
+    description: "Ask reef to grow this harness: /reefine [--direct] <what it should do>",
     handler: async (args, ctx) => {
       const words = (args || "").trim();
       const direct = words === "--direct" || words.startsWith("--direct ");
@@ -1193,7 +1193,7 @@ export default function requests(pi) {
           ctx.ui.notify([`reef: ${phase}${since}`, ...watchLines()].join("\n"), "info");
           return;
         }
-        ctx.ui.notify("Usage: /evolve <what the harness should do>", "warning");
+        ctx.ui.notify("Usage: /reefine <what the harness should do>", "warning");
         return;
       }
       if (!installedRelease()) {
@@ -1206,7 +1206,7 @@ export default function requests(pi) {
           return;
         }
         if (!ctx.model) {
-          ctx.ui.notify("reef: no model to clarify with; pick one with /model, or use /evolve --direct", "error");
+          ctx.ui.notify("reef: no model to clarify with; pick one with /model, or use /reefine --direct", "error");
           return;
         }
         // Not awaited: the clarification runs beside the session, so the person's input stays theirs.
@@ -1376,7 +1376,7 @@ export default function requests(pi) {
   // any request filed before a restart or reported while the person was away.
   pi.on("session_start", async (_event, ctx) => {
     if (!ctx.hasUI) return;
-    const lines = ["reef: /evolve <what it should do> asks for a harness change; /versions lists the versions."];
+    const lines = ["reef: /reefine <what it should do> asks for a harness change; /versions lists the versions."];
     let rows = [];
     try {
       rows = await releases();

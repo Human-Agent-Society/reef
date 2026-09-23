@@ -585,6 +585,19 @@ def test_rejected_step_state_entries_are_not_the_loader_rows(tmp_path: Path) -> 
     assert all(row["config"] is not entry["config"] for row, entry in zip(rows, result.state["entries"], strict=True))
 
 
+def test_commit_applied_aligns_the_tree_to_the_committed_entries(tmp_path: Path) -> None:
+    # Meta-Harness moves the tree back after settlement; the commit brings it to the durable entries.
+    winning = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
+    b = backend(tmp_path, lambda nodes, samples, model: winning)
+    result = run_backend_step(b, batch(), b.initial_state())
+    assert result.metrics["published"] is True
+    b._loader.root.update([])
+    b.commit_applied(result.state)
+    rows = b._loader.root.data
+    assert b._entries() == result.state["entries"]
+    assert all(row["config"] is not entry["config"] for row, entry in zip(rows, result.state["entries"], strict=True))
+
+
 def test_failed_episodes_are_counted_never_scored(tmp_path: Path) -> None:
     # An unlaunchable episode loses its pairing but must not put -inf into
     # the metrics: the commit log serializes them as JSON, which has no
