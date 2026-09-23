@@ -179,12 +179,14 @@ def test_terminus_renders_one_extension_without_executing_it() -> None:
         render_composition([node, ("code_extension", {**node[1], "name": "second"})], get_adapter("terminus"))
 
 
-def test_terminus_binding_renders_the_litellm_provider() -> None:
+@pytest.mark.parametrize("model", ["m1", "qwen/qwen3-coder"])
+def test_terminus_binding_renders_the_litellm_provider(model: str) -> None:
     descriptor = get_adapter("terminus")
-    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model=model, api_key="k-1")
     files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
     config = json.loads(files["terminus/config.json"])
-    assert config["model_name"] == "m1"
+    # The openai prefix routes litellm to api_base whatever vendor prefix the served name carries.
+    assert config["model_name"] == f"openai/{model}"
     assert config["api_base"] == "http://127.0.0.1:9/v1"
     assert config["llm_kwargs"] == {"api_key": "k-1"}
 

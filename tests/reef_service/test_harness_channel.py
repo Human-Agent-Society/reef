@@ -1714,7 +1714,8 @@ def test_install_route_refuses_an_unknown_adapter_with_a_404_naming_it(tmp_path)
 @pytest.mark.unit
 def test_install_route_answers_400_when_the_adapter_declares_no_install_section(tmp_path, monkeypatch) -> None:
     """A known adapter whose descriptor has no install section is a caller
-    error, not a lookup miss: HTTP 400 naming the adapter."""
+    error, not a lookup miss: HTTP 400 naming the adapter and the routes that
+    still serve it."""
     from dataclasses import replace
 
     monkeypatch.setattr(
@@ -1735,6 +1736,7 @@ def test_install_route_answers_400_when_the_adapter_declares_no_install_section(
             text = await response.text()
             assert "'pi'" in text
             assert "no install section" in text
+            assert "GET /reef/harness serves its tree" in text and "POST /reef/train" in text
         finally:
             await client.close()
 

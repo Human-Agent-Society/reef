@@ -55,6 +55,44 @@ into the prompt. One ``code_extension`` may define ``Agent(Terminus2)``;
 rendering checks syntax without executing it, and the runner uses Harbor's
 native ``AgentConfig.import_path`` contract. No extension means stock Terminus 2.
 
+Terminus is a batch runner, not a session. ``reef-terminus`` takes only
+``--task`` and plays one Harbor task, so the adapter declares no install
+section: ``GET /reef/harness/install?adapter=terminus`` answers HTTP 400,
+there is no ``reef-terminus`` client wrapper (``reef-terminus evolve`` does
+not exist), and there is no session to type ``/reefine`` into. A request
+reaches a deployment through ``POST /reef/train``. ``GET /reef/harness``
+serves the tree, and each evaluation episode renders it with the model
+binding.
+
+The model binding writes ``"model_name": "openai/{model}"``. Terminus 2
+calls the model through litellm, which routes to ``api_base`` only under a
+provider prefix and removes that prefix before the call, so the endpoint
+receives the served model name unchanged. Without the prefix, a vendor
+prefix litellm does not know, such as ``qwen/qwen3-coder``, fails with
+``LLM Provider NOT provided``, and one it knows, such as ``deepseek/``,
+goes to that vendor's own client without its vendor prefix.
+
+Evaluation episodes call the upstream directly. A tree that you run through
+Reef yourself also needs the scenario header in ``llm_kwargs.extra_headers``,
+or Reef answers HTTP 400 ``missing or empty x-reef-scenario``. Write this in
+``terminus/config.json`` under the tree root, with the service's
+``REEF_TOKEN`` as the key (any text when the service has no token):
+
+.. code:: json
+
+   {
+     "model_name": "openai/<served model>",
+     "api_base": "http://127.0.0.1:8901/v1",
+     "llm_kwargs": {
+       "api_key": "<REEF_TOKEN>",
+       "extra_headers": {"x-reef-scenario": "<scenario>"}
+     }
+   }
+
+Then run ``REEF_TERMINUS_DIR=<root> REEF_TERMINUS_SESSION_DIR=<root>/terminus/sessions
+REEF_TERMINUS_TRIALS_DIR=<trials> reef-terminus --task <task directory>``. Docker must be
+able to write to ``<trials>``; on macOS, put it under your home directory.
+
 Extensions require ``evolution.executor: sandbox`` to isolate the Python
 runner. Harbor then runs the terminal
 task remotely. Network access must be enabled with ``sandbox.egress_hosts``;

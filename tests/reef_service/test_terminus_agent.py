@@ -2,22 +2,27 @@
 
 Skipped unless the ``terminus`` extra is installed. These are the contract
 checks no hermetic mapping can make: that Harbor accepts the agent spec and
-the trial overrides the runner builds, and that the constructor arguments the
-render quirk admits are real Terminus 2 parameters. They need Harbor, but not
-Docker and not a model, so they run in any job that installs the extra.
+the trial overrides the runner builds, that the constructor arguments the
+render quirk admits are real Terminus 2 parameters, that litellm sends the
+bound model name to the bound endpoint, and that Harbor loads the reefine
+health task. They need Harbor, but not Docker and not a model, so they run in
+any job that installs the extra.
 """
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.terminus.quirks import _ALLOWED_KNOBS, _BINDING_KNOBS
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.terminus import instruction_paths, skill_roots
 from reef.harness.runners.terminus.runner import AGENT_NAME, agent_spec
 from reef.harness.tree.render import render_composition
+from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY
 
 pytest.importorskip("harbor", reason="harbor is not installed")
 
@@ -79,6 +84,32 @@ def test_every_admitted_knob_is_a_real_terminus_2_argument() -> None:
     parameters = set(inspect.signature(Terminus2.__init__).parameters)
     unknown = sorted((_ALLOWED_KNOBS | _BINDING_KNOBS) - parameters)
     assert unknown == [], f"the quirk admits arguments Terminus 2 does not take: {unknown}"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "served", ["qwen/qwen3-coder", "deepseek/deepseek-chat-v3.1", "openai/gpt-4o-mini", "gemma4:26b"]
+)
+def test_litellm_sends_the_served_model_to_the_bound_endpoint(served: str) -> None:
+    """A vendor prefix litellm does not know has no route, and one it knows picks that vendor's client and drops
+    the prefix; the binding's model_name reaches api_base with the served name unchanged either way."""
+    from litellm import get_llm_provider
+
+    descriptor = get_adapter("terminus")
+    binding = ModelBinding(base_url="https://openrouter.ai/api", model=served, api_key="k-1")
+    config = json.loads(render_composition([*binding.compose_nodes(descriptor)], descriptor)["terminus/config.json"])
+    model, provider, _, _ = get_llm_provider(config["model_name"], api_base=config["api_base"])
+    assert (provider, model) == ("openai", served)
+
+
+@pytest.mark.unit
+def test_harbor_loads_the_reefine_health_task_directory() -> None:
+    from harbor.models.task.task import Task
+
+    assert Task.is_valid_dir(HEALTH_TASK_DIRECTORY)
+    task = Task(HEALTH_TASK_DIRECTORY)
+    assert "echo reef-ok" in task.instruction
+    assert task.paths.test_path.is_file() and (task.paths.environment_dir / "Dockerfile").is_file()
 
 
 @pytest.mark.unit

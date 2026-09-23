@@ -9,8 +9,8 @@ of silently dropping a knob.
 Skills carry the ``name`` and ``description`` frontmatter the instruction
 builder reads, synthesized when an evolved node ships bare text, under both
 skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
-renders under the second root and the runner names those skills as
-user-invocable when it joins them.
+renders under the second root, and Harbor lists those skills beside the
+others, with nothing that marks them as commands.
 
 One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
 Rendering only checks its syntax. Execution requires Reef's sandbox around

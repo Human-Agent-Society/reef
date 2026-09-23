@@ -288,6 +288,61 @@ review notes and the person judge that. Set both ``evolution.tasks`` and
 ``evolution.selection: score_comparison`` to require the candidate to beat
 the current release on them instead.
 
+An adapter whose prompt is a Harbor task directory, ``terminus``, cannot
+take this prompt. There the recipe runs the same check as the task
+directory ``reef/recipe/reefine/health`` in its place: the agent writes the
+output of ``echo reef-ok`` to a file in the task container, and the bundled
+evaluator reads the task verifier's reward.
+
+Terminus
+--------
+
+``--recipe.config.evolution.adapter terminus`` runs the profile on
+Terminal-Bench's Terminus 2. Terminus is a batch runner, not a session:
+``reef-terminus`` takes only ``--task`` and plays one Harbor task in a Docker
+container. So the ask, result, install and reload steps of `How it works`_
+do not apply:
+
+* There is no install script. ``GET /reef/harness/install?adapter=terminus``
+  answers HTTP 400.
+* There is no ``reef-terminus`` client wrapper, so ``reef-terminus evolve``
+  and ``reef-terminus update`` do not exist.
+* There is no session, so there is no ``/reefine`` to type. The ``/reefine``
+  command and the update notice are pi entries, so start the profile with
+  both turned off:
+
+.. code:: bash
+
+   reef serve --recipe reefine \
+     --inference.upstream-url https://openrouter.ai/api \
+     --inference.upstream-model openai/gpt-4o-mini \
+     --inference.upstream-api-key sk-or-... \
+     --recipe.config.evolution.adapter terminus \
+     --recipe.config.evolution.requests false \
+     --recipe.config.evolution.version_check false
+
+A request reaches the service through ``POST /reef/train``. Create a
+scenario, read its ``release_id`` from ``GET /reef/harness``, and send the
+request:
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8901/reef/scenarios -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" -d '{"name": "terminus-demo"}'
+   curl -sS http://127.0.0.1:8901/reef/harness \
+     -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: terminus-demo"
+   curl -sS http://127.0.0.1:8901/reef/train \
+     -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: terminus-demo" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "<what it should do>", "session": "terminal-1", "release_id": "<release_id>"}'
+
+The answer carries the request's ``agent_record_id``, and
+``GET /reef/harness/requests/<id>/page`` shows the step. The evaluation
+runs the health task directory above, so the service host needs Docker.
+``GET /reef/harness`` serves the published tree; `Harness adapters
+<../../developer-guide/harness-adapters.rst>`__ shows the config that runs
+it through Reef yourself, including the ``x-reef-scenario`` header.
+
 What the step records
 ---------------------
 

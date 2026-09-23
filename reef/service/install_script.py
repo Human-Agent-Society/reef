@@ -490,7 +490,10 @@ def render_install_script(
         raise ValueError("content_id must be a non-empty string")
     install = descriptor.install
     if install is None:
-        raise DescriptorError(f"adapter {descriptor.name!r} declares no install section")
+        raise DescriptorError(
+            f"adapter {descriptor.name!r} declares no install section, so there is no install script or client "
+            "wrapper for it; GET /reef/harness serves its tree and POST /reef/train takes a request"
+        )
     env_var, compose_dir = descriptor.compose_relocation()
     wrapper_name = f"reef-{descriptor.name}"
     bindings = dict(binding_files or {})

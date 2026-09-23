@@ -57,11 +57,18 @@ self_isolating: true
 quirks: reef.harness.adapters.terminus.quirks
 # Terminus 2 reaches the model through litellm, so the binding is the provider
 # base URL, key, and model name. The served tree never carries a provider.
+# litellm routes to api_base only under a provider prefix and strips it before
+# the call, so the model reaches the endpoint as it is named: a bare
+# "qwen/qwen3-coder" has no litellm provider, and "deepseek/..." would go to
+# litellm's DeepSeek client without its vendor prefix.
+# A tree a person runs against Reef itself also needs llm_kwargs.extra_headers
+# {"x-reef-scenario": "<scenario>"}, or Reef answers 400. Evaluation episodes
+# call the upstream directly and need no header.
 model_binding:
   openai:
     - target: primary
       data:
-        model_name: "{model}"
+        model_name: "openai/{model}"
         api_base: "{base_url}/v1"
         llm_kwargs:
           api_key: "{api_key}"
