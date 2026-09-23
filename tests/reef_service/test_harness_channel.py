@@ -768,6 +768,71 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(("adapter", "api"), [("codex", "responses"), ("opencode", "openai")])
+def test_a_rerun_of_the_same_release_is_current_when_the_binding_rewrites_a_served_file(
+    tmp_path, adapter: str, api: str
+) -> None:
+    """The binding rewrites a served config file (codex config.toml, opencode opencode.json) on every run, so
+    that file never holds the served bytes again: a rerun of the same release still writes no composition file
+    and no release file, and writes the binding again with this run's token; another release is still written."""
+    descriptor = get_adapter(adapter)
+    install = descriptor.install
+    assert install is not None
+    nodes = [("rules", {"text": "rules\n"})]
+    binding = ModelBinding(base_url="http://reef.test:8901", model="m1", api_key=TOKEN_PLACEHOLDER, api=api)
+    files = render_composition(nodes, descriptor)
+    target = descriptor.config_targets["primary"].path
+    bound = render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor)[target]
+    assert target in files and files[target] != bound
+
+    def render(release_id: str) -> Path:
+        script = tmp_path / f"install-{release_id}.sh"
+        script.write_text(
+            render_install_script(
+                descriptor=descriptor,
+                files=files,
+                release_id=release_id,
+                content_id=f"content-{release_id}",
+                binding_files={target: bound},
+            )
+        )
+        return script
+
+    prefix = tmp_path / "prefix"
+    _write_executable(prefix / install.binary_path, f"#!/bin/sh\necho {install.version}\n")
+    env = _source_env(tmp_path / "shim", tmp_path / "home")
+    dest = tmp_path / "dest"
+    script = render("v1")
+    first = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-1"})
+    assert first.returncode == 0, first.stderr
+    assert "writing the harness tree" in first.stdout
+    assert "tok-1" in (dest / target).read_text(encoding="utf-8")
+    # Read-only bits make any write of a composition file or the release file a hard fail.
+    unbound = [dest / relative for relative in files if relative != target]
+    for path in (*unbound, dest / HARNESS_RELEASE_FILE):
+        path.chmod(0o444)
+    before = {path: path.stat().st_mtime_ns for path in (*unbound, dest / HARNESS_RELEASE_FILE)}
+    second = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert second.returncode == 0, second.stderr
+    assert "composition already current" in second.stdout
+    assert {path: path.stat().st_mtime_ns for path in before} == before
+    assert (dest / target).read_text(encoding="utf-8") == bound.replace(TOKEN_PLACEHOLDER, "tok-2")
+    for path in before:
+        path.chmod(0o644)
+    # A changed file the binding leaves alone is still caught, and so is another release of the same files.
+    changed = unbound[0]
+    changed.write_text("changed\n", encoding="utf-8")
+    third = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert third.returncode == 0, third.stderr
+    assert "writing the harness tree" in third.stdout
+    assert changed.read_text(encoding="utf-8") == files[changed.relative_to(dest).as_posix()]
+    fourth = _run_install(render("v2"), dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert fourth.returncode == 0, fourth.stderr
+    assert "writing the harness tree" in fourth.stdout
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))["release_id"] == "v2"
+
+
+@pytest.mark.unit
 def test_install_script_golden_structure() -> None:
     """The full script for a one-file composition, byte for byte.
 

@@ -18,7 +18,8 @@ release file). A release with an item the release file on disk does not check of
 refused first of all, before the binary is installed or a directory is
 made, with the setup list and the release that installs on a machine with
 nothing set up as the message; the refusal needs python3 only. Rerunning when everything already matches
-writes nothing at all, not even the release file, and says "already current".
+writes no composition file and no release file and says "already current"; the model binding files
+are written on every run, so the served files they replace are left out of that comparison.
 The interpreter is decided once: the python3 the installing shell resolves,
 followed through to the interpreter behind it and pinned by absolute path
 into the wrapper, so a later shell with another python3 on PATH runs the one
@@ -281,12 +282,31 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
     ]
 
 
+def _stream_lines(name: str, paths: Sequence[str]) -> list[str]:
+    """The shell function ``name``: the checksum stream of ``paths`` on disk, as ``composition_checksum`` hashes it."""
+    return [
+        f"{name}() {{",
+        "    :",
+        *(
+            line
+            for relative in paths
+            for line in (
+                f"    printf '%s\\n' {_single_quoted(relative)}",
+                f"    printf '%s\\n' $(wc -c < \"$DEST/{_double_quoted(relative)}\")",
+                f'    cat "$DEST/{_double_quoted(relative)}"',
+            )
+        ),
+        "}",
+    ]
+
+
 def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
     """Shell that writes the model binding files over the pulled tree, the token filled from the environment.
 
     The binding is written after the checksum and on every run, so a rerun
     re-points an installed tree at the Reef the script came from; the
-    checksum still covers the served composition alone."""
+    checksum still covers the served composition alone, and the current
+    check leaves out the served files the binding rewrites."""
     if not bindings:
         return []
     lines = [
@@ -500,6 +520,19 @@ def render_install_script(
     items = parse_requires(list(requires), limit=None)
     ordered = sorted(files)
     checksum = composition_checksum(files)
+    # The binding rewrites its target files on every run, so a served file it targets never holds the served
+    # bytes on disk again: the current check hashes the other files, and the release file names the release.
+    unbound = [relative for relative in ordered if relative not in bindings]
+    if unbound == ordered:
+        current_stream, current_checksum, current_stream_lines = "compose_stream", "CHECKSUM", []
+    else:
+        current_stream, current_checksum = "current_stream", "CURRENT_CHECKSUM"
+        current_stream_lines = [
+            "# The current check's stream, as baked into CURRENT_CHECKSUM: the same stream without the",
+            "# served files the model binding below rewrites on every run.",
+            f'CURRENT_CHECKSUM="{composition_checksum({relative: files[relative] for relative in unbound})}"',
+            *_stream_lines("current_stream", unbound),
+        ]
     release_info_text = (
         json.dumps(
             {
@@ -563,18 +596,8 @@ def render_install_script(
         "# The checksum stream, as baked into CHECKSUM: each sorted relative path,",
         "# its byte length, then its bytes, newline separated. The unquoted wc",
         "# substitution word-splits away the padding BSD wc prints.",
-        "compose_stream() {",
-        "    :",
-        *(
-            line
-            for relative in ordered
-            for line in (
-                f"    printf '%s\\n' {_single_quoted(relative)}",
-                f"    printf '%s\\n' $(wc -c < \"$DEST/{_double_quoted(relative)}\")",
-                f'    cat "$DEST/{_double_quoted(relative)}"',
-            )
-        ),
-        "}",
+        *_stream_lines("compose_stream", ordered),
+        *current_stream_lines,
         "",
         'mkdir -p "$DEST"',
         *(f'mkdir -p "$DEST/{_double_quoted(directory)}"' for directory in directories),
@@ -585,10 +608,10 @@ def render_install_script(
         "if "
         + " && ".join(f'[ -f "$DEST/{_double_quoted(relative)}" ]' for relative in (HARNESS_RELEASE_FILE, *ordered))
         + "; then",
-        '    current="$(compose_stream | sha256)"',
+        f'    current="$({current_stream} | sha256)"',
         f'    current_release_checksum="$(release_info_tool static "$DEST/{HARNESS_RELEASE_FILE}")"',
         "fi",
-        'if [ "$current" = "$CHECKSUM" ] && [ "$current_release_checksum" = "$RELEASE_FILE_CHECKSUM" ]; then',
+        f'if [ "$current" = "${current_checksum}" ] && [ "$current_release_checksum" = "$RELEASE_FILE_CHECKSUM" ]; then',
         '    echo "reef: composition already current"',
         "else",
         f'    echo "reef: writing the harness tree ({len(ordered)} file{"" if len(ordered) == 1 else "s"}) to $DEST"',
