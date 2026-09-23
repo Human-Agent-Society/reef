@@ -37,7 +37,7 @@ from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
-from reef.train.processors.base import DataProcessor
+from reef.train.processors.base import DataProcessor, RetentionDecision
 from reef.train.processors.computed import ComputedFeedbackProcessor, SupportsReceipt
 from reef.train.processors.reported import GroupDecision, ReportContext
 from reef.train.types import TrainingBatch
@@ -1482,6 +1482,137 @@ def test_two_stale_drops_across_a_reload_are_two_receipts_and_the_rows_behind_th
         dispatcher.close()
 
 
+def _fail_first_record_of(monkeypatch: pytest.MonkeyPatch, scenario: Scenario, component: str) -> list[bool]:
+    """Make ``component``'s next commit record fail once, after its trainer acknowledged the batch."""
+    committer = scenario._committer
+    original = committer._append_commit_record
+    failed: list[bool] = []
+
+    def append(**kwargs: Any) -> Any:
+        if kwargs.get("component") == component and not failed:
+            failed.append(True)
+            raise OSError("transient store write error")
+        return original(**kwargs)
+
+    monkeypatch.setattr(committer, "_append_commit_record", append)
+    return failed
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("colocated", [False, True])
+def test_a_harness_commit_that_fails_under_a_weights_job_leaves_its_rows_to_the_harness(
+    tmp_path: Path, colocated: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The harness acknowledges its batch before its record is durable. When that commit fails while a weights job
+    is out, the reload waits for the job, and the job's commit must not retire the harness's rows on the strength of
+    an acknowledgment no record carries: after the job, the rebuilt harness trains them. A colocated job holds every
+    cycle lock, so the harness cannot retry before the job commits."""
+    backends = _dispatched_pair(tmp_path, "job-1")
+    if colocated:
+        backends[WEIGHTS] = _ColocatedBackend(WEIGHTS, tmp_path / "candidates", "job-1")
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        _fail_first_record_of(monkeypatch, scenario, HARNESS)
+        with pytest.raises(OSError, match="transient store write error"):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        # The acknowledgment is in the harness processor's memory only: siblings do not read it.
+        assert not {"i1", "r1"} & scenario.trainer_for(HARNESS).releasable_agent_record_ids()
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        assert scenario.records.get("agent", "i1") is not None and scenario.records.get("agent", "r1") is not None
+        for _ in range(3):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        current = dispatcher._registry.get_optional("agent")
+        assert current is not None
+        history = current.store.history()
+        assert [sorted(record.consumed_ids) for record in history if record.component == HARNESS] == [["i1", "r1"]]
+        assert [sorted(record.compacted_ids) for record in history if record.component == WEIGHTS] == [[]]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_weights_commit_that_fails_leaves_its_batch_to_the_weights_trainer_after_a_harness_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reverse: a weights commit that fails after its acknowledgment, then a harness commit before the weights
+    trainer's reload. The harness commit retires only what the weights trainer's durable state releases, so the
+    rebuilt weights trainer trains the batch its failed commit had acknowledged."""
+    dispatcher, _ = _dispatcher(tmp_path)
+
+    def step(scenario: Scenario, component: str) -> list[tuple[str, ...]] | None:
+        result = scenario.prepare_training_step(component)
+        if result is None:
+            return None
+        batch = scenario.trainer_for(component).pending_batch
+        assert batch is not None
+        sources = [item.source_agent_record_ids for item in batch.items]
+        scenario.commit(result, component=component)
+        return sources
+
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        assert step(scenario, HARNESS) == [("i1", "r1")]
+        for record in _records(2):
+            scenario.records.append(record)
+        _fail_first_record_of(monkeypatch, scenario, WEIGHTS)
+        with pytest.raises(OSError, match="transient store write error"):
+            step(scenario, WEIGHTS)
+        assert not {"i1", "r1"} & scenario.trainer_for(WEIGHTS).releasable_agent_record_ids()
+        assert step(scenario, HARNESS) == [("i2", "r2")]
+        assert scenario.records.get("agent", "i1") is not None and scenario.records.get("agent", "r1") is not None
+        rebuilt = dispatcher._registry.reload("agent")
+        assert step(rebuilt, WEIGHTS) == [("i1", "r1")]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_stale_drop_under_a_failed_harness_commit_retires_none_of_the_harness_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A drop retires only rows every other trainer releases, like a commit: a harness batch acknowledged by a commit
+    that failed is not released yet, so the weights drop leaves it stored and the harness trains it."""
+    weights = _DroppingBackend(WEIGHTS, tmp_path / "candidates", "job-0")
+    dispatcher, _ = _dispatcher(
+        tmp_path, backends={WEIGHTS: weights, HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")}
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        _fail_first_record_of(monkeypatch, scenario, HARNESS)
+        with pytest.raises(OSError, match="transient store write error"):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        weights.drop_next = True
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, weights, batch) is True
+        assert scenario.records.get("agent", "i1") is not None and scenario.records.get("agent", "r1") is not None
+        (receipt,) = [
+            row for row in scenario.records.compaction_receipts("agent") if row["metadata"]["outcome"] == "stale"
+        ]
+        assert set(receipt["metadata"]["consumed_ids"]) == {"i1", "r1"} and receipt["compacted_ids"] == ()
+        for _ in range(3):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        current = dispatcher._registry.get_optional("agent")
+        assert current is not None
+        assert [sorted(record.consumed_ids) for record in current.store.history() if record.component == HARNESS] == [
+            ["i1", "r1"]
+        ]
+    finally:
+        dispatcher.close()
+
+
 @dataclass(frozen=True)
 class _Judgment(SupportsReceipt):
     receipt: str
@@ -1783,6 +1914,105 @@ def test_rows_a_trainer_never_ingests_are_released_by_it() -> None:
     assert "i1" not in trainer.releasable_agent_record_ids()
     trainer.compaction_applied(frozenset({"r1"}))
     assert "r1" not in trainer.releasable_agent_record_ids()
+
+
+class _ReportOnlyProcessor(DataProcessor):
+    """A weights processor that trains on reports alone: the inference rows beside them are nobody's to protect."""
+
+    required_request_types = frozenset({RequestType.REPORT})
+
+    def __init__(self, context: Any) -> None:
+        super().__init__(context)
+        self.items: list[str] = []
+        self.done: set[str] = set()
+        self.batches = 0
+
+    def ingest(self, item: AgentRecord) -> None:
+        self.items.append(item.agent_record_id)
+
+    def ready(self) -> bool:
+        return bool(self.items)
+
+    def build_batch(self) -> TrainingBatch:
+        self.batches += 1
+        return TrainingBatch(f"b{self.batches}", ())
+
+    def acknowledge(self, batch_id: str) -> frozenset[str]:
+        consumed = frozenset(self.items)
+        self.items.clear()
+        self.done |= consumed
+        return consumed
+
+    def retention_decision(self) -> RetentionDecision:
+        return RetentionDecision(
+            protected_agent_record_ids=frozenset(self.items), releasable_agent_record_ids=frozenset(self.done)
+        )
+
+    def compaction_applied(self, compacted_ids: frozenset[str]) -> None:
+        self.done -= compacted_ids
+
+
+@dataclass(frozen=True)
+class _ReportOnlyWeightsRecipe(_TwoTrainerRecipe):
+    """Weights train on reports alone; the harness holds every inference it reads, its batch never full."""
+
+    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+        def factory_for(component: str):
+            if component == HARNESS:
+                return lambda context: ThresholdProcessor(context.with_config({"batch_size": 10**6}))
+            return _ReportOnlyProcessor
+
+        return tuple(
+            ComponentTrainer(
+                component,
+                Trainer.build(
+                    scenario,
+                    records,
+                    processor_factory=factory_for(component),
+                    candidate_backend=backend,
+                    algorithm_state=algorithm_states.get(component),
+                    experiment_logger=experiment_logger,
+                ),
+            )
+            for component, backend in self.backends.items()
+        )
+
+
+@pytest.mark.unit
+def test_a_settled_row_of_a_type_the_processor_does_not_take_is_named_once_across_reloads(tmp_path: Path) -> None:
+    """The weights trainer releases each inference beside its report at once, and its record names the row once
+    while the harness keeps it stored; a reload reads that record back, so the next record does not name every such
+    row again."""
+    backends: dict[str, CandidateBackend] = {
+        component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)
+    }
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    dispatcher = Dispatcher(
+        _ReportOnlyWeightsRecipe(backends=backends),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=tmp_path / "records",
+        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in range(1, 13):
+            for record in _records(step):
+                scenario.records.append(record)
+            assert scenario.prepare_training_step(HARNESS) is None
+            result = scenario.prepare_training_step(WEIGHTS)
+            assert result is not None
+            scenario.commit(result, component=WEIGHTS)
+            if step % 4 == 0:
+                scenario = dispatcher._registry.reload("agent")
+        records = [record for record in scenario.store.history() if record.component == WEIGHTS]
+        assert [sorted(record.settled_ids) for record in records] == [[f"i{step}"] for step in range(1, 13)]
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit

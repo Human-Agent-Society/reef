@@ -500,6 +500,13 @@ class TrainingExecution:
         if disposition != "fresh":
             if marker is None:
                 raise RuntimeError("replayed training disposition has no marker")
+            owner = payload.get(JOB_OWNER_KEY)
+            if "scenario" not in marker and isinstance(owner, str) and owner:
+                # A marker an earlier build wrote names no owner. This payload is the marker's own job (its batch
+                # gives the job id), so the owner it carries is the job's: written down, a delete of it is refused
+                # from here on, as for a marker this build wrote.
+                marker = {**marker, "scenario": owner}
+                self._store.write(marker)
             return marker_result(marker) if marker["status"] == "COMPLETE" else marker_checkpoint_result(marker)
         admission_metrics: Mapping[str, Any] = {}
         if self._context is not None:

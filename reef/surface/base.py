@@ -229,9 +229,10 @@ class Surface:
 
     components: Mapping[str, ComponentSurface] = field(default_factory=dict)
     harness: HarnessInfo | None = None
-    #: The whole release's own admission check, run before each component's. A recipe binds its checks on
-    #: ``ComponentSurface.validator``; this one carries the ``build_artifact_validator`` of a recipe that serves no
-    #: component, which admits the release as a whole, as every recipe's did before components existed.
+    #: The whole release's own admission check, run before each component's: on the release a step publishes and
+    #: on a release a rollback or promote restores. A recipe binds its checks on ``ComponentSurface.validator``; this
+    #: one carries the ``build_artifact_validator`` of a recipe that serves no component, which admits the release as
+    #: a whole, as every recipe's did before components existed (a composite moves it onto that recipe's component).
     validator: ArtifactValidator = field(default_factory=AcceptAnyArtifact)
 
     def __post_init__(self) -> None:

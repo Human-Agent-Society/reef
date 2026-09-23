@@ -36,7 +36,7 @@ from reef.core.components import validate_component_name
 from reef.core.reports import ReportBase, ReportValidationError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe
+from reef.recipe.base import Recipe, ServedEndpoint, WeightTrainingRecipe, every_check
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.config import recipe_config_from_mapping
 from reef.recipe.errors import RecipeConfigError
@@ -270,7 +270,11 @@ class CompositeRecipe(Recipe):
             surface = recipe.serving_surface(scenario)
             if len(surface.components) > 1:
                 raise RecipeConfigError(f"component {component!r} serves several components of its own")
-            components[component] = next(iter(surface.components.values()), ComponentSurface())
+            served = next(iter(surface.components.values()), ComponentSurface())
+            # A recipe's own release check (a recipe serving no component admits its whole release with one) admits
+            # this component here: inside the composite, the component is that recipe's release.
+            checks = every_check(surface.validator, served.validator)
+            components[component] = served if checks is served.validator else replace(served, validator=checks)
             if surface.harness is not None:
                 if harness is not None:
                     raise RecipeConfigError("only one component may serve harness information")

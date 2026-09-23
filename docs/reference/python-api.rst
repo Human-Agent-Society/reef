@@ -203,7 +203,9 @@ Common members
 |                                                   |                             | checks: joins the check of the |
 |                                                   |                             | one component served, admits   |
 |                                                   |                             | the whole release of a recipe  |
-|                                                   |                             | serving none; an override on a |
+|                                                   |                             | serving none (inside a         |
+|                                                   |                             | composite, that recipe's       |
+|                                                   |                             | component); an override on a   |
 |                                                   |                             | recipe serving several is      |
 |                                                   |                             | refused at build               |
 +---------------------------------------------------+-----------------------------+--------------------------------+

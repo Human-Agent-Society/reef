@@ -322,10 +322,11 @@ class Dispatcher:
         scenario whose turn failed and was rebuilt, or one not loaded yet,
         whose job the backend still holds. Every job's marker names the
         scenario that owns it. One written before markers named an owner says
-        nothing about whose job is out: it refuses no delete, as before, and
-        the loaded scenario that holds the job's reservation is still refused
-        by the caller; refusing every delete would leave an owner that cannot
-        bind with no way out.
+        nothing about whose job is out until the owner's own job resumes and
+        writes its name in (``TrainingExecution.execute``): until then it
+        refuses no delete, as before, and the loaded scenario that holds the
+        job's reservation is still refused by the caller; refusing every
+        delete would leave an owner that cannot bind with no way out.
         """
         runtime = self._recipe.training_runtime
         if runtime is None:

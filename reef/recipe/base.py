@@ -45,6 +45,14 @@ class _EveryCheck(ArtifactValidator):
             check.validate(artifact)
 
 
+def every_check(*checks: ArtifactValidator) -> ArtifactValidator:
+    """One check that admits an artifact only when each of ``checks`` does; a check that admits anything is left out."""
+    kept = tuple(check for check in checks if not isinstance(check, AcceptAnyArtifact))
+    if not kept:
+        return AcceptAnyArtifact()
+    return kept[0] if len(kept) == 1 else _EveryCheck(kept)
+
+
 @dataclass(frozen=True)
 class ServedEndpoint:
     """Where this Reef answers inference itself: what a recipe's own evaluation calls target.
@@ -264,9 +272,11 @@ class Recipe:
         Kept for recipes written before admission moved onto the component
         surface (``ComponentSurface.validator``, where a new recipe binds it):
         it joins the check of the one component the recipe serves, and on a
-        recipe that serves none it admits the release as a whole. A recipe
-        that overrides it while serving several components is refused at
-        build, since the check could not say which component it admits.
+        recipe that serves none it admits the release as a whole; inside a
+        composite that recipe's release is its component, so the check joins
+        that component's. A recipe that overrides it while serving several
+        components is refused at build, since the check could not say which
+        component it admits.
         """
         return AcceptAnyArtifact()
 
@@ -277,14 +287,14 @@ class Recipe:
             return surface
         if not surface.components:
             # A release with no component is admitted as a whole, as it was before components existed.
-            return replace(surface, validator=_EveryCheck((surface.validator, self.build_artifact_validator())))
+            return replace(surface, validator=every_check(surface.validator, self.build_artifact_validator()))
         if len(surface.components) != 1:
             raise RecipeConfigError(
                 f"{type(self).__name__} overrides build_artifact_validator but serves components "
                 f"{list(surface.names)}: bind the check on each component's ComponentSurface.validator instead"
             )
         ((name, component),) = surface.components.items()
-        checks = _EveryCheck((component.validator, self.build_artifact_validator()))
+        checks = every_check(component.validator, self.build_artifact_validator())
         return replace(surface, components={name: replace(component, validator=checks)})
 
     def base_artifact_files(self) -> Mapping[str, str] | None:

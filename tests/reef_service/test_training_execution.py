@@ -312,6 +312,37 @@ def test_every_job_marker_names_its_owner_and_the_owner_is_no_part_of_the_identi
     assert markers.read_marker(backend.path)["scenario"] == "slot-a"
 
 
+@pytest.mark.parametrize("status", ["CHECKPOINT", "READY_TO_COMMIT"])
+def test_a_marker_an_earlier_build_left_takes_its_owner_when_its_own_job_resumes(backend, status):
+    """An upgrade mid job leaves a marker that names no owner, so no delete is refused for it. The payload whose batch
+    is that marker's job proves whose it is: the replay writes its owner into the marker, and a delete of the owner
+    is refused from then on, as for a job this build started. (UPDATING_WEIGHTS resumes through the scheduler's
+    recovery and reaches READY_TO_COMMIT before the owner's job replays.)"""
+    backend.checkpoint.path.mkdir()
+    legacy = legacy_training_job_id(PAYLOAD, 0)
+    legacy_marker = {
+        "job_id": legacy,
+        "rollout_id": 0,
+        "checkpoint_path": str(backend.checkpoint.path),
+        "runtime_load_id": "engine:1",
+    }
+    markers.write_marker(
+        backend.path,
+        {**legacy_marker, "status": status},
+    )
+    result = coordinator(backend).execute({**PAYLOAD, "owner": "agent"})
+    assert result.training_job_id == legacy and backend.events == []
+    marker = markers.read_marker(backend.path)
+    assert marker["scenario"] == "agent" and marker["status"] == status and marker["job_id"] == legacy
+    # A payload with no owner, from an earlier build's replay, leaves the marker as it is.
+    markers.write_marker(
+        backend.path,
+        {**legacy_marker, "status": status},
+    )
+    coordinator(backend).execute(PAYLOAD)
+    assert "scenario" not in markers.read_marker(backend.path)
+
+
 def test_scenario_steps_can_use_a_separate_global_checkpoint_index(backend):
     backend.checkpoint = TrainingCheckpoint(12, backend.checkpoint.path, "scenario-a", 0)
     coordinator(backend).execute({**PAYLOAD, "scenario": "scenario-a"})

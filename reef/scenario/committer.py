@@ -826,7 +826,15 @@ class ScenarioCommitter:
         self._require_components(carried)
         components = {name: carried.component(name) for name in surface.names}
         components[component] = publication.artifact
-        return self._artifacts.stage_composed(next_step, components, parent=checkpoint)
+        staged = self._artifacts.stage_composed(next_step, components, parent=checkpoint)
+        try:
+            # The release's own check, which a rollback or promote to this release runs too; the carried
+            # components were admitted when they were published.
+            surface.validator.validate(staged)
+        except BaseException:
+            self._artifacts.discard(staged)
+            raise
+        return staged
 
     def _activate(self, artifact: Artifact, *, source: Artifact | None = None) -> None:
         # A component the engine already serves is not activated again, so a

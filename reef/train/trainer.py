@@ -53,6 +53,10 @@ class _PendingStep:
     base_release_id: str | None = None
     #: The prepared step behind ``result``; kept across a stale refusal when the candidate is evaluated again.
     prepared: PreparedStep | None = None
+    #: What the trainer released before its processor took this batch back (acknowledged, dropped or skipped).
+    #: Until a durable record says the batch is consumed, a sibling trainer reads this, not the processor's memory:
+    #: a commit that fails after the acknowledgment must not let another trainer's commit retire the batch's rows.
+    durable_releasable: frozenset[str] | None = None
 
     @property
     def batch_id(self) -> str:
@@ -446,6 +450,7 @@ class Trainer:
             if pending is None or pending.batch_id != batch.batch_id:
                 raise RuntimeError("trainer reservation changed while its instruction was being skipped")
             metadata = dict(self._processor.request_failure_metrics(request.id))
+            self._hold_durable_view(pending)
             self._processor.release_batch(batch.batch_id)
             pending.consumed_ids = self._processor.discard_request(request.id)
         metrics = {**metadata, "skipped": "instruction failed", "error": error}
@@ -494,6 +499,7 @@ class Trainer:
                 batch=self._pending.batch,
                 result=None,
                 prepared=self._pending.prepared if keep_candidate else None,
+                durable_releasable=self._pending.durable_releasable,
             )
 
     def execute_reserved_step(self, scenario_step: int) -> StepExecution:
@@ -516,9 +522,24 @@ class Trainer:
         return execution
 
     def releasable_agent_record_ids(self) -> frozenset[str]:
-        """The rows this trainer no longer needs and does not protect."""
+        """The rows this trainer no longer needs and does not protect, as its durable state says.
+
+        Another trainer's commit retires only rows every trainer releases, so
+        what this reports must hold even if this trainer's own pending commit
+        fails: while a batch the processor took back has no durable record,
+        the rows that release made releasable stay out of this set.
+        """
         with self._lock:
-            return self._releasable_ids()
+            released = self._releasable_ids()
+            pending = self._pending
+            if pending is not None and pending.durable_releasable is not None:
+                return released & pending.durable_releasable
+            return released
+
+    def _hold_durable_view(self, pending: _PendingStep) -> None:
+        """Remember what was releasable before the processor takes ``pending``'s batch back; the first time only."""
+        if pending.durable_releasable is None:
+            pending.durable_releasable = self._releasable_ids()
 
     def _releasable_ids(self) -> frozenset[str]:
         retention = self._processor.retention_decision()
@@ -556,6 +577,7 @@ class Trainer:
                 raise TypeError("training step state must be a mapping")
             consumed = self._pending.consumed_ids
             if consumed is None:
+                self._hold_durable_view(self._pending)
                 consumed = self._processor.acknowledge(batch_id)
             compacted = self._releasable_ids()
             if compactable is not None:
@@ -656,6 +678,7 @@ class Trainer:
             if self._pending is None:
                 return frozenset()
             batch_id = self._pending.batch_id
+            self._hold_durable_view(self._pending)
             self._processor.dropped(batch_id)
             consumed = self._processor.acknowledge(batch_id)
             compacted = self._releasable_ids()
@@ -784,11 +807,11 @@ class Trainer:
                         self._processor.restore_consumed(item)
                         consumed.append(item)
                         continue
-                    if (
-                        item.agent_record_id in settled_ids
-                        and item.request_type in self.processor.required_request_types
-                    ):
-                        self._processor.restore_settled(item)
+                    if item.agent_record_id in settled_ids:
+                        # On record already, whatever its type, so the next record does not name it again; the
+                        # processor settles only the rows it takes.
+                        if item.request_type in self.processor.required_request_types:
+                            self._processor.restore_settled(item)
                         self._released_stored_ids.add(item.agent_record_id)
                         self._recorded_ids.add(item.agent_record_id)
                         continue

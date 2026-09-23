@@ -893,6 +893,98 @@ def test_a_recipe_serving_no_component_admits_the_whole_release_through_its_vali
         dispatcher.close()
 
 
+class _RefuseUnvetted(ArtifactValidator):
+    """Refuse a release any file of which says unvetted."""
+
+    def validate(self, artifact: Artifact) -> None:
+        root = artifact.materialize().local_path
+        files = [] if root is None else [path for path in Path(root).rglob("*") if path.is_file()]
+        if any("unvetted" in path.read_text(encoding="utf-8", errors="ignore") for path in files):
+            raise ValueError("validator refused the artifact")
+
+
+@dataclass(frozen=True)
+class _LegacyTreeRecipe(_TreeRecipe):
+    """A recipe written before components: the default surface, a tree it publishes, and main's admission hook."""
+
+    def build_surface(self, scenario: str) -> Surface:
+        return Surface()
+
+    def build_artifact_validator(self) -> ArtifactValidator:
+        return _RefuseUnvetted()
+
+
+def _tree(tmp_path: Path, name: str, text: str) -> Artifact:
+    directory = tmp_path / name
+    directory.mkdir()
+    (directory / "notes.txt").write_text(text, encoding="utf-8")
+    return Artifact.local(directory)
+
+
+@pytest.mark.unit
+def test_inside_a_composite_a_recipe_serving_no_component_admits_its_component_through_its_validator(
+    tmp_path: Path,
+) -> None:
+    """Flat, such a recipe's release is the whole artifact; inside a composite its release is its component, so its
+    check admits that component's steps as it admitted its whole release flat, and a rollback runs it again."""
+    composite = CompositeRecipe(
+        components={
+            "notes": _LegacyTreeRecipe(label="notes", artifact_dir=tmp_path / "steps"),
+            "config": _ConfigRecipe(),
+        }
+    )
+    with pytest.raises(ValueError, match="validator refused the artifact"):
+        composite.serving_surface("agent").components["notes"].validator.validate(_tree(tmp_path, "u", "unvetted"))
+    dispatcher = _serve(composite, tmp_path / "svc")
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        seed = scenario.current_artifact_ref()
+        with pytest.raises(ValueError, match="validator refused the artifact"):
+            scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="notes")
+        assert scenario.current_artifact_ref() == seed
+        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="notes")
+        assert scenario.current_artifact_ref() != seed
+    finally:
+        dispatcher.close()
+
+
+@dataclass(frozen=True)
+class _ReleaseCheckedComposite(CompositeRecipe):
+    """A composite that sets the release's own check itself, beside each component's."""
+
+    def build_surface(self, scenario: str) -> Surface:
+        return replace(super().build_surface(scenario), validator=_RefuseUnvetted())
+
+
+@pytest.mark.unit
+def test_a_commit_runs_the_release_check_a_rollback_to_that_release_runs(tmp_path: Path) -> None:
+    """The release's own check runs on the composed release a step publishes, as a rollback or promote to it runs
+    it: a release the commit admits can be rolled back to, and one the rollback would refuse is never published."""
+    composite = _ReleaseCheckedComposite(
+        components={
+            "harness": _TreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+            "config": _ConfigRecipe(),
+        }
+    )
+    dispatcher = _serve(composite, tmp_path / "svc")
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        seed = scenario.current_artifact_ref()
+        with pytest.raises(ValueError, match="validator refused the artifact"):
+            scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "c", "unvetted")), component="harness")
+        assert scenario.current_artifact_ref() == seed
+        scenario.commit(TrainStepResult(state={}, artifact=_tree(tmp_path, "v", "vetted")), component="harness")
+        published = scenario.current_artifact_ref()
+        assert published != seed
+        scenario.rollback(seed.release_id)
+        scenario.rollback(published.release_id)
+        assert scenario.current_artifact_ref().content_id == published.content_id
+    finally:
+        dispatcher.close()
+
+
 @pytest.mark.unit
 @pytest.mark.parametrize("data", [[["training_mode", "hybrid"]], "hybrid", [], "", None])
 def test_a_component_data_section_that_is_not_an_object_is_refused_under_a_composite_mode(data: Any) -> None:
