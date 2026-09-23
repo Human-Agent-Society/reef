@@ -93,6 +93,8 @@ jobs:
         run: npm run lint
 
       - name: Build documentation site
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: npm run build
 
   gate:
