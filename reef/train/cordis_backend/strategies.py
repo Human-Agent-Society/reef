@@ -123,7 +123,9 @@ class Proposer(ABC):
     :func:`untrusted_text` before it enters a model prompt. ``entries`` is
     the step's tree as entry options, ``{"id", "name", "config"}`` mappings
     in tree order, so a method can name the entry an ``update`` or ``remove``
-    targets. Each keyword is
+    targets. ``adapter`` is the name of the harness adapter the tree renders
+    for (``pi``, ``claude``, ...), so a method writes the kinds that harness
+    carries. Each keyword is
     only forwarded to callables whose signature names it, so earlier
     proposers run unchanged.
 

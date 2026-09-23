@@ -731,6 +731,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._propose_accepts_rejected = accepts_keyword(propose.__call__, "rejected")
         self._propose_accepts_sources = accepts_keyword(propose.__call__, "sources")
         self._propose_accepts_entries = accepts_keyword(propose.__call__, "entries")
+        self._propose_accepts_adapter = accepts_keyword(propose.__call__, "adapter")
         if (
             isinstance(episode_timeout_s, bool)
             or not isinstance(episode_timeout_s, (int, float))
@@ -1144,6 +1145,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             if self._propose_accepts_entries:
                 # The tree as entry options, so a method can name the entry an update or remove targets.
                 extra["entries"] = tuple(dict(entry) for entry in snapshot)
+            if self._propose_accepts_adapter:
+                # The harness the tree renders for, so a method writes the kinds that adapter carries.
+                extra["adapter"] = self._descriptor.name
             handed: dict[str, Any] | None = None
             if batch.request is not None:
                 if not self._propose.reads_requests:

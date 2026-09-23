@@ -510,10 +510,13 @@ class AgentProposer(Proposer):
         requests: Sequence[Mapping[str, Any]] = (),
         entries: Sequence[Mapping[str, Any]] = (),
         agent_host: AgentHost | None = None,
+        adapter: str | None = None,
     ) -> Mutation | StepProposal | None:
         # The text proposer reads none of manifest, rejected or sources; they are the contract's, unused here.
+        # The agent proposer's workspace tools are a pi extension, so another adapter's request goes to the text
+        # proposer, which writes the kinds that adapter carries.
         if not requests or agent_host is None or agent_host.descriptor.name != "pi":
-            return evolution.propose(nodes, samples, models, requests=requests, entries=entries)
+            return evolution.propose(nodes, samples, models, requests=requests, entries=entries, adapter=adapter)
         return answer_with_agent(nodes, requests[0], samples, models, entries, agent_host, self.provider)
 
 
