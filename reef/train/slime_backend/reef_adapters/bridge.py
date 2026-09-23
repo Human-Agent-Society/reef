@@ -31,11 +31,13 @@ from reef.runtime.interfaces import (
 from reef.runtime.recovery import ScenarioHistory, history_path, marker_rollouts
 from reef.runtime.scheduler import _producing_runtime_load_ids
 from reef.runtime.scheduler import max_staleness as _max_staleness
+from reef.train.adaptive_kl import AdaptiveKLController
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
+from reef.train.slime_backend.reef_adapters.adaptive_kl import adaptive_kl_config_from_args
 from reef.train.slime_backend.reef_adapters.batches import TrainingBatchProcessor
 from reef.train.slime_backend.reef_adapters.preflight import (
     configure_megatron_runtime,
@@ -54,6 +56,22 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
 # One training step (train + checkpoint + publish) legitimately takes hours;
 # this bounds a single Ray RPC from the bridge to its workers.
 _TRAIN_RPC_TIMEOUT_S = 14_400
+
+
+def _metric_integer(value: Any) -> int | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(float(value)):
+        return None
+    integer = int(value)
+    return integer if integer == value and integer >= 0 else None
+
+
+def _metrics_loss_is_finite(metrics: Mapping[str, Any]) -> bool:
+    losses = [
+        float(value)
+        for name, value in metrics.items()
+        if "loss" in str(name).lower() and isinstance(value, (int, float)) and not isinstance(value, bool)
+    ]
+    return all(math.isfinite(value) for value in losses)
 
 
 def create_train_groups(args, placement_groups, rollout_manager):
@@ -108,6 +126,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         loss_family: str | None = None,
         loss_family_config: object | None = None,
         loss_runtime: SlimeAlgorithm | None = None,
+        adaptive_kl_config=None,
     ) -> None:
         self._worker_failure: ExecutorFailure | None = None
         self._group = actor_group
@@ -129,6 +148,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             next_rollout_id=start_rollout_id,
             history=ScenarioHistory(history_path(save_hf_template)) if lora and save_hf_template is not None else None,
         )
+        self._adaptive_kl = AdaptiveKLController(adaptive_kl_config) if adaptive_kl_config is not None else None
         if loss_runtime is not None:
             self._algo = loss_runtime
         elif loss_family is not None:
@@ -153,6 +173,21 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             if storage_config is not None and save_hf_template is not None and megatron_save_root is not None
             else None
         )
+        self._pending_adaptive_kl: tuple[str, int, AdaptiveKLController] | None = None
+        self._adaptive_kl_candidate: AdaptiveKLController | None = None
+        self._adaptive_kl_previous_state: dict[str, Any] | None = None
+        self._adaptive_kl_committed_job: tuple[str, int] | None = None
+        self._adaptive_kl_restore_source = "disabled" if self._adaptive_kl is None else "initial"
+        if self._adaptive_kl is not None and self._storage is not None:
+            restored = self._storage.latest_adaptive_kl_state()
+            if restored is not None:
+                self._adaptive_kl = AdaptiveKLController.from_state_dict(restored, self._adaptive_kl.config)
+                self._adaptive_kl_restore_source = "checkpoint"
+        if self._adaptive_kl is not None and self._adaptive_kl.config.mode == "reward":
+            # ``kl_coef`` is read inside Slime's worker-side advantage pass.
+            # Restore the effective value before the next rollout, including
+            # an explicitly configured initial beta that differs from it.
+            self._group.set_adaptive_kl_beta(self._adaptive_kl.beta)
 
     @property
     def config(self) -> TrainingCoordinationConfig:
@@ -272,10 +307,92 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         )
         train_metrics.update(self._get(self._group.async_pop_rank0_metrics()))
         train_metrics.update(job.algorithm_metrics)
+        train_metrics.update(
+            self._adaptive_kl_metrics(
+                train_metrics, job_id=job.job_id, rollout_id=checkpoint.rollout_id
+            )
+        )
         return TrainingMetrics(training=train_metrics, durable=durable_metrics)
 
+    def _adaptive_kl_metrics(
+        self,
+        metrics: Mapping[str, Any],
+        *,
+        job_id: str,
+        rollout_id: int,
+    ) -> dict[str, Any]:
+        controller = self._adaptive_kl
+        if controller is None:
+            return {}
+        if self._pending_adaptive_kl is not None or self._adaptive_kl_candidate is not None:
+            pending = self._pending_adaptive_kl
+            if pending is None:
+                pending_job_id, pending_rollout_id = self._adaptive_kl_committed_job or ("<unknown>", -1)
+            else:
+                pending_job_id, pending_rollout_id, _ = pending
+            raise RuntimeError(
+                "adaptive KL has an uncommitted candidate "
+                f"for job {pending_job_id!r}, rollout {pending_rollout_id}"
+            )
+        controller_type = controller.config.controller_type
+        finite_observed = metrics.get("adaptive_kl/finite_observed", 1.0)
+        if controller_type == "verl":
+            observed = metrics.get("adaptive_kl/verl_observed_kl")
+            n_steps = _metric_integer(metrics.get("adaptive_kl/n_steps"))
+            if n_steps is None:
+                n_steps = _metric_integer(metrics.get("train/global_batch_size"))
+            if n_steps is None or n_steps <= 0:
+                raise RuntimeError("VERL-compatible adaptive KL requires a positive batch n_steps metric")
+        else:
+            observed = metrics.get("adaptive_kl/observed_kl")
+            n_steps = 1
+        if finite_observed != 1.0:
+            observed = math.nan
+        candidate = AdaptiveKLController.from_state_dict(controller.state_dict(), controller.config)
+        decision = candidate.observe(
+            observed,
+            training_step_succeeded=True,
+            loss_is_finite=_metrics_loss_is_finite(metrics),
+            valid_token_count=_metric_integer(metrics.get("adaptive_kl/valid_token_count")),
+            n_steps=n_steps,
+        )
+        self._pending_adaptive_kl = (job_id, rollout_id, candidate)
+        output = decision.metrics(
+            mode=controller.config.mode,
+            reference_policy_id=controller.config.reference_policy_id,
+            controller_type=controller_type,
+            horizon=controller.config.horizon,
+            n_steps=n_steps,
+        )
+        output.update(
+            {
+                "adaptive_kl/target_kl": controller.config.target_kl,
+                "adaptive_kl/finite_loss": _metrics_loss_is_finite(metrics),
+                "adaptive_kl/controller_state_version": controller.config.controller_version,
+                "adaptive_kl/restore_source": self._adaptive_kl_restore_source,
+            }
+        )
+        return output
+
     def save_job_checkpoint(self, job: _SlimePreparedTrainingJob) -> None:
+        try:
+            self._save_job_checkpoint(job)
+        except BaseException:
+            self._pending_adaptive_kl = None
+            raise
+
+    def _save_job_checkpoint(self, job: _SlimePreparedTrainingJob) -> None:
         """Persist the paired model/optimizer checkpoints and record the step."""
+        pending = self._pending_adaptive_kl
+        if pending is not None:
+            pending_job_id, pending_rollout_id, candidate = pending
+            if pending_job_id != job.job_id or pending_rollout_id != job.checkpoint.rollout_id:
+                raise RuntimeError("adaptive KL candidate does not match the checkpoint being saved")
+        else:
+            candidate = None
+        if candidate is not None and self._adaptive_kl is None:
+            raise RuntimeError("adaptive KL candidate exists without an active controller")
+        previous_state = None if candidate is None else self._adaptive_kl.state_dict()
         checkpoint = job.checkpoint
         rollout_id = checkpoint.rollout_id
         self._group.save_model(rollout_id, force_sync=True)
@@ -291,9 +408,77 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
         if self._storage is not None:
             rewards = job.rollout_data["rewards"]
-            self._storage.complete(job.job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
+            self._storage.complete(
+                job.job_id,
+                rollout_id,
+                reward=math.fsum(rewards) / len(rewards),
+                adaptive_kl_state=None if candidate is None else candidate.state_dict(),
+                adaptive_kl_previous_state=previous_state,
+            )
+        if candidate is not None:
+            # The checkpoint is durable, but the controller remains on the
+            # old state until the matching serving publication is staged.
+            self._adaptive_kl_candidate = candidate
+            self._adaptive_kl_previous_state = previous_state
+            self._adaptive_kl_committed_job = (job.job_id, rollout_id)
+            self._pending_adaptive_kl = None
         if checkpoint.scenario is not None:
             self._require_history().record_checkpoint(checkpoint.scenario, rollout_id)
+
+    def commit_training_candidate(self, training_job_id: str) -> None:
+        """Forget the rollback snapshot after the candidate is selected."""
+        committed = self._adaptive_kl_committed_job
+        if committed is None:
+            if self._storage is not None:
+                self._storage.finalize_adaptive_kl_state(training_job_id)
+            return
+        if committed[0] != training_job_id:
+            raise RuntimeError(
+                f"adaptive KL commit {training_job_id!r} does not match {committed[0]!r}"
+            )
+        candidate = self._adaptive_kl_candidate
+        if candidate is not None:
+            if candidate.config.mode == "reward":
+                self._group.set_adaptive_kl_beta(candidate.beta)
+            self._adaptive_kl = candidate
+        if self._storage is not None:
+            self._storage.finalize_adaptive_kl_state(training_job_id)
+        self._adaptive_kl_candidate = None
+        self._adaptive_kl_previous_state = None
+        self._adaptive_kl_committed_job = None
+
+    def reject_training_candidate(self, training_job_id: str) -> None:
+        """Restore controller state and worker beta when a candidate is rejected."""
+        if self._adaptive_kl is None:
+            return
+        committed = self._adaptive_kl_committed_job
+        if committed is None and self._adaptive_kl_candidate is None and self._storage is None:
+            return
+        if committed is not None and committed[0] != training_job_id:
+            raise RuntimeError(
+                f"adaptive KL rejection {training_job_id!r} does not match {committed[0]!r}"
+            )
+        had_in_memory_candidate = committed is not None or self._adaptive_kl_candidate is not None
+        previous = self._adaptive_kl_previous_state
+        restored = None
+        if self._storage is not None:
+            restored = self._storage.rollback_adaptive_kl_state(training_job_id)
+            if previous is None:
+                previous = restored
+        if previous is None and not had_in_memory_candidate and restored is None:
+            # An already rejected candidate is idempotent; do not reset a
+            # controller that was restored from the rejection record.
+            return
+        if previous is None:
+            self._adaptive_kl = AdaptiveKLController(self._adaptive_kl.config)
+        else:
+            self._adaptive_kl = AdaptiveKLController.from_state_dict(previous, self._adaptive_kl.config)
+        if self._adaptive_kl.config.mode == "reward":
+            self._group.set_adaptive_kl_beta(self._adaptive_kl.beta)
+        self._adaptive_kl_restore_source = "rollback"
+        self._adaptive_kl_candidate = None
+        self._adaptive_kl_previous_state = None
+        self._adaptive_kl_committed_job = None
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
@@ -457,4 +642,5 @@ def create_training_backend(
         critic_save_interval=args.critic_save_interval,
         loss_family=preparation.loss_family,
         loss_family_config=loss_family_config,
+        adaptive_kl_config=adaptive_kl_config_from_args(args),
     )

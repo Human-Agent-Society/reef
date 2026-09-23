@@ -199,6 +199,15 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
     def get_runtime_load_id(self) -> str:
         return str(self.weight_updater.exact_runtime_load_id)
 
+    def set_adaptive_kl_beta(self, beta: float) -> None:
+        """Set the worker-local reference-KL beta used by the next batch."""
+        import math
+
+        beta = float(beta)
+        if not math.isfinite(beta) or beta <= 0:
+            raise ValueError("adaptive KL beta must be positive and finite")
+        self.args.kl_coef = beta
+
     def set_runtime_load_id_for_update(self, runtime_load_id: str) -> None:
         self.weight_updater.prepare_exact_runtime_load_id(runtime_load_id)
 

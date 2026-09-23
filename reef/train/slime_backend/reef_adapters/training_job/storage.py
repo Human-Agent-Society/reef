@@ -184,7 +184,19 @@ class CheckpointStorage:
                 plan = self._plan(active, inventory)
             yield plan
 
-    def complete(self, job_id: str, rollout_id: int, *, reward: float | None) -> None:
+    def complete(
+        self,
+        job_id: str,
+        rollout_id: int,
+        *,
+        reward: float | None,
+        adaptive_kl_state: Mapping[str, Any] | None = None,
+        adaptive_kl_previous_state: Mapping[str, Any] | None = None,
+    ) -> None:
+        if adaptive_kl_state is not None and not isinstance(adaptive_kl_state, Mapping):
+            raise TypeError("adaptive_kl_state must be a mapping or None")
+        if adaptive_kl_previous_state is not None and not isinstance(adaptive_kl_previous_state, Mapping):
+            raise TypeError("adaptive_kl_previous_state must be a mapping or None")
         # The critic asset is required at completion time on the commits the
         # critic's cadence saves it — the bridge saves it before completing —
         # so a failed critic save cannot be recorded as a durable checkpoint.
@@ -204,8 +216,82 @@ class CheckpointStorage:
                 "rollout_id": rollout_id,
                 "bytes": pair_bytes,
                 "reward": _finite_or_none(reward),
+                "adaptive_kl_state": None if adaptive_kl_state is None else dict(adaptive_kl_state),
+                "adaptive_kl_previous_state": (
+                    None if adaptive_kl_previous_state is None else dict(adaptive_kl_previous_state)
+                ),
             },
         )
+
+    def latest_adaptive_kl_state(self) -> dict[str, Any] | None:
+        """Return the newest committed controller state, if one exists."""
+        with self._locked():
+            records, errors = self._reconcile()
+            if errors:
+                raise CheckpointStorageError("; ".join(errors))
+            for record in sorted(records, key=lambda value: int(value["rollout_id"]), reverse=True):
+                state = record.get("adaptive_kl_state")
+                if state is None:
+                    continue
+                if not isinstance(state, Mapping):
+                    raise CheckpointStorageError("checkpoint record has invalid adaptive KL state")
+                return dict(state)
+            return None
+
+    def clear_adaptive_kl_state(self, rollout_id: int) -> None:
+        """Remove a rejected candidate's controller state from its record."""
+        with self._locked():
+            records, errors = self._reconcile()
+            if errors:
+                raise CheckpointStorageError("; ".join(errors))
+            for record in records:
+                if int(record["rollout_id"]) == rollout_id:
+                    _write_json(
+                        self._record_path(rollout_id),
+                        {**record, "adaptive_kl_state": None},
+                    )
+                    return
+            raise CheckpointStorageError(f"checkpoint record is missing for rollout {rollout_id}")
+
+    def rollback_adaptive_kl_state(self, job_id: str) -> dict[str, Any] | None:
+        """Restore the previous controller state recorded for one rejected job."""
+        with self._locked():
+            records, errors = self._reconcile()
+            if errors:
+                raise CheckpointStorageError("; ".join(errors))
+            for record in records:
+                if record.get("job_id") != job_id:
+                    continue
+                previous = record.get("adaptive_kl_previous_state")
+                if previous is not None and not isinstance(previous, Mapping):
+                    raise CheckpointStorageError("checkpoint record has invalid previous adaptive KL state")
+                restored = None if previous is None else dict(previous)
+                _write_json(
+                    self._record_path(int(record["rollout_id"])),
+                    {
+                        **record,
+                        "adaptive_kl_state": restored,
+                        "adaptive_kl_previous_state": None,
+                    },
+                )
+                return restored
+            raise CheckpointStorageError(f"checkpoint record is missing for training job {job_id!r}")
+
+    def finalize_adaptive_kl_state(self, job_id: str) -> None:
+        """Forget the rollback snapshot after a candidate is published."""
+        with self._locked():
+            records, errors = self._reconcile()
+            if errors:
+                raise CheckpointStorageError("; ".join(errors))
+            for record in records:
+                if record.get("job_id") != job_id:
+                    continue
+                _write_json(
+                    self._record_path(int(record["rollout_id"])),
+                    {**record, "adaptive_kl_previous_state": None},
+                )
+                return
+            raise CheckpointStorageError(f"checkpoint record is missing for training job {job_id!r}")
 
     def _plan(self, active_rollouts: set[int], inventory: Inventory) -> dict[str, Any]:
         usage = self._disk_usage(self.root)
