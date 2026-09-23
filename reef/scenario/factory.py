@@ -31,32 +31,10 @@ from reef.observability import ExperimentTracker
 from reef.recipe.base import Recipe
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
-from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
-from reef.storage.scenario import ScenarioStorage, ScenarioStore
+from reef.storage.commits import SCENARIO_METADATA_KEY, parse_scenario_metadata, scenario_metadata_for
+from reef.storage.scenario import ScenarioStorage
 from reef.surface.base import ArtifactActivator
 from reef.train.trainer import Trainer
-
-
-def _consumed_by_committed_steps(
-    store: ScenarioStore,
-    head_record: CommitRecord | None,
-) -> frozenset[str]:
-    """The rows every committed step's batch consumed.
-
-    Rehydration must skip these rows: retention may keep a consumed row stored
-    (audit-only retention is contract-legal), and re-ingesting one would train
-    it twice. Consumption is permanent, so the union over the whole log is the
-    exclusion set.
-    """
-    records = store.history()
-    if not records and head_record is not None:
-        # No durable log: the head adopted from checkpoint metadata is the
-        # only committed step there is.
-        records = (head_record,)
-    consumed: set[str] = set()
-    for record in records:
-        consumed |= record.consumed_ids
-    return frozenset(consumed)
 
 
 class ScenarioFactory:
@@ -251,7 +229,10 @@ class ScenarioFactory:
             # Replay retained, unconsumed rows behind the watermark before resuming
             # the cursor. Retention may keep already-consumed rows for audit.
             if high_water is not None:
-                consumed = _consumed_by_committed_steps(store, head_record)
+                commits = store.history()
+                if not commits and head_record is not None:
+                    commits = (head_record,)
+                consumed = trainer.restore_consumption(commits)
                 scenario.reingest(up_to_sequence=high_water[0], consumed_ids=consumed)
                 scenario.restore_record_progress(after_sequence=high_water[0], offset=high_water[1])
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness

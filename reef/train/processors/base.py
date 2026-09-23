@@ -7,14 +7,15 @@ computed from traffic).
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
+from reef.core.reports import is_dataset_end_report
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
-from reef.train.types import ProcessorContext, TrainingBatch
+from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch
 
 
 @dataclass(frozen=True)
@@ -120,6 +121,102 @@ class DataProcessor:
         #: reshuffle what it references.
         self._pending: TrainingBatch | None = None
         self._batch_number = 0
+        self.dataset_enabled = "dataset_epochs" in context.config
+        dataset_epochs = context.config.get("dataset_epochs", 1)
+        if isinstance(dataset_epochs, bool) or not isinstance(dataset_epochs, int) or dataset_epochs < 1:
+            raise ValueError("dataset_epochs must be a positive integer")
+        self.dataset_epochs: int = dataset_epochs
+        self.dataset_size = 0
+        self.dataset_sealed = False
+        self.dataset_end_ids: set[str] = set()
+        self.dataset_epoch = 1
+        self.dataset_units: dict[str, tuple[TrainDataItem, ...]] = {}
+        self.dataset_seen_units: set[str] = set()
+        self.dataset_consumed_units: set[str] = set()
+        self.dataset_released_records: set[str] = set()
+        self.dataset_pending_units: tuple[str, ...] = ()
+
+    def add_dataset_unit(self, record_id: str, items: tuple[TrainDataItem, ...]) -> None:
+        """Buffer a sample or group for all dataset passes, once, in arrival order.
+
+        ``record_id`` must be one of the unit's source records and uniquely
+        identify it. Recipes assembling inference records directly can call
+        this from ``ingest``; the reported engine does so automatically.
+        A report carrying metadata.dataset_end seals the queue before training starts.
+        """
+        if not self.dataset_enabled:
+            raise ValueError("add_dataset_unit requires dataset_epochs in processor config")
+        if record_id in self.dataset_seen_units:
+            return
+        if self.dataset_sealed:
+            raise ValueError("cannot add a unit after dataset completion")
+        if not items or not any(record_id in item.source_agent_record_ids for item in items):
+            raise ValueError("a dataset unit must contain items referencing its identifying record")
+        self.dataset_seen_units.add(record_id)
+        self.dataset_units[record_id] = items
+
+    def finish_dataset(self, record_id: str) -> None:
+        """Seal the fixed input set when its durable completion record is ingested."""
+        if not self.dataset_enabled:
+            raise ValueError("dataset completion requires dataset_epochs in processor config")
+        self.dataset_end_ids.add(record_id)
+        if self.dataset_sealed:
+            return
+        if self.dataset_size and self.dataset_size != len(self.dataset_seen_units):
+            raise ValueError("replayed dataset size does not match committed dataset size")
+        self.dataset_size = len(self.dataset_seen_units)
+        self.dataset_sealed = True
+
+    def ingest_record(self, item: AgentRecord) -> None:
+        """Route durable control records independently of a recipe's input types."""
+        if item.request_type is RequestType.REPORT and is_dataset_end_report(item.payload):
+            self.finish_dataset(item.agent_record_id)
+        elif item.request_type in self.required_request_types:
+            if self.dataset_enabled and self.dataset_sealed and item.request_type is not RequestType.TRAIN:
+                return
+            self.ingest(item)
+
+    def dataset_items(self) -> tuple[TrainDataItem, ...]:
+        """The reserved samples, shaped through the processor's existing batch hooks."""
+        return tuple(item for record_id in self.dataset_pending_units for item in self.dataset_units[record_id])
+
+    def dataset_record_ids(self, unit_ids: Iterable[str]) -> frozenset[str]:
+        return frozenset(
+            source_id
+            for record_id in unit_ids
+            for item in self.dataset_units[record_id]
+            for source_id in item.source_agent_record_ids
+        )
+
+    def dataset_retention(self, decision: RetentionDecision) -> RetentionDecision:
+        """Keep all unfinished units protected, including records shared by multiple units."""
+        protected = self.dataset_record_ids(self.dataset_units)
+        if self.dataset_units:
+            protected |= self.dataset_end_ids
+        protected |= decision.protected_agent_record_ids
+        return RetentionDecision(
+            protected_agent_record_ids=protected,
+            releasable_agent_record_ids=(decision.releasable_agent_record_ids | self.dataset_released_records)
+            - protected,
+        )
+
+    def restore_dataset_progress(self, epoch: int, size: int, consumed_units: frozenset[str]) -> None:
+        """Restore the last pass's committed units before record replay assembles samples."""
+        if self.dataset_seen_units or self._pending is not None:
+            raise RuntimeError("dataset progress must be restored before ingestion")
+        self.dataset_epoch = epoch
+        self.dataset_size = size
+        self.dataset_consumed_units = set(consumed_units)
+        if len(consumed_units) == self.dataset_size:
+            self.dataset_epoch += 1
+            self.dataset_consumed_units.clear()
+        if self.dataset_epoch > self.dataset_epochs:
+            self.dataset_seen_units = set(consumed_units)
+            self.dataset_sealed = True
+        elif self.dataset_epoch == self.dataset_epochs:
+            # Final-pass units may already have been compacted. Earlier passes
+            # must rebuild them because their records are still needed.
+            self.dataset_seen_units = set(self.dataset_consumed_units)
 
     @property
     def context(self) -> ProcessorContext:
@@ -197,10 +294,14 @@ class DataProcessor:
     def ready(self) -> bool:
         if self._pending is not None:
             return True
+        if self.dataset_enabled and not self.dataset_sealed:
+            return False
         if self.training_mode == "manual":
             return bool(self._training_requests)
         if self.training_mode == "hybrid" and self._training_requests:
             return True
+        if self.dataset_enabled:
+            return bool(self.dataset_units)
         return self._ready_count() >= self._batch_size
 
     def build_batch(self) -> TrainingBatch:
@@ -214,7 +315,16 @@ class DataProcessor:
                 if self.training_mode != "auto" and self._training_requests
                 else None
             )
+            if self.dataset_enabled:
+                self.dataset_pending_units = tuple(
+                    record_id for record_id in self.dataset_units if record_id not in self.dataset_consumed_units
+                )[: self._batch_size]
             self._pending = self.make_training_batch(self._batch_number, request)
+            if self.dataset_enabled:
+                self._pending = replace(
+                    self._pending,
+                    batch_id=f"{self.scenario}:dataset:{self.dataset_epoch}:{len(self.dataset_consumed_units)}",
+                )
             if request is not None:
                 self._pending = replace(
                     self._pending, batch_id=f"{self.scenario}:instruction:{request.id}", request=request
@@ -229,14 +339,30 @@ class DataProcessor:
         With a request the hook's own batch id is replaced by
         ``<scenario>:instruction:<request id>`` and the request is attached.
         """
-        if request is not None:
+        if request is not None and not self.dataset_enabled:
             raise NotImplementedError(f"{type(self).__name__} does not implement instruction batch assembly")
         return self._make_pending(batch_number)
 
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         if self._pending is None or self._pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
-        consumed = self._consume_pending()
+        if self.dataset_enabled:
+            consumed = self.dataset_record_ids(self.dataset_pending_units)
+            self.dataset_consumed_units.update(self.dataset_pending_units)
+            if self.dataset_epoch == self.dataset_epochs:
+                self.dataset_released_records.update(consumed)
+                self._agent_record_ids -= consumed
+                for record_id in self.dataset_pending_units:
+                    self.dataset_units.pop(record_id)
+            if self.dataset_pending_units and len(self.dataset_consumed_units) == self.dataset_size:
+                self.dataset_epoch += 1
+                self.dataset_consumed_units.clear()
+                if self.dataset_epoch > self.dataset_epochs:
+                    consumed |= self.dataset_end_ids
+                    self.dataset_released_records.update(self.dataset_end_ids)
+            self.dataset_pending_units = ()
+        else:
+            consumed = self._consume_pending()
         if self._pending.request is not None:
             request_id = self._pending.request.id
             self._training_requests.pop(request_id)
@@ -254,6 +380,7 @@ class DataProcessor:
         if self._pending is None or self._pending.batch_id != batch_id:
             raise ValueError(f"unknown batch_id {batch_id!r}")
         self._pending = None
+        self.dataset_pending_units = ()
 
     def discard_request(self, request_id: str) -> frozenset[str]:
         """Consume one queued instruction without a batch; the committed row that names it is what recovery skips."""
@@ -276,6 +403,8 @@ class DataProcessor:
 
     def _make_pending(self, batch_number: int) -> TrainingBatch:
         """Select this batch's units and shape them through ``make_batch``."""
+        if self.dataset_enabled:
+            return TrainingBatch(f"{self.scenario}:dataset:{batch_number}", self.dataset_items())
         raise RuntimeError(f"{type(self).__name__} never produces a training batch")
 
     def _consume_pending(self) -> frozenset[str]:
@@ -295,15 +424,18 @@ class DataProcessor:
         Subclasses with real pairing semantics override this to derive
         protected/releasable sets from their own state.
         """
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(self._agent_record_ids | self._training_requests.keys()),
-            releasable_agent_record_ids=frozenset(self._consumed_requests),
+        return self.dataset_retention(
+            RetentionDecision(
+                protected_agent_record_ids=frozenset(self._agent_record_ids | self._training_requests.keys()),
+                releasable_agent_record_ids=frozenset(self._consumed_requests),
+            )
         )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         """Forget semantic markers whose positioned records were deleted."""
         self._agent_record_ids -= agent_record_ids
         self._consumed_requests -= agent_record_ids
+        self.dataset_released_records -= agent_record_ids
 
     def derivation_pending(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.

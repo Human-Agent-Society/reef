@@ -22,7 +22,7 @@ none may block:
 - ``build_batch()``: produce it (the trainer validates it against ``output_schema``);
 - ``acknowledge(batch_id)``: the training step consumed that batch; returns
   the consumed record ids, which the commit record persists so recovery never
-  re-ingests them.
+  trains them twice in the same dataset pass.
 
 Every concrete processor produces ``TrainingBatch.items``, an ordered tuple of
 ``TrainDataItem`` values: ``TrajectoryItem`` for existing trajectories or
@@ -48,6 +48,50 @@ invariant failure).
 ``DataProcessor`` in ``base.py`` is concrete on purpose: bare, it is the
 no-update default that ingests for audit and never becomes ready. Recipes
 can implement their own lifecycle or reuse one of the feedback engines below.
+
+Fixed dataset epochs
+--------------------
+
+Set ``dataset_epochs`` to a positive integer in ``ProcessorContext.config``
+for a fixed dataset; omit it to preserve streaming batching. A weight recipe
+can expose it as ``dataset_epochs: int = config_field(4)``. Write inputs once,
+then send ``POST /reef/report`` with the scenario header and:
+
+.. code:: json
+
+   {"agent_record_id": "dataset-complete", "metadata": {"dataset_end": true}}
+
+Wait for all input writes before sending this signal. Reuse its receipt ID
+on retries. This control report has no references, score or feedback and
+bypasses the recipe's sample-report schema. Training waits for it, including
+in manual and hybrid mode. Later data remains audit-only; use a new scenario
+for another dataset. An empty dataset produces no automatic batches.
+
+``ReportedFeedbackProcessor`` uses its existing ``make_sample`` and
+``make_batch`` hooks. One report or complete group is one unit; incomplete
+groups at completion are rejected. Direct ``DataProcessor`` subclasses can
+call ``add_dataset_unit(record_id, (sample,))`` in ``ingest``; the identifying
+receipt must appear in the sample's ``source_agent_record_ids``. The base
+owns passes and reservations, and existing batch hooks can read the selected
+samples through ``dataset_items()``. Asynchronous computed-feedback engines
+need to assemble stable units before using this queue.
+
+Units repeat in arrival order, preserving groups. Three units with
+``batch_size=2`` and ``dataset_epochs=2`` produce ``[a, b], [c], [a, b], [c]``.
+Each batch commits normally, including the tail. For one commit per pass,
+make the processor batch size cover the dataset and use
+``StepScheduling.batch_size`` for optimizer steps. ``StepScheduling.epochs``
+repeats a single reserved batch before its commit; it does not repeat the
+dataset across commits.
+
+Commit/release metrics record the one-based ``dataset_epoch``, total
+``dataset_epochs``, ``dataset_size`` and consumed ``dataset_unit_ids``.
+Recovery rebuilds the current pass from these records; keep unit assembly,
+grouping and epoch count unchanged across restarts. A failed instruction
+consumes only the instruction. Inputs, shared references and the end report
+remain protected until their final use, then normal compaction applies.
+A stale-drop backend raises rather than discarding dataset progress without
+a commit. Samples remain in memory; stored inputs are never duplicated.
 
 Explicit manual training
 ------------------------

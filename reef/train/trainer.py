@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Lock
@@ -26,6 +26,7 @@ from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
 from reef.observability.operations import OperationMetrics
+from reef.storage.commits import CommitRecord
 from reef.storage.records import RecordStore
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
@@ -121,6 +122,7 @@ class Trainer:
         self._data_offset = 0
         self._data_sequence = 0
         self._pending: _PendingStep | None = None
+        self.dataset_final_record_ids: frozenset[str] = frozenset()
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -267,8 +269,7 @@ class Trainer:
             if not items:
                 return
             for sequence, item in items:
-                if item.request_type in self.processor.required_request_types:
-                    self._processor.ingest(item)
+                self._processor.ingest_record(item)
                 self._data_offset += 1
                 self._data_sequence = sequence
                 if self._processor.ready():
@@ -424,11 +425,24 @@ class Trainer:
             if not isinstance(result.state, Mapping):
                 raise TypeError("training step state must be a mapping")
             consumed = self._pending.consumed_ids
+            dataset_unit_ids = self._processor.dataset_pending_units
+            dataset_epoch = self._processor.dataset_epoch
             if consumed is None:
                 consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
             metrics = dict(result.metrics)
+            if (
+                self._processor.dataset_enabled
+                and self._processor.dataset_size
+                and dataset_epoch <= self._processor.dataset_epochs
+            ):
+                metrics.update(
+                    dataset_epoch=dataset_epoch,
+                    dataset_epochs=self._processor.dataset_epochs,
+                    dataset_size=self._processor.dataset_size,
+                    dataset_unit_ids=list(dataset_unit_ids),
+                )
             request = self._pending.batch.request
             if request is not None:
                 # The backend's own dict, when it wrote one, carries what its proposer added to ``requires``.
@@ -493,6 +507,8 @@ class Trainer:
             if self._pending is None:
                 return
             batch_id = self._pending.batch_id
+            if self._processor.dataset_enabled:
+                raise ValueError("a fixed dataset batch cannot be discarded as stale; its progress requires a commit")
             self._processor.dropped(batch_id)
             self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
@@ -543,6 +559,66 @@ class Trainer:
                 if self._candidate_backend is not None:
                     self._candidate_backend.close()
 
+    def restore_consumption(self, commits: Sequence[CommitRecord]) -> frozenset[str]:
+        """Restore dataset passes and return permanently consumed record IDs for replay.
+
+        Dataset unit IDs are recorded per batch; source IDs retain their normal
+        meaning in ``consumed_ids``. Earlier passes remain replayable. On the
+        final pass, inference dependencies shared with unfinished reports must
+        still replay even when one report already consumed them.
+        """
+        consumed: set[str] = set()
+        dataset_records: set[str] = set()
+        final_records: set[str] = set()
+        unit_ids: set[str] = set()
+        epoch = 0
+        size = 0
+        for commit in commits:
+            consumed.update(commit.consumed_ids)
+            metrics = commit.metrics or {}
+            if "dataset_epoch" not in metrics:
+                continue
+            if not self._processor.dataset_enabled or metrics.get("dataset_epochs") != self._processor.dataset_epochs:
+                raise ValueError("dataset_epochs must match the committed dataset configuration")
+            pass_index = metrics["dataset_epoch"]
+            pass_size = metrics.get("dataset_size")
+            batch_units = metrics.get("dataset_unit_ids")
+            if (
+                isinstance(pass_index, bool)
+                or not isinstance(pass_index, int)
+                or not 1 <= pass_index <= self._processor.dataset_epochs
+                or isinstance(pass_size, bool)
+                or not isinstance(pass_size, int)
+                or pass_size < 1
+                or not isinstance(batch_units, list)
+                or any(not isinstance(record_id, str) for record_id in batch_units)
+            ):
+                raise ValueError("invalid dataset progress in commit metrics")
+            if (size and pass_size != size) or pass_index < epoch:
+                raise ValueError("inconsistent dataset progress in commit history")
+            size = pass_size
+            if pass_index != epoch:
+                unit_ids.clear()
+                epoch = pass_index
+            if unit_ids.intersection(batch_units) or len(unit_ids) + len(batch_units) > size:
+                raise ValueError("dataset units were consumed more than once in a pass")
+            unit_ids.update(batch_units)
+            if batch_units:
+                sources = set(commit.consumed_ids)
+                request = metrics.get("training_request")
+                if isinstance(request, Mapping):
+                    sources.discard(request.get("id"))
+                dataset_records.update(sources)
+                if epoch == self._processor.dataset_epochs:
+                    final_records.update(sources)
+        if epoch:
+            self._processor.restore_dataset_progress(epoch, size, frozenset(unit_ids))
+        self.dataset_final_record_ids = frozenset(final_records)
+        excluded = consumed - dataset_records
+        if epoch == self._processor.dataset_epochs:
+            excluded.update(unit_ids)
+        return frozenset(excluded)
+
     def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
         """Rebuild processor memory from retained rows at or below a watermark.
 
@@ -552,10 +628,10 @@ class Trainer:
         them stored. Only processor memory knew about them, and a rebuilt
         processor starts empty: without this replay, a report arriving after
         recovery waits forever on a reference that can never be ingested
-        again. ``consumed_ids`` names the rows committed batches consumed —
-        the commit log records them per step because retention may keep a
-        consumed row stored (audit-only retention is contract-legal), and a
-        row a committed batch consumed must never train twice. Skipping them
+        again. ``consumed_ids`` names permanently consumed rows, as determined
+        by ``restore_consumption``: dataset inputs needed for later passes
+        are replayed. Retention may keep a consumed row stored (audit-only
+        retention is contract-legal), but it must not train twice in a pass. Skipping them
         while replaying the retained prefix reconstructs the live state the
         crash destroyed and nothing more; consumption accounting stays
         untouched, since the recovered mark already covers every replayed row.
@@ -577,8 +653,12 @@ class Trainer:
                         return
                     if item.agent_record_id in consumed_ids:
                         continue
-                    if item.request_type in self.processor.required_request_types:
-                        self._processor.ingest(item)
+                    if (
+                        item.agent_record_id in self.dataset_final_record_ids
+                        and item.request_type is not RequestType.INFERENCE
+                    ):
+                        continue
+                    self._processor.ingest_record(item)
 
     def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
         """Resume consumption from a recovered commit record's high-water mark.

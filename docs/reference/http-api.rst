@@ -125,6 +125,19 @@ defaults. Responses redact the API key and report ``has_api_key`` instead.
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
 protocols, persistence and model bindings used throughout evolution.
 
+Fixed dataset completion
+------------------------
+
+For processors configured with ``dataset_epochs``, send ``POST /reef/report``
+with ``{"agent_record_id": "dataset-complete", "metadata": {"dataset_end": true}}``
+after all input writes finish, using the usual authentication and scenario
+headers. This control report has no references, score or feedback and bypasses
+the recipe's sample-report schema. Identical receipt retries deduplicate;
+malformed signals or processors without the option return HTTP 400.
+Only inputs before the first signal join the dataset. See
+`fixed dataset epochs <../developer-guide/processors.rst#fixed-dataset-epochs>`__
+for batching and commit metrics.
+
 Manual training
 ---------------
 

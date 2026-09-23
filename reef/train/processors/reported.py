@@ -244,6 +244,8 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     def cap_manual_units(self) -> None:
         """Manual mode batches on instructions, not units, so the pile is bounded here instead."""
+        if self.dataset_enabled:
+            return
         limit = self._batch_size * self.manual_unit_cap_batches
         if self.training_mode != "manual" or self._ready_count() <= limit:
             return
@@ -338,10 +340,29 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     # A unit is one accepted singleton report or one ready group; the
     # engine's half of the shared cycle in base.py is the three methods below.
 
+    def finish_dataset(self, record_id: str) -> None:
+        if not self.dataset_sealed:
+            if self._groups.keys() - self._ready_groups:
+                raise ValueError("cannot finish a dataset with incomplete report groups")
+            for unit in sorted(self._ordered_units(), key=lambda unit: unit[0].order):
+                self.add_dataset_unit(
+                    unit[0].report.agent_record_id,
+                    tuple(pending.item for pending in unit),
+                )
+            super().finish_dataset(record_id)
+            self._reports.clear()
+            self.singletons.clear()
+            self._groups.clear()
+            self._ready_groups.clear()
+        else:
+            super().finish_dataset(record_id)
+
     def _ready_count(self) -> int:
         return len(self.singletons) + len(self._ready_groups)
 
     def _make_pending(self, batch_number: int) -> TrainingBatch:
+        if self.dataset_enabled:
+            return self.make_batch(self.dataset_items(), batch_number)
         units = self._ordered_units()[: self._batch_size]
         self._pending_reports = tuple(pending for unit in units for pending in unit)
         return self.make_batch(tuple(pending.item for pending in self._pending_reports), batch_number)
@@ -399,13 +420,17 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         both move between reads, so the answer is never latched at event time.
         """
         live_references = self._live_references()
-        releasable_sources = (self._terminal_owned_sources | self._trained_sources) - live_references
+        releasable_sources = (
+            self._terminal_owned_sources | self._trained_sources | self.dataset_released_records
+        ) - live_references
         releasable = self._consumed | self._terminal | releasable_sources
         protected = set(self._reports) | live_references
         protected.update(inference_id for inference_id in self._inferences if inference_id not in releasable_sources)
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(protected | self._training_requests.keys()),
-            releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
+        return self.dataset_retention(
+            RetentionDecision(
+                protected_agent_record_ids=frozenset(protected | self._training_requests.keys()),
+                releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
+            )
         )
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:

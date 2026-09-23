@@ -23,7 +23,7 @@ from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.repository import EnumerableRepositoryBackendFactory, RepositoryBackendFactory
 from reef.core.errors import UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
-from reef.core.reports import ReportValidationError, validate_report_payload
+from reef.core.reports import ReportValidationError, is_dataset_end_report, validate_report_payload
 from reef.core.training_request import TrainingRequest
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.observability import (
@@ -413,7 +413,10 @@ class Dispatcher:
                     current.operations.increment("ingest/duplicates_total")
                     return existing
                 validate_report_payload(item.payload)
-                if (report_type := current.report_type) is not None:
+                if is_dataset_end_report(item.payload):
+                    if not current.trainer.processor.dataset_enabled:
+                        raise ValueError("dataset completion requires a processor configured with dataset_epochs")
+                elif (report_type := current.report_type) is not None:
                     report_type.from_dict(item.payload)
                 if len(set(item.references)) != len(item.references):
                     raise ReportValidationError("report references must be unique")
