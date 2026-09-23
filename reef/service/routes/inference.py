@@ -121,7 +121,9 @@ async def _relay_inference_stream(
                 error = "upstream SSE ended without a terminal event"
             else:
                 record_attempted = True
-                item = request_service.record_stream(
+                # Off the loop: recording takes the scenario's lock, which a commit may hold for a while.
+                item = await asyncio.to_thread(
+                    request_service.record_stream,
                     pending,
                     stream_record(upstream, bytes(body), complete=True),
                 )
@@ -155,7 +157,8 @@ async def _relay_inference_stream(
             await upstream.close()
         finally:
             if not record_attempted:
-                request_service.record_stream(
+                await asyncio.to_thread(
+                    request_service.record_stream,
                     pending,
                     stream_record(upstream, bytes(body), complete=complete, error=error),
                 )

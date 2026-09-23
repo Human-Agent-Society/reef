@@ -441,6 +441,11 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
         )
 
+    def restore_consumed(self, item: AgentRecord) -> None:
+        """A consumed inference still stored is a trained source: a later report on it is settled, not resolved."""
+        if item.request_type is RequestType.INFERENCE:
+            self._trained_sources.add(item.agent_record_id)
+
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         super().compaction_applied(agent_record_ids)
         # --- scalar id sets ---

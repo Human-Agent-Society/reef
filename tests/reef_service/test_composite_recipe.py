@@ -806,3 +806,32 @@ def test_composed_release_links_carried_files_and_tolerates_an_empty_component(t
     assert linked.stat().st_nlink == 2
     assert (tmp_path / "r" / "harness").is_dir()
     assert TextFileTree().read_files(composed.component("harness")) is None
+
+
+@pytest.mark.unit
+def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> None:
+    """A component listed first that runs no step does not lend its mode and processor to the whole scenario."""
+    recipe = CompositeRecipe(
+        components={
+            "config": _ConfigRecipe(),
+            "harness": _HybridTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"}),
+        }
+    )
+    dispatcher = _serve(recipe, tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        dispatcher.set_training_mode("agent", "hybrid")
+        harness = scenario.trainer_for("harness")
+        assert scenario.trainer is harness
+        block = dispatcher.build_training_status()["scenarios"]["agent"]
+        assert block["training_mode"] == "hybrid"
+        assert block["processor"] == {
+            **harness.processor_status(),
+            "pending_instructions": harness.pending_instructions(),
+        }
+        contract = dispatcher.scenario_contract("agent")
+        assert contract["training_mode"] == "hybrid"
+        assert contract["processor"] == type(harness.processor).__name__
+    finally:
+        dispatcher.close()

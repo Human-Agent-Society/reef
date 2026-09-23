@@ -16,7 +16,7 @@ from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef, InMemoryRepos
 from reef.artifact.release_chain import ArtifactReleaseChain
 from reef.core import AgentRecord, RequestType
 from reef.core.components import RECORDS_COMPONENT
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, ScenarioBusy
 from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
@@ -39,6 +39,7 @@ from reef.train.evaluation import EvaluationResult, UpdateCandidate
 from reef.train.processors.base import DataProcessor
 
 from ._threshold_processor import ThresholdProcessor
+from .runtime_stubs import StubTrainingRuntime
 
 WEIGHTS = "weights"
 HARNESS = "harness"
@@ -110,6 +111,18 @@ class _SlowBackend(_ComponentBackend):
         self.evaluating.set()
         assert self.release.wait(30)
         return super().evaluate(candidate)
+
+
+class _AwayBackend(_ComponentBackend):
+    """A local cycle whose backend is away: every preparation fails."""
+
+    def __init__(self, component: str, artifact_dir: Path) -> None:
+        super().__init__(component, artifact_dir)
+        self.attempts = 0
+
+    def prepare_step(self, batch, state, scenario_step):
+        self.attempts += 1
+        raise RuntimeError("proposer away")
 
 
 class _DispatchedBackend(_ComponentBackend):
@@ -231,6 +244,7 @@ def _dispatcher(
     backends: dict[str, _ComponentBackend] | None = None,
     hybrid_components: frozenset[str] = frozenset(),
     experiment_tracker: ExperimentTracker | None = None,
+    training: StubTrainingRuntime | None = None,
 ) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
     initial = tmp_path / "initial"
     if not initial.exists():
@@ -242,8 +256,17 @@ def _dispatcher(
             component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)
         }
     records = tmp_path / "records" if records_dir is None else records_dir
+    recipe = _TwoTrainerRecipe(backends=backends, hybrid_components=hybrid_components)
+    if training is not None:
+        # A training runtime binds the scenario to the training thread, which drives the dispatched job.
+        recipe = _TwoTrainerRecipe(
+            backends=backends,
+            hybrid_components=hybrid_components,
+            runtime=training.inference,
+            training_runtime=training,
+        )
     dispatcher = Dispatcher(
-        _TwoTrainerRecipe(backends=backends, hybrid_components=hybrid_components),
+        recipe,
         backend_factory or InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         agent_record_dir=records,
@@ -541,7 +564,29 @@ def test_a_reload_after_a_training_failure_wakes_the_local_workers(tmp_path: Pat
 
 
 @pytest.mark.unit
-def test_a_scenario_deleted_under_its_training_job_is_an_error_not_a_silent_replay(tmp_path: Path) -> None:
+def test_deleting_a_scenario_whose_training_job_is_out_waits_for_the_job(tmp_path: Path) -> None:
+    """The job could neither commit nor be acknowledged without its scenario, so the delete answers busy until it lands."""
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        with pytest.raises(ScenarioBusy, match="training job is out"):
+            dispatcher.delete_scenario("agent")
+        assert dispatcher._registry.has("agent")
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        assert dispatcher.delete_scenario("agent")["scenario"] == "agent"
+        assert not dispatcher._registry.has("agent")
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_scenario_removed_under_its_training_job_is_an_error_not_a_silent_replay(tmp_path: Path) -> None:
+    """The registry path a delete no longer takes: a job without its scenario needs operator recovery."""
     dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
     try:
         old = dispatcher.get_or_create_scenario("agent")
@@ -550,9 +595,171 @@ def test_a_scenario_deleted_under_its_training_job_is_an_error_not_a_silent_repl
             old.records.append(record)
         batch = old.reserve_training_batch(WEIGHTS)
         assert batch is not None
-        dispatcher.delete_scenario("agent")
+        dispatcher._registry.remove("agent")
         with pytest.raises(RuntimeContractError, match="deleted under its training job"):
             dispatcher._run_dispatched_turn(old, WEIGHTS, backends[WEIGHTS], batch)
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_the_training_thread_idles_once_the_last_training_scenario_is_gone(tmp_path: Path) -> None:
+    """A wake that finds no training scenario is not a failure: nothing would ever clear its error."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        assert dispatcher._process_training() is False
+        dispatcher._drain_training()
+        assert dispatcher.build_training_status()["error"] is None
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_failed_instruction_of_a_scenario_that_is_gone_starts_no_worker(tmp_path: Path, monkeypatch: Any) -> None:
+    """Workers started for a deleted name would record errors that nothing clears."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        old = dispatcher.get_or_create_scenario("agent")
+        assert old is not None
+        dispatcher.delete_scenario("agent")
+        monkeypatch.setattr(old.trainer_for(HARNESS), "fail_pending_instruction", lambda error: True)
+        dispatcher._fail_instruction(old, RuntimeError("episode failed"), HARNESS)
+        with dispatcher._training.lock:
+            assert dispatcher._training.local_workers == {}
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_failing_local_cycle_runs_once_per_wake_and_keeps_its_error_in_the_status(tmp_path: Path) -> None:
+    """A backend that is away costs one attempt per wake, never a loop of reloads, and the failure stays visible."""
+    backends = {
+        WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _AwayBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    away = backends[HARNESS]
+    assert isinstance(away, _AwayBackend)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            dispatcher.accept_record(record)
+        deadline = time.monotonic() + 10
+        while away.attempts == 0 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)
+        assert away.attempts == 1
+        assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
+        # A job's turn ended: the worker looks again, once.
+        dispatcher.wake_local_workers()
+        deadline = time.monotonic() + 10
+        while away.attempts == 1 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        time.sleep(0.5)
+        assert away.attempts == 2
+        assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_local_failure_under_a_dispatched_job_reloads_once_the_job_has_landed(tmp_path: Path) -> None:
+    """A reload under the job would hand its result to an instance that never reserved it."""
+    backends = {
+        WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _AwayBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        with pytest.raises(RuntimeError, match="proposer away"):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        assert dispatcher._registry.get_optional("agent") is scenario
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        assert [row["component"] for row in scenario.releases() if row["operation"] == "training"] == [WEIGHTS]
+        dispatcher.reload_deferred("agent")
+        rebuilt = dispatcher._registry.get_optional("agent")
+        assert rebuilt is not None and rebuilt is not scenario
+        assert rebuilt.scenario_step == 1
+        dispatcher.reload_deferred("agent")
+        assert dispatcher._registry.get_optional("agent") is rebuilt
+    finally:
+        dispatcher.close()
+
+
+class _SlowDispatchedBackend(_DispatchedBackend):
+    """A dispatched job whose execution takes a moment, as a real job takes minutes."""
+
+    def evaluate(self, candidate):
+        time.sleep(0.05)
+        return super().evaluate(candidate)
+
+
+@pytest.mark.unit
+def test_a_weights_job_commits_while_the_harness_backend_is_away(tmp_path: Path) -> None:
+    """On the training thread: the harness cycle keeps failing, the weights job still lands and the failure shows."""
+    training = StubTrainingRuntime()
+    backends = {
+        WEIGHTS: _SlowDispatchedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _AwayBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends, training=training)
+    away = backends[HARNESS]
+    assert isinstance(away, _AwayBackend)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            dispatcher.accept_record(record)
+        deadline = time.monotonic() + 15
+        history: list[tuple[str | None, int]] = []
+        while time.monotonic() < deadline:
+            current = dispatcher.get_or_create_scenario("agent")
+            assert current is not None
+            history = [(row.component, row.step) for row in current.store.history()]
+            if (WEIGHTS, 1) in history:
+                break
+            time.sleep(0.05)
+        assert (WEIGHTS, 1) in history
+        time.sleep(0.5)
+        assert 1 <= away.attempts <= 3
+        assert dispatcher.build_training_status()["error"] == "agent: RuntimeError: proposer away"
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(tmp_path: Path) -> None:
+    """The harness trained on i1 through r1a while the weights trainer still holds i1; after a restart r1b is not resolved against it."""
+    dispatcher, _ = _dispatcher(tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        scenario.records.append(
+            AgentRecord.create(
+                scenario="agent",
+                request_type=RequestType.REPORT,
+                payload={"score": 0.5, "references": ["i1"]},
+                agent_record_id="r1b",
+                references=("i1",),
+            )
+        )
+        result = scenario.prepare_training_step(HARNESS)
+        assert result is not None
+        scenario.commit(result, component=HARNESS)
+        assert scenario.records.count("agent") == 3
+        assert scenario.prepare_training_step(HARNESS) is None
+        rebuilt = dispatcher._registry.reload("agent")
+        assert rebuilt.prepare_training_step(HARNESS) is None
+        assert "r1b" in rebuilt.trainer_for(HARNESS).releasable_agent_record_ids()
     finally:
         dispatcher.close()
 

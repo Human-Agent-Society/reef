@@ -127,17 +127,35 @@ class Scenario:
 
     @property
     def trainer(self) -> Trainer:
-        """Inspection-only view of the first trainer; the only one of a flat scenario.
+        """Inspection-only view of the trainer that steps the scenario; the only one of a flat scenario.
 
-        Every mutating path goes through a Scenario method so it is serialized
-        against rollback and commit by the committer lock; the one exception
-        is a local step of a scenario with several trainers, which runs outside
-        it and meets the commits made meanwhile at the commit boundary. Reading state
-        that is not part of a transaction (objective identity, consumption
+        The dispatched trainer when there is one, else the first with a
+        candidate backend, else the first: the status, the contract and the
+        undrained batch warning speak of the trainer that runs steps, not of
+        a component that only carries files. Every mutating path goes
+        through a Scenario method so it is serialized against rollback and
+        commit by the committer lock; the one exception is a local step of a
+        scenario with several trainers, which runs outside it and meets the
+        commits made meanwhile at the commit boundary. Reading state that is
+        not part of a transaction (objective identity, consumption
         watermarks, processor schema) is safe here; do not reserve batches,
         replace results, or compact through this handle.
         """
-        return self._trainers[0].trainer
+        stepping = self._stepping_trainers()
+        for bound in stepping:
+            backend = bound.trainer.candidate_backend
+            if backend is not None and backend.dispatched:
+                return bound.trainer
+        return stepping[0].trainer
+
+    @property
+    def is_job_reserved(self) -> bool:
+        """Whether a dispatched trainer holds a reserved batch: its job is out at the backend until commit or reject."""
+        for bound in self._trainers:
+            backend = bound.trainer.candidate_backend
+            if backend is not None and backend.dispatched and bound.trainer.pending_batch is not None:
+                return True
+        return False
 
     def trainer_for(self, component: str | None) -> Trainer:
         """The trainer evolving ``component``; ``None`` selects the first trainer, for scenario-wide operations."""

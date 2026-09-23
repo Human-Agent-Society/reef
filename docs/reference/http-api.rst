@@ -307,7 +307,11 @@ log move under ``<agent_record_dir>/archived/``, the recipe's own directories
 scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every release it published stays reachable. The
 base artifact, the shared head and releases other scenarios may fork from
-stay where they are. A step in flight for the scenario ends without a commit.
+stay where they are. A local step in flight for the scenario ends without a
+commit. While a weight training job of the scenario is out at its backend the
+request answers 409: the job could neither commit nor be acknowledged without
+its scenario, and its marker would keep inference admission closed for every
+scenario on the runtime. Retry once the job has committed or been rejected.
 Only a local artifact repository can be archived; a remote one answers 501.
 
 For a scenario that trains weights the deletion is Reef-side: the training

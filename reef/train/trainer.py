@@ -684,8 +684,10 @@ class Trainer:
                         return
                     if item.agent_record_id in consumed_ids:
                         # Still stored, already trained: this trainer has released it and says so
-                        # until every other trainer has too.
+                        # until every other trainer has too. The processor learns of it, so a report
+                        # that arrives later on this row is settled instead of resolved against it.
                         self._released_stored_ids.add(item.agent_record_id)
+                        self._processor.restore_consumed(item)
                         continue
                     if item.request_type in self.processor.required_request_types:
                         self._processor.ingest(item)

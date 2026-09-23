@@ -310,6 +310,9 @@ class DataProcessor:
         self._agent_record_ids -= agent_record_ids
         self._consumed_requests -= agent_record_ids
 
+    def restore_consumed(self, item: AgentRecord) -> None:
+        """Learn of a stored row a committed batch consumed before a restart; the trainer replays it, never ingests it."""
+
     def derivation_pending(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.
 
