@@ -39,7 +39,7 @@ driving a real coding agent binary per episode.
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError, read_opencode_storage, read_pi_session
+from reef.harness.episodes.trajectory import TrajectoryError, read_opencode_session, read_pi_session
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 
@@ -54,7 +54,7 @@ __all__ = [
     "TrajectoryError",
     "TrajectoryKeepError",
     "load_descriptor",
-    "read_opencode_storage",
+    "read_opencode_session",
     "read_pi_session",
     "render_composition",
     "run_episode",

@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 import time
 from pathlib import Path
@@ -20,11 +21,12 @@ from reef.harness.episodes.trajectory import (
     read_codex_session,
     read_deepseek_session,
     read_hermes_session,
-    read_opencode_storage,
+    read_opencode_session,
     read_pi_session,
     reader_for,
 )
 from reef.harness.tree.render import render_composition
+from reef.recipe.reefine import evolution
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -48,9 +50,30 @@ print(json.dumps({"type": "agent_end"}))
 sys.exit(3 if prompt == "fail" else 0)
 """
 
+#: The two tables of opencode 1.18.18's session store the reader reads, as the pinned binary creates them.
+OPENCODE_TABLES = """\
+CREATE TABLE `message` (
+  `id` text PRIMARY KEY,
+  `session_id` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL,
+  CONSTRAINT `fk_message_session_id_session_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON DELETE CASCADE
+);
+CREATE TABLE `part` (
+  `id` text PRIMARY KEY,
+  `message_id` text NOT NULL,
+  `session_id` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL,
+  CONSTRAINT `fk_part_message_id_message_id_fk` FOREIGN KEY (`message_id`) REFERENCES `message`(`id`) ON DELETE CASCADE
+);
+"""
+
 OPENCODE_FAKE = """\
 #!/usr/bin/env python3
-import json, os, sys
+import json, os, sqlite3, sys
 from pathlib import Path
 
 args = sys.argv[1:]
@@ -58,18 +81,49 @@ assert args[:3] == ["run", "--format", "json"] and "--auto" in args, args
 config_dir = Path(os.environ["OPENCODE_CONFIG_DIR"])
 config = json.loads((config_dir / "opencode.json").read_text())
 assert config["autoupdate"] is False and config["share"] == "disabled", config
-storage = Path(os.environ["XDG_DATA_HOME"]) / "opencode" / "storage" / "session" / "message" / "s1"
-storage.mkdir(parents=True)
-(storage / "msg_001.json").write_text(json.dumps({"role": "user", "text": args[-1]}))
-(storage / "msg_002.json").write_text(json.dumps({"role": "assistant", "text": "done"}))
-# Boot mutations of the rendered config dir, whitelisted by the quirks.
+# The session as opencode 1.18.18 stores it: a message row per turn, its pieces as part rows, and the JSON data
+# columns without the ids the other columns hold. A shell call and its answer take two assistant turns.
+data_dir = Path(os.environ["XDG_DATA_HOME"]) / "opencode"
+data_dir.mkdir(parents=True)
+database = sqlite3.connect(data_dir / "opencode.db")
+database.execute("PRAGMA journal_mode=WAL")
+database.executescript(OPENCODE_TABLES)
+shell = {"status": "completed", "input": {"command": "echo reef-ok"}, "output": "reef-ok\\n"}
+turns = [
+    ("msg_01", {"role": "user", "agent": "build"}, [{"type": "text", "text": args[-1]}]),
+    (
+        "msg_02",
+        {"parentID": "msg_01", "role": "assistant", "agent": "build", "finish": "tool-calls"},
+        [{"type": "step-start"}, {"type": "tool", "tool": "bash", "callID": "c1", "state": shell},
+         {"type": "step-finish", "reason": "tool-calls"}],
+    ),
+    (
+        "msg_03",
+        {"parentID": "msg_01", "role": "assistant", "agent": "build", "finish": "stop"},
+        [{"type": "step-start"}, {"type": "text", "text": "reef-ok"}, {"type": "step-finish", "reason": "stop"}],
+    ),
+]
+for turn, (message_id, message, parts) in enumerate(turns):
+    database.execute("INSERT INTO message VALUES (?, 'ses_01', ?, ?, ?)", (message_id, turn, turn, json.dumps(message)))
+    for index, part in enumerate(parts):
+        row = (f"prt_{turn}{index}", message_id, "ses_01", turn, turn, json.dumps(part))
+        database.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", row)
+database.commit()
+database.close()
+# Boot mutations of the rendered config dir, whitelisted by the quirks, and the npm cache of the boot install,
+# which npm keeps in npm_config_cache when it is set and in ~/.npm otherwise.
 (config_dir / ".gitignore").write_text("node_modules\\n")
 (config_dir / "node_modules").mkdir()
 (config_dir / "node_modules" / "dep.js").write_text("module.exports = {}\\n")
+npm_cache = Path(os.environ.get("npm_config_cache", Path.home() / ".npm"))
+(npm_cache / "_cacache").mkdir(parents=True)
+(npm_cache / "_cacache" / "index").write_text("entry\\n")
 # A file nothing declared: the residue scan must report it.
 (config_dir.parent / "stray.txt").write_text("leak\\n")
-print(json.dumps({"type": "done"}))
-"""
+print(json.dumps({"type": "text", "sessionID": "ses_01", "part": {"messageID": "msg_03", "type": "text", "text": "reef-ok"}}))
+""".replace(
+    "OPENCODE_TABLES", repr(OPENCODE_TABLES)
+)
 
 CODEX_FAKE = """\
 #!/usr/bin/env python3
@@ -168,8 +222,17 @@ def test_opencode_episode_whitelists_boot_mutations_and_reports_residue(tmp_path
     files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("opencode"))
     result = run_episode(get_adapter("opencode"), files, "list files", binary=fake_binary(tmp_path, OPENCODE_FAKE))
     assert result.exit_code == 0
-    assert [event["role"] for event in result.trajectory] == ["user", "assistant"]
-    assert result.residue == ("stray.txt",)  # boot mutations tolerated, the stray file is a finding
+    assert [event["role"] for event in result.trajectory] == ["user", "assistant", "assistant"]
+    assert result.trajectory[0]["content"] == [{"id": "prt_00", "type": "text", "text": "list files"}]
+    assert result.residue == ("stray.txt",)  # boot mutations and the npm cache tolerated, the stray file is a finding
+
+
+def test_opencode_episode_grades_the_final_answer_of_its_session(tmp_path: Path) -> None:
+    """The reader joins each message to its parts, so the grader finds the text of the last assistant turn."""
+    files = render_composition([], get_adapter("opencode"))
+    result = run_episode(get_adapter("opencode"), files, "Run it.", binary=fake_binary(tmp_path, OPENCODE_FAKE))
+    assert evolution.final_assistant_text(result.trajectory) == "reef-ok"
+    assert evolution.evaluate("[health] Run the shell command `echo reef-ok`.", result) == 1.0
 
 
 def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
@@ -319,6 +382,16 @@ def test_colliding_render_paths_raise_episode_error(tmp_path: Path) -> None:
 
 
 def test_opencode_reader_rejects_a_non_object_document(tmp_path: Path) -> None:
-    (tmp_path / "part.json").write_text("[1, 2, 3]")
-    with pytest.raises(TrajectoryError, match="not an event object"):
-        read_opencode_storage(tmp_path)
+    assert read_opencode_session(tmp_path) == ()  # no session database yet
+    (tmp_path / "opencode.db").write_text("not a database")
+    with pytest.raises(TrajectoryError, match="cannot be read"):
+        read_opencode_session(tmp_path)
+    (tmp_path / "opencode.db").unlink()
+    database = sqlite3.connect(tmp_path / "opencode.db")
+    database.executescript(OPENCODE_TABLES)
+    database.execute("INSERT INTO message VALUES ('msg_01', 'ses_01', 0, 0, '{\"role\": \"user\"}')")
+    database.execute("INSERT INTO part VALUES ('prt_01', 'msg_01', 'ses_01', 0, 0, '[1, 2, 3]')")
+    database.commit()
+    database.close()
+    with pytest.raises(TrajectoryError, match=r"part prt_01 .* is not an object"):
+        read_opencode_session(tmp_path)

@@ -28,24 +28,27 @@ opencode reads the frontmatter of a command or a skill with gray-matter,
 which strips a byte order mark, takes the text after the opening ``---`` as
 the name of another engine (JSON, JavaScript), reads to the end of the file
 when no line closes the block, and fails on YAML js-yaml cannot read, which
-opencode then reads again with its values that hold a colon rewritten. The
-check reads only the plain form, a ``---`` line, a YAML mapping with no tags
-and a closing ``---`` line, with js-yaml's types for plain values (``1e5`` is
-a number and ``yes`` a string), where both readers agree, and refuses every
-other form, so no command reaches opencode with an agent, a model or a name
-the check did not see. A command file's frontmatter ``name`` must be the
-file's own, since opencode files the command under that name, in place of
-the command of that name. A command's ``agent`` and ``default_agent`` must
-name an agent the run has, an agent must keep its own name, and a tree with
-no ``default_agent`` must keep an agent that is neither a subagent nor
-hidden, since opencode otherwise fails the command, or every run, with an
-opaque server error; a command field of the wrong type makes opencode refuse
-its whole configuration.
+opencode then reads again with its top level values that hold a colon
+rewritten as block scalars. The check reads the plain form, a ``---`` line, a
+YAML mapping with no tags and a closing ``---`` line, with js-yaml's types
+for plain values (``1e5`` is a number and ``yes`` a string), and reads a
+block js-yaml cannot read again with the same rewrite, so it sees the keys
+opencode sees. It refuses every other form, so no command reaches opencode
+with an agent, a model or a name the check did not see. A command file's
+frontmatter ``name`` must be the file's own, since opencode files the command
+under that name, in place of the command of that name. A command's ``agent``
+and ``default_agent`` must name an agent the run has, an agent must keep its
+own name, and a tree with no ``default_agent`` must keep an agent that is
+neither a subagent nor hidden, since opencode otherwise fails the command, or
+every run, with an opaque server error. A command field, or an agent's
+``disable``, ``hidden`` or ``mode``, of a type opencode's schema does not
+allow makes opencode refuse its whole configuration.
 """
 
 from __future__ import annotations
 
 import json
+import math
 import re
 from collections.abc import Collection, Hashable, Mapping
 from typing import ClassVar
@@ -106,6 +109,20 @@ JS_YAML_RESOLVERS = (
     ("tag:yaml.org,2002:merge", r"^(?:<<)$", ("<",)),
 )
 FRONTMATTER_FORM = "write the frontmatter as a --- line, a YAML mapping with no tags, and a closing --- line"
+#: The agent fields opencode's schema types that decide which agent starts a run: any other value fails its whole
+#: configuration.
+AGENT_FLAG_FIELDS = ("disable", "hidden")
+AGENT_MODES = ("subagent", "primary", "all")
+#: JavaScript's whitespace, which opencode's rewrite of frontmatter trims and matches as ``\s``; Python's differs at
+#: a few code points (U+FEFF, U+001C to U+001F, U+0085).
+JS_WHITESPACE = (
+    "\t\n\x0b\x0c\r \xa0\u1680" + "".join(map(chr, range(0x2000, 0x200B))) + "\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+JS_SPACE = f"[{re.escape(JS_WHITESPACE)}]"
+#: The frontmatter block opencode's rewrite reads, and a top level line it rewrites: a key, a colon and a value,
+#: where JavaScript's ``.`` stops at any line end.
+REWRITE_BLOCK = re.compile(r"---\r?\n(.*?)\r?\n---", re.DOTALL)
+REWRITE_LINE = re.compile(rf"([a-zA-Z_][a-zA-Z0-9_]*){JS_SPACE}*:{JS_SPACE}*([^\n\r\u2028\u2029]*)")
 
 cleanup_whitelist = (
     "opencode/.gitignore",
@@ -114,6 +131,10 @@ cleanup_whitelist = (
     "opencode/bun.lock",
     "opencode/node_modules/**",
 )
+
+
+class RefusedValueError(yaml.MarkedYAMLError):
+    """A value js-yaml reads that the check refuses to read another way, so opencode never rewrites the file for it."""
 
 
 class FrontmatterLoader(yaml.SafeLoader):
@@ -129,16 +150,23 @@ class FrontmatterLoader(yaml.SafeLoader):
     def compose_node(self, parent: yaml.Node | None, index: object) -> yaml.Node | None:
         event = self.peek_event()
         if isinstance(event, (yaml.ScalarEvent, yaml.CollectionStartEvent)) and event.tag is not None:
-            raise yaml.MarkedYAMLError(problem=f"a value has the tag {event.tag!r}", problem_mark=event.start_mark)
+            raise RefusedValueError(problem=f"a value has the tag {event.tag!r}", problem_mark=event.start_mark)
         return super().compose_node(parent, index)
 
     def construct_yaml_timestamp(self, node: yaml.ScalarNode) -> object:
         try:
             return super().construct_yaml_timestamp(node)
         except ValueError as error:
-            raise yaml.MarkedYAMLError(
+            raise RefusedValueError(
                 problem=f"the date {node.value!r} does not exist", problem_mark=node.start_mark
             ) from error
+
+    def construct_yaml_float(self, node: yaml.ScalarNode) -> float:
+        # js-yaml reads a float with only underscores after its dot (._e5) as parseFloat(".e5"), which is NaN, where
+        # PyYAML's float() fails.
+        if self.construct_scalar(node).replace("_", "").lower().startswith(".e"):
+            return math.nan
+        return super().construct_yaml_float(node)
 
     def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict[Hashable, object]:
         seen: set[str] = set()
@@ -155,6 +183,7 @@ class FrontmatterLoader(yaml.SafeLoader):
 for tag, pattern, first in JS_YAML_RESOLVERS:
     FrontmatterLoader.add_implicit_resolver(tag, re.compile(pattern), first)
 FrontmatterLoader.add_constructor("tag:yaml.org,2002:timestamp", FrontmatterLoader.construct_yaml_timestamp)
+FrontmatterLoader.add_constructor("tag:yaml.org,2002:float", FrontmatterLoader.construct_yaml_float)
 
 
 def check_binding_shape(config: Mapping[str, object]) -> None:
@@ -209,35 +238,84 @@ def check_command(where: str, command: Mapping[object, object], agents: Collecti
         check_agent_name(where, command["agent"], agents)
 
 
-def read_frontmatter(where: str, text: str) -> Mapping[object, object]:
-    """The keys of a markdown file's frontmatter as opencode reads them, empty when it has none.
+def rewritten_frontmatter(text: str) -> str:
+    """``text`` as opencode rewrites it after js-yaml fails on its frontmatter: each top level line whose value holds
+    a colon and is not quoted, empty or a block indicator becomes a block scalar holding that value."""
+    match = REWRITE_BLOCK.match(text)
+    if match is None:
+        return text
+    lines: list[str] = []
+    for line in re.split(r"\r?\n", match.group(1)):
+        stripped = line.strip(JS_WHITESPACE)
+        pair = REWRITE_LINE.fullmatch(line)
+        value = pair.group(2).strip(JS_WHITESPACE) if pair else ""
+        if (
+            pair is None
+            or stripped.startswith("#")
+            or re.match(JS_SPACE, line)
+            or value in ("", ">", "|")
+            or value.startswith(("'", '"'))
+            or ":" not in value
+        ):
+            lines.append(line)
+        else:
+            lines.extend((f"{pair.group(1)}: |-", f"  {value}"))
+    return text.replace(match.group(1), "\n".join(lines), 1)
 
-    gray-matter finds frontmatter only when the text starts with ``---`` and a fourth character other than ``-``,
-    and closes it at the first later line starting with ``---``. Every other form where it and this reader could
-    see different keys is refused rather than guessed at.
-    """
-    if text.startswith("\ufeff"):
-        raise RenderError(f"opencode {where} starts with a byte order mark; {FRONTMATTER_FORM}")
-    if not text.startswith("---") or text.startswith("----"):
-        return {}
+
+def frontmatter_block(where: str, text: str) -> str:
+    """The YAML of a frontmatter block as gray-matter cuts it: from the line after ``---`` to the next line that
+    starts with ``---``."""
     block = text[3:]
     first_line_end = block.find("\n")
     closing = block.find("\n---")
     if first_line_end == -1 or closing == -1:
         raise RenderError(f"opencode {where} frontmatter has no closing --- line; {FRONTMATTER_FORM}")
-    engine = block[:first_line_end].strip()
+    engine = block[:first_line_end].strip(JS_WHITESPACE)
     if engine:
         raise RenderError(f"opencode {where} frontmatter names the engine {engine!r} after ---; {FRONTMATTER_FORM}")
+    return block[first_line_end + 1 : closing]
+
+
+def read_frontmatter(where: str, text: str) -> Mapping[object, object]:
+    """The keys of a markdown file's frontmatter as opencode reads them, empty when it has none.
+
+    gray-matter finds frontmatter only when the text starts with ``---`` and a fourth character other than ``-``,
+    and closes it at the first later line starting with ``---``. When js-yaml cannot read the block, opencode reads
+    the file again with its values that hold a colon rewritten, and so does this reader. Every other form where it
+    and this reader could see different keys is refused rather than guessed at, a rewrite that changes nothing
+    included: opencode then reads the file with no keys at all.
+    """
+    if text.startswith("\ufeff"):
+        raise RenderError(f"opencode {where} starts with a byte order mark; {FRONTMATTER_FORM}")
+    if not text.startswith("---") or text.startswith("----"):
+        return {}
+    rewritten = rewritten_frontmatter(text)
+    retried = False
     try:
-        data = yaml.load(block[first_line_end + 1 : closing], Loader=FrontmatterLoader)
-    except yaml.YAMLError as error:
-        # A marked error counts lines from the block, which starts on the file's second line.
+        try:
+            data = yaml.load(frontmatter_block(where, text), Loader=FrontmatterLoader)
+        except yaml.YAMLError as error:
+            # js-yaml fails on this block too, unless the check itself refused a value js-yaml reads.
+            if isinstance(error, RefusedValueError) or rewritten == text:
+                raise
+            retried = True
+            data = yaml.load(frontmatter_block(where, rewritten), Loader=FrontmatterLoader)
+    except RenderError:
+        raise
+    except Exception as error:
+        # PyYAML's constructors can raise more than YAMLError, and deep nesting a RecursionError; a file the check
+        # cannot read is a refusal, never a crash of admission.
         if isinstance(error, yaml.MarkedYAMLError) and error.problem_mark is not None:
-            detail = f"{error.problem or error.context} at line {error.problem_mark.line + 2}"
+            detail = str(error.problem or error.context)
+            if not retried:
+                # A marked error counts lines from the block, which starts on the file's second line.
+                detail += f" at line {error.problem_mark.line + 2}"
         else:
-            detail = " ".join(str(error).split())
+            detail = " ".join(str(error).split()) or type(error).__name__
+        rewrite = " even with its values that hold ': ' rewritten as opencode rewrites them" if retried else ""
         raise RenderError(
-            f"opencode {where} frontmatter cannot be read: {detail}; {FRONTMATTER_FORM}, "
+            f"opencode {where} frontmatter cannot be read{rewrite}: {detail}; {FRONTMATTER_FORM}, "
             "quoting a value that holds ': '"
         ) from error
     if data is None:
@@ -262,15 +340,16 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
     for key in MODEL_CHOICE_KEYS:
         if key in config:
             raise RenderError(f"opencode composition must not set {key}: Reef's model binding chooses the model")
-    modes = dict(BUILTIN_AGENT_MODES)
-    disabled: set[str] = set()
-    hidden = set(BUILTIN_HIDDEN_AGENTS)
-    # ``mode`` is opencode's deprecated name for ``agent``; opencode folds its entries in as primary agents.
+    # ``mode`` is opencode's deprecated name for ``agent``: opencode merges its entries over the agent entries of
+    # the same name as primary agents, after its schema has checked both.
+    merged: dict[str, dict[str, object]] = {}
     for section in ("agent", "mode"):
-        entries = config.get(section)
-        for name, agent in entries.items() if isinstance(entries, dict) else ():
+        entries = config.get(section, {})
+        if not isinstance(entries, dict):
+            raise RenderError(f"opencode {section} must be an object of agents, got {entries!r}")
+        for name, agent in entries.items():
             if not isinstance(agent, dict):
-                continue
+                raise RenderError(f"opencode {section} {name!r} must be an object, got {agent!r}")
             if "model" in agent:
                 raise RenderError(
                     f"opencode {section} {name!r} must not choose a model: Reef's model binding chooses it"
@@ -281,15 +360,29 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
                     f"opencode {section} {name!r} must not set name {agent['name']!r}: opencode then finds no agent "
                     "by that name and fails a run that uses it"
                 )
-            # An agent opencode does not build in takes either role unless its mode says which.
-            modes[name] = "primary" if section == "mode" else str(agent.get("mode", modes.get(name, "all")))
-            if agent.get("disable") is True:
-                disabled.add(name)
-            if agent.get("hidden") is True:
-                hidden.add(name)
-            elif agent.get("hidden") is False:
-                hidden.discard(name)
-    agents = {name: mode for name, mode in modes.items() if name not in disabled}
+            for field in AGENT_FLAG_FIELDS:
+                if field in agent and not isinstance(agent[field], bool):
+                    raise RenderError(
+                        f"opencode {section} {name!r} field {field!r} must be a bool, got {agent[field]!r}"
+                    )
+            if "mode" in agent and agent["mode"] not in AGENT_MODES:
+                raise RenderError(
+                    f"opencode {section} {name!r} field 'mode' must be one of {', '.join(AGENT_MODES)}, "
+                    f"got {agent['mode']!r}"
+                )
+            merged[name] = {**merged.get(name, {}), **agent, **({"mode": "primary"} if section == "mode" else {})}
+    # opencode drops a disabled agent, and an agent it does not build in takes either role unless its mode says which.
+    agents = dict(BUILTIN_AGENT_MODES)
+    hidden = set(BUILTIN_HIDDEN_AGENTS)
+    for name, agent in merged.items():
+        if agent.get("disable") is True:
+            agents.pop(name, None)
+            continue
+        agents[name] = str(agent.get("mode", agents.get(name, "all")))
+        if agent.get("hidden") is True:
+            hidden.add(name)
+        elif agent.get("hidden") is False:
+            hidden.discard(name)
     if "default_agent" in config:
         default = config["default_agent"]
         check_agent_name("default_agent", default, agents)

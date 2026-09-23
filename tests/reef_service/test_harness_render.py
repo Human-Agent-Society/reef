@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import tomllib
 from pathlib import Path
@@ -13,6 +14,7 @@ import yaml
 import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
+from reef.harness.adapters.opencode.quirks import read_frontmatter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.render import RenderError, render_composition
@@ -465,8 +467,17 @@ def test_opencode_runs_offer_only_the_binding_provider() -> None:
         ('---json\n{"model": "opencode/big-pickle"}\n---\nSay hi.', "names the engine 'json' after ---"),
         ("---js\n{agent: 'ghost'}\n---\nSay hi.", "names the engine 'js' after ---"),
         ("---\nagent: ghost\n", "has no closing --- line"),
-        ("---\nagent: ghost\ndescription: note: more\n---\nSay hi.", "mapping values are not allowed here at line 3"),
+        ("---\nagent: ghost\nallowed-tools: a: b\n---\nSay hi.", "mapping values are not allowed here at line 3"),
+        (
+            "---\nagent: ghost\ndescription: x\n  y: a: b\n---\nSay hi.",
+            "mapping values are not allowed here at line 4",
+        ),
         ("---\nagent: ghost\nagent: build\n---\nSay hi.", "the key 'agent' appears twice at line 3"),
+        (
+            "---\ndescription: a: b\nagent: ghost\nagent: build\n---\nSay hi.",
+            "cannot be read even with its values that hold ': ' rewritten as opencode rewrites them: the key 'agent'",
+        ),
+        ("---\ndescription: " + "[" * 5000 + "]" * 5000 + "\n---\nSay hi.", "cannot be read: maximum recursion depth"),
         ("---\n- build\n---\nSay hi.", "frontmatter is a list"),
         ("---\ndescription: 5\n---\nSay hi.", "field 'description' must be a str, got 5"),
         ("---\nsubtask: yes\n---\nSay hi.", "field 'subtask' must be a bool, got 'yes'"),
@@ -477,11 +488,13 @@ def test_opencode_runs_offer_only_the_binding_provider() -> None:
 )
 def test_opencode_refuses_frontmatter_it_cannot_read_as_opencode_does(text: str, message: str) -> None:
     """opencode's gray-matter strips a byte order mark, takes text after --- as another engine, reads to the end of
-    the file with no closing line, and fails on a repeated key and on YAML that opencode then rewrites and retries;
-    for each form a check that read the file its own way would miss the agent or the model opencode sees. A field
-    of the wrong type, with js-yaml's booleans (true and false only), makes opencode refuse its whole config. js-yaml
+    the file with no closing line, and fails on a repeated key and on YAML its rewrite of values that hold ': '
+    cannot repair (a key with a dash, an indented line), where opencode reads the file with no keys or skips it; for
+    each form a check that read the file its own way would miss the agent or the model opencode sees. A field of
+    the wrong type, with js-yaml's booleans (true and false only), makes opencode refuse its whole config. js-yaml
     checks a tag against its value and moves a date that does not exist forward to a real one, where PyYAML's
-    constructors fail, so a tagged value and such a date are refused rather than read another way."""
+    constructors fail, so a tagged value and such a date are refused rather than read another way, and so is a
+    value nested too deep for PyYAML."""
     descriptor = get_adapter("opencode")
     with pytest.raises(RenderError, match=f"opencode command 'hi' .*{message}"):
         render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
@@ -507,6 +520,30 @@ def test_opencode_admits_the_frontmatter_forms_it_reads_as_opencode_does() -> No
     )
 
 
+def test_opencode_reads_frontmatter_again_as_opencode_rewrites_it() -> None:
+    """When js-yaml cannot read a block, opencode rewrites each top level value that holds ': ' and is not quoted as
+    a block scalar and reads the file again; render reads the same keys, so it admits a file opencode loads and
+    still sees an agent, a model or a name next to such a value."""
+    descriptor = get_adapter("opencode")
+    chat = "Enter chat mode: conversation with web search only, no other tools"
+    for text, description in (
+        (f"---\ndescription: {chat}\nagent: build\n---\nSay hi.", chat),
+        ("---\r\ndescription: a: b\r\nagent: plan\r\n---\r\nSay hi.", "a: b"),
+        ("---\ndescription: a: 'b'\n---\nSay hi.", "a: 'b'"),
+        ("---\ndescription :  a: b  \n# a: note\n---\nSay hi.", "a: b"),
+    ):
+        assert read_frontmatter("command 'hi'", text)["description"] == description
+        render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
+    for text, message in (
+        ("---\nagent: ghost\ndescription: note: more\n---\nSay hi.", "names agent 'ghost'"),
+        ("---\nmodel: opencode/big-pickle\ndescription: note: more\n---\nSay hi.", "must not choose a model"),
+        ("---\nname: reefine\ndescription: note: more\n---\nSay hi.", "must not set name 'reefine'"),
+        ("---\ndescription: !!str a: b\n---\nSay hi.", "a value has the tag"),
+    ):
+        with pytest.raises(RenderError, match=f"opencode command 'hi' .*{message}"):
+            render_composition([("agent_command", {"name": "hi", "text": text})], descriptor)
+
+
 @pytest.mark.parametrize(
     ("value", "number"),
     [
@@ -525,12 +562,16 @@ def test_opencode_admits_the_frontmatter_forms_it_reads_as_opencode_does() -> No
         ("=", None),
         ("-.nan", None),
         ("2001-1-1", None),
+        ("._e0", math.nan),
+        (" ._e-5 ", math.nan),
+        (".__e9", math.nan),
     ],
 )
 def test_opencode_reads_frontmatter_values_as_js_yaml_does(value: str, number: float | None) -> None:
     """js-yaml 3, opencode's frontmatter reader, reads 1e5 and 1.5e3 as numbers, which PyYAML reads as strings, and
-    09, 01.5, 1_, 0b_ and = as strings, which PyYAML reads as numbers or cannot read. A number in a string field
-    makes opencode refuse its whole config, so render refuses exactly the values opencode reads as numbers."""
+    09, 01.5, 1_, 0b_ and = as strings, which PyYAML reads as numbers or cannot read. It reads ._e0 as NaN, where
+    PyYAML's float constructor fails. A number in a string field makes opencode refuse its whole config, so render
+    refuses exactly the values opencode reads as numbers."""
     descriptor = get_adapter("opencode")
     for field in ("description", "variant"):
         nodes = [("agent_command", {"name": "hi", "text": f"---\n{field}: {value}\n---\nSay hi."})]
@@ -586,6 +627,32 @@ def test_opencode_tree_keeps_an_agent_that_starts_a_run() -> None:
         render({"agent": {"build": {"name": "ghost"}}})
     with pytest.raises(RenderError, match="opencode mode 'chat' must not set name 'talk'"):
         render({"mode": {"chat": {"prompt": "You chat.", "name": "talk"}}})
+
+
+def test_opencode_reads_agent_flags_with_the_types_its_schema_allows() -> None:
+    """opencode's schema allows only a bool for an agent's disable and hidden and only subagent, primary or all for
+    its mode, in the agent and the mode sections, and refuses its whole config otherwise, so render refuses these
+    rather than read null as a primary agent. opencode merges a mode entry over the agent entry of the same name,
+    so a mode entry can turn a disabled agent back on."""
+    descriptor = get_adapter("opencode")
+
+    def render(data: dict) -> None:
+        render_composition([("config", {"data": data})], descriptor)
+
+    off = {"build": {"disable": True}, "plan": {"disable": True}}
+    render({"agent": off, "mode": {"build": {"disable": False}}})
+    for data, message in (
+        ({"agent": {"build": {"disable": 1}, "plan": {"disable": 1}}}, "agent 'build' field 'disable' must be a bool"),
+        ({"agent": {**off, "general": {"mode": None}}}, "agent 'general' field 'mode' must be one of"),
+        ({"agent": {**off, "chat": {"mode": "secondary"}}}, "agent 'chat' field 'mode' must be one of"),
+        ({"default_agent": "general", "agent": {"general": {"mode": None}}}, "agent 'general' field 'mode' must be"),
+        ({"agent": {"chat": {"hidden": "yes"}}}, "agent 'chat' field 'hidden' must be a bool"),
+        ({"mode": {"chat": {"disable": 1}}}, "mode 'chat' field 'disable' must be a bool"),
+        ({"agent": {"build": None}}, "agent 'build' must be an object"),
+        ({"agent": []}, "agent must be an object of agents"),
+    ):
+        with pytest.raises(RenderError, match=f"opencode {message}"):
+            render(data)
 
 
 def test_opencode_default_agent_must_start_a_run() -> None:
