@@ -2584,7 +2584,7 @@ def test_update_installs_into_the_install_root_when_the_composition_directory_is
     """A session can replace the composition directory with a link to a directory elsewhere; ``update`` still runs
     the install for the install root, whose install then deals with that link, never for the parent of the link's
     target."""
-    reef = _ReleasesReef([_row("v1")], install="#!/bin/sh\nprintf '%s\\n' \"$1\" > \"$1/dest-seen\"\n")
+    reef = _ReleasesReef([_row("v1")], install='#!/bin/sh\nprintf \'%s\\n\' "$1" > "$1/dest-seen"\n')
     compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
     elsewhere = tmp_path / "elsewhere"
     elsewhere.mkdir()
