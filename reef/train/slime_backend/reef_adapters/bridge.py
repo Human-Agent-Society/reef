@@ -196,13 +196,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         prior_marker: Mapping[str, Any] | None,
     ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
         scenario = self._job_scenario(payload)
+        # Reef numbers a job by its scenario step, which other scenarios and the other components of a
+        # composite also advance; the bridge's checkpoint index stays one monotonic sequence of its own.
         scenario_step = rollout_id
-        if scenario is not None:
-            # Scenario steps are per scenario; the bridge's checkpoint index
-            # stays one monotonic sequence across all of them.
-            rollout_id = self._next_rollout_id
-        elif rollout_id != self._next_rollout_id:
-            raise RuntimeError(f"expected rollout {self._next_rollout_id}, got {rollout_id}")
+        rollout_id = self._next_rollout_id
         max_staleness = _max_staleness(payload)
         checkpoint = Path(self._checkpoint_path(rollout_id))
         if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
@@ -243,7 +240,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             packed = self._batch_processor.prepare_external_train_data(rollout_data)
             yield _SlimePreparedTrainingJob(
                 self,
-                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step if scenario else None),
+                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step),
                 job_id=job_id,
                 rollout_data=rollout_data,
                 packed=packed,

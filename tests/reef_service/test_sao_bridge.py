@@ -17,6 +17,7 @@ import pytest
 import ray
 from reef_service.slime_coordinator import build_slime_coordinator
 
+from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, read_marker
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 
@@ -379,6 +380,25 @@ def test_sao_critic_only_warmup_commits_without_moving_the_policy(tmp_path, _loc
     assert len(critic_group.train_calls) == 2
     assert actor_group.train_calls == []
     assert result.metrics["sao/actor_trained"] == 0
+
+
+@pytest.mark.unit
+def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_path, _local_ray_get) -> None:
+    # The other components of a composite advance the scenario step between two weight steps.
+    actor, actor_group, _, payload = _sao_actor(tmp_path)
+
+    first = _execute_and_update_weights(actor, payload)
+    actor.acknowledge_training_commit(first.training_job_id)
+    later = _execute_and_update_weights(
+        actor, {**payload, "rollout_id": 4, "expected_runtime_load_id": first.runtime_load_id}
+    )
+
+    assert (first.outcome, later.outcome) == ("complete", "complete")
+    assert [rollout_id for rollout_id, _ in actor_group.train_calls] == [0, 1]
+    assert actor_group.saved_model_rollouts == [0, 1]
+    marker = read_marker(tmp_path / LATEST_JOB_MARKER_FILENAME)
+    assert (marker["rollout_id"], marker["scenario_step"]) == (1, 4)
+    assert actor.health()["training_job"]["rollout_id"] == 4
 
 
 @pytest.mark.unit

@@ -248,6 +248,15 @@ def test_scenario_steps_can_use_a_separate_global_checkpoint_index(backend):
     assert (marker["rollout_id"], marker["scenario"], marker["scenario_step"]) == (12, "scenario-a", 0)
 
 
+def test_scenario_steps_travel_beside_the_global_checkpoint_index(backend):
+    # The other components of a composite advance the scenario step between two weight steps.
+    backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path, scenario_step=4)
+    coordinator(backend).execute({**PAYLOAD, "rollout_id": 4})
+    marker = markers.read_marker(backend.path)
+    assert (marker["rollout_id"], marker["scenario_step"]) == (1, 4)
+    assert "scenario" not in marker
+
+
 @pytest.mark.parametrize("invalid", [-1, True, "0", None])
 def test_invalid_step_is_rejected_before_preparation(backend, invalid):
     with pytest.raises(ValueError, match="rollout_id"):

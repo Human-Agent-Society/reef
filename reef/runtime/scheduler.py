@@ -506,7 +506,10 @@ class TrainingExecution:
         if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
             running["parent_runtime_load_id"] = parent_runtime_load_id
         if checkpoint.scenario is not None:
-            running.update(scenario=checkpoint.scenario, scenario_step=checkpoint.scenario_step)
+            running["scenario"] = checkpoint.scenario
+        if checkpoint.scenario_step is not None:
+            # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
+            running["scenario_step"] = checkpoint.scenario_step
         store.write(running)
         self._state.phase = "training"
         try:
@@ -875,8 +878,8 @@ class TrainingCoordinator:
         training_job.update(
             status=marker["status"],
             training_job_id=marker["job_id"],
-            # Reef reasons in scenario steps; in per-scenario mode the
-            # marker's rollout id is the bridge-global checkpoint index.
+            # Reef reasons in scenario steps; the marker's rollout id is the
+            # backend's own checkpoint index (older markers carry only that).
             rollout_id=marker.get("scenario_step", marker["rollout_id"]),
             runtime_load_id=marker.get("runtime_load_id"),
             commit_acknowledged=marker.get("commit_acknowledged", False),

@@ -214,7 +214,7 @@ class PreparedTrainingStep:
 
 @dataclass(frozen=True)
 class TrainingCheckpoint:
-    """Backend-selected checkpoint index and path, optionally scoped to a scenario."""
+    """Backend-selected checkpoint index and path, with the scenario step it trained and optionally its scenario."""
 
     rollout_id: int
     path: Path
@@ -224,17 +224,12 @@ class TrainingCheckpoint:
     def __post_init__(self) -> None:
         if not isinstance(self.rollout_id, int) or isinstance(self.rollout_id, bool) or self.rollout_id < 0:
             raise ValueError("checkpoint rollout_id must be non-negative")
-        if self.scenario is not None:
-            if not isinstance(self.scenario, str) or not self.scenario:
-                raise ValueError("checkpoint scenario must be non-empty")
-            if (
-                not isinstance(self.scenario_step, int)
-                or isinstance(self.scenario_step, bool)
-                or self.scenario_step < 0
-            ):
-                raise ValueError("checkpoint scenario_step must be non-negative")
-        elif self.scenario_step is not None:
-            raise ValueError("checkpoint scenario_step requires a scenario")
+        if self.scenario is not None and (not isinstance(self.scenario, str) or not self.scenario):
+            raise ValueError("checkpoint scenario must be non-empty")
+        if (self.scenario is not None or self.scenario_step is not None) and (
+            not isinstance(self.scenario_step, int) or isinstance(self.scenario_step, bool) or self.scenario_step < 0
+        ):
+            raise ValueError("checkpoint scenario_step must be non-negative")
 
 
 @dataclass(frozen=True)
