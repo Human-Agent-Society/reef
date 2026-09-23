@@ -153,7 +153,13 @@ def _install_metric_capture() -> None:
 
 
 def _install_adaptive_kl_telemetry(args) -> None:
-    """Observe Slime's raw reference-policy ``rollout_data[\"kl\"]``."""
+    """Observe Slime raw reference-policy ``rollout_data["kl"]``.
+
+    Slime commit ``045310b2`` (PR #2114) keeps this tensor unscaled while
+    constructing PPO reward-shaping rewards. Reef records it after the
+    advantage pass, so telemetry must not consume a beta-scaled reward tensor
+    as if it were raw KL.
+    """
     if getattr(args, "adaptive_kl_mode", "off") == "off":
         return
 
