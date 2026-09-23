@@ -129,6 +129,7 @@ class CompositeRecipe(Recipe):
                 )
         # Resolve the deployment's runtime once, so the composite and every component share it.
         runtime = cls._resolve_runtime(environ, runtime)
+        configured_mode = config.get("data", {}).get("training_mode")
         components: dict[str, Recipe] = {}
         for component, component_config in raw.items():
             if not isinstance(component_config, Mapping):
@@ -136,6 +137,11 @@ class CompositeRecipe(Recipe):
             cls._refuse_checkpoint_cadence(component_config, f"components.{component}")
             merged = dict(component_config)
             merged.setdefault("model", dict(config.get("model", {})))
+            if configured_mode is not None:
+                # The composite's mode is every component's mode: a component sets its own only to disagree.
+                data = dict(merged.get("data") or {})
+                data.setdefault("training_mode", configured_mode)
+                merged["data"] = data
             settings = recipe_config_from_mapping(merged)
             recipe_class = recipe_class_for(settings["implementation"])
             if recipe_class is None:
@@ -267,6 +273,9 @@ class CompositeRecipe(Recipe):
     ) -> tuple[ComponentTrainer, ...]:
         trainers = []
         for component, recipe in self.components.items():
+            if type(recipe).build is Recipe.build and recipe.training_mode != "auto":
+                # A component that runs no step has no mode to run in: its bare processor takes records in auto.
+                recipe = replace(recipe, training_mode="auto")
             trainer = recipe.build(
                 scenario,
                 records,

@@ -313,6 +313,9 @@ class DataProcessor:
     def restore_consumed(self, item: AgentRecord) -> None:
         """Learn of a stored row a committed batch consumed before a restart; the trainer replays it, never ingests it."""
 
+    def consumed_restored(self, agent_record_ids: frozenset[str]) -> None:
+        """The replay is over: the rows committed batches consumed are trained from now on, not live."""
+
     def derivation_pending(self) -> bool:
         """Whether background derivation could flip ``ready`` without records.
 

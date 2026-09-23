@@ -835,3 +835,34 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         assert contract["processor"] == type(harness.processor).__name__
     finally:
         dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_composite_mode_is_every_components_mode_and_a_stepless_component_runs_auto(tmp_path: Path) -> None:
+    """The documented composite takes instructions from its config: the mode reaches every component, and the
+    config component, which runs no step, keeps its bare processor in auto."""
+    recipe = build_recipe(
+        "reef.recipe.composite:CompositeRecipe",
+        {},
+        config={
+            "implementation": "reef.recipe.composite:CompositeRecipe",
+            "model": {"path": "served-model"},
+            "data": {"training_mode": "hybrid"},
+            "components": {
+                "harness": {"implementation": "reef_service.test_composite_recipe:_HybridTreeRecipe"},
+                "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
+            },
+        },
+    )
+    assert isinstance(recipe, CompositeRecipe)
+    assert recipe.training_mode == "hybrid"
+    assert [component.training_mode for component in recipe.components.values()] == ["hybrid", "hybrid"]
+    dispatcher = _serve(recipe, tmp_path)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        assert scenario.training_mode == "hybrid"
+        assert scenario.trainer_for("harness").training_mode == "hybrid"
+        assert scenario.trainer_for("config").training_mode == "auto"
+    finally:
+        dispatcher.close()

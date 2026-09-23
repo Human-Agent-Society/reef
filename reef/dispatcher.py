@@ -37,6 +37,7 @@ from reef.observability import (
 from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
+from reef.runtime.recovery import marker_in_flight
 from reef.scenario.registry import ScenarioRegistry
 from reef.scenario.scenario import Scenario, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
@@ -290,7 +291,7 @@ class Dispatcher:
             if not self._registry.has(scenario):
                 raise UnknownScenario(f"unknown scenario {scenario!r}")
             loaded = self._registry.get_optional(scenario)
-            if loaded is not None and loaded.is_job_reserved:
+            if (loaded is not None and loaded.is_job_reserved) or self.training_job_in_flight(scenario):
                 # The backend's job would outlive its scenario: nothing could commit or acknowledge it, and
                 # its marker keeps inference admission closed for every scenario on the runtime.
                 raise ScenarioBusy(
@@ -303,6 +304,7 @@ class Dispatcher:
             self._record_training_error(scenario, None, source=None)
             with self._training.lock:
                 self._training.failure_counts.pop(scenario, None)
+                self._training.deferred_reloads.discard(scenario)
             if dropped is not None:
                 for bound in dropped.component_trainers:
                     backend = bound.trainer.candidate_backend
@@ -312,6 +314,23 @@ class Dispatcher:
             archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
         self._registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}
+
+    def training_job_in_flight(self, scenario: str) -> bool:
+        """Whether the training runtime's durable job marker names a job of ``scenario`` still out.
+
+        A loaded instance knows its reserved batch; the marker also covers a
+        scenario whose turn failed and was rebuilt, or one not loaded yet,
+        whose job the backend still holds. A marker that names no owner
+        counts for every scenario on the runtime.
+        """
+        runtime = self._recipe.training_runtime
+        if runtime is None:
+            return False
+        marker = runtime.training_job_status()
+        if not marker_in_flight(marker):
+            return False
+        owner = marker.get("scenario") if marker is not None else None
+        return owner is None or owner == scenario
 
     def _archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
@@ -724,16 +743,23 @@ class Dispatcher:
                 return
             self._reload_with_instruction_failures(scenario, current)
 
-    def reload_deferred(self, scenario: str) -> None:
-        """Rebuild a scenario whose local cycle failed under the dispatched job that has just landed."""
+    def reload_deferred(self, scenario: str, current: Scenario) -> bool:
+        """Rebuild a scenario whose earlier local cycle failed under a job, once no job is out; True when rebuilt.
+
+        Called by a local worker under the scenario's cycle lock, so the
+        rebuild never lands under a sibling cycle that is evaluating on the
+        instance it replaces.
+        """
         with self._training.lock:
             if scenario not in self._training.deferred_reloads:
-                return
-            self._training.deferred_reloads.discard(scenario)
+                return False
         with self._registry.lock_for(scenario):
-            current = self._registry.get_optional(scenario)
-            if current is not None:
-                self._reload_with_instruction_failures(scenario, current)
+            if self._registry.get_optional(scenario) is not current or current.is_job_reserved:
+                return False
+            with self._training.lock:
+                self._training.deferred_reloads.discard(scenario)
+            self._reload_with_instruction_failures(scenario, current)
+        return True
 
     def _recover_failed_step(
         self, scenario: str, current: Scenario, cause: Exception, component: str | None = None
@@ -807,6 +833,9 @@ class Dispatcher:
                 with self._training.lock:
                     self._training.stood_aside.add(key)
                 return False
+            if self.reload_deferred(scenario, current):
+                # The rebuilt instance holds this worker's rows unread: look again on it.
+                return True
             try:
                 result = current.prepare_training_step(component)
             except Exception as exc:
@@ -985,15 +1014,11 @@ class Dispatcher:
             batch = current.reserve_training_batch(component)
         if batch is None:
             return False
-        landed = False
         try:
-            progressed = self._run_dispatched_turn(current, component, backend, batch)
-            landed = True
-            return progressed
+            return self._run_dispatched_turn(current, component, backend, batch)
         finally:
-            if landed:
-                self.reload_deferred(name)
-            # Local cycles that stood aside or yielded for the job run now, on every scenario, whatever the outcome.
+            # Local cycles that stood aside or yielded for the job run now, on every scenario, whatever the
+            # outcome; a cycle whose reload waited for the job rebuilds the scenario as its first act.
             self.wake_local_workers()
 
     def _run_dispatched_turn(

@@ -442,9 +442,13 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         )
 
     def restore_consumed(self, item: AgentRecord) -> None:
-        """A consumed inference still stored is a trained source: a later report on it is settled, not resolved."""
+        """A consumed inference still stored stays in view: a report replayed after it resolves as it did before."""
         if item.request_type is RequestType.INFERENCE:
-            self._trained_sources.add(item.agent_record_id)
+            self._inferences[item.agent_record_id] = item
+
+    def consumed_restored(self, agent_record_ids: frozenset[str]) -> None:
+        """The consumed inferences are trained sources now: a report arriving on one is settled, not resolved."""
+        self._trained_sources.update(record_id for record_id in agent_record_ids if record_id in self._inferences)
 
     def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
         super().compaction_applied(agent_record_ids)

@@ -5,7 +5,7 @@ from __future__ import annotations
 import threading
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Hashable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,6 +21,7 @@ from reef.core.requirements import required_by
 from reef.dispatcher import Dispatcher
 from reef.observability import ExperimentTracker, NullExperimentLogger
 from reef.recipe import Recipe
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
@@ -37,6 +38,7 @@ from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 from reef.train.processors.base import DataProcessor
+from reef.train.processors.reported import GroupDecision, ReportContext
 
 from ._threshold_processor import ThresholdProcessor
 from .runtime_stubs import StubTrainingRuntime
@@ -123,6 +125,20 @@ class _AwayBackend(_ComponentBackend):
     def prepare_step(self, batch, state, scenario_step):
         self.attempts += 1
         raise RuntimeError("proposer away")
+
+
+class _FlakyBackend(_ComponentBackend):
+    """A local cycle whose backend fails once, then answers."""
+
+    def __init__(self, component: str, artifact_dir: Path) -> None:
+        super().__init__(component, artifact_dir)
+        self.failures_left = 1
+
+    def prepare_step(self, batch, state, scenario_step):
+        if self.failures_left:
+            self.failures_left -= 1
+            raise RuntimeError("proposer away once")
+        return super().prepare_step(batch, state, scenario_step)
 
 
 class _DispatchedBackend(_ComponentBackend):
@@ -683,14 +699,237 @@ def test_a_local_failure_under_a_dispatched_job_reloads_once_the_job_has_landed(
         assert dispatcher._registry.get_optional("agent") is scenario
         assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
         assert [row["component"] for row in scenario.releases() if row["operation"] == "training"] == [WEIGHTS]
-        dispatcher.reload_deferred("agent")
+        # The next local cycle rebuilds the scenario as its first act, then looks again on the new instance.
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
         rebuilt = dispatcher._registry.get_optional("agent")
         assert rebuilt is not None and rebuilt is not scenario
         assert rebuilt.scenario_step == 1
-        dispatcher.reload_deferred("agent")
-        assert dispatcher._registry.get_optional("agent") is rebuilt
+        # With no job out, a failure reloads at once.
+        with pytest.raises(RuntimeError, match="proposer away"):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        assert dispatcher._registry.get_optional("agent") is not rebuilt
     finally:
         dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_deferred_reload_never_lands_under_a_cycle_that_runs_on_the_instance(tmp_path: Path) -> None:
+    """A cycle woken while the job is still out commits on the instance; the rebuild waits for the cycle after."""
+    backends = {
+        WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _FlakyBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        with pytest.raises(RuntimeError, match="away once"):
+            dispatcher._process_local_backend_step("agent", HARNESS)
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        assert dispatcher._registry.get_optional("agent") is scenario
+        assert [row["component"] for row in scenario.releases() if row["operation"] == "training"] == [HARNESS]
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        rebuilt = dispatcher._registry.get_optional("agent")
+        assert rebuilt is not None and rebuilt is not scenario
+        assert [row["component"] for row in rebuilt.releases() if row["operation"] == "training"] == [WEIGHTS, HARNESS]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_deleting_a_scenario_whose_job_marker_is_out_at_the_backend_waits(tmp_path: Path, monkeypatch: Any) -> None:
+    """The backend's marker outlives a rebuilt or unloaded instance; the delete reads it, not the reserved batch."""
+    training = StubTrainingRuntime()
+    dispatcher, _ = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"), training=training)
+    try:
+        assert dispatcher.get_or_create_scenario("agent") is not None
+        marker: dict[str, Any] = {"status": "CHECKPOINT", "training_job_id": "job-1", "scenario": "agent"}
+        monkeypatch.setattr(training, "training_job_status", lambda: marker)
+        with pytest.raises(ScenarioBusy, match="training job is out"):
+            dispatcher.delete_scenario("agent")
+        marker["scenario"] = "other"
+        assert dispatcher.delete_scenario("agent")["scenario"] == "agent"
+        assert dispatcher.get_or_create_scenario("again") is not None
+        marker = {"status": "COMPLETE", "training_job_id": "job-2", "commit_acknowledged": False}
+        with pytest.raises(ScenarioBusy, match="training job is out"):
+            dispatcher.delete_scenario("again")
+        marker["commit_acknowledged"] = True
+        assert dispatcher.delete_scenario("again")["scenario"] == "again"
+    finally:
+        dispatcher.close()
+
+
+class _GroupedProcessor(ThresholdProcessor):
+    """Reports batch by the group named in their metadata; a group is ready at two members."""
+
+    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        return context.report.payload["metadata"]["group"], None
+
+    def decide_group(self, key: Hashable, items: tuple[Any, ...]) -> GroupDecision:
+        return GroupDecision.READY if len(items) >= 2 else GroupDecision.INCOMPLETE
+
+
+@dataclass(frozen=True)
+class _GroupedRecipe(_TwoTrainerRecipe):
+    """The two trainer recipe whose harness batches reports by group."""
+
+    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+        def factory_for(component: str):
+            processor = _GroupedProcessor if component == HARNESS else ThresholdProcessor
+            return lambda context: processor(context.with_config({"batch_size": 1}))
+
+        return tuple(
+            ComponentTrainer(
+                component,
+                Trainer.build(
+                    scenario,
+                    records,
+                    processor_factory=factory_for(component),
+                    candidate_backend=backend,
+                    algorithm_state=algorithm_states.get(component),
+                    experiment_logger=experiment_logger,
+                ),
+            )
+            for component, backend in self.backends.items()
+        )
+
+
+def _grouped_report(record_id: str, reference: str, group: str) -> AgentRecord:
+    return AgentRecord.create(
+        scenario="agent",
+        request_type=RequestType.REPORT,
+        payload={"score": 1.0, "references": [reference], "metadata": {"group": group}},
+        agent_record_id=record_id,
+        references=(reference,),
+    )
+
+
+@pytest.mark.unit
+def test_a_report_live_in_an_incomplete_group_before_a_restart_still_trains_after_it(tmp_path: Path) -> None:
+    """The replay rebuilds the live state as it was: a report ingested before its source trained stays live."""
+    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    records = tmp_path / "records"
+    dispatcher = Dispatcher(
+        _GroupedRecipe(backends=backends),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=records,
+        scenario_storage=SQLiteScenarioStorage(records),
+    )
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2, 3):
+            scenario.records.append(_records(step)[0])
+        scenario.records.append(_grouped_report("r1c", "i1", "B"))
+        scenario.records.append(_grouped_report("r1a", "i1", "A"))
+        scenario.records.append(_grouped_report("r2", "i2", "A"))
+        result = scenario.prepare_training_step(HARNESS)
+        assert result is not None
+        scenario.commit(result, component=HARNESS)
+        assert scenario.prepare_training_step(HARNESS) is None
+        rebuilt = dispatcher._registry.reload("agent")
+        rebuilt.records.append(_grouped_report("r3", "i3", "B"))
+        assert rebuilt.prepare_training_step(HARNESS) is not None
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_scenario_of_several_components_refuses_a_checkpoint_interval_above_one(tmp_path: Path) -> None:
+    """A step that published no checkpoint would see its component dropped from the next release."""
+    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
+    initial = tmp_path / "initial"
+    for component in (WEIGHTS, HARNESS):
+        (initial / component).mkdir(parents=True)
+        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
+    records = tmp_path / "records"
+    dispatcher = Dispatcher(
+        _TwoTrainerRecipe(backends=backends, checkpoint_strategy=EveryNVersions(2)),
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        local_artifact_dir=tmp_path / "staged",
+        agent_record_dir=records,
+        scenario_storage=SQLiteScenarioStorage(records),
+    )
+    try:
+        with pytest.raises(ReefError, match="checkpoint interval must be 1"):
+            dispatcher.get_or_create_scenario("agent")
+    finally:
+        dispatcher.close()
+
+
+@dataclass(frozen=True)
+class _NamedComponentsRecipe(Recipe):
+    """A recipe serving the named components, each evolved by its own local backend."""
+
+    names: tuple[str, ...] = ()
+    artifact_dir: Path = Path(".")
+
+    def build_surface(self, scenario: str) -> Surface:
+        return Surface(
+            components={
+                name: ComponentSurface(files=TextFileTree()) if name == HARNESS else ComponentSurface()
+                for name in self.names
+            }
+        )
+
+    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
+        return tuple(
+            ComponentTrainer(
+                name,
+                Trainer.build(
+                    scenario,
+                    records,
+                    processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+                    candidate_backend=_ComponentBackend(name, self.artifact_dir),
+                    algorithm_state=algorithm_states.get(name),
+                    experiment_logger=experiment_logger,
+                ),
+            )
+            for name in self.names
+        )
+
+
+@pytest.mark.unit
+def test_a_recipe_serving_fewer_components_than_registered_is_refused(tmp_path: Path) -> None:
+    """A step carries forward only the components the recipe serves; one it does not serve would leave every release."""
+    names = ("weights", "harness", "config")
+    initial = tmp_path / "initial"
+    for name in names:
+        (initial / name).mkdir(parents=True)
+        (initial / name / f"{name}.txt").write_text(f"{name} seed", encoding="utf-8")
+    factory = InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository")
+    records = tmp_path / "records"
+
+    def serve(served: tuple[str, ...]) -> Dispatcher:
+        return Dispatcher(
+            _NamedComponentsRecipe(names=served, artifact_dir=tmp_path / "candidates"),
+            factory,
+            local_artifact_dir=tmp_path / "staged",
+            agent_record_dir=records,
+            scenario_storage=SQLiteScenarioStorage(records),
+        )
+
+    first = serve(names)
+    try:
+        assert first.get_or_create_scenario("agent") is not None
+    finally:
+        first.close()
+    second = serve(("weights", "harness"))
+    try:
+        with pytest.raises(ReefError, match=r"does not serve \['config'\]"):
+            second.get_or_create_scenario("agent")
+    finally:
+        second.close()
 
 
 class _SlowDispatchedBackend(_DispatchedBackend):

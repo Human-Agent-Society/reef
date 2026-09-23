@@ -38,6 +38,7 @@ from reef.core.errors import ReefError
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentTracker
 from reef.recipe.base import Recipe
+from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.scenario import Scenario
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, parse_scenario_metadata, scenario_metadata_for
@@ -258,6 +259,14 @@ class ScenarioFactory:
                     f"scenario {name!r} was registered with components {list(registered_components.names)}; "
                     f"the recipe also serves {missing}"
                 )
+            unserved = [component for component in registered_components.names if component not in surface.names]
+            if unserved:
+                # A step carries forward the components the recipe serves: one it does not serve would leave
+                # every later release, and the head would then refuse the recipe that registered them.
+                raise ReefError(
+                    f"scenario {name!r} was registered with components {list(registered_components.names)}; "
+                    f"the recipe does not serve {unserved}"
+                )
         elif registered_components is not None and not registered_components.single:
             # The reverse mismatch: a flat recipe would serve the composed root as its one tree and its next
             # step would publish a head without the other components.
@@ -337,6 +346,13 @@ class ScenarioFactory:
                     default=0,
                 ),
             )
+            if not surface.single and recipe.checkpoint_strategy != EveryNVersions(1):
+                # A composed release binds the other components from the checkpoint: a step that published
+                # no checkpoint would see its component dropped from the next release.
+                raise ReefError(
+                    f"scenario {name!r} serves components {list(surface.names)}: every step checkpoints, "
+                    "so the checkpoint interval must be 1"
+                )
             trainers = recipe.build_trainers(
                 name,
                 store.records,
@@ -344,7 +360,11 @@ class ScenarioFactory:
                 algorithm_states={component: state.algorithm_state for component, state in recovered_states.items()},
                 experiment_logger=experiment_logger,
             )
-            if any(bound.trainer.training_mode != recipe.training_mode for bound in trainers):
+            if any(
+                bound.trainer.candidate_backend is not None and bound.trainer.training_mode != recipe.training_mode
+                for bound in trainers
+            ):
+                # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.
                 raise ValueError("recipe.build must pass its training_mode to Trainer.build")
             if len(trainers) > 1 and not store.durable:
                 raise ReefError(

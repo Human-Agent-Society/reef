@@ -21,7 +21,7 @@ from threading import Lock
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, SelectionDecision, UpdateCandidate
-from reef.core.records_types import RequestType
+from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger, NullExperimentLogger
@@ -670,29 +670,36 @@ class Trainer:
         if up_to_sequence < 0:
             raise ValueError("up_to_sequence must be non-negative")
         with self._lock:
+            consumed: list[AgentRecord] = []
             sequence = 0
-            while True:
+            replaying = True
+            while replaying:
                 items = self._records.replay_page(
                     self.scenario,
                     after_sequence=sequence,
                     limit=self._DATA_READ_BATCH_SIZE,
                 )
                 if not items:
-                    return
+                    break
                 for sequence, item in items:
                     if sequence > up_to_sequence:
-                        return
+                        replaying = False
+                        break
                     if item.agent_record_id in consumed_ids:
                         # Still stored, already trained: this trainer has released it and says so
-                        # until every other trainer has too. The processor learns of it, so a report
-                        # that arrives later on this row is settled instead of resolved against it.
+                        # until every other trainer has too. The processor keeps it in view for the
+                        # replayed reports that reference it, as it was before the crash.
                         self._released_stored_ids.add(item.agent_record_id)
                         self._processor.restore_consumed(item)
+                        consumed.append(item)
                         continue
                     if item.request_type in self.processor.required_request_types:
                         self._processor.ingest(item)
                     else:
                         self._released_stored_ids.add(item.agent_record_id)
+            # After the replay, so a report that was live before the crash stays live as it was; a report
+            # that arrives later on a consumed row is settled instead of resolved against it.
+            self._processor.consumed_restored(frozenset(item.agent_record_id for item in consumed))
 
     def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
         """Resume consumption from a recovered commit record's high-water mark.

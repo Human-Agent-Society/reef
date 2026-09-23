@@ -127,6 +127,16 @@ _IN_FLIGHT_STATES = frozenset(
 )
 
 
+def marker_in_flight(marker: Mapping[str, Any] | None) -> bool:
+    """Whether the marker names a job still out: in flight, or complete and not yet acknowledged."""
+    if marker is None:
+        return False
+    status = marker.get("status")
+    if status in _IN_FLIGHT_STATES:
+        return True
+    return status == "COMPLETE" and not marker.get("commit_acknowledged")
+
+
 def marker_path(hf_template: str) -> Path:
     """The single marker location derived from the HF checkpoint template."""
     return Path(hf_template.format(rollout_id=0)).expanduser().parent / LATEST_JOB_MARKER_FILENAME
