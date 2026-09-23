@@ -168,6 +168,26 @@ class RequestService:
         parsed = parse_request_headers(headers, request_type)
         return self._accept(parsed, payload, agent_record_id=agent_record_id)
 
+    def import_record(self, headers: Mapping[str, str], body: Mapping[str, object]) -> AgentRecord:
+        """Persist an existing inference or report through ordinary admission.
+
+        A stable client ID makes uploads retryable. The scenario comes from
+        the headers, and importing never invokes an inference handler.
+        """
+        if body.keys() - {"agent_record_id", "request_type", "payload"}:
+            raise ValueError("record fields must be agent_record_id, request_type and payload")
+        record_id = body.get("agent_record_id")
+        if not isinstance(record_id, str) or not record_id.strip():
+            raise ValueError("agent_record_id must be a non-empty string")
+        request_type = body.get("request_type")
+        if not isinstance(request_type, str) or request_type not in ("inference", "report"):
+            raise ValueError("import request_type must be 'inference' or 'report'; use /reef/train for instructions")
+        payload = body.get("payload")
+        if not isinstance(payload, Mapping):
+            raise ValueError("record payload must be an object")
+        parsed = parse_request_headers(headers, RequestType(request_type))
+        return self._accept(parsed, payload, agent_record_id=record_id)
+
     async def infer(
         self,
         headers: Mapping[str, str],

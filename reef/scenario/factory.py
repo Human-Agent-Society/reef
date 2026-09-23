@@ -251,12 +251,8 @@ class ScenarioFactory:
             # Replay retained, unconsumed rows behind the watermark before resuming
             # the cursor. Retention may keep already-consumed rows for audit.
             if high_water is not None:
-                commits = store.history()
-                if not commits and head_record is not None:
-                    commits = (head_record,)
-                if not trainer.processor.restore_consumption(commits):
-                    consumed = _consumed_by_committed_steps(store, head_record)
-                    scenario.reingest(up_to_sequence=high_water[0], consumed_ids=consumed)
+                consumed = _consumed_by_committed_steps(store, head_record)
+                scenario.reingest(up_to_sequence=high_water[0], consumed_ids=consumed)
                 scenario.restore_record_progress(after_sequence=high_water[0], offset=high_water[1])
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.

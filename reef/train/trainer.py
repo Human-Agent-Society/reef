@@ -258,10 +258,6 @@ class Trainer:
         return batch
 
     def _consume_data(self) -> None:
-        progress = self._processor.consume(self._records, after_sequence=self._data_sequence, offset=self._data_offset)
-        if progress is not None:
-            self._data_sequence, self._data_offset = progress
-            return
         while True:
             items = self._records.replay_page(
                 self.scenario,
@@ -417,7 +413,6 @@ class Trainer:
                     high_water_sequence=self._data_sequence,
                     high_water_offset=self._data_offset,
                     compacted_ids=frozenset(),
-                    metrics=self._processor.consumption_metrics() or None,
                 )
             if self._pending.result is not result:
                 raise RuntimeError("training result does not match the pending step")
@@ -433,7 +428,7 @@ class Trainer:
                 consumed = self._processor.acknowledge(batch_id)
             retention = self._processor.retention_decision()
             compacted = retention.releasable_agent_record_ids - retention.protected_agent_record_ids
-            metrics = {**result.metrics, **self._processor.consumption_metrics()}
+            metrics = dict(result.metrics)
             request = self._pending.batch.request
             if request is not None:
                 # The backend's own dict, when it wrote one, carries what its proposer added to ``requires``.

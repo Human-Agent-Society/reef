@@ -44,7 +44,6 @@ def record(record_id: str, scenario: str = "math", *, references: tuple[str, ...
 
 
 def test_append_retry_and_scenario_reads(records: RecordStore) -> None:
-    assert records.latest_sequence("math") == 0
     original = record("first")
     assert records.existing_receipt(original) is None
     assert records.append_result(original) == AppendResult(original, True)
@@ -71,8 +70,6 @@ def test_append_retry_and_scenario_reads(records: RecordStore) -> None:
     assert records.get("code", original.agent_record_id) is None
     assert records.get_for_audit("code", original.agent_record_id) is None
     assert records.replay("code") == (other,)
-    assert records.latest_sequence("math") == records.replay_page("math")[-1][0]
-    assert records.latest_sequence("code") == records.replay_page("code")[-1][0]
 
 
 def test_retirement_purge_and_retry_receipts(records: RecordStore) -> None:
@@ -92,7 +89,6 @@ def test_retirement_purge_and_retry_receipts(records: RecordStore) -> None:
     assert records.count("math") == 0
     assert records.replay("math") == ()
     assert records.replay_page("math") == ()
-    assert records.latest_sequence("math") == 0
     assert records.get("math", original.agent_record_id) is None
     assert records.get("code", other.agent_record_id) == other
     assert records.audit_page("math") == (retired,)

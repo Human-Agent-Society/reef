@@ -33,14 +33,12 @@ packages.
 
 from reef.train.backend import CandidateBackend, PreparedStep, StepExecution
 from reef.train.processors.base import DataProcessor, RetentionDecision
-from reef.train.processors.dataset import DatasetProcessor
 from reef.train.trainer import Trainer
 from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch, TrainStepResult, TrajectoryItem
 
 __all__ = [
     "CandidateBackend",
     "DataProcessor",
-    "DatasetProcessor",
     "PreparedStep",
     "ProcessorContext",
     "RetentionDecision",

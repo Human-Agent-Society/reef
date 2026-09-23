@@ -121,10 +121,6 @@ class RecordStore(ABC):
         """Read at most a positive ``limit`` after a nonnegative append sequence."""
 
     @abstractmethod
-    def latest_sequence(self, scenario: str) -> int:
-        """Return the last training-visible sequence, or zero, without loading bodies."""
-
-    @abstractmethod
     def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
         """Count training-visible records by optional type and append sequence."""
 

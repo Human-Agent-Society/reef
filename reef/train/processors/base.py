@@ -7,15 +7,13 @@ computed from traffic).
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
 from typing import Any
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
-from reef.storage.commits import CommitRecord
-from reef.storage.records import RecordStore
 from reef.train.types import ProcessorContext, TrainingBatch
 
 
@@ -187,22 +185,6 @@ class DataProcessor:
                 self._training_requests.setdefault(request.id, request)
         else:
             self._agent_record_ids.add(item.agent_record_id)
-
-    def consume(self, records: RecordStore, *, after_sequence: int, offset: int) -> tuple[int, int] | None:
-        """Optionally own storage reads and return the ingestion watermark and count.
-
-        None keeps ordinary trainer-driven ingestion. A processor that rereads
-        persisted inputs can override this instead of caching a whole dataset.
-        """
-        return None
-
-    def consumption_metrics(self) -> Mapping[str, object]:
-        """Consumption state to persist with the prepared training commit."""
-        return {}
-
-    def restore_consumption(self, commits: Sequence[CommitRecord]) -> bool:
-        """Restore custom consumption state; False requests ordinary prefix replay."""
-        return False
 
     # ------------------------------------------------------------ batch cycle
     #

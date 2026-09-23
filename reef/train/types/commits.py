@@ -15,16 +15,14 @@ class PreparedCommit:
     policy says are now disposable. ``consumed_ids`` and ``compacted_ids``
     answer different questions — a retention policy may keep a consumed row
     stored (audit-only retention), so recovery needs the consumed set on its
-    own for ordinary prefix replay. Processors that repeat dataset passes
-    instead restore their consumption state from metrics.
+    own to know which retained rows must never re-enter a processor.
     Compaction itself is applied separately so the commit record can be made
     durable first. Persisted as a CommitRecord (reef/scenario/commit_log.py);
     the only construction site is Scenario._append_commit_record.
 
-    ``metrics`` contains the objective's step result and any processor consumption
-    state. Its schema is owned by the processor or backend that produced it;
-    the trainer and commit log never interpret it. A processor can restore its
-    consumption state from committed metrics. The harness manifest republishes it verbatim as
+    ``metrics`` is the objective's step result, carried opaquely: its schema is
+    owned by the processor or backend that produced it; the trainer and commit log
+    never interpret it, and the harness manifest republishes it verbatim as
     ``gate``. It rides the commit record because that is the only durable
     version-keyed store, so training metrics remain available when the
     resulting version is served.

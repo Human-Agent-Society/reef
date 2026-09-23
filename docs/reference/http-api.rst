@@ -37,6 +37,8 @@ Routes
 | ``POST /v1/images``, ``/v1/embeddings``,               | multimodal call, relayed by the recipe to its     |
 | ``/v1/audio/speech``, ``/v1/decisions``                | gateway; not recorded, 501 when it offers none    |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records``                                 | import one existing inference or report           |
++--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                  | submit feedback about one or more receipts        |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                   | enqueue one training instruction                  |
@@ -124,6 +126,69 @@ defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
 protocols, persistence and model bindings used throughout evolution.
+
+Import records for cold-start learning
+--------------------------------------
+
+``POST /reef/records`` accepts an existing inference or report without calling
+an inference provider. It uses the usual Bearer token and ``x-reef-scenario``
+header. Submit one record per request and use a stable ``agent_record_id``:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/records \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'x-reef-scenario: my-agent' \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "agent_record_id": "offline-0001",
+       "request_type": "inference",
+       "payload": {
+         "model": "example-model",
+         "messages": [{"role": "user", "content": "What is 2 + 2?"}],
+         "response": {"choices": [{"message": {"role": "assistant", "content": "4"}}]}
+       }
+     }'
+
+The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
+"request_type":"inference"}``. HTTP 200 acknowledges record admission; it does
+not mean a training step has finished. Identical retries return the existing
+receipt, including after compaction; reusing the ID with different content
+returns HTTP 409. Authentication failures return 401 and invalid envelopes,
+report schemas or references return 400. Scenario selection comes only from
+headers; envelope fields other than the three shown above are rejected.
+
+``request_type`` may be ``inference`` or ``report``. Inference payloads follow
+the selected recipe's recorded-input contract: native provider request fields
+with an existing ``response``, or another complete example that its processor
+understands. Import does not synthesize missing training tensors, run inference,
+or assign the current serving artifact to externally generated examples.
+Reports use the same schema and reference validation as ``POST /reef/report``;
+import referenced inferences first. Training instructions use ``POST /reef/train``.
+
+For large datasets, read the source incrementally and issue successive requests,
+retrying the same IDs after interruption. The existing HTTP body limit (1 MiB
+per request) also applies here; this endpoint does not accept a whole dataset
+in one body or provide an atomic multi-record transaction.
+
+Imported records enter the same scenario storage and wake the same training
+worker as live traffic. Keep the same scenario header when subsequently calling
+``POST /v1/chat/completions``: its records continue through the existing
+processor, with no processor replacement or end-of-dataset signal. A processor
+that needs reward/report feedback still needs it for both imported and live
+records; submit each example's feedback promptly so completed batches can drain.
+For example, feedback for the imported record can be sent as:
+
+.. code:: json
+
+   {"agent_record_id": "offline-score-0001", "request_type": "report",
+    "payload": {"references": ["offline-0001"], "score": 1.0}}
+
+Batching, buffering, retention and training policy remain owned by the selected
+recipe and processor. Uploading can overlap training; this API adds no dataset
+epochs, cold-start completion barrier, or automatic algorithm switch. To start
+chat traffic after cold-start training has finished, use the recipe's progress
+and commit status to determine when its imported examples have been consumed.
 
 Manual training
 ---------------
