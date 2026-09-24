@@ -54,9 +54,11 @@ When invoked with ``wait`` (e.g. ``reef-claude wait <request id> --timeout 500``
   Waits for the step that takes a request ``evolve`` already filed and
   reports it as ``evolve --wait`` does, with the same exit statuses. The
   shipped ``/reefine`` command of an adapter without its own extension
-  files the request with ``evolve`` and calls ``wait`` until it stops
-  answering 2, since the agent's shell tool stops a command after a few
-  minutes.
+  files the request with ``evolve`` and calls ``wait --poll`` until it
+  stops printing ``no result yet``, since the agent's shell tool stops a
+  command after a few minutes; ``--poll`` exits 0 while the step still
+  runs, where a plain ``wait`` exits 2, since a shell tool counts a
+  nonzero exit as a failed call.
 
 When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
 
@@ -1423,18 +1425,28 @@ def harness(
 
 
 def wait_request(
-    scenario: str, adapter: str, compose_dir: str, record_id: str, *, timeout_s: float = 1800.0, poll_s: float = 5.0
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    record_id: str,
+    *,
+    timeout_s: float = 1800.0,
+    poll_s: float = 5.0,
+    poll: bool = False,
 ) -> int:
     """Wait for the step that takes the filed request ``record_id`` and report its result, as ``evolve --wait`` does.
 
     A harness whose shell tool stops a command after a few minutes files
-    the request with ``evolve`` and calls this until it stops answering 2."""
+    the request with ``evolve`` and calls this until it stops answering 2;
+    with ``poll`` a step that still runs answers 0 instead, since such a
+    tool counts a nonzero exit as a failed call, and the printed line says
+    the step still runs."""
     record_id = record_id.strip()
     if not record_id:
         sys.exit(f"reef-{adapter} wait: name the request id evolve printed")
     upstream = _reef_url_of(adapter, compose_dir)
     token = _reef_token(adapter, compose_dir)
-    return _report_request(
+    status = _report_request(
         scenario,
         adapter,
         compose_dir,
@@ -1445,6 +1457,7 @@ def wait_request(
         timeout_s=timeout_s,
         poll_s=poll_s,
     )
+    return 0 if poll and status == 2 else status
 
 
 def _report_request(
@@ -2108,7 +2121,7 @@ def _usage(adapter: str) -> str:
             f"{prog}: run {adapter} through reef's capture proxy, or one of",
             f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
             f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
-            f"  {prog} wait <request id> [--timeout SECONDS]                     wait for a request's result",
+            f"  {prog} wait <request id> [--timeout SECONDS] [--poll]            wait for a request's result",
             f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
             f"  {prog} doctor                                                     check what the install needs",
             f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
@@ -2164,8 +2177,11 @@ def main() -> None:
         parser.add_argument(
             "--timeout", type=float, default=1800.0, metavar="SECONDS", help="how long to wait (default 1800)"
         )
+        parser.add_argument(
+            "--poll", action="store_true", help="exit 0 while the step still runs (a plain wait exits 2)"
+        )
         ns = parser.parse_args(args[1:])
-        sys.exit(wait_request(scenario, adapter, compose, ns.request, timeout_s=ns.timeout))
+        sys.exit(wait_request(scenario, adapter, compose, ns.request, timeout_s=ns.timeout, poll=ns.poll))
     elif args and args[0] == "page":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} page")
         parser.add_argument("step", type=step_of_version, help="the version, as /versions lists it: v3 or 3")

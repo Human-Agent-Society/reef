@@ -143,7 +143,12 @@ def test_an_adapter_without_an_extension_seeds_one_reefine_command_the_wrapper_a
     files = render_composition(_nodes([options]), descriptor)
     text = files[descriptor.node_paths["agent_command"].format(name=REQUESTS_COMMAND)]
     assert f"The person typed {typed} " in text and request_words in text
-    assert f"{wrapper} evolve '<the request>'" in text and f"`{wrapper} wait <request id> --timeout 100`" in text
+    assert (
+        f"{wrapper} evolve '<the request>'" in text and f"`{wrapper} wait <request id> --timeout 100 --poll`" in text
+    )
+    # The request is filed as typed, and a step that still runs is read from the output, not the exit status.
+    assert f"copying the text after {typed} exactly, character for character" in text
+    assert "While it prints `no result yet` the step still runs" in text and "status 2" not in text
     assert timeout in text and "Its --timeout counts seconds." in text
     assert f"reef-{adapter} setup" in text and "{" not in text
     assert not any(options.get("id") == REQUESTS_SKILL_ID for options in recipe.seed)

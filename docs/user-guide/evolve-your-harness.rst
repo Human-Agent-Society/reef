@@ -661,10 +661,13 @@ the new head the same way. Declined, or in a script without a terminal,
 it prints the commands to run instead: ``reef-pi update``, with ``reef-pi
 setup`` first only while the release requires something this machine has
 not met. ``update`` keeps the binary where the first install put it.
-``reef-pi wait <request id> [--timeout SECONDS]`` waits for a request that
-``evolve`` already filed and reports it the same way, with the same exit
-statuses; a harness whose shell tool stops a command after a few minutes
-files with ``evolve`` and calls ``wait`` until it stops answering 2. On an
+``reef-pi wait <request id> [--timeout SECONDS] [--poll]`` waits for a
+request that ``evolve`` already filed and reports it the same way, with the
+same exit statuses; a harness whose shell tool stops a command after a few
+minutes files with ``evolve`` and calls ``wait --poll`` until it stops
+printing ``no result yet``: ``--poll`` exits 0 while the step still runs,
+where a plain ``wait`` exits 2, since such a tool counts a nonzero exit as a
+failed call. On an
 adapter other than pi, which has no ``/versions`` and no update notice, the
 lines name ``reef-<adapter> wait`` and ``reef-<adapter> update`` instead.
 To return to failure driven

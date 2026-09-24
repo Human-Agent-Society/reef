@@ -1723,6 +1723,8 @@ def test_a_wait_on_a_running_step_names_its_phase_and_its_time_so_far(tmp_path, 
     compose, captures = _claude_ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
         assert harness("ask-scenario", "claude", compose, "text me") == 0
+        # --poll, which the shipped command uses: a step that still runs is no failed call for the shell tool.
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=0.05, poll_s=0.01, poll=True) == 0
         assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=0.05, poll_s=0.01) == 2
     reef.close()
     out = capsys.readouterr().out.splitlines()
@@ -1844,7 +1846,16 @@ def test_main_dispatches_wait_with_the_request_and_the_timeout(tmp_path: Path) -
     ):
         main()
     assert exited.value.code == 2
-    assert waited == [(("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 500.0})]
+    assert waited == [(("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 500.0, "poll": False})]
+    waited.clear()
+    with (
+        patch.dict(os.environ, _main_env(tmp_path)),
+        patch("reef.harness.client.wrapper.wait_request", lambda *args, **kwargs: waited.append((args, kwargs)) or 0),
+        patch("sys.argv", ["reef-pi", "wait", "q-1", "--timeout", "100", "--poll"]),
+        pytest.raises(SystemExit),
+    ):
+        main()
+    assert waited == [(("ask-scenario", "pi", str(tmp_path), "q-1"), {"timeout_s": 100.0, "poll": True})]
 
 
 @pytest.mark.unit
