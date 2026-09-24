@@ -677,18 +677,18 @@ def test_a_harness_backlog_is_kept_for_the_next_start_when_the_service_stops(tmp
         slow.release.set()
         if closing is None:
             dispatcher.close()
-    # The next start finds both batches unread and trains them.
-    restarted, backends = _dispatcher(tmp_path)
+    # The next start finds both batches unread and trains them, with no new record to wake the harness.
+    restarted, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path))
     try:
+        # What a restart does for every registration a repository lists (this in-memory one lists none).
+        restarted._preload_scenarios(("agent",))
+        deadline = time.monotonic() + 10
+        while backends[HARNESS].prepared < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
         scenario = restarted.get_or_create_scenario("agent")
         assert scenario is not None
-        assert [row["component"] for row in scenario.releases() if row["operation"] == "training"] == []
-        assert restarted._process_local_backend_step("agent", HARNESS) is True
-        assert restarted._process_local_backend_step("agent", HARNESS) is True
-        assert [row["component"] for row in scenario.releases() if row["operation"] == "training"] == [
-            HARNESS,
-            HARNESS,
-        ]
+        trained = [row["component"] for row in scenario.releases() if row["operation"] == "training"]
+        assert backends[HARNESS].prepared == 2 and trained == [HARNESS, HARNESS]
     finally:
         restarted.close()
 

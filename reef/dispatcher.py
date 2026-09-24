@@ -688,7 +688,10 @@ class Dispatcher:
         # a training step that cannot commit.
         for scenario in scenarios:
             try:
-                self.get_or_create_scenario(scenario)
+                current = self.get_or_create_scenario(scenario)
+                if current is not None:
+                    # Rows left unread before the restart train now, not once the next record arrives.
+                    self._wake_training(current)
             except Exception as exc:
                 logger.exception("failed to preload scenario %r", scenario)
                 self._registry.record_preload_error(scenario, f"{type(exc).__name__}: {exc}")
@@ -745,6 +748,9 @@ class Dispatcher:
             return
         key = (scenario, component)
         with self._training.lock:
+            if self._lifecycle.closed.is_set():
+                # Closed while this caller got here: close() joins only the workers registered before it.
+                return
             worker = self._training.local_workers.get(key)
             if worker is None:
                 ready = Event()
@@ -1486,7 +1492,9 @@ class Dispatcher:
         if self._lifecycle.closed.is_set():
             return
         self.stop_local_cycles()
-        self._lifecycle.closed.set()
+        with self._training.lock:
+            # Under the lock a worker registers under, so none starts after the list below is taken.
+            self._lifecycle.closed.set()
         self._training.ready.set()
         with self._training.lock:
             local_workers = tuple(self._training.local_workers.values())
