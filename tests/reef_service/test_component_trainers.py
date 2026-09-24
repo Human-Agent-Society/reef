@@ -37,7 +37,7 @@ from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.surface import ComponentSurface, Surface, TextFileTree
 from reef.train import CandidateBackend, ComponentTrainer, PreparedStep, Trainer, TrainStepResult
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.processors.computed import ComputedFeedbackProcessor, SupportsReceipt
 from reef.train.processors.reported import GroupDecision, ReportContext
 from reef.train.types import TrainingBatch
@@ -172,12 +172,6 @@ class _HybridThresholdProcessor(ThresholdProcessor):
     """The same processor, taking instructions too."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
-
-
-class _InferenceOnlyProcessor(DataProcessor):
-    """A processor that never needs a report row."""
-
-    required_request_types = frozenset({RequestType.INFERENCE})
 
 
 @dataclass(frozen=True)
@@ -356,9 +350,8 @@ def test_component_trainers_meet_at_the_commit_boundary(tmp_path: Path) -> None:
             (HARNESS, base),
             (WEIGHTS, after_harness.release_id),
         ]
-        # Rows both trainers consumed are retired only once both have committed.
-        assert records[0].compacted_ids == frozenset()
-        assert records[1].compacted_ids == frozenset({"i1", "r1"})
+        # A commit retires no row: each trainer consumed the same rows on its own record.
+        assert scenario.records.count("agent") == 2
         assert records[0].consumed_ids == records[1].consumed_ids == frozenset({"i1", "r1"})
 
         # Each trainer recovers from its own commits.
@@ -1025,41 +1018,6 @@ def _grouped_report(record_id: str, reference: str, group: str) -> AgentRecord:
 
 
 @pytest.mark.unit
-def test_a_report_live_in_an_incomplete_group_before_a_restart_still_trains_after_it(tmp_path: Path) -> None:
-    """The replay rebuilds the live state as it was: a report ingested before its source trained stays live."""
-    backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
-    initial = tmp_path / "initial"
-    for component in (WEIGHTS, HARNESS):
-        (initial / component).mkdir(parents=True)
-        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    records = tmp_path / "records"
-    dispatcher = Dispatcher(
-        _GroupedRecipe(backends=backends),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=records,
-        scenario_storage=SQLiteScenarioStorage(records),
-    )
-    try:
-        scenario = dispatcher.get_or_create_scenario("agent")
-        assert scenario is not None
-        for step in (1, 2, 3):
-            scenario.records.append(_records(step)[0])
-        scenario.records.append(_grouped_report("r1c", "i1", "B"))
-        scenario.records.append(_grouped_report("r1a", "i1", "A"))
-        scenario.records.append(_grouped_report("r2", "i2", "A"))
-        result = scenario.prepare_training_step(HARNESS)
-        assert result is not None
-        scenario.commit(result, component=HARNESS)
-        assert scenario.prepare_training_step(HARNESS) is None
-        rebuilt = dispatcher._registry.reload("agent")
-        rebuilt.records.append(_grouped_report("r3", "i3", "B"))
-        assert rebuilt.prepare_training_step(HARNESS) is not None
-    finally:
-        dispatcher.close()
-
-
-@pytest.mark.unit
 def test_a_scenario_of_several_components_refuses_a_checkpoint_interval_above_one(tmp_path: Path) -> None:
     """A step that published no checkpoint would see its component dropped from the next release."""
     backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
@@ -1213,9 +1171,9 @@ def test_a_second_report_on_a_trained_inference_is_settled_after_a_restart(tmp_p
         assert scenario.prepare_training_step(HARNESS) is None
         rebuilt = dispatcher._registry.reload("agent")
         assert rebuilt.prepare_training_step(HARNESS) is None
-        # Settled, not live: the harness releases it; the other trainers see that release with its next record.
-        decision = rebuilt.trainer_for(HARNESS).processor.retention_decision()
-        assert "r1b" in decision.releasable_agent_record_ids and "r1b" not in decision.protected_agent_record_ids
+        # Its source trained, so the rebuilt harness skips it; the weights trainer still reads it.
+        assert "r1b" in rebuilt.trainer_for(HARNESS).skipped_record_ids
+        assert "r1b" not in rebuilt.trainer_for(WEIGHTS).consumed_record_ids
     finally:
         dispatcher.close()
 
@@ -1241,18 +1199,16 @@ def test_a_report_settled_between_two_commits_stays_settled_after_a_restart(tmp_
         scenario.commit(harness, component=HARNESS)
         rebuilt = dispatcher._registry.reload("agent")
         assert rebuilt.prepare_training_step(HARNESS) is None
-        # Settled, not live: the harness releases it; the other trainers see that release with its next record.
-        decision = rebuilt.trainer_for(HARNESS).processor.retention_decision()
-        assert "r1b" in decision.releasable_agent_record_ids and "r1b" not in decision.protected_agent_record_ids
+        # Settled, not live: commit B names it as consumed, so the rebuilt harness skips it.
+        assert "r1b" in rebuilt.trainer_for(HARNESS).consumed_record_ids
     finally:
         dispatcher.close()
 
 
 @pytest.mark.unit
-def test_a_report_on_an_inference_the_sibling_commit_retired_is_released_not_raised(tmp_path: Path) -> None:
-    """The weights job holds i1 while the harness commits and r1b arrives; the job's commit retires i1 with r1b
-    still stored, unread by the weights trainer. Every later read releases r1b, on the live path and after a restart.
-    """
+def test_a_report_on_an_inference_the_weights_job_trained_is_skipped_not_raised(tmp_path: Path) -> None:
+    """The weights job holds i1 while the harness commits and r1b arrives; the job's commit consumes i1 with r1b
+    unread by the weights trainer. Every later read skips r1b, on the live path and after a restart."""
     dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -1267,16 +1223,14 @@ def test_a_report_on_an_inference_the_sibling_commit_retired_is_released_not_rai
         scenario.records.append(_report("r1b", "i1"))
         assert scenario.prepare_training_step(HARNESS) is None
         assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
-        assert scenario.records.get("agent", "i1") is None
-        assert scenario.records.get("agent", "r1b") is not None
+        assert scenario.records.get("agent", "i1") is not None
         assert scenario.reserve_training_batch(WEIGHTS) is None
-        assert "r1b" in scenario.trainer_for(WEIGHTS).releasable_agent_record_ids()
+        assert "r1b" in scenario.trainer_for(WEIGHTS).skipped_record_ids
         for record in _records(2):
             scenario.records.append(record)
         harness = scenario.prepare_training_step(HARNESS)
         assert harness is not None
         scenario.commit(harness, component=HARNESS)
-        assert scenario.records.get("agent", "r1b") is None
         rebuilt = dispatcher._registry.reload("agent")
         assert rebuilt.prepare_training_step(HARNESS) is None
         weights = rebuilt.reserve_training_batch(WEIGHTS)
@@ -1334,9 +1288,8 @@ def _slotted_report(record_id: str, reference: str, group: str, slot: int) -> Ag
 
 @pytest.mark.unit
 def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(tmp_path: Path) -> None:
-    """r1dup retried slot 0 while r1 held it, so the harness settled it; the harness commit consumed r1, which both
-    trainers had trained, and retired it. The weights trainer has not read r1dup, so it stays stored. The replay no
-    longer sees r1 hold the slot: the commit record names r1dup as settled, and the rebuilt harness keeps it out."""
+    """r1dup retried slot 0 while r1 held it, so the harness settled it; the harness commit names r1dup as consumed
+    with the rows it trained. The replay skips r1 and r1dup alike, so the rebuilt harness keeps r1dup out of G."""
     backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     initial = tmp_path / "initial"
     for component in (WEIGHTS, HARNESS):
@@ -1371,16 +1324,14 @@ def test_a_retry_settled_for_a_taken_slot_stays_settled_after_a_restart(tmp_path
             ("i2", "r2"),
         ]
         scenario.commit(harness, component=HARNESS)
-        assert scenario.records.get("agent", "r1") is None
         assert scenario.records.get("agent", "r1dup") is not None
         rebuilt = dispatcher._registry.reload("agent")
         rebuilt.records.append(_records(4)[0])
         rebuilt.records.append(_slotted_report("r4", "i4", "G", 2))
         # Live, slot 0 was never r1dup's: G holds r4 alone and waits.
         assert rebuilt.prepare_training_step(HARNESS) is None
-        assert "r1dup" in rebuilt.trainer_for(HARNESS).releasable_agent_record_ids()
         record = rebuilt.last_commit_for(HARNESS)
-        assert record is not None and "r1dup" in record.settled_ids
+        assert record is not None and "r1dup" in record.consumed_ids
     finally:
         dispatcher.close()
 
@@ -1406,9 +1357,9 @@ class _DroppingBackend(_DispatchedBackend):
 
 @pytest.mark.unit
 def test_a_batch_the_weights_backend_dropped_stays_consumed_after_a_restart(tmp_path: Path) -> None:
-    """A drop consumes its batch without a commit; the harness still holds its rows, so they stay stored. The drop's
-    receipt names what it consumed and how far the trainer read, so neither a restart right after it nor one after a
-    later commit reserves the dropped batch again."""
+    """A drop consumes its batch without a commit and its rows stay stored for the harness. The drop's consumption
+    receipt names what it consumed and its component, so neither a restart right after it nor one after a later
+    commit reserves the dropped batch again."""
     weights = _DroppingBackend(WEIGHTS, tmp_path / "candidates", "job-0")
     dispatcher, _ = _dispatcher(
         tmp_path, backends={WEIGHTS: weights, HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")}
@@ -1437,11 +1388,9 @@ def test_a_batch_the_weights_backend_dropped_stays_consumed_after_a_restart(tmp_
             rebuilt.records.append(record)
         rebuilt = dispatcher._registry.reload("agent")
         assert turn(rebuilt) == [("i4", "r4")]
-        (receipt,) = [
-            row for row in rebuilt.records.compaction_receipts("agent") if row["metadata"]["outcome"] == "stale"
-        ]
-        assert receipt["metadata"]["component"] == WEIGHTS
-        assert set(receipt["metadata"]["consumed_ids"]) == {"i2", "r2"}
+        (receipt,) = rebuilt.records.consumption_receipts("agent")
+        assert receipt["metadata"]["outcome"] == "stale" and receipt["metadata"]["component"] == WEIGHTS
+        assert set(receipt["consumed_ids"]) == {"i2", "r2"}
     finally:
         dispatcher.close()
 
@@ -1449,7 +1398,7 @@ def test_a_batch_the_weights_backend_dropped_stays_consumed_after_a_restart(tmp_
 @pytest.mark.unit
 def test_two_stale_drops_across_a_reload_are_two_receipts_and_the_rows_behind_them_train(tmp_path: Path) -> None:
     """A rebuilt processor numbers its batches from 1 again, so a drop after a reload carries the batch id of a drop
-    before it, over other rows. Each drop's receipt is keyed by what it consumed: the second is a receipt of its
+    before it, over other rows. A receipt is keyed by its id and what it consumed: the second is a receipt of its
     own, not a conflict with the first, and the weights trainer goes on to the rows behind both drops."""
     weights = _DroppingBackend(WEIGHTS, tmp_path / "candidates", "job-0")
     dispatcher, _ = _dispatcher(
@@ -1478,10 +1427,9 @@ def test_two_stale_drops_across_a_reload_are_two_receipts_and_the_rows_behind_th
         assert (second_id, second) == (first_id, [("i2", "r2")])
         rebuilt = dispatcher._registry.reload("agent")
         assert turn(rebuilt)[1] == [("i3", "r3")]
-        stale = [row for row in rebuilt.records.compaction_receipts("agent") if row["metadata"]["outcome"] == "stale"]
-        assert sorted(sorted(row["metadata"]["consumed_ids"]) for row in stale) == [["i1", "r1"], ["i2", "r2"]]
-        assert len({row["receipt_id"] for row in stale}) == 2
-        assert all(str(row["receipt_id"]).startswith(f"{first_id}:") for row in stale)
+        stale = rebuilt.records.consumption_receipts("agent")
+        assert sorted(sorted(row["consumed_ids"]) for row in stale) == [["i1", "r1"], ["i2", "r2"]]
+        assert [row["receipt_id"] for row in stale] == [f"{WEIGHTS}:{first_id}"] * 2
     finally:
         dispatcher.close()
 
@@ -1508,9 +1456,9 @@ def test_a_harness_commit_that_fails_under_a_weights_job_leaves_its_rows_to_the_
     tmp_path: Path, colocated: bool, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The harness acknowledges its batch before its record is durable. When that commit fails while a weights job
-    is out, the reload waits for the job, and the job's commit must not retire the harness's rows on the strength of
-    an acknowledgment no record carries: after the job, the rebuilt harness trains them. A colocated job holds every
-    cycle lock, so the harness cannot retry before the job commits."""
+    is out, the reload waits for the job, and the job's commit leaves the harness's rows stored: after the job, the
+    rebuilt harness trains them once. A colocated job holds every cycle lock, so the harness cannot retry before the
+    job commits."""
     backends = _dispatched_pair(tmp_path, "job-1")
     if colocated:
         backends[WEIGHTS] = _ColocatedBackend(WEIGHTS, tmp_path / "candidates", "job-1")
@@ -1525,8 +1473,6 @@ def test_a_harness_commit_that_fails_under_a_weights_job_leaves_its_rows_to_the_
         _fail_first_record_of(monkeypatch, scenario, HARNESS)
         with pytest.raises(OSError, match="transient store write error"):
             dispatcher._process_local_backend_step("agent", HARNESS)
-        # The acknowledgment is in the harness processor's memory only: siblings do not read it.
-        assert not {"i1", "r1"} & scenario.trainer_for(HARNESS).releasable_agent_record_ids()
         assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
         assert scenario.records.get("agent", "i1") is not None and scenario.records.get("agent", "r1") is not None
         for _ in range(3):
@@ -1535,7 +1481,7 @@ def test_a_harness_commit_that_fails_under_a_weights_job_leaves_its_rows_to_the_
         assert current is not None
         history = current.store.history()
         assert [sorted(record.consumed_ids) for record in history if record.component == HARNESS] == [["i1", "r1"]]
-        assert [sorted(record.compacted_ids) for record in history if record.component == WEIGHTS] == [[]]
+        assert [sorted(record.consumed_ids) for record in history if record.component == WEIGHTS] == [["i1", "r1"]]
     finally:
         dispatcher.close()
 
@@ -1545,8 +1491,8 @@ def test_a_weights_commit_that_fails_leaves_its_batch_to_the_weights_trainer_aft
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The reverse: a weights commit that fails after its acknowledgment, then a harness commit before the weights
-    trainer's reload. The harness commit retires only what the weights trainer's durable state releases, so the
-    rebuilt weights trainer trains the batch its failed commit had acknowledged."""
+    trainer's reload. The harness commit leaves the rows stored, so the rebuilt weights trainer trains the batch its
+    failed commit had acknowledged."""
     dispatcher, _ = _dispatcher(tmp_path)
 
     def step(scenario: Scenario, component: str) -> list[tuple[str, ...]] | None:
@@ -1570,7 +1516,6 @@ def test_a_weights_commit_that_fails_leaves_its_batch_to_the_weights_trainer_aft
         _fail_first_record_of(monkeypatch, scenario, WEIGHTS)
         with pytest.raises(OSError, match="transient store write error"):
             step(scenario, WEIGHTS)
-        assert not {"i1", "r1"} & scenario.trainer_for(WEIGHTS).releasable_agent_record_ids()
         assert step(scenario, HARNESS) == [("i2", "r2")]
         assert scenario.records.get("agent", "i1") is not None and scenario.records.get("agent", "r1") is not None
         rebuilt = dispatcher._registry.reload("agent")
@@ -1580,11 +1525,11 @@ def test_a_weights_commit_that_fails_leaves_its_batch_to_the_weights_trainer_aft
 
 
 @pytest.mark.unit
-def test_a_stale_drop_under_a_failed_harness_commit_retires_none_of_the_harness_rows(
+def test_a_stale_drop_under_a_failed_harness_commit_leaves_the_harness_rows_to_the_harness(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A drop retires only rows every other trainer releases, like a commit: a harness batch acknowledged by a commit
-    that failed is not released yet, so the weights drop leaves it stored and the harness trains it."""
+    """A drop consumes its rows for the weights trainer alone: a harness batch acknowledged by a commit that failed
+    stays stored under the weights drop, and the harness trains it."""
     weights = _DroppingBackend(WEIGHTS, tmp_path / "candidates", "job-0")
     dispatcher, _ = _dispatcher(
         tmp_path, backends={WEIGHTS: weights, HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")}
@@ -1602,10 +1547,8 @@ def test_a_stale_drop_under_a_failed_harness_commit_retires_none_of_the_harness_
         weights.drop_next = True
         assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, weights, batch) is True
         assert scenario.records.get("agent", "i1") is not None and scenario.records.get("agent", "r1") is not None
-        (receipt,) = [
-            row for row in scenario.records.compaction_receipts("agent") if row["metadata"]["outcome"] == "stale"
-        ]
-        assert set(receipt["metadata"]["consumed_ids"]) == {"i1", "r1"} and receipt["compacted_ids"] == ()
+        (receipt,) = scenario.records.consumption_receipts("agent")
+        assert set(receipt["consumed_ids"]) == {"i1", "r1"} and receipt["metadata"]["component"] == WEIGHTS
         for _ in range(3):
             dispatcher._process_local_backend_step("agent", HARNESS)
         current = dispatcher._registry.get_optional("agent")
@@ -1714,8 +1657,8 @@ def _turn(record_id: str, turn: str, completes: str | None = None) -> AgentRecor
 @pytest.mark.parametrize("reload", [False, True])
 def test_a_retry_a_computed_processor_retired_never_trains_after_a_reload(tmp_path: Path, reload: bool) -> None:
     """A retries turn t1 after A trained; the weights processor retires the retry, and its next commit names the
-    retry as settled because the harness still holds it. Settled means released without training: a reload keeps it
-    released, so a later turn that completes the retry finds nothing to judge, as on the live path."""
+    retry as consumed. A reload keeps it out, so a later turn that completes the retry finds nothing to judge, as on
+    the live path."""
     initial = tmp_path / "initial"
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True)
@@ -1748,7 +1691,7 @@ def test_a_retry_a_computed_processor_retired_never_trains_after_a_reload(tmp_pa
         scenario.records.append(_turn("A-retry", "t1"))
         scenario.records.append(_turn("C", "t3", completes="B"))
         assert step(scenario) == [("B",)]
-        assert "A-retry" in scenario.store.history()[-1].settled_ids
+        assert "A-retry" in scenario.store.history()[-1].consumed_ids
         if reload:
             scenario = dispatcher._registry.reload("agent")
         scenario.records.append(_turn("E", "t4", completes="A-retry"))
@@ -1768,9 +1711,9 @@ def _run_report(record_id: str, references: tuple[str, ...]) -> AgentRecord:
 
 
 @pytest.mark.unit
-def test_a_run_report_settled_for_a_retired_inference_releases_its_other_inference(tmp_path: Path) -> None:
-    """run references i1 and i2 and is stored before the weights job retires i1. Each trainer then settles run for
-    the retired row, and the ownership rule releases i2 with it, as when run is read before the retirement."""
+def test_a_run_report_on_an_inference_both_trainers_trained_is_skipped_by_both(tmp_path: Path) -> None:
+    """run references i1 and i2 and is stored before the weights job commits i1, which the harness trained already.
+    Each trainer then skips run, since one of its sources trained, instead of raising on it."""
     dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -1784,16 +1727,10 @@ def test_a_run_report_settled_for_a_retired_inference_releases_its_other_inferen
         scenario.commit(harness, component=HARNESS)
         scenario.records.append(_run_report("run", ("i1", "i2")))
         assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
-        assert scenario.records.get("agent", "i1") is None
         assert scenario.prepare_training_step(HARNESS) is None
         assert scenario.reserve_training_batch(WEIGHTS) is None
         for component in (WEIGHTS, HARNESS):
-            decision = scenario.trainer_for(component).processor.retention_decision()
-            assert "i2" not in decision.protected_agent_record_ids, component
-            assert "i2" in decision.releasable_agent_record_ids, component
-            # The report on a retired row is released at once, as a replay releases it; the inference its ownership
-            # rule released reaches the other trainer with this trainer's next record.
-            assert "run" in scenario.trainer_for(component).releasable_agent_record_ids(), component
+            assert "run" in scenario.trainer_for(component).skipped_record_ids, component
     finally:
         dispatcher.close()
 
@@ -1889,135 +1826,23 @@ def test_training_mode_switches_every_trainer_or_none(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_a_rejected_batch_retires_rows_from_every_trainer(tmp_path: Path) -> None:
-    """Rows a rejection retires leave the other trainers' memory too, as after a commit."""
+def test_a_rejected_batch_is_consumed_for_its_own_trainer_alone(tmp_path: Path) -> None:
+    """A drop consumes its rows for the trainer that dropped them: they stay stored, and its receipt names it."""
     dispatcher, _ = _dispatcher(tmp_path)
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         for record in _records(1):
             scenario.records.append(record)
+        assert scenario.prepare_training_step(WEIGHTS) is not None
+        scenario.reject_pending(component=WEIGHTS)
+        assert scenario.records.count("agent") == 2
+        (receipt,) = scenario.records.consumption_receipts("agent")
+        assert receipt["metadata"]["component"] == WEIGHTS and set(receipt["consumed_ids"]) == {"i1", "r1"}
         harness = scenario.prepare_training_step(HARNESS)
         assert harness is not None
         scenario.commit(harness, component=HARNESS)
-        assert scenario.trainer_for(HARNESS).releasable_agent_record_ids() == frozenset({"i1", "r1"})
-        assert scenario.prepare_training_step(WEIGHTS) is not None
-        scenario.reject_pending(component=WEIGHTS)
-        assert scenario.records.count("agent") == 0
-        assert scenario.trainer_for(HARNESS).releasable_agent_record_ids() == frozenset()
-    finally:
-        dispatcher.close()
-
-
-@pytest.mark.unit
-def test_rows_a_trainer_never_ingests_are_released_by_it() -> None:
-    """A row outside the processor's request types is nobody's to protect, so the trainer releases it at once."""
-    store = SQLiteRecordStore()
-    trainer = Trainer.build("agent", store, processor_factory=_InferenceOnlyProcessor)
-    for record in _records(1):
-        store.append(record)
-    assert trainer.run_once(0) is None
-    assert "r1" in trainer.releasable_agent_record_ids()
-    assert "i1" not in trainer.releasable_agent_record_ids()
-    trainer.compaction_applied(frozenset({"r1"}))
-    assert "r1" not in trainer.releasable_agent_record_ids()
-
-
-class _ReportOnlyProcessor(DataProcessor):
-    """A weights processor that trains on reports alone: the inference rows beside them are nobody's to protect."""
-
-    required_request_types = frozenset({RequestType.REPORT})
-
-    def __init__(self, context: Any) -> None:
-        super().__init__(context)
-        self.items: list[str] = []
-        self.done: set[str] = set()
-        self.batches = 0
-
-    def ingest(self, item: AgentRecord) -> None:
-        self.items.append(item.agent_record_id)
-
-    def ready(self) -> bool:
-        return bool(self.items)
-
-    def build_batch(self) -> TrainingBatch:
-        self.batches += 1
-        return TrainingBatch(f"b{self.batches}", ())
-
-    def acknowledge(self, batch_id: str) -> frozenset[str]:
-        consumed = frozenset(self.items)
-        self.items.clear()
-        self.done |= consumed
-        return consumed
-
-    def retention_decision(self) -> RetentionDecision:
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(self.items), releasable_agent_record_ids=frozenset(self.done)
-        )
-
-    def compaction_applied(self, compacted_ids: frozenset[str]) -> None:
-        self.done -= compacted_ids
-
-
-@dataclass(frozen=True)
-class _ReportOnlyWeightsRecipe(_TwoTrainerRecipe):
-    """Weights train on reports alone; the harness holds every inference it reads, its batch never full."""
-
-    def build_trainers(self, scenario, records, *, surface, algorithm_states, experiment_logger=None):
-        def factory_for(component: str):
-            if component == HARNESS:
-                return lambda context: ThresholdProcessor(context.with_config({"batch_size": 10**6}))
-            return _ReportOnlyProcessor
-
-        return tuple(
-            ComponentTrainer(
-                component,
-                Trainer.build(
-                    scenario,
-                    records,
-                    processor_factory=factory_for(component),
-                    candidate_backend=backend,
-                    algorithm_state=algorithm_states.get(component),
-                    experiment_logger=experiment_logger,
-                ),
-            )
-            for component, backend in self.backends.items()
-        )
-
-
-@pytest.mark.unit
-def test_a_settled_row_of_a_type_the_processor_does_not_take_is_named_once_across_reloads(tmp_path: Path) -> None:
-    """The weights trainer releases each inference beside its report at once, and its record names the row once
-    while the harness keeps it stored; a reload reads that record back, so the next record does not name every such
-    row again."""
-    backends: dict[str, CandidateBackend] = {
-        component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)
-    }
-    initial = tmp_path / "initial"
-    for component in (WEIGHTS, HARNESS):
-        (initial / component).mkdir(parents=True)
-        (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
-    dispatcher = Dispatcher(
-        _ReportOnlyWeightsRecipe(backends=backends),
-        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
-        local_artifact_dir=tmp_path / "staged",
-        agent_record_dir=tmp_path / "records",
-        scenario_storage=SQLiteScenarioStorage(tmp_path / "records"),
-    )
-    try:
-        scenario = dispatcher.get_or_create_scenario("agent")
-        assert scenario is not None
-        for step in range(1, 13):
-            for record in _records(step):
-                scenario.records.append(record)
-            assert scenario.prepare_training_step(HARNESS) is None
-            result = scenario.prepare_training_step(WEIGHTS)
-            assert result is not None
-            scenario.commit(result, component=WEIGHTS)
-            if step % 4 == 0:
-                scenario = dispatcher._registry.reload("agent")
-        records = [record for record in scenario.store.history() if record.component == WEIGHTS]
-        assert [sorted(record.settled_ids) for record in records] == [[f"i{step}"] for step in range(1, 13)]
+        assert scenario.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})
     finally:
         dispatcher.close()
 
@@ -2101,8 +1926,8 @@ def test_composite_recovery_refuses_a_registration_without_a_component_manifest(
 
 
 @pytest.mark.unit
-def test_rows_consumed_before_a_restart_are_still_retired(tmp_path: Path) -> None:
-    """A trainer rebuilt after a restart keeps releasing the rows its committed steps consumed."""
+def test_rows_one_trainer_consumed_before_a_restart_still_train_the_other(tmp_path: Path) -> None:
+    """A restart between two trainers' commits of the same rows: the second still trains them, the first never again."""
     dispatcher, _ = _dispatcher(tmp_path)
     try:
         scenario = dispatcher.get_or_create_scenario("agent")
@@ -2112,15 +1937,14 @@ def test_rows_consumed_before_a_restart_are_still_retired(tmp_path: Path) -> Non
         harness = scenario.prepare_training_step(HARNESS)
         assert harness is not None
         scenario.commit(harness, component=HARNESS)
-        assert scenario.store.history()[-1].compacted_ids == frozenset()
 
-        # Restart between the two trainers' commits of the same rows.
         reloaded = dispatcher._registry.reload("agent")
+        assert reloaded.prepare_training_step(HARNESS) is None
         weights = reloaded.prepare_training_step(WEIGHTS)
         assert weights is not None
         reloaded.commit(weights, component=WEIGHTS)
-        assert reloaded.store.history()[-1].compacted_ids == frozenset({"i1", "r1"})
-        assert reloaded.records.count("agent") == 0
+        assert reloaded.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})
+        assert reloaded.records.count("agent") == 2
     finally:
         dispatcher.close()
 
@@ -2963,17 +2787,3 @@ def test_a_surface_built_with_the_flat_keywords_serves_one_component() -> None:
     assert replaced.names == (HARNESS,) and replaced.components[HARNESS].files is tree
     with pytest.raises(ValueError, match="per component"):
         Surface(components={WEIGHTS: ComponentSurface(), HARNESS: ComponentSurface()}, files=tree)
-
-
-@pytest.mark.unit
-def test_a_record_store_without_its_own_retired_read_answers_by_the_rows_it_still_holds(tmp_path: Path) -> None:
-    """``retired`` is not abstract: a store complete against the contract before it existed still builds, and the
-    default names a referenced row the store no longer answers for."""
-    store = SQLiteRecordStore(tmp_path / "records.sqlite3")
-    for record in _records(1):
-        store.append(record)
-    store.compact("agent", frozenset({"i1"}))
-    from reef.storage.records import RecordStore
-
-    assert RecordStore.retired(store, "agent", ["i1", "r1", "never"]) == frozenset({"i1", "never"})
-    assert "retired" not in RecordStore.__abstractmethods__

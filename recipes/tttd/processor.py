@@ -97,23 +97,6 @@ class TTTDProcessor(ReportedFeedbackProcessor):
         )
         return GroupDecision.DISCARD
 
-    def durable_decisions(self) -> Mapping[str, object]:
-        """The discarded steps, and why each failed, so a rebuilt processor still reports them."""
-        decisions = dict(super().durable_decisions())
-        if self._failed_step_versions:
-            decisions["failed_steps"] = {
-                str(step): list(versions) for step, versions in sorted(self._failed_step_versions.items())
-            }
-        return decisions
-
-    def restore_decisions(self, decisions: Mapping[str, object]) -> None:
-        super().restore_decisions(decisions)
-        failed = decisions.get("failed_steps")
-        if isinstance(failed, Mapping):
-            for step, versions in failed.items():
-                if isinstance(versions, list):
-                    self._failed_step_versions[int(step)] = tuple(str(version) for version in versions)
-
     def status(self) -> Mapping[str, Any]:
         """Expose mixed-version steps that terminally violated TTTD's invariant."""
         return {

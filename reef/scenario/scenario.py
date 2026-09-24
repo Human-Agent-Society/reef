@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -138,8 +138,8 @@ class Scenario:
         scenario with several trainers, which runs outside it and meets the
         commits made meanwhile at the commit boundary. Reading state that is
         not part of a transaction (objective identity, consumption
-        watermarks, processor schema) is safe here; do not reserve batches,
-        replace results, or compact through this handle.
+        watermarks, processor schema) is safe here; do not reserve batches
+        or replace results through this handle.
         """
         stepping = self._stepping_trainers()
         for bound in stepping:
@@ -230,40 +230,21 @@ class Scenario:
         if len(self.component_trainers) == 1:
             with self._committer.lock:
                 return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
-        result = trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
-        if result is None:
-            # No step to record what it read: a settlement puts its releases on record for the other trainers.
-            self._committer.settle_released(component)
-        return result
+        return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
         with self._committer.lock:
-            batch = self.trainer_for(component).reserve_training_batch(
+            return self.trainer_for(component).reserve_training_batch(
                 base_release_id=self.current_artifact_ref().release_id
             )
-            if batch is None:
-                self._committer.settle_released(component)
-            return batch
-
-    def recover_settled(self, settlements: Mapping[str, frozenset[str]], *, component: str | None = None) -> None:
-        """Hand a rebuilt trainer the rows its settlement receipts name, by receipt."""
-        with self._committer.lock:
-            self.trainer_for(component).recover_settled(settlements)
-
-    def recover_decisions(
-        self, decisions: Mapping[str, Mapping[str, object]], *, component: str | None = None
-    ) -> None:
-        """Hand a rebuilt trainer what its decisions receipts say its processor decided."""
-        with self._committer.lock:
-            self.trainer_for(component).recover_decisions(decisions)
 
     def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
         """Run the bound dispatched backend for the reserved batch."""
         return self.trainer_for(component).execute_reserved_step(self.scenario_step)
 
     def reject_pending(self, metrics: Mapping[str, Any] | None = None, *, component: str | None = None) -> None:
-        """Drop the reserved batch and durably compact whatever it released."""
+        """Drop the reserved batch and persist its consumption."""
         with self._committer.lock:
             self._committer.reject_pending(component, metrics)
 
@@ -272,23 +253,10 @@ class Scenario:
         with self._committer.lock:
             self.trainer_for(component).retry_pending(keep_candidate=keep_candidate)
 
-    def reingest(
-        self,
-        *,
-        up_to_sequence: int,
-        consumed_ids: frozenset[str],
-        component: str | None = None,
-        consumed_by_step: Sequence[tuple[int, frozenset[str]]] = (),
-        settled_ids: frozenset[str] = frozenset(),
-    ) -> None:
+    def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""
         with self._committer.lock:
-            self.trainer_for(component).reingest(
-                up_to_sequence=up_to_sequence,
-                consumed_ids=consumed_ids,
-                consumed_by_step=consumed_by_step,
-                settled_ids=settled_ids,
-            )
+            self.trainer_for(component).reingest(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
 
     def restore_record_progress(self, *, after_sequence: int, offset: int, component: str | None = None) -> None:
         """Resume record consumption at a recovered commit's high-water mark."""

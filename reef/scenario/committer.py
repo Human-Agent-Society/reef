@@ -209,48 +209,11 @@ class ScenarioCommitter:
             return True
         return record.component is None and record.operation == "training" and len(self._trainers) == 1
 
-    def _compactable_for(self, component: str | None) -> frozenset[str] | None:
-        """The rows every other trainer has released; ``None`` when no other trainer runs a step.
-
-        Trainers of one scenario consume the same records, so a row is retired
-        only when no trainer still needs it. A trainer without a candidate
-        backend runs no step and needs no row, so it has no say.
-        """
-        others = [
-            bound.trainer
-            for bound in self._trainers
-            if bound.component != component and bound.trainer.candidate_backend is not None
-        ]
-        if not others:
-            return None
-        released: frozenset[str] | None = None
-        for trainer in others:
-            ids = trainer.releasable_agent_record_ids()
-            released = ids if released is None else released & ids
-        return frozenset() if released is None else released
-
     def reject_pending(self, component: str | None, metrics: Mapping[str, Any] | None = None) -> None:
-        """Drop ``component``'s reserved batch, retiring only rows every trainer has released."""
+        """Drop ``component``'s reserved batch; with several trainers its consumption receipt names the component."""
         with self._lock:
             bound = self._bound_trainer(component)
-            compactable = self._compactable_for(bound.component)
-            if compactable is not None:
-                bound.trainer.record_decisions(component=bound.component)
-            compacted = bound.trainer.reject_pending(metrics, compactable=compactable, component=bound.component)
-            # Retired rows leave every trainer's memory, as after a commit.
-            for other in self._trainers:
-                if other is not bound:
-                    other.trainer.compaction_applied(compacted)
-                other.trainer.forget_settlements(compacted)
-
-    def settle_released(self, component: str | None) -> None:
-        """Put on record what ``component``'s trainer released in memory, when another trainer may retire it."""
-        with self._lock:
-            bound = self._bound_trainer(component)
-            if self._compactable_for(bound.component) is None or bound.trainer.candidate_backend is None:
-                return
-            bound.trainer.record_decisions(component=bound.component)
-            bound.trainer.settle_released(component=bound.component)
+            bound.trainer.reject_pending(metrics, component=bound.component if len(self._trainers) > 1 else None)
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""
@@ -475,9 +438,7 @@ class ScenarioCommitter:
                     record_progress=RecordProgress(
                         high_water_sequence=prepared.high_water_sequence,
                         high_water_offset=prepared.high_water_offset,
-                        compacted_ids=prepared.compacted_ids,
                         consumed_ids=prepared.consumed_ids,
-                        settled_ids=prepared.settled_ids,
                     ),
                     metrics=prepared.metrics,
                     training_job_id=prepared.training_job_id,
@@ -667,11 +628,7 @@ class ScenarioCommitter:
                 )
                 # The record names the base its batch was reserved against; the metrics say what it landed on.
                 result = trainer.add_commit_metrics(result, {"merged_onto": served})
-            compactable = self._compactable_for(component)
-            if compactable is not None:
-                # A sibling may keep what this record releases: the decisions behind it go on record first.
-                trainer.record_decisions(component=component)
-            prepared = trainer.prepare_commit(result, compactable=compactable)
+            prepared = trainer.prepare_commit(result)
             recorded = self._recorded_training_retry(prepared, result, next_step, component)
             if recorded is not None:
                 recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
@@ -792,9 +749,7 @@ class ScenarioCommitter:
                     record_progress=RecordProgress(
                         high_water_sequence=prepared.high_water_sequence,
                         high_water_offset=prepared.high_water_offset,
-                        compacted_ids=prepared.compacted_ids,
                         consumed_ids=prepared.consumed_ids,
-                        settled_ids=prepared.settled_ids,
                     ),
                     metrics=prepared.metrics,
                     training_job_id=prepared.training_job_id,
@@ -827,7 +782,7 @@ class ScenarioCommitter:
             else:
                 if not durable:
                     # Without a durable commit point, reject a changed serving
-                    # head before recording or compacting the prepared step.
+                    # head before recording the prepared step.
                     artifacts.advance(local_artifact.ref, expected=head)
                 record = self._append_commit_record(
                     step=next_step,
@@ -927,10 +882,6 @@ class ScenarioCommitter:
     ) -> None:
         """Finish recoverable effects before exposing the prepared state."""
         trainer.commit_applied(prepared.algorithm_state)
-        # Retired rows leave every trainer's processor memory, not only the committing one's.
-        for bound in self._trainers:
-            bound.trainer.compaction_applied(prepared.compacted_ids)
-            bound.trainer.forget_settlements(prepared.compacted_ids)
         trainer.commit(prepared)
         if not self._store.durable:
             self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)
@@ -1012,9 +963,7 @@ class ScenarioCommitter:
             record.algorithm_state == prepared.algorithm_state
             and record.high_water_sequence == prepared.high_water_sequence
             and record.high_water_offset == prepared.high_water_offset
-            and record.compacted_ids == prepared.compacted_ids
             and record.consumed_ids == prepared.consumed_ids
-            and record.settled_ids == prepared.settled_ids
             and record.metrics == prepared.metrics
             and record.training_job_id == prepared.training_job_id
         )
@@ -1061,9 +1010,7 @@ class ScenarioCommitter:
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
             high_water_offset=prepared.high_water_offset,
-            compacted_ids=prepared.compacted_ids,
             consumed_ids=prepared.consumed_ids,
-            settled_ids=prepared.settled_ids,
             operation=operation,
             rollback_target_release_id=rollback_target_release_id,
             metrics=prepared.metrics,

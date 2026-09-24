@@ -42,7 +42,7 @@ SCENARIO = "agents"
 QUERY = {"scenario": SCENARIO, "token": "secret"}
 
 
-def _record(compacted_at: float | None = None, text: str = TEXT, requires: list | None = None) -> dict:
+def _record(text: str = TEXT, requires: list | None = None) -> dict:
     """The agent record as ``Dispatcher.read_record`` answers it for a ``POST /reef/train`` instruction."""
     payload = {"text": text, "session": SESSION, "release_id": "rel-0", "requires": requires or []}
     return {
@@ -50,7 +50,6 @@ def _record(compacted_at: float | None = None, text: str = TEXT, requires: list 
         "agent_record_id": RECORD_ID,
         "request_type": "train",
         "created_at": 1_000.0,
-        "compacted_at": compacted_at,
         "references": [],
         "artifact_ref": None,
         "score": None,
@@ -101,7 +100,7 @@ def test_both_harness_pages_carry_the_readme_logo_from_the_shared_chrome() -> No
 def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> None:
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
     rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION))]
-    page = build_request_page(_record(compacted_at=1_050.0), rows, link_query=QUERY, now=1_100.0)
+    page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
     head = "/reef/harness/releases/1/page?scenario=agents&amp;token=secret"
     assert f'<a class="brand" href="{head}" aria-label="Harness home">' in page
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
@@ -165,7 +164,12 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_
     assert "Evaluation episodes" not in page
     page = build_request_page(_record(), [CREATION], consumed=True, now=1_100.0)
     assert '<span class="running">In progress</span>' in page and "its row follows" in page and REFRESH in page
-    page = build_request_page(_record(compacted_at=1_099.0), [CREATION], now=1_100.0)
+    page = build_request_page(
+        _record(),
+        [CREATION],
+        progress=StepProgress(RECORD_ID, "settling", started_at=1_099.0, step_record=None),
+        now=1_100.0,
+    )
     assert (
         '<span class="settling">Saving the result</span>' in page and "committing its row" in page and REFRESH in page
     )
@@ -173,7 +177,7 @@ def test_a_running_request_shows_the_steps_phase_its_elapsed_time_and_the_gates_
 
 def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link_with_its_query() -> None:
     rows = [CREATION, _row(_answered(selected=True, published=True, mutation=MUTATION))]
-    page = build_request_page(_record(compacted_at=1_050.0), rows, link_query=QUERY, now=1_100.0)
+    page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
     page.encode("ascii")
     assert REFRESH not in page and "<title>Harness request 3f1c2a9d</title>" in page
     assert _sections(page) == ["Request", "Result", "What changed"]
@@ -191,7 +195,7 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
     assert '<span class="tag">rules</span>' in changed
     assert "<code>/versions v1 install</code>" in selection_result
     assert settled_step(rows, RECORD_ID) == 1
-    bare = build_request_page(_record(compacted_at=1_050.0), rows, now=1_100.0)
+    bare = build_request_page(_record(), rows, now=1_100.0)
     assert 'href="/reef/harness/releases/1/page">View v1' in bare
 
     # A rejected proposal is labeled as proposed, never as an applied change.
@@ -203,7 +207,7 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
             selection={"reason": "candidate missed the floor on 1 of 1 tasks"},
         )
     )
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, rejected], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, rejected], now=1_100.0)
     assert '<span class="rejected">Not selected</span>' in page
     assert "did not pass the checks (candidate missed the floor on 1 of 1 tasks); nothing changed" in page
     assert "rephrase or split the request" in page
@@ -215,14 +219,14 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
 
 def test_a_pending_request_names_the_promote_and_reads_promoted_once_a_promote_row_names_it() -> None:
     pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, pending], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, pending], now=1_100.0)
     assert '<span class="pending">Ready for review</span>' in page
     assert "Proposed changes" in _sections(page)
     assert "Release rel-1 is ready. This change includes an extension" in page
     assert REFRESH not in page
     assert "<code>/versions v1 install</code>" in page
     promote = _row({}, release_id="rel-2", parent="rel-0", operation="promote", rollback_target_release_id="rel-1")
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, pending, promote], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, pending, promote], now=1_100.0)
     assert '<span class="promoted">Promoted at v2</span>' in page
     assert "passed the checks and was promoted at v2; the release that step published serves it" in page
     assert "What changed" in _sections(page)
@@ -238,7 +242,7 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
         "review": {review_key: "partial", "covered": ["the trigger"], "uncovered": ["a way to turn it off"]},
     }
     skipped = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, skipped], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, skipped], now=1_100.0)
     assert REFRESH not in page and '<span class="failed">Failed</span>' in page
     assert _sections(page) == ["Request", "Result", "Proposed changes", "Review", "Design"]
     assert "<p>one rules entry</p>" in _section(page, "Design")
@@ -254,13 +258,13 @@ def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_
     assert "the trigger" not in review
     complete = {"review": {"result": "complete", "covered": ["all of it"], "uncovered": []}}
     row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes=complete))
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
     assert '<span class="complete">Complete</span>' in page and "Nothing left uncovered." in page
     row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": "plan"}))
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
     assert "<h2>Review</h2>" not in page and _sections(page)[-1] == "Design" and "<h2>How to use</h2>" not in page
     failed = _row(_answered(skipped="instruction failed", error="RuntimeError: poison proposer"), release_id="rel-0")
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, failed], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, failed], now=1_100.0)
     assert '<span class="failed">Failed</span>' in page
     assert "<h3>Error</h3><p>RuntimeError: poison proposer</p>" in page
 
@@ -274,7 +278,7 @@ def test_a_settled_request_ends_with_the_design_and_how_to_use_the_change() -> N
         "## How to use\n\nType /speak after an answer; it plays through <afplay>. /speak off stops it."
     )
     row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": design}))
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
     assert _sections(page) == ["Request", "Result", "What changed", "Design", "How to use"]
     assert _section(page, "Design").strip() == (
         "<p>Restated: read each answer aloud.\n\nTrigger: the /speak command; state: the last answer, from the session.</p>"
@@ -284,7 +288,7 @@ def test_a_settled_request_ends_with_the_design_and_how_to_use_the_change() -> N
     )
     # A plain "How to use:" line splits the same way, wherever the proposer put the heading marks.
     row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes={"design": "A plan.\nHow to use:\nRun /x."}))
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
     assert "<p>A plan.</p>" in _section(page, "Design") and "<p>Run /x.</p>" in _section(page, "How to use")
 
 
@@ -294,7 +298,7 @@ def test_a_step_whose_review_did_not_run_says_so_instead_of_dropping_the_section
     that nothing checked, rather than reading like a step that simply had no review."""
     notes = {"design": "plan", "review_failure": "model call failed after 91.9 s: non-text content"}
     row = _row(_answered(selected=True, mutation=MUTATION, proposal_notes=notes))
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
     review = _section(page, "Review")
     assert "did not run, so nothing checked whether they deliver it" in review
     assert "non-text content" in review
@@ -310,7 +314,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_
     notes = {"failure": "<b>failed</b>", "review": {"result": "partial", "covered": [], "uncovered": ["<i>off</i>"]}}
     row = _row(_answered(skipped="no proposal", proposal_notes=notes), release_id="rel-0")
     page = build_request_page(
-        _record(compacted_at=1_050.0, text=text, requires=requires),
+        _record(text=text, requires=requires),
         [CREATION, row],
         link_query={"scenario": "a b", "token": "t&<"},
         now=1_100.0,

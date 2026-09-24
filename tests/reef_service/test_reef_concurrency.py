@@ -202,9 +202,9 @@ def test_async_worker_serializes_slow_trainer_commits(tmp_path, monkeypatch) -> 
     scenario = dispatcher.get_or_create_scenario("math")
     original_prepare_commit = scenario.trainer.prepare_commit
 
-    def slow_prepare_commit(result, *, compactable=None):
+    def slow_prepare_commit(result):
         time.sleep(0.05)
-        return original_prepare_commit(result, compactable=compactable)
+        return original_prepare_commit(result)
 
     monkeypatch.setattr(scenario.trainer, "prepare_commit", slow_prepare_commit)
 

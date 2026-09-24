@@ -153,7 +153,6 @@ class OpenTelemetryRecordObserver(RecordObserver):
             "reef.checkpoint": commit.checkpoint,
             "reef.pending": commit.pending,
             "reef.consumed_record_count": len(commit.consumed_ids),
-            "reef.compacted_record_count": len(commit.compacted_ids),
             **_artifact_attributes(commit.artifact_ref),
         }
         if commit.training_job_id is not None:

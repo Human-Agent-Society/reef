@@ -7,8 +7,8 @@ failure closes the trainer and opened storage session owned by this attempt.
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
+from collections.abc import Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -48,110 +48,47 @@ from reef.surface.files import REPOSITORY_FILES
 from reef.train.trainer import ComponentTrainer
 
 
-def _consumed_by_committed_steps(records: tuple[CommitRecord, ...]) -> frozenset[str]:
+def _committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
+    records = store.history()
+    if not records and head_record is not None:
+        # No durable log: the head adopted from checkpoint metadata is the
+        # only committed step there is.
+        records = (head_record,)
+    return records
+
+
+def _consumed_by_committed_steps(
+    store: ScenarioStore,
+    head_record: CommitRecord | None,
+    scenario: str,
+    *,
+    component: str | None = None,
+) -> frozenset[str]:
     """The rows every committed step's batch consumed.
 
     Rehydration must skip these rows: retention may keep a consumed row stored
     (audit-only retention is contract-legal), and re-ingesting one would train
     it twice. Consumption is permanent, so the union over the whole log is the
-    exclusion set.
+    exclusion set. ``component`` keeps one trainer's share of a scenario with
+    several: its own commits and the receipts of its own stale drops.
     """
     consumed: set[str] = set()
-    for record in records:
-        consumed |= record.consumed_ids
+    for record in _committed_records(store, head_record):
+        if component is None or record.component == component:
+            consumed |= record.consumed_ids
+    for receipt in store.records.consumption_receipts(scenario):
+        if component is None or receipt["metadata"].get("component") == component:
+            consumed.update(receipt["consumed_ids"])
     return frozenset(consumed)
 
 
 @dataclass(frozen=True)
 class _RecoveredTrainerState:
-    """What one component's trainer recovers from its own commits: state, cursor, and consumed rows."""
+    """What one component's trainer recovers from its own commits and drops: state, cursor, and consumed rows."""
 
     algorithm_state: Mapping[str, Any] | None
     high_water: tuple[int, int] | None
     consumed_ids: frozenset[str]
-    #: Each own committed step's watermark with the rows its batch consumed, in commit order.
-    consumed_by_step: tuple[tuple[int, frozenset[str]], ...] = ()
-    #: The rows its records say it released without training while another trainer held them.
-    settled_ids: frozenset[str] = frozenset()
-    #: The rows its settlement receipts name, by receipt: released in memory between its commits, put on record
-    #: without a step.
-    settlements: Mapping[str, frozenset[str]] = field(default_factory=dict)
-    #: What its processor decided that the rows cannot rebuild (a group it discarded), by decisions receipt.
-    decisions: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
-
-
-@dataclass(frozen=True)
-class _DroppedStep:
-    """A batch a backend dropped as stale: consumed without a commit, named by its compaction receipt."""
-
-    component: str | None
-    consumed_ids: frozenset[str]
-    settled_ids: frozenset[str]
-    high_water: tuple[int, int]
-
-
-def _dropped_steps(store: ScenarioStore, scenario: str) -> tuple[_DroppedStep, ...]:
-    """The stale drops the records store's receipts name, oldest first.
-
-    A drop retires only the rows every trainer has released; the rest stay
-    stored, and without this a replay would take them for live rows and
-    reserve the dropped batch again. A receipt that names no consumed rows
-    comes from a drop that retired every row it consumed, or from an older
-    Reef: nothing of it is left to skip.
-    """
-    dropped = []
-    for receipt in store.records.compaction_receipts(scenario):
-        metadata = receipt["metadata"]
-        if not isinstance(metadata, Mapping) or metadata.get("outcome") != "stale" or "consumed_ids" not in metadata:
-            continue
-        component = metadata.get("component")
-        dropped.append(
-            _DroppedStep(
-                component=component if isinstance(component, str) else None,
-                consumed_ids=frozenset(str(record_id) for record_id in metadata["consumed_ids"]),
-                settled_ids=frozenset(str(record_id) for record_id in metadata.get("settled_ids", ())),
-                high_water=(int(metadata["high_water_sequence"]), int(metadata["high_water_offset"])),
-            )
-        )
-    return tuple(dropped)
-
-
-def settlement_receipts(
-    receipts: Sequence[Mapping[str, object]],
-) -> dict[str | None, dict[str, frozenset[str]]]:
-    """The rows each trainer's settlement receipts name as released without training, by component and receipt.
-
-    A receipt goes once a compaction retired all its rows, so this is bounded
-    by the rows the scenario still keeps, not by the idle cycles that wrote it.
-    """
-    settled: dict[str | None, dict[str, frozenset[str]]] = {}
-    for receipt in receipts:
-        metadata = receipt["metadata"]
-        if not isinstance(metadata, Mapping) or metadata.get("outcome") != "settled":
-            continue
-        component = metadata.get("component")
-        settled.setdefault(component if isinstance(component, str) else None, {})[str(receipt["receipt_id"])] = (
-            frozenset(str(record_id) for record_id in metadata.get("settled_ids", ()))
-        )
-    return settled
-
-
-def decision_receipts(
-    receipts: Sequence[Mapping[str, object]],
-) -> dict[str | None, dict[str, Mapping[str, object]]]:
-    """What each trainer's processor put on record as decided, by component and decisions receipt."""
-    decided: dict[str | None, dict[str, Mapping[str, object]]] = {}
-    for receipt in receipts:
-        metadata = receipt["metadata"]
-        if not isinstance(metadata, Mapping) or metadata.get("outcome") != "decisions":
-            continue
-        decisions = metadata.get("decisions")
-        component = metadata.get("component")
-        if isinstance(decisions, Mapping):
-            decided.setdefault(component if isinstance(component, str) else None, {})[
-                str(receipt["receipt_id"])
-            ] = decisions
-    return decided
 
 
 def _recovered_trainer_states(
@@ -159,51 +96,26 @@ def _recovered_trainer_states(
 ) -> dict[str, _RecoveredTrainerState]:
     """What each component's trainer recovers from its own commits and its own stale drops.
 
-    The only trainer of a one-component (or record-only) scenario also owns
-    every commit that named no trainer: the records made before commits
-    carried a component, and rollbacks, which carry its state. A drop is a
-    step without a commit: its rows count as consumed and its cursor as
-    read, the state stays the last commit's.
+    The only trainer of a one-component (or record-only) scenario owns every
+    commit and consumption receipt: the ones made before they carried a
+    component, and rollbacks, which carry its state. A drop is a step without a commit: its rows count as consumed, and
+    the state and the cursor stay the last commit's.
     """
-    records = store.history()
-    if not records and head_record is not None:
-        # No durable log: the head adopted from checkpoint metadata is the
-        # only committed step there is.
-        records = (head_record,)
+    records = _committed_records(store, head_record)
     components = surface.names or (RECORDS_COMPONENT,)
-    dropped = _dropped_steps(store, scenario)
-    receipts = store.records.compaction_receipts(scenario)
-    settlements = settlement_receipts(receipts)
-    decisions = decision_receipts(receipts)
     states: dict[str, _RecoveredTrainerState] = {}
     for component in components:
+        alone = len(components) == 1
         own = tuple(
-            record
-            for record in records
-            if record.component == component or (len(components) == 1 and record.component is None)
-        )
-        own_drops = tuple(
-            drop
-            for drop in dropped
-            if drop.component == component or (len(components) == 1 and drop.component is None)
+            record for record in records if record.component == component or (alone and record.component is None)
         )
         last = own[-1] if own else None
-        marks = [drop.high_water for drop in own_drops]
-        if last is not None:
-            marks.append((last.high_water_sequence, last.high_water_offset))
         states[component] = _RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
-            high_water=max(marks) if marks else None,
-            consumed_ids=_consumed_by_committed_steps(own).union(*(drop.consumed_ids for drop in own_drops)),
-            consumed_by_step=(
-                *((record.high_water_sequence, record.consumed_ids) for record in own),
-                *((drop.high_water[0], drop.consumed_ids) for drop in own_drops),
+            high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
+            consumed_ids=_consumed_by_committed_steps(
+                store, head_record, scenario, component=None if alone else component
             ),
-            settled_ids=frozenset().union(
-                *(record.settled_ids for record in own), *(drop.settled_ids for drop in own_drops)
-            ),
-            settlements=settlements.get(component, {}),
-            decisions=decisions.get(component, {}),
         )
     return states
 
@@ -503,23 +415,19 @@ class ScenarioFactory:
                 recovered = recovered_states.get(bound.component)
                 if recovered is None:
                     continue
-                if recovered.decisions:
-                    # Before the replay: a retry at a group the processor discarded is terminal again.
-                    scenario.recover_decisions(recovered.decisions, component=bound.component)
-                if recovered.settlements:
-                    scenario.recover_settled(recovered.settlements, component=bound.component)
-                if recovered.high_water is None:
-                    continue
-                scenario.reingest(
-                    up_to_sequence=recovered.high_water[0],
-                    consumed_ids=recovered.consumed_ids,
-                    component=bound.component,
-                    consumed_by_step=recovered.consumed_by_step,
-                    settled_ids=recovered.settled_ids.union(*recovered.settlements.values()),
-                )
-                scenario.restore_record_progress(
-                    after_sequence=recovered.high_water[0], offset=recovered.high_water[1], component=bound.component
-                )
+                if recovered.high_water is not None:
+                    scenario.reingest(
+                        up_to_sequence=recovered.high_water[0],
+                        consumed_ids=recovered.consumed_ids,
+                        component=bound.component,
+                    )
+                    scenario.restore_record_progress(
+                        after_sequence=recovered.high_water[0],
+                        offset=recovered.high_water[1],
+                        component=bound.component,
+                    )
+                elif recovered.consumed_ids:
+                    scenario.reingest(up_to_sequence=0, consumed_ids=recovered.consumed_ids, component=bound.component)
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
             scenario.publish_shipped_content()

@@ -342,7 +342,6 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
         high_water_sequence=9,
         high_water_offset=0,
         consumed_ids=frozenset({"i1", "i2"}),
-        compacted_ids=frozenset({"i1"}),
         recorded_at=1_700_000_100.0,
         metrics={"loss": 0.5, "selected": True, "label": "ok", "nan": float("nan"), "nested": {"x": 1}},
         training_job_id="job-3",
@@ -360,7 +359,7 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     assert step.attributes["reef.component"] == "harness"
     assert step.attributes["reef.release_id"] == "v3"
     assert step.attributes["reef.consumed_record_count"] == 2
-    assert step.attributes["reef.compacted_record_count"] == 1
+    assert "reef.compacted_record_count" not in step.attributes
     assert step.attributes["reef.training_job_id"] == "job-3"
     assert step.attributes["reef.metrics.loss"] == 0.5
     assert step.attributes["reef.metrics.selected"] is True

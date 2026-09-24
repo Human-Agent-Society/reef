@@ -21,18 +21,23 @@ from reef.core.errors import ReefError
 class RecordProgress:
     """Record-consumption watermark pinned by a commit record.
 
-    ``consumed_ids`` names the rows the step's batch consumed. ``settled_ids``
-    names rows the step's trainer released without training that stay
-    stored because another trainer still holds them, and that no earlier
-    record of that trainer names: recovery settles them again rather than
-    reading them as live.
+    ``consumed_ids`` names the rows the step's batch consumed.
     """
 
     high_water_sequence: int
     high_water_offset: int
-    compacted_ids: frozenset[str] = frozenset()
     consumed_ids: frozenset[str] = frozenset()
-    settled_ids: frozenset[str] = frozenset()
+
+
+def read_consumed_ids(value: Mapping[str, object], *, context: str) -> frozenset[str]:
+    """Normalize old progress into the current consumption-only contract."""
+    consumed: set[str] = set()
+    for key in ("compacted_ids", "consumed_ids"):
+        ids = value.get(key, [] if key == "compacted_ids" else None)
+        if not isinstance(ids, list) or any(not isinstance(record_id, str) for record_id in ids):
+            raise ValueError(f"{context} record_progress.{key} must be a list of strings")
+        consumed.update(ids)
+    return frozenset(consumed)
 
 
 def parse_record_progress(value: object, *, context: str) -> RecordProgress:
@@ -48,22 +53,10 @@ def parse_record_progress(value: object, *, context: str) -> RecordProgress:
         field = value.get(name)
         if not isinstance(field, int) or isinstance(field, bool) or field < 0:
             raise ValueError(f"{context} record_progress.{name} must be a non-negative integer")
-    compacted_ids = value.get("compacted_ids")
-    if not isinstance(compacted_ids, list) or any(not isinstance(item, str) for item in compacted_ids):
-        raise ValueError(f"{context} record_progress.compacted_ids must be a list of strings")
-    consumed_ids = value.get("consumed_ids")
-    if not isinstance(consumed_ids, list) or any(not isinstance(item, str) for item in consumed_ids):
-        raise ValueError(f"{context} record_progress.consumed_ids must be a list of strings")
-    # Written only when a trainer settled rows another trainer holds; older records never carry it.
-    settled_ids = value.get("settled_ids", [])
-    if not isinstance(settled_ids, list) or any(not isinstance(item, str) for item in settled_ids):
-        raise ValueError(f"{context} record_progress.settled_ids must be a list of strings")
     return RecordProgress(
         high_water_sequence=value["high_water_sequence"],
         high_water_offset=value["high_water_offset"],
-        compacted_ids=frozenset(compacted_ids),
-        consumed_ids=frozenset(consumed_ids),
-        settled_ids=frozenset(settled_ids),
+        consumed_ids=read_consumed_ids(value, context=context),
     )
 
 
@@ -80,9 +73,8 @@ class CommitRecord:
 
     ``step``, ``artifact_ref`` and ``algorithm_state`` advance together or not
     at all; ``record_progress`` pins the record high-water mark the step
-    consumed, the rows its batch consumed, and the rows its compaction
-    retired, so the record store and processor memory can be re-derived after
-    a crash.
+    consumed and the IDs processed by the step. Recovery rebuilds processor
+    memory without changing stored records.
     """
 
     scenario: str
@@ -92,10 +84,7 @@ class CommitRecord:
     algorithm_state: Mapping[str, Any] | None
     high_water_sequence: int
     high_water_offset: int
-    compacted_ids: frozenset[str] = frozenset()
     consumed_ids: frozenset[str] = frozenset()
-    #: Rows the trainer released without training that another trainer still holds (``RecordProgress``).
-    settled_ids: frozenset[str] = frozenset()
     recorded_at: float = field(default_factory=time.time)
     operation: str = "training"
     operation_verified: bool = True
@@ -163,20 +152,15 @@ class CommitRecord:
             self, "algorithm_state", None if self.algorithm_state is None else dict(self.algorithm_state)
         )
         object.__setattr__(self, "metrics", None if self.metrics is None else deepcopy(dict(self.metrics)))
-        object.__setattr__(self, "compacted_ids", frozenset(self.compacted_ids))
         object.__setattr__(self, "consumed_ids", frozenset(self.consumed_ids))
-        object.__setattr__(self, "settled_ids", frozenset(self.settled_ids))
         object.__setattr__(self, "components", None if self.components is None else dict(self.components))
 
     def to_dict(self) -> dict[str, Any]:
         record_progress: dict[str, Any] = {
             "high_water_sequence": self.high_water_sequence,
             "high_water_offset": self.high_water_offset,
-            "compacted_ids": sorted(self.compacted_ids),
         }
         record_progress["consumed_ids"] = sorted(self.consumed_ids)
-        if self.settled_ids:
-            record_progress["settled_ids"] = sorted(self.settled_ids)
         value = {
             "record": RECORD_KIND,
             "scenario": self.scenario,
@@ -252,9 +236,7 @@ class CommitRecord:
             algorithm_state=algorithm_state,
             high_water_sequence=record_progress.high_water_sequence,
             high_water_offset=record_progress.high_water_offset,
-            compacted_ids=record_progress.compacted_ids,
             consumed_ids=record_progress.consumed_ids,
-            settled_ids=record_progress.settled_ids,
             recorded_at=float(recorded_at),
             operation=operation,
             operation_verified=operation_verified,
@@ -326,15 +308,11 @@ def scenario_metadata_for(
     if algorithm_state is not None:
         metadata["algorithm_state"] = dict(algorithm_state)
     if record_progress is not None:
-        progress: dict[str, object] = {
+        metadata["record_progress"] = {
             "high_water_sequence": record_progress.high_water_sequence,
             "high_water_offset": record_progress.high_water_offset,
-            "compacted_ids": sorted(record_progress.compacted_ids),
             "consumed_ids": sorted(record_progress.consumed_ids),
         }
-        if record_progress.settled_ids:
-            progress["settled_ids"] = sorted(record_progress.settled_ids)
-        metadata["record_progress"] = progress
     if training_job_id is not None:
         metadata["training_job_id"] = training_job_id
     if metrics is not None:
@@ -410,9 +388,7 @@ def parse_scenario_metadata(
         algorithm_state=algorithm_state,
         high_water_sequence=record_progress.high_water_sequence,
         high_water_offset=record_progress.high_water_offset,
-        compacted_ids=record_progress.compacted_ids,
         consumed_ids=record_progress.consumed_ids,
-        settled_ids=record_progress.settled_ids,
         training_job_id=training_job_id,
         metrics=metrics,
         operation=operation or "training",

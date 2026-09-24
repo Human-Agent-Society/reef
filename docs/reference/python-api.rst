@@ -327,6 +327,14 @@ scenario state, settling each step and its record progress together. Recipes
 and trainers use the record interface; ``Scenario`` coordinates training and
 artifact publication through its supplied scenario store.
 
+``RecordStore.append_many(items)`` atomically appends an ordered batch from one
+scenario and returns an ``AppendResult`` for each input. Conflicts roll back the
+batch; identical retries and retired records follow ``append_result`` semantics.
+SQLite and PostgreSQL implement this with one write transaction. Other adapters
+must implement atomic batch append to support ``POST /reef/records/batch``;
+the default raises ``NotImplementedError`` before writing. Single-record
+callers remain compatible with existing adapters.
+
 Storage implementations explicitly subclass ``RecordStore``,
 ``ScenarioStore``, and ``ScenarioStorage`` and override their abstract
 methods and properties. Incomplete subclasses cannot be instantiated. The
@@ -403,7 +411,7 @@ contract is:
      - Contract
    * - ``records``
      - A ``RecordStore`` implementation preserving append deduplication,
-       ordered replay, scenario isolation, audit reads, and compaction receipts.
+       ordered replay, scenario isolation, audit reads, and consumption receipts.
    * - ``durable``
      - Whether committed history survives session/process restart. A durable
        store requires a repository backend supporting staged releases.
@@ -414,18 +422,17 @@ contract is:
      - The last rollback step and the count of training commits after it, for
        experiment run numbering.
    * - ``commit_step(expected_step=..., commit=...)``
-     - Settle the ``CommitRecord`` and its record compaction, returning the
+     - Persist the ``CommitRecord`` and its consumption progress, returning the
        canonical accepted record. Its step must equal ``expected_step + 1``.
    * - ``recover(checkpoint=...)``
      - Accept a checkpoint ``CommitRecord`` (``None`` at initial registration),
-       reconcile it with history, repair interrupted record
-       compaction, and return the head ``CommitRecord`` or ``None`` for a fresh
+       reconcile it with history, and return the head ``CommitRecord`` or ``None`` for a fresh
        scenario.
    * - ``close()``
      - Release the session's record and commit resources; repeated calls are safe.
 
 ``CommitRecord`` carries the artifact ref, algorithm state, record watermark,
-consumed and compacted IDs, checkpoint/pending flags, operation and rollback
+consumed IDs, checkpoint/pending flags, operation and rollback
 target, metrics, and training job identity. The store must atomically validate
 the current step before accepting a new successor: two different commits
 prepared from the same step cannot both succeed. An identical recorded retry
@@ -436,14 +443,11 @@ expected step, or a retry with conflicting content, raises
 
 The commit log adapter serializes its writers with a local POSIX file lock;
 direct writes through ``CommitLog`` bypass this store contract.
-The default adapter fsyncs the JSONL record before applying SQLite compaction.
-It therefore provides recoverable settlement across two files, rather than a
-single SQL transaction. A failure after the append may leave the step committed
-while compaction still needs repair. Retry the exact commit or recover the
-session; do not infer rollback from an exception. Recovery reapplies recorded
-compaction and uses all committed ``consumed_ids`` to keep retained audit rows
-out of training. A future database adapter can commit the step and record
-progress together in one database transaction.
+The default adapter fsyncs the JSONL record as the durable commit point.
+A failure after append can leave the step committed. Retry the exact commit or
+recover the session; do not infer rollback from an exception. Recovery uses
+committed ``consumed_ids`` and separate skipped-batch receipts to rebuild
+processor memory without repeating work. It does not modify stored bodies.
 
 Artifact bytes and backend head movement remain outside ``ScenarioStore``.
 ``ScenarioCommitter`` owns their order around store settlement, including
@@ -480,7 +484,10 @@ database-file discovery and maintenance connections.
 It supplies PostgreSQL schema types, pooled transactions, and conflict insertion
 through psycopg 3. Install ``reef-infra[postgres]`` to enable the driver. The
 ``RecordTables.scope`` mapping isolates named stores in shared SQL tables;
-SQLite leaves it empty because each store owns a database.
+SQLite leaves it empty because each store owns a database. Custom SQL adapters
+must also supply ``RecordTables.eviction`` with scope/scenario keys and the
+``record_count``, ``body_bytes``, ``first_sequence`` and ``last_sequence`` columns.
+These totals are updated atomically with capacity deletion and retry hashes.
 
 .. code-block:: python
 
@@ -507,13 +514,12 @@ selects this storage service with ``reef.record_backend: postgres``; see
 
 Writes lock their store generation before allocating append sequences and hold
 the lock through commit. Reads use a consistent transaction snapshot. PostgreSQL
-receipt keys hash large compacted id sets, with complete canonical content checked
+receipt keys hash large consumed ID sets, with complete canonical content checked
 by the shared SQL layer. PostgreSQL timestamps use double precision, and sequences
-use 64-bit identities. Retention applies the same age and byte-budget policy to
-compacted bodies across active and archived generations in the deployment schema.
+use 64-bit identities. Retention applies the same byte-budget policy to
+all bodies across active and archived generations in the deployment schema.
 
-Existing SQLite databases, record encodings, and record methods remain
-compatible; no database conversion is required. Direct callers must replace
+Existing SQLite databases remain readable without copying record bodies. Direct callers must replace
 ``RecordStore(path)`` with ``SQLiteRecordStore(path)``; the abstract base cannot
 be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
 
@@ -527,18 +533,19 @@ be instantiated. ``SQLiteRecordStore`` is also exported from ``reef``:
        retained = records.audit_page("math")
 
 ``RecordRetention`` in ``reef.storage.records`` holds and validates the
-``days`` and ``max_bytes`` limits. Store factories apply those limits through
-their ``prune`` method.
+``max_bytes`` capacity budget. ``days`` remains a validated compatibility
+argument but does not expire data. Store factories apply capacity limits through
+``prune`` independently of record consumption.
 
-``reef.storage.records.RecordStore`` separates the training record set from retained
-trace history. ``compact(scenario, ids)`` sets ``compacted_at`` and keeps the
-original payload, response, references, and artifact reference. Hash tombstones
-and optional compaction receipts are committed atomically with that transition.
-Repeated compaction preserves the first timestamp.
+Training commits persist consumption progress without changing record
+visibility or deleting bodies. Processors expose ``releasable_record_ids()``
+and ``release_records(ids)`` for memory management. Storage controls capacity
+independently of these buffers.
 
-``get``, ``replay``, ``replay_page``, and ``count`` expose only records whose
-``compacted_at`` is ``None``. Training and restart recovery continue to use
-those methods. Use these explicit methods for audit and retention work:
+``get``, ``replay``, ``replay_page``, and ``count`` read all retained records.
+A one-time upgrade converts older retirement markers and receipts into
+consumption records. It preserves original bodies, drops the old schema,
+and keeps consumption metadata out of record reads.
 
 .. list-table::
    :header-rows: 1
@@ -550,23 +557,23 @@ those methods. Use these explicit methods for audit and retention work:
      - A ``StoredRecord``, or ``None`` if no body is retained in that scenario.
    * - ``audit_page(scenario, after_sequence=0, limit=256)``
      - A bounded tuple of ``StoredRecord`` entries, in append order, including
-       compacted bodies. Advance the cursor using the last entry's ``sequence``.
-   * - ``purge_compacted(scenario, before=timestamp, limit=256)``
-     - The number of bodies physically deleted, at most ``limit``. Only records
-       with ``compacted_at < before`` are eligible. The cutoff must be a finite
-       Unix timestamp and the limit a positive integer.
-   * - ``retired(scenario, agent_record_ids)``
-     - The ids among ``agent_record_ids`` that a compaction retired. The base
-       class answers with one ``get`` per id, so a store written before this
-       method needs no change; a store that keeps its retirements in a table
-       can override it with one read.
+       consumed bodies. Advance the cursor using the last entry's ``sequence``.
+   * - ``loss(scenario)``
+     - Durable ``RecordLoss`` totals: ``record_count``, ``body_bytes``,
+       ``first_sequence`` and ``last_sequence`` for capacity-evicted bodies.
+       Counts include consumed and unconsumed records.
+   * - ``record_consumption(scenario, ids, receipt_id=..., metadata=...)``
+     - Persist a skipped batch's consumed IDs without modifying its records.
+       Identical retries are idempotent; conflicting metadata is rejected.
+   * - ``consumption_receipts(scenario)``
+     - Ordered receipts with ``receipt_id``, ``consumed_ids``, ``metadata``,
+       and ``recorded_at``. Includes consumption from legacy receipts.
 
-``StoredRecord`` contains ``sequence``, ``item`` (the original ``AgentRecord``),
-and ``compacted_at`` (a Unix timestamp or ``None``). Audit reads never restore a
-record to the training set. A missing body may have been purged or never stored;
-the read API does not guess which. Compaction includes terminal or excluded
-records as well as trained records. Use the commit log's per-step
-``consumed_ids`` to determine learning participation.
+``StoredRecord`` contains ``sequence`` and ``item`` (the original ``AgentRecord``).
+Reading a record does not change a consumer's progress. A missing body may have been purged or never stored;
+the read API does not guess which. Use the commit log's per-step
+``consumed_ids`` to determine consumption, including intentional skips; it is
+not proof that every named record produced a model update.
 
 For example, inspect one trace without making it available to training again:
 
@@ -576,12 +583,11 @@ For example, inspect one trace without making it available to training again:
    if entry is not None:
        payload = entry.item.payload
        references = entry.item.references
-       retired_at = entry.compacted_at
 
 With the default SQLite storage service, the HTTP service runs background retention at
 startup and every 60 seconds.
-It removes bodies older than 7 days, then the oldest remaining bodies to meet
-a shared 20 GiB budget across scenario databases in ``agent_record_dir``,
+It evicts oldest bodies only when their total exceeds a shared 20 GiB budget
+across scenario databases in ``agent_record_dir``,
 including ``archived/``. The budget measures UTF-8 JSON payloads, references,
 and artifact references. Limits are configurable in `Configuration <configuration.rst>`__.
 
@@ -617,12 +623,13 @@ standalone SQLite maintenance, pass the directory to the storage service:
 
 The caller must serialize standalone maintenance with any scenario file moves.
 
-Retention preserves active records, retry hashes, and compaction receipts.
-An identical retry after purge still deduplicates, and conflicting content
-still fails. Deletes commit in batches of 256. Concurrent compaction can exceed
-the budget until the next sweep. SQLite may reuse freed pages, but purging does
-not shrink the database file; active records, indexes, and other metadata also
-use disk space. HTTP audit routes remain a separate integration. See
+Capacity eviction includes active records and logs warnings with counts, byte
+sizes and sequence ranges. Retry hashes and commit/receipt metadata survive,
+so identical retries still deduplicate and conflicting content still fails.
+SQLite deletes commit in batches of 256; PostgreSQL serializes a sweep with
+writers in one transaction. Concurrent writes can exceed the budget between
+sweeps. SQLite reuses freed pages without shrinking its file. Indexes and other
+metadata also require disk space. HTTP audit routes remain a separate integration. See
 `Configuration <configuration.rst>`__ for migration and rollback constraints.
 
 Processor
@@ -647,7 +654,7 @@ combined batching on the same processor. Declare ``supported_training_modes`` an
 implement ``make_training_batch(batch_number, request)`` to select inputs;
 ``request`` is the queued instruction in ``manual`` and ``hybrid`` and ``None``
 for an automatic batch. Ingestion, acknowledgement, retention,
-compaction and background derivation are shared. See
+buffer release and background derivation are shared. See
 `Processors <../developer-guide/processors.rst>`__ for the instruction queue and batch contract.
 
 Every processor gets the scenario's experiment logger as

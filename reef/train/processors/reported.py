@@ -3,12 +3,11 @@
 Ingress validates references against storage before accepting reports. The
 processor consumes records in append order, so references are already present.
 Deduplication, consumed-source tracking, and group slots preserve retry behavior;
-retention protects every live report and the inference records it references.
+buffer release preserves every live report and the inference records it references.
 """
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import time
@@ -20,7 +19,7 @@ from typing import Any, cast
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.processors.common import (
     make_multi_turn_policy_trajectory,
     make_policy_trajectory,
@@ -81,23 +80,6 @@ class _PendingReport:
     slot: Hashable
 
 
-def encoded_group_key(key: Hashable) -> tuple[bool, object]:
-    """A group key as JSON, and whether JSON can carry it: a plain value as is, a tuple as ``{"tuple": [...]}``."""
-    if key is None or isinstance(key, (bool, int, float, str)):
-        return True, key
-    if isinstance(key, tuple):
-        parts = [encoded_group_key(part) for part in key]
-        return all(ok for ok, _ in parts), {"tuple": [value for _, value in parts]}
-    return False, None
-
-
-def decoded_group_key(value: object) -> Hashable:
-    """The group key :func:`encoded_group_key` wrote."""
-    if isinstance(value, Mapping) and isinstance(value.get("tuple"), list):
-        return tuple(decoded_group_key(part) for part in value["tuple"])
-    return cast("Hashable", value)
-
-
 # ------------------------------------------------- reported-feedback processor
 
 
@@ -115,7 +97,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     Recipes implement ``make_sample`` and ``make_batch``, plus ``grouping``
     and ``decide_group`` for grouped methods. The engine owns deduplication, group slots, reservations,
-    consumption, and retention. Invalid references raise immediately; training
+    consumption, and buffer release. Invalid references raise immediately; training
     data failures propagate instead of silently dropping reports.
     """
 
@@ -260,7 +242,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
                 return
         context = self._report_context(item, parsed_report)
         # Retain the report before assembly: a contract failure must not let
-        # compaction delete its inputs or turn a retry into a successful no-op.
+        # buffer release drop its inputs or turn a retry into a successful no-op.
         self._reports[item.agent_record_id] = item
         sample = self.make_sample(context)
         if not isinstance(sample, (TrajectoryItem, TaskItem)):
@@ -436,13 +418,13 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._pending_reports = None
         return frozenset(consumed_reports | trained_sources)
 
-    # -------------------------------------------------------------- retention
+    # ---------------------------------------------------------- buffer release
 
     def _live_references(self) -> set[str]:
         return {ref for report in self._reports.values() for ref in report.references}
 
-    def retention_decision(self) -> RetentionDecision:
-        """Derive retention from live state — a pure read, nothing mutates.
+    def releasable_record_ids(self) -> frozenset[str]:
+        """Find completed records with no remaining buffered dependents.
 
         The releasable-source set is recomputed here every time: a source is
         releasable while a terminal report owns it (or a batch consumed it)
@@ -452,62 +434,10 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         live_references = self._live_references()
         releasable_sources = (self._terminal_owned_sources | self._trained_sources) - live_references
         releasable = self._consumed | self._terminal | releasable_sources
-        protected = set(self._reports) | live_references
-        protected.update(inference_id for inference_id in self._inferences if inference_id not in releasable_sources)
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(protected | self._training_requests.keys()),
-            releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
-        )
+        return frozenset(releasable | self._consumed_requests)
 
-    def restore_consumed(self, item: AgentRecord) -> None:
-        """A consumed inference still stored stays in view: a report replayed after it resolves as it did before."""
-        if item.request_type is RequestType.INFERENCE:
-            self._inferences[item.agent_record_id] = item
-
-    def consumed_restored(self, agent_record_ids: frozenset[str]) -> None:
-        """The consumed inferences are trained sources now: a report arriving on one is settled, not resolved."""
-        self._trained_sources.update(record_id for record_id in agent_record_ids if record_id in self._inferences)
-
-    def durable_decisions(self) -> Mapping[str, object]:
-        """The groups this processor discarded: a retry at one is terminal, and nothing rebuilds them from rows a
-        sibling's commit may have retired. A key JSON cannot carry is left out (it is decided again from the rows)."""
-        encoded = [value for ok, value in (encoded_group_key(key) for key in self._discarded_groups) if ok]
-        if not encoded:
-            return {}
-        return {"discarded_groups": sorted(encoded, key=lambda value: json.dumps(value, sort_keys=True))}
-
-    def restore_decisions(self, decisions: Mapping[str, object]) -> None:
-        discarded = decisions.get("discarded_groups")
-        if isinstance(discarded, list):
-            self._discarded_groups.update(decoded_group_key(value) for value in discarded)
-
-    def restore_settled(self, item: AgentRecord) -> None:
-        """A row this processor settled before the crash is settled again, not resolved.
-
-        Whether a report was settled can hang on state the replay does not
-        rebuild (the slot a report a commit consumed held when a retry of it
-        arrived), so the record says it: a report is terminal again, with
-        the sources it owns, and an inference a terminal report owned stays
-        in view and owned.
-        """
-        if item.request_type is RequestType.INFERENCE:
-            self._inferences[item.agent_record_id] = item
-            self._terminal_owned_sources.add(item.agent_record_id)
-        elif item.request_type is RequestType.REPORT and item.agent_record_id not in self._seen_reports:
-            self._seen_reports.add(item.agent_record_id)
-            self._terminate(item)
-
-    def settle_retired(self, item: AgentRecord) -> None:
-        """A report whose inference a commit retired is settled as a terminal report: it never trains here, and
-        the sources it owns under the ownership rule (``_terminate``) are released with it, as they are when the
-        report is read before the retirement."""
-        if item.request_type is not RequestType.REPORT or item.agent_record_id in self._seen_reports:
-            return
-        self._seen_reports.add(item.agent_record_id)
-        self._terminate(item)
-
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
-        super().compaction_applied(agent_record_ids)
+    def release_records(self, agent_record_ids: frozenset[str]) -> None:
+        super().release_records(agent_record_ids)
         # --- scalar id sets ---
         self._consumed -= agent_record_ids
         self._terminal -= agent_record_ids
@@ -515,11 +445,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._terminal_owned_sources -= agent_record_ids
         self._seen_reports -= agent_record_ids
 
-        # Stored records: only inferences can be here. The trainer compacts
-        # ``releasable - protected``, and every live report, every reference
-        # a live report holds, and every buffered report are protected —
-        # so a compacted id is never in _reports, singletons, or a
-        # group.
+        # Only completed inferences without live report references are released.
         for agent_record_id in agent_record_ids:
             self._inferences.pop(agent_record_id, None)
 

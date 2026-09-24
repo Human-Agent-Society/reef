@@ -495,8 +495,8 @@ def test_composite_scenario_serves_config_defaults_and_reports_components(tmp_pa
         assert rows[0]["component"] == "harness"
         assert rows[0]["base_release_id"] == rows[1]["release_id"]
         assert "component" not in rows[1]
-        # The config component runs no step, so it has no say over which rows are retired.
-        assert scenario.store.history()[-1].compacted_ids == frozenset({"i1", "r1"})
+        # The config component runs no step: the one commit is the harness's, naming the rows it consumed.
+        assert scenario.store.history()[-1].consumed_ids == frozenset({"i1", "r1"})
         status = dispatcher.build_training_status()["scenarios"]["agent"]
         assert status["components"]["harness"]["last_committed_step"]["step"] == 1
         assert status["components"]["config"]["last_committed_step"] is None

@@ -162,7 +162,9 @@ class ServiceConfig:
         "reef_records", public_path=("storage", "record_database_schema"), help="PostgreSQL schema."
     )
     agent_record_retention_days: float = config_option(
-        7.0, public_path=("storage", "agent_record_retention_days"), help="Record retention in days."
+        7.0,
+        public_path=("storage", "agent_record_retention_days"),
+        help="Deprecated compatibility setting; records are evicted by capacity, not age.",
     )
     agent_record_retention_max_bytes: int = config_option(
         20 * 1024**3,

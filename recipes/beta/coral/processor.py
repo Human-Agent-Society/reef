@@ -114,23 +114,6 @@ class CoralProcessor(ReportedFeedbackProcessor):
         )
         return GroupDecision.DISCARD
 
-    def durable_decisions(self) -> Mapping[str, object]:
-        """The discarded sibling groups, and their releases, so a rebuilt processor still reports them."""
-        decisions = dict(super().durable_decisions())
-        if self._mixed_release_groups:
-            decisions["mixed_release_groups"] = {
-                parent: list(versions) for parent, versions in sorted(self._mixed_release_groups.items())
-            }
-        return decisions
-
-    def restore_decisions(self, decisions: Mapping[str, object]) -> None:
-        super().restore_decisions(decisions)
-        mixed = decisions.get("mixed_release_groups")
-        if isinstance(mixed, Mapping):
-            for parent, versions in mixed.items():
-                if isinstance(versions, list):
-                    self._mixed_release_groups[str(parent)] = tuple(str(version) for version in versions)
-
     def status(self) -> Mapping[str, Any]:
         return {
             "discarded_groups": [

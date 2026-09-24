@@ -7,18 +7,11 @@ from typing import Any
 
 @dataclass(frozen=True)
 class PreparedCommit:
-    """Trainer-side state of a prepared commit, captured before compaction.
+    """Trainer state captured before publishing a step.
 
-    Everything a durable commit record needs from the trainer: the post-step
-    algorithm state, the record high-water mark (how far the store was
-    consumed), the rows the step's batch consumed, and the rows the retention
-    policy says are now disposable. ``consumed_ids`` and ``compacted_ids``
-    answer different questions — a retention policy may keep a consumed row
-    stored (audit-only retention), so recovery needs the consumed set on its
-    own to know which retained rows must never re-enter a processor.
-    Compaction itself is applied separately so the commit record can be made
-    durable first. Persisted as a CommitRecord (reef/scenario/commit_log.py);
-    the only construction site is Scenario._append_commit_record.
+    ``consumed_ids`` records committed consumption and intentionally skipped
+    records for recovery. ``released_ids`` only releases processor memory after
+    commit; it never retires stored records.
 
     ``metrics`` is the objective's step result, carried opaquely: its schema is
     owned by the processor or backend that produced it; the trainer and commit log
@@ -31,10 +24,8 @@ class PreparedCommit:
     algorithm_state: Mapping[str, Any]
     high_water_sequence: int
     high_water_offset: int
-    compacted_ids: frozenset[str]
     consumed_ids: frozenset[str] = frozenset()
-    #: Rows the trainer released without training that another trainer still holds, not named by an earlier record.
-    settled_ids: frozenset[str] = frozenset()
+    released_ids: frozenset[str] = frozenset()
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
     #: The release the step's batch was reserved against; the committer
