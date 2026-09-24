@@ -27,7 +27,6 @@ from __future__ import annotations
 
 import importlib
 import json
-import sqlite3
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -308,6 +307,9 @@ class OpencodeSessionReader(TrajectoryReader):
     format = "opencode-session-sqlite"
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
+        # Here, not at the top: importing reef loads this module, and the record contracts load no database module.
+        import sqlite3
+
         database = Path(path).resolve() / "opencode.db"
         if not database.is_file():
             return ()
