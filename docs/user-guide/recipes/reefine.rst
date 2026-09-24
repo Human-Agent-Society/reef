@@ -186,7 +186,8 @@ kinds cannot give. On ``claude``, ``codex``, ``hermes`` and ``dsh`` a
 command cannot take a tool away, so a mode there is guidance the model
 follows while every tool stays offered: the design and the command's reply
 say so, the mode's state lives in the conversation (the command's reply and
-the header on each reply) and never in a file a tool writes or reads, and
+the header on each reply) and never in a file a tool writes or reads, the
+model declines a skill the person's message loads while the mode is on, and
 the review lists a request for a hard restriction under limits. On
 ``opencode`` an agent with a permission map is the mode, and the model gets
 only the tools it allows: an answer whose agent has no permission map is

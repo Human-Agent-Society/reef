@@ -147,9 +147,27 @@ def test_a_prompt_level_mode_keeps_its_state_in_the_conversation_and_a_hard_rest
     assert "never claim the other tools are unavailable" in model.prompt
     assert "never in a file or a marker a tool writes or reads" in model.prompt
     assert "the rules make no tool call on any turn" in model.prompt
+    # A skill the person types still loads its text on these harnesses: the mode declines it, and each harness says
+    # how the loaded text shows in the message.
+    assert "the model declines a skill that the person's message loads, other than the mode's own command" in (
+        model.prompt
+    )
+    marker = {"claude": "Base directory for this skill:", "codex": "<skill> block", "hermes": "[IMPORTANT: The user"}
+    assert marker.get(adapter, '<skill_content name="<name>">') in model.prompt
+    assert "tries the tool the mode allows before it refuses a question that tool can answer" in model.prompt
     (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
     assert "the review lists that point under limits" in text and 'goes in a "limits" list' in text
     assert "it is the behavior itself, not a substitute" not in model.prompt
+
+
+def test_the_tool_lists_are_what_a_session_offers_and_claude_replaces_every_arguments() -> None:
+    """The tools a recorded reef-claude session (Claude Code 2.1.257) and reef-hermes session (v2026.8.31) offered,
+    all of them, so a mode's wording can name what it keeps and what it declines."""
+    claude = [name.split(" (")[0] for name in FACTS["claude"].tools.replace(" and ", ", ").split(", ")]
+    hermes = [name.split(" (")[0] for name in FACTS["hermes"].tools.replace(" and ", ", ").split(", ")]
+    assert len(claude) == 25 and {"Bash", "Skill", "TaskOutput", "WebSearch"} <= set(claude)
+    assert len(hermes) == 21 and {"session_search", "text_to_speech", "vision_analyze", "web_search"} <= set(hermes)
+    assert "replaces every $ARGUMENTS in the file" in FACTS["claude"].command
 
 
 def test_opencode_enters_a_mode_by_selecting_its_agent_and_leaves_it_through_agents() -> None:

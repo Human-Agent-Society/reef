@@ -42,7 +42,9 @@ _CONVERSATION_MODE = (
     "on, and the same command with the word off turns it off. The mode's state lives in the conversation, in the "
     "command's reply and the header each reply starts with, never in a file or a marker a tool writes or reads, and "
     "the rules make no tool call on any turn: a rule applies to every turn of every session, the mode's turns or "
-    "not. The design, the How to use paragraph and the command's reply say the model follows the mode and never "
+    "not. While the mode is on, the model declines a skill that the person's message loads, other than the mode's "
+    "own command ({skill}), and tries the tool the mode allows before it refuses a question that tool can answer. "
+    "The design, the How to use paragraph and the command's reply say the model follows the mode and never "
     "claim the other tools are unavailable. A request for a hard restriction (no other tool or skill may run at "
     "all) is only partly met this way, and no answer here can do more: the review lists that point under limits."
 )
@@ -54,13 +56,20 @@ FACTS = {
             "A person types an agent_command as /<id> in the session. Its text is a Claude Code command file: "
             "YAML frontmatter with description (and allowed-tools, a list such as [WebSearch], which pre-approves "
             "those tools for the command's own turn), then the prompt, where $ARGUMENTS stands for what the person "
-            "typed after /<id>."
+            "typed after /<id>. Claude Code replaces every $ARGUMENTS in the file with that text, so write it once "
+            "(The person typed: $ARGUMENTS) and describe the branches by what it holds."
         ),
         tools=(
-            "Bash, Read, Edit, Write, NotebookEdit, Agent, Skill, Workflow, AskUserQuestion, WebFetch (reads one URL) "
-            "and WebSearch (searches the web; no key needed)"
+            "Agent, AskUserQuestion, Bash, CronCreate, CronDelete, CronList, DesignSync, Edit, EnterPlanMode, "
+            "EnterWorktree, ExitPlanMode, ExitWorktree, ListAgents, NotebookEdit, Read, ReportFindings, ScheduleWakeup, "
+            "SendMessage, Skill, TaskOutput, TaskStop, Workflow, Write, WebFetch (reads one URL) and WebSearch "
+            "(searches the web; no key needed)"
         ),
-        mode=_CONVERSATION_MODE.format(title="Claude Code"),
+        mode=_CONVERSATION_MODE.format(
+            title="Claude Code",
+            skill="Claude Code puts a typed skill's SKILL.md into the message, after the line 'Base directory for "
+            "this skill:'",
+        ),
         config_keys=("permissions",),
         config_example=(
             '{"target": "primary", "data": {"permissions": {"allow": ["WebSearch"]}}} lets WebSearch run without '
@@ -81,7 +90,9 @@ FACTS = {
             "view_image, multi_agent_v1, the goal tools and web_search (the hosted web search, off unless the config "
             "sets web_search)"
         ),
-        mode=_CONVERSATION_MODE.format(title="Codex").replace("the same command", "the same skill"),
+        mode=_CONVERSATION_MODE.format(
+            title="Codex", skill="Codex puts a typed $<name> skill into the message as a <skill> block with its <name>"
+        ).replace("the same command", "the same skill"),
         config_keys=("web_search",),
         config_example=(
             '{"target": "primary", "data": {"web_search": "live"}} gives sessions the web_search tool (evaluation '
@@ -131,11 +142,15 @@ FACTS = {
             "the skill invocation:'."
         ),
         tools=(
-            "terminal, process, execute_code, read_file, write_file, patch, search_files, skill_view, skills_list, "
-            "skill_manage, delegate_task, browser_exec, memory, todo, web_extract (reads one page) and web_search "
-            "(searches the web; no key needed)"
+            "browser_exec, clarify, cronjob, delegate_task, execute_code, memory, patch, process, read_file, "
+            "search_files, session_search, skill_manage, skill_view, skills_list, terminal, text_to_speech, todo, "
+            "vision_analyze, write_file, web_extract (reads one page) and web_search (searches the web; no key needed)"
         ),
-        mode=_CONVERSATION_MODE.format(title="Hermes"),
+        mode=_CONVERSATION_MODE.format(
+            title="Hermes",
+            skill="hermes puts a typed skill into the message after the line '[IMPORTANT: The user has invoked the "
+            '"<name>" skill\'',
+        ),
     ),
     "terminus": HarnessFacts(
         title="Terminus 2",
@@ -174,7 +189,9 @@ FACTS = {
             'change that relies on web_search declares {"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": '
             '"<one sentence>"} as a requires item'
         ),
-        mode=_CONVERSATION_MODE.format(title="dsh"),
+        mode=_CONVERSATION_MODE.format(
+            title="dsh", skill='dsh puts a typed skill into the message as a <skill_content name="<name>"> block'
+        ),
     ),
 }
 
