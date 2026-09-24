@@ -269,17 +269,32 @@ def test_releases_over_the_size_limit_keep_the_newest_rows_that_fit(tmp_path):
 
         return asyncio.run(run())
 
-    # Rows come newest first; the oldest one pads the result to the limit exactly.
-    rows = [{"release_id": f"step-{index:03d}", "metrics": {"mutation_count": 20}} for index in range(100)]
-    size = len(json.dumps({"state": "succeeded", "value": {"releases": rows, "truncated": False}}).encode())
-    rows[-1]["release_id"] += "x" * (BODY_LIMIT - size)
-    exact = result_for(rows)
-    assert exact == {"state": "succeeded", "value": {"releases": rows, "truncated": False}}
-    assert len(json.dumps(exact).encode()) == BODY_LIMIT
+    def size(value):
+        return len(json.dumps(value).encode())
+
+    def rows_of():
+        return [{"release_id": f"step-{index:03d}", "metrics": {"mutation_count": 20}} for index in range(100)]
+
+    # Rows come newest first. A list exactly at the limit comes whole; one byte over drops its oldest row.
+    rows = rows_of()
+    rows[-1]["release_id"] += "x" * (
+        BODY_LIMIT - size({"state": "succeeded", "value": {"releases": rows, "truncated": False}})
+    )
+    whole = result_for(rows)
+    assert whole == {"state": "succeeded", "value": {"releases": rows, "truncated": False}}
+    assert size(whole) == BODY_LIMIT
     rows[-1]["release_id"] += "x"
-    over = result_for(rows)
-    assert over == {"state": "succeeded", "value": {"releases": rows[:-1], "truncated": True}}
-    assert len(json.dumps(over).encode()) <= BODY_LIMIT
+    assert result_for(rows) == {"state": "succeeded", "value": {"releases": rows[:-1], "truncated": True}}
+    # The second oldest row pads the newest 99 to the limit exactly; one byte more and it goes too.
+    rows = rows_of()
+    rows[98]["release_id"] += "x" * (
+        BODY_LIMIT - size({"state": "succeeded", "value": {"releases": rows[:99], "truncated": True}})
+    )
+    fitted = result_for(rows)
+    assert fitted == {"state": "succeeded", "value": {"releases": rows[:99], "truncated": True}}
+    assert size(fitted) == BODY_LIMIT
+    rows[98]["release_id"] += "x"
+    assert result_for(rows) == {"state": "succeeded", "value": {"releases": rows[:98], "truncated": True}}
 
 
 def test_requests_lists_ids_states_and_times_without_text(tmp_path):
