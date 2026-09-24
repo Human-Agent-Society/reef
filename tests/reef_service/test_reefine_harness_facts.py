@@ -253,6 +253,9 @@ def test_opencode_enters_a_mode_by_selecting_its_agent_and_leaves_it_through_age
     assert "opencode tells the model nothing when the agent changes" in model.prompt
     # The leave command alone runs one build turn; only /agents switches the session back.
     assert "The leave command alone runs one build turn and leaves the chat agent selected" in model.prompt
+    # The mid session note stays in the command's reply: in the agent's prompt it would end every later reply.
+    assert "belongs in that command's own reply alone, never in the agent's prompt or in rules" in model.prompt
+    assert "reads the turns another agent answered in the history as that agent's, not its own" in model.prompt
     assert "a !command the person runs still run in any agent" in model.prompt
     assert "the review lists those person paths under limits" in model.prompt
     assert "the entering command states no restriction" in model.prompt

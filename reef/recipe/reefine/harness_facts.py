@@ -141,8 +141,11 @@ FACTS = {
             "command in the same reply. The restriction's wording lives only in that agent's own prompt, never in "
             "rules or in a command's text: a command's text stays in the conversation as the person's message, so the "
             "entering command states no restriction, and it says the session stays in the mode only when the command "
-            "opened the session (typed later, the person selects the agent with /agents). Say how to enter and leave "
-            "in the command's reply and in How to use."
+            "opened the session (typed later, the person selects the agent with /agents). That note about a command "
+            "typed after other messages belongs in that command's own reply alone, never in the agent's prompt or in "
+            "rules, which would repeat it under every later reply; and the agent's prompt reads the turns another "
+            "agent answered in the history as that agent's, not its own. Say how to enter and leave in the command's "
+            "reply and in How to use."
         ),
         config_keys=("agent",),
         config_example=(
