@@ -4,7 +4,6 @@ One directory per tutorial. Each opens with a README that says what you will see
 
 | Tutorial | What you see | Needs | Open |
 |----------|--------------|-------|------|
-| [Dataset replay](dataset_replay/README.md) | A processor reads three stored records for two passes, then continues with new records; commits and restart recovery keep its cursor. | CPU only; publishes batch descriptions rather than training weights. | `.venv/bin/python -m tutorials.dataset_replay.demo` from the repository root |
 | [Evolve your harness](evolve-your-harness/README.md) | Three coding tasks go through Reef, one fails, the served model proposes a change to its own harness, the gate runs both versions, and the winner publishes as a new harness version. | An OpenAI compatible model endpoint (a local ollama is enough), no GPU; the pi coding agent for the pi variant, nothing extra for the native variant. | [notebook](evolve-your-harness/evolve-your-harness.ipynb), or `./run.sh` in the directory |
 | [Reefine](reefine/README.md) | A person asks reef-pi for a capability in plain words; the service proposer writes the change, the gate scores it, an evolved extension waits for a promote, and the next session runs the new tree. Two demos (a bug fix flow, a research loop) and a measurement of which requests won the gate. | An OpenAI compatible model endpoint (a local ollama is enough), no GPU; the pi coding agent. | `./run.sh bugfix` in the directory |
 

@@ -51,37 +51,6 @@ invariant failure).
 no-update default that ingests for audit and never becomes ready. Recipes
 can implement their own lifecycle or reuse one of the feedback engines below.
 
-Dataset passes and continual records
------------------------------------
-
-Dataset replay is processor policy. A recipe already receives ``records`` and
-the committed ``algorithm_state`` in ``build``; it can inject both into a
-processor that reads storage through ``replay_page``. The
-`runnable dataset replay example <https://github.com/Human-Agent-Society/reef/tree/main/tutorials/dataset_replay>`__
-selects an already stored prefix, emits bounded batches for N passes, and then
-consumes later records once using the same processor. It does not need a
-dataset-end API or a list of all samples in memory.
-
-The example puts the next epoch/cursor on its batch. Its backend carries that
-progress alongside algorithm state into the ordinary training commit; the
-recipe restores the last committed cursor on restart. Each batch commits as
-usual, with ``dataset_epoch`` in metrics. The processor's cursor controls
-historical reads independently of the trainer's ordinary forward ingestion
-and consumed-ID filtering. Existing processors do not acquire replay behavior
-automatically. Real training backends using this pattern must preserve the
-progress in their returned state and retain their normal update/recovery contract.
-
-Here ``epochs`` repeats the selected dataset across multiple batches and
-commits. ``StepScheduling.epochs`` instead repeats optimizer work within one
-reserved batch before it commits. The example uses a CPU demonstration backend
-that publishes batch descriptions, not model weights.
-
-The fixed range is recipe policy: finish the intended import before selecting
-its upper sequence. Later arrivals do not extend a pass; they wait for the
-continual phase. Capacity eviction may remove inputs at any time, with storage
-warnings and loss metrics; the example skips missing inputs rather than
-protecting them from eviction.
-
 Explicit manual training
 ------------------------
 
