@@ -2819,6 +2819,109 @@ def test_a_sibling_commit_durable_but_not_settled_is_settled_before_the_next_com
         dispatcher.close()
 
 
+def _harness_record_durable_then_failed(
+    dispatcher: Dispatcher, scenario: Any, monkeypatch: pytest.MonkeyPatch, fault: str = "install"
+) -> None:
+    """The harness commit reaches the log and then fails (a lost acknowledgment or a failed ref install)."""
+    committer = scenario._committer
+    name = "_append_commit_record" if fault == "append" else "_install_committed_checkpoint"
+    original = committer._append_commit_record if fault == "append" else committer._install_committed_checkpoint
+    failed: list[bool] = []
+
+    def fail_once(*args: Any, **kwargs: Any) -> Any:
+        outcome = original(*args, **kwargs)
+        if not failed:
+            failed.append(True)
+            raise OSError("acknowledgment lost")
+        return outcome
+
+    monkeypatch.setattr(committer, name, fail_once)
+    with pytest.raises(OSError, match="acknowledgment lost"):
+        dispatcher._process_local_backend_step("agent", HARNESS)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("fault", ["append", "install"])
+def test_a_harness_cycle_in_flight_never_commits_a_result_the_weights_commit_settled(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fault: str
+) -> None:
+    """The harness worker took its cached result, then waited for the registry lock the weights commit held. That
+    commit settled the harness record, so the worker's result is on record: it looks again and publishes nothing,
+    where it used to land a third step with nothing consumed and republish the harness artifact."""
+    backends = _dispatched_pair(tmp_path, "job-1")
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2):
+            for record in _records(step):
+                scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        _harness_record_durable_then_failed(dispatcher, scenario, monkeypatch, fault)
+        prepared = threading.Event()
+        go = threading.Event()
+        real_prepare = scenario.prepare_training_step
+
+        def paused_prepare(component: str | None = None) -> Any:
+            result = real_prepare(component)
+            prepared.set()
+            assert go.wait(10)
+            return result
+
+        monkeypatch.setattr(scenario, "prepare_training_step", paused_prepare)
+        outcome: dict[str, Any] = {}
+
+        def harness_cycle() -> None:
+            try:
+                outcome["progressed"] = dispatcher._process_local_backend_step("agent", HARNESS)
+            except BaseException as exc:
+                outcome["error"] = exc
+
+        worker = threading.Thread(target=harness_cycle)
+        worker.start()
+        assert prepared.wait(10)
+        releases_before = len(scenario.releases())
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        go.set()
+        worker.join(10)
+        assert outcome == {"progressed": True}
+        assert [(row.step, row.component) for row in scenario.store.history()] == [(1, HARNESS), (2, WEIGHTS)]
+        assert len(scenario.releases()) == releases_before + 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_commit_that_settles_a_sibling_record_gives_each_step_its_own_event(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The weights commit settled the harness record first: the harness step gets its event at step 1, from its
+    record, and the weights commit gets its event at step 2, the step it took."""
+    tracker = _RecordingTracker()
+    backends = _dispatched_pair(tmp_path, "job-1")
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends, experiment_tracker=tracker)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2):
+            for record in _records(step):
+                scenario.records.append(record)
+        batch = scenario.reserve_training_batch(WEIGHTS)
+        assert batch is not None
+        _harness_record_durable_then_failed(dispatcher, scenario, monkeypatch)
+        assert dispatcher._run_dispatched_turn(scenario, WEIGHTS, backends[WEIGHTS], batch) is True
+        history = scenario.store.history()
+        assert [(row.step, row.component) for row in history] == [(1, HARNESS), (2, WEIGHTS)]
+        events = [(event.context.step, event.context.component, event.training_job_id) for event in tracker.events]
+        assert events == [(1, HARNESS, None), (2, WEIGHTS, "job-1")]
+        weights_event = tracker.events[1]
+        assert weights_event.context.source_artifact_ref.release_id == history[0].artifact_ref.release_id
+        assert tracker.events[0].produced_artifact_ref.release_id == history[0].artifact_ref.release_id
+    finally:
+        dispatcher.close()
+
+
 @pytest.mark.unit
 def test_the_status_names_the_job_out_and_its_owner_or_that_it_names_none(tmp_path: Path, monkeypatch: Any) -> None:
     """An operator reads whose job the runtime holds out: a marker from before markers named their owner shows no

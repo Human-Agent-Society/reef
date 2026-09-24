@@ -177,6 +177,18 @@ class RecordStore(ABC):
     def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
         """Read durable compaction receipts in recorded-time and receipt-id order."""
 
+    def delete_receipts(self, scenario: str, receipt_ids: Sequence[str]) -> int:
+        """Delete the receipts named ``receipt_ids`` that retired no row, whatever set of ids they cover.
+
+        Only a receipt that names no retired row may go: a settlement receipt
+        whose rows a later compaction retired, or a decisions receipt a newer
+        one replaced. A receipt of a compaction guards append deduplication and
+        stays. Returns the number deleted. This default deletes none, so a
+        store without its own delete keeps every receipt, as before this call
+        existed.
+        """
+        return 0
+
     @abstractmethod
     def close(self) -> None:
         """Release resources; repeated closes are harmless."""

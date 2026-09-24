@@ -100,6 +100,9 @@ class ObservedRecordStore(RecordStore):
     def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
         return self._inner.compaction_receipts(scenario)
 
+    def delete_receipts(self, scenario: str, receipt_ids: Sequence[str]) -> int:
+        return self._inner.delete_receipts(scenario, receipt_ids)
+
     def close(self) -> None:
         self._inner.close()
 

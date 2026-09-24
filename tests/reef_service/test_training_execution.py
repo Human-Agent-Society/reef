@@ -1,5 +1,6 @@
 """CPU contracts for the shared training-job coordinator."""
 
+import hashlib
 from contextlib import contextmanager
 
 import pytest
@@ -16,7 +17,16 @@ from reef.runtime.interfaces import (
     TrainingMetrics,
 )
 from reef.runtime.recovery import FileTrainingJobStore
-from reef.runtime.scheduler import LEGACY_SCHEDULE_KEY, TrainingExecution, legacy_training_job_id, training_job_id
+from reef.runtime.scheduler import (
+    LEGACY_BATCH_NUMBER_MARGIN,
+    LEGACY_SCHEDULE_KEY,
+    LegacyJobIdentity,
+    TrainingExecution,
+    canonical_json,
+    legacy_shuffle,
+    legacy_training_job_id,
+    training_job_id,
+)
 
 PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 
@@ -345,18 +355,33 @@ def test_a_marker_an_earlier_build_left_takes_its_owner_when_its_own_job_resumes
     assert "scenario" not in markers.read_marker(backend.path)
 
 
+def _shuffled(batch_id: str) -> tuple[dict[str, object], dict[str, object], dict[str, object]]:
+    """This build's payload of a ten row batch, its legacy schedule, and the payload an earlier build shuffled as
+    batch ``batch_id``. Ten rows have enough orders that no two batch numbers in the search give the same one."""
+    head_rows = [1, 0, 3, 2, 5, 4, 7, 6, 9, 8]
+    head = {**PAYLOAD, "samples": [[f"row-{row}"] for row in head_rows], "rollout_ids": list(range(10))}
+    order = {"head_rows": head_rows, "groups": [[row] for row in range(10)], "epochs": 1, "batch_id": batch_id}
+    shuffle = legacy_shuffle(order, batch_id)
+    assert shuffle is not None
+    positions, rollout_ids = shuffle
+    earlier = {**head, "samples": [head["samples"][position] for position in positions], "rollout_ids": rollout_ids}
+    return head, order, earlier
+
+
 @pytest.mark.parametrize("status", ["CHECKPOINT", "READY_TO_COMMIT"])
-def test_a_marker_an_earlier_build_left_for_a_shuffled_batch_resumes_through_that_builds_row_order(backend, status):
-    """An earlier build seeded the shuffle with the batch number, so its marker names the rows in another order than
-    this build trains them. The payload carries that order: the job replays and takes its owner instead of asking for
-    operator recovery, and the backend never sees the earlier order."""
-    # This build's wire rows are batch rows 1, 0, 2; the earlier build's were 0, 1, 2.
-    head = {**PAYLOAD, "samples": [["b"], ["a"], ["c"]], "rollout_ids": [0, 1, 2]}
-    earlier = {**PAYLOAD, "samples": [["a"], ["b"], ["c"]], "rollout_ids": [0, 1, 2]}
-    order = {"head_rows": [1, 0, 2], "row_indices": [0, 1, 2], "rollout_ids": [0, 1, 2]}
+@pytest.mark.parametrize("number", [1, 7])
+def test_a_marker_an_earlier_build_left_for_a_shuffled_batch_resumes_through_that_builds_row_order(
+    backend, status, number
+):
+    """An earlier build seeded the shuffle with the batch id, so its marker names the rows in another order than
+    this build trains them, and a reload here numbers the batch 1 whatever number that build gave it. The payload
+    carries what that shuffle needs: the job replays and takes its owner instead of asking for operator recovery,
+    and the backend never sees the earlier order."""
+    head, order, earlier = _shuffled(f"agent:batch:{number}")
+    assert earlier["samples"] != head["samples"]
+    order = {**order, "batch_id": "agent:batch:1"}
     backend.checkpoint.path.mkdir()
     legacy = legacy_training_job_id(earlier, 3)
-    assert legacy_training_job_id({**head, LEGACY_SCHEDULE_KEY: order}, 3) == legacy
     assert training_job_id({**head, LEGACY_SCHEDULE_KEY: order}) == training_job_id(head)
     marker = {
         "job_id": legacy,
@@ -377,6 +402,76 @@ def test_a_marker_an_earlier_build_left_for_a_shuffled_batch_resumes_through_tha
     backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path.with_name("checkpoint-1"))
     coordinator(backend).execute({**head, LEGACY_SCHEDULE_KEY: order, "owner": "agent"})
     assert backend.payload == {**head, "owner": "agent"}
+
+
+@pytest.mark.parametrize("staleness", [False, True])
+def test_the_legacy_identity_encodes_each_row_once_and_hashes_what_the_whole_payload_encodes_to(staleness):
+    """The search joins rows encoded once; the bytes it hashes are the ones the earlier build's whole payload encoded
+    to, nested maps, floats and text outside ASCII included."""
+    head, order, _ = _shuffled("agent:batch:4")
+    rows = [{"tokens": [row, 2], "text": f"\u00e9-{row}", "logprob": -0.1 * row} for row in range(10)]
+    payload = {**head, "samples": rows, "advantages": [0.5 * row for row in range(10)], "owner": "agent"}
+    if staleness:
+        payload = {**payload, "max_staleness": 2}
+    shuffle = legacy_shuffle(order, "agent:batch:9")
+    assert shuffle is not None
+    positions, rollout_ids = shuffle
+    earlier = {key: value for key, value in payload.items() if key not in {"owner", "max_staleness"}}
+    earlier.update(
+        rollout_id=3,
+        rollout_ids=rollout_ids,
+        samples=[rows[position] for position in positions],
+        advantages=[payload["advantages"][position] for position in positions],
+    )
+    if staleness:
+        earlier.pop("expected_runtime_load_id")
+    expected = hashlib.sha256(canonical_json(earlier).encode()).hexdigest()
+    assert LegacyJobIdentity({**payload, LEGACY_SCHEDULE_KEY: order}, 3).job_id("agent:batch:9") == expected
+
+
+def test_a_marker_no_legacy_identity_matches_is_refused_naming_both_jobs(backend):
+    """A batch number past the search, or another batch, matches no legacy identity: the job is refused, nothing
+    trains, and the error names the marker's job and this batch's for the operator steps."""
+    number = 3 + 2 + LEGACY_BATCH_NUMBER_MARGIN
+    head, order, earlier = _shuffled(f"agent:batch:{number}")
+    order = {**order, "batch_id": "agent:batch:1"}
+    backend.checkpoint.path.mkdir()
+    legacy = legacy_training_job_id(earlier, 3)
+    marker = {
+        "job_id": legacy,
+        "rollout_id": 3,
+        "checkpoint_path": str(backend.checkpoint.path),
+        "runtime_load_id": "engine:1",
+        "status": "CHECKPOINT",
+    }
+    markers.write_marker(backend.path, marker)
+    payload = {**head, LEGACY_SCHEDULE_KEY: order, "owner": "agent"}
+    with pytest.raises(RuntimeError, match=f"job {legacy}, not this batch's job {training_job_id(payload)}"):
+        coordinator(backend).execute(payload)
+    assert backend.events == [] and markers.read_marker(backend.path) == marker
+
+
+def test_a_settled_marker_leaves_a_new_shuffled_job_fresh_without_a_search(backend, monkeypatch):
+    """The marker of a committed job is on disk when the next job arrives: that job is fresh, and the legacy search,
+    which hashes the payload once per batch number, never runs for it."""
+    backend.checkpoint.path.mkdir()
+    markers.write_marker(
+        backend.path,
+        {
+            "job_id": "done",
+            "rollout_id": 900,
+            "checkpoint_path": str(backend.checkpoint.path),
+            "runtime_load_id": "engine:1",
+            "status": "COMPLETE",
+            "commit_acknowledged": True,
+        },
+    )
+    calls = []
+    monkeypatch.setattr(TrainingExecution, "legacy_job_id", lambda self, *args: calls.append(args))
+    head, order, _ = _shuffled("agent:batch:1")
+    backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path.with_name("checkpoint-1"))
+    assert coordinator(backend).execute({**head, LEGACY_SCHEDULE_KEY: order}).outcome == "checkpoint"
+    assert calls == [] and backend.payload == head
 
 
 def test_scenario_steps_can_use_a_separate_global_checkpoint_index(backend):

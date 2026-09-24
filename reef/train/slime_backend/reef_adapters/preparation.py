@@ -9,13 +9,14 @@ own wire tuples from a resolved signal.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from dataclasses import replace
 from typing import Any
 
 from reef.runtime.interfaces import PreparedTrainingStep
 from reef.runtime.scheduler import LEGACY_SCHEDULE_KEY
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
-from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule, schedule_seed
+from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
@@ -59,9 +60,8 @@ def prepare_slime_step(
     )
 
 
-def _materialize(batch: TrainingBatch, scheduling: StepScheduling, *, seed: int | None = None) -> MaterializedSchedule:
-    """Rollout grouping for ``batch`` under ``scheduling``, expanded into a row order; ``seed`` replaces the
-    shuffle seed the rows give."""
+def _materialize(batch: TrainingBatch, scheduling: StepScheduling) -> MaterializedSchedule:
+    """Rollout grouping for ``batch`` under ``scheduling``, expanded into a row order."""
     samples = trajectories(batch)
     if scheduling.unit == "sample":
         source_rollout_ids = list(range(len(samples)))
@@ -75,9 +75,7 @@ def _materialize(batch: TrainingBatch, scheduling: StepScheduling, *, seed: int 
                 else ("sample", index)
             )
             source_rollout_ids.append(group_ids.setdefault(key, len(group_ids)))
-    return materialize_schedule(
-        source_rollout_ids, scheduling, seed=batch_schedule_seed(batch) if seed is None else seed
-    )
+    return materialize_schedule(source_rollout_ids, scheduling, seed=batch_schedule_seed(batch))
 
 
 def _build_payload(
@@ -116,13 +114,17 @@ def _build_payload(
     else:
         payload["external_remainder"] = scheduling.remainder
     if scheduling.shuffle:
-        # An earlier Reef seeded the shuffle from the batch id; its job marker names the rows in that order, so a
-        # job it left out resumes here only if the legacy identity can put them back in it.
-        earlier = _materialize(batch, scheduling, seed=schedule_seed(batch.batch_id))
-        if earlier.row_indices != schedule.row_indices:
-            payload[LEGACY_SCHEDULE_KEY] = {
-                "head_rows": list(schedule.row_indices),
-                "row_indices": list(earlier.row_indices),
-                "rollout_ids": list(earlier.rollout_ids),
-            }
+        # An earlier Reef seeded the shuffle from the batch id, and its job marker names the rows in that order. The
+        # number in the id counted that process's batches, which a reload here starts again, so the legacy identity
+        # gets what it needs to shuffle again for any number: the rollout groups in batch order, before a shuffle.
+        plain = _materialize(batch, replace(scheduling, shuffle=False, epochs=1))
+        groups: dict[int, list[int]] = {}
+        for row, rollout_id in zip(plain.row_indices, plain.rollout_ids, strict=True):
+            groups.setdefault(rollout_id, []).append(row)
+        payload[LEGACY_SCHEDULE_KEY] = {
+            "head_rows": list(schedule.row_indices),
+            "groups": list(groups.values()),
+            "epochs": schedule.epochs,
+            "batch_id": batch.batch_id,
+        }
     return payload

@@ -21,9 +21,11 @@ from typing import Any
 
 import pytest
 
-from reef.artifact import InMemoryRepositoryBackend
+from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
+from reef.artifact import ArtifactRef, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
+from reef.scenario.factory import settlement_receipts
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import ComponentTrainer, Trainer
 from reef.train.processors.computed import ComputedFeedbackProcessor
@@ -108,6 +110,8 @@ class _Recipe(_TwoTrainerRecipe):
 
         def factory_for(component: str):
             cls = processors[component]
+            if cls is TTTDProcessor:
+                return lambda context: cls(context.with_config({"groups_per_step": 1, "rollouts_per_group": 2}))
             return lambda context: cls(context.with_config({"batch_size": 1}))
 
         return tuple(
@@ -120,6 +124,7 @@ class _Recipe(_TwoTrainerRecipe):
                     candidate_backend=backend,
                     algorithm_state=algorithm_states.get(component),
                     experiment_logger=experiment_logger,
+                    report_type=TTTDGroupedRolloutReport if processors[component] is TTTDProcessor else None,
                 ),
             )
             for component, backend in self.backends.items()
@@ -129,7 +134,7 @@ class _Recipe(_TwoTrainerRecipe):
 def _dispatcher(tmp_path: Path, processors: dict[str, Any]) -> Dispatcher:
     initial = tmp_path / "initial"
     for component in (WEIGHTS, HARNESS):
-        (initial / component).mkdir(parents=True)
+        (initial / component).mkdir(parents=True, exist_ok=True)
         (initial / component / f"{component}.txt").write_text(f"{component} seed", encoding="utf-8")
     backends = {component: _ComponentBackend(component, tmp_path / "candidates") for component in (WEIGHTS, HARNESS)}
     return Dispatcher(
@@ -289,3 +294,181 @@ def test_an_inference_released_with_another_roles_report_stays_released_after_a_
     live = _another_roles_report(tmp_path / "live", reload=False)
     rebuilt = _another_roles_report(tmp_path / "rebuilt", reload=True)
     assert live[0] == [("i3",)] and live[1] is False and rebuilt == live
+
+
+def _retry_at_a_discarded_step(tmp_path: Path, point: str, reload: bool) -> tuple[Any, ...]:
+    dispatcher = _dispatcher(tmp_path, {WEIGHTS: ThresholdProcessor, HARNESS: _StepProcessor})
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        records = [
+            _inference("i1"),
+            _report("r1", "i1", {"step": 0, "slot": 0}),
+            _inference("i2"),
+            _report("r2", "i2", {"step": 0, "slot": 1}, feedback="mixed"),
+        ]
+        if point == "committed":
+            # A later step completes too: the harness commits it, and its record names r1 and r2 settled.
+            records += [
+                _inference("i3"),
+                _report("r3", "i3", {"step": 1, "slot": 0}),
+                _inference("i4"),
+                _report("r4", "i4", {"step": 1, "slot": 1}),
+            ]
+        for record in records:
+            scenario.records.append(record)
+        first = _step(scenario, HARNESS)
+        if point == "retired":
+            # The weights trainer trains the discarded rows, so they are gone before the rebuild.
+            for _ in range(3):
+                _step(scenario, WEIGHTS)
+        if reload:
+            scenario = dispatcher._registry.reload("agent")
+        # The client retries step 0 at both slots, clean this time.
+        for record in (
+            _inference("iX"),
+            _report("rX", "iX", {"step": 0, "slot": 0}),
+            _inference("iY"),
+            _report("rY", "iY", {"step": 0, "slot": 1}),
+        ):
+            scenario.records.append(record)
+        return first, _step(scenario, HARNESS)
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("point", ["settled", "retired", "committed"])
+def test_a_retry_at_a_step_a_reported_processor_discarded_stays_terminal_after_a_reload(
+    tmp_path: Path, point: str
+) -> None:
+    """Live, every later report of a discarded group key is terminal. The harness records the discarded keys before
+    it releases their rows, so a rebuilt harness finds step 0 discarded whether its rows are still stored, retired
+    by the weights trainer, or named by a later commit, and never trains the client's retry of it."""
+    live = _retry_at_a_discarded_step(tmp_path / "live", point, reload=False)
+    rebuilt = _retry_at_a_discarded_step(tmp_path / "rebuilt", point, reload=True)
+    assert live[1] is None and rebuilt == live
+
+
+def _tttd_inference(record_id: str, release: str) -> AgentRecord:
+    return AgentRecord.create(
+        scenario="agent",
+        request_type=RequestType.INFERENCE,
+        agent_record_id=record_id,
+        artifact_ref=ArtifactRef(content_id=f"c-{release}", release_id=release, parent_release_id=None),
+        payload={"tokens": [1, 2], "loss_mask": [0, 1], "rollout_log_probs": [-0.2]},
+    )
+
+
+def _tttd_report(record_id: str, reference: str, rollout: int, score: float) -> AgentRecord:
+    metadata = {
+        "algorithm": "ttt-discover",
+        "comparison_set": "tttd-step-0-group-0",
+        "step": 0,
+        "group": 0,
+        "rollout": rollout,
+        "groups_per_step": 1,
+        "rollouts_per_group": 2,
+    }
+    return AgentRecord.create(
+        scenario="agent",
+        request_type=RequestType.REPORT,
+        agent_record_id=record_id,
+        references=(reference,),
+        payload={"score": score, "references": [reference], "metadata": metadata},
+    )
+
+
+def _tttd_failed_step(tmp_path: Path, reload: bool) -> tuple[Any, ...]:
+    dispatcher = _dispatcher(tmp_path, {WEIGHTS: ThresholdProcessor, HARNESS: TTTDProcessor})
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        # Step 0 spans two releases: TTTD fails it.
+        for record in (
+            _tttd_inference("i0", "rel-1"),
+            _tttd_report("r0", "i0", 0, 1.0),
+            _tttd_inference("i1", "rel-2"),
+            _tttd_report("r1", "i1", 1, 0.0),
+        ):
+            scenario.records.append(record)
+        first = _step(scenario, HARNESS)
+        if reload:
+            scenario = dispatcher._registry.reload("agent")
+        failed = scenario.trainer_for(HARNESS).processor_status()["failed_steps"]
+        # The controller samples step 0 again, on one release.
+        for record in (
+            _tttd_inference("j0", "rel-2"),
+            _tttd_report("s0", "j0", 0, 1.0),
+            _tttd_inference("j1", "rel-2"),
+            _tttd_report("s1", "j1", 1, 0.0),
+        ):
+            scenario.records.append(record)
+        return first, failed, _step(scenario, HARNESS)
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_tttd_step_failed_on_two_releases_stays_failed_after_a_reload(tmp_path: Path) -> None:
+    """A rebuilt TTTD harness still reports step 0 failed, with its releases, and never trains a resample of it."""
+    live = _tttd_failed_step(tmp_path / "live", reload=False)
+    rebuilt = _tttd_failed_step(tmp_path / "rebuilt", reload=True)
+    assert live[1] == [{"step": 0, "reason": "mixed_release_ids", "release_ids": ["rel-1", "rel-2"]}]
+    assert live[2] is None and rebuilt == live
+
+
+def _settlements(scenario) -> dict[str, frozenset[str]]:
+    by_component = settlement_receipts(scenario.records.compaction_receipts("agent"))
+    return {receipt_id: rows for receipts in by_component.values() for receipt_id, rows in receipts.items()}
+
+
+@pytest.mark.unit
+def test_a_long_idle_run_keeps_a_bounded_set_of_settlement_receipts(tmp_path: Path) -> None:
+    """Each idle harness cycle that reads another role's report writes a settlement receipt. Once the weights
+    trainer retires the rows one names, the next settlement deletes it: over 200 cycles at most one stays, and a
+    rebuild reads only what is left."""
+    dispatcher = _dispatcher(tmp_path, {WEIGHTS: ThresholdProcessor, HARNESS: _StepProcessor})
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        for k in range(200):
+            scenario.records.append(_inference(f"i{k}"))
+            scenario.records.append(_report(f"r{k}", f"i{k}"))
+            assert _step(scenario, HARNESS) is None
+            assert _step(scenario, WEIGHTS) == [(f"i{k}", f"r{k}")]
+            assert len(_settlements(scenario)) <= 1
+        assert len(scenario.store.history()) == 200 and _stored(scenario) == []
+        scenario = dispatcher._registry.reload("agent")
+        harness = scenario.trainer_for(HARNESS)
+        assert len(harness.open_settlements) + len(harness.retired_settlements) <= 1
+        scenario.records.append(_inference("iz"))
+        scenario.records.append(_report("rz", "iz"))
+        assert _step(scenario, HARNESS) is None
+        assert set(_settlements(scenario).values()) == {frozenset({"iz", "rz"})}
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_settlement_receipts_stay_bounded_by_the_rows_a_sibling_still_keeps(tmp_path: Path) -> None:
+    """While the weights trainer keeps every row (it never steps), a receipt names rows still stored, so the
+    receipts never outnumber them. A receipt a rebuild finds all retired is deleted at the next settlement."""
+    dispatcher = _dispatcher(tmp_path, {WEIGHTS: ThresholdProcessor, HARNESS: _StepProcessor})
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        for k in range(20):
+            scenario.records.append(_inference(f"i{k}"))
+            scenario.records.append(_report(f"r{k}", f"i{k}"))
+            assert _step(scenario, HARNESS) is None
+        settlements = _settlements(scenario)
+        stored = set(_stored(scenario))
+        assert len(settlements) == 20 and frozenset().union(*settlements.values()) <= stored
+        # The weights trainer trains every row; a reload before any settlement finds the receipts all retired.
+        while _step(scenario, WEIGHTS) is not None:
+            pass
+        assert _stored(scenario) == []
+        scenario = dispatcher._registry.reload("agent")
+        scenario.records.append(_inference("iz"))
+        scenario.records.append(_report("rz", "iz"))
+        assert _step(scenario, HARNESS) is None
+        assert set(_settlements(scenario).values()) == {frozenset({"iz", "rz"})}
+    finally:
+        dispatcher.close()

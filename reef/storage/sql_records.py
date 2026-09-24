@@ -609,6 +609,22 @@ class SQLRecordStore(RecordStore):
         with self._transaction(scenario, write=True) as connection:
             return self._retention_queries.purge_expired(connection, before=before, limit=limit, scenario=scenario)
 
+    def delete_receipts(self, scenario: str, receipt_ids: Sequence[str]) -> int:
+        """Delete the named receipts that retired no row (their compacted id set is empty)."""
+        if not receipt_ids:
+            return 0
+        table = self._tables.compaction_receipts
+        with self._transaction(scenario, write=True) as connection:
+            result = connection.execute(
+                table.delete().where(
+                    self._tables.condition(table),
+                    table.c.scenario == scenario,
+                    table.c.receipt_id.in_(sorted(set(receipt_ids))),
+                    table.c.compacted_ids_json == self._json([]),
+                )
+            )
+        return int(result.rowcount or 0)
+
     def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
         """Return durable, ordered metadata for explicitly recorded compactions."""
         with self._transaction(scenario, write=False) as connection:

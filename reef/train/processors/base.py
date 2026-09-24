@@ -319,6 +319,20 @@ class DataProcessor:
     def settle_retired(self, item: AgentRecord) -> None:
         """Learn of a report whose inference another commit retired; the trainer releases it, never ingests it."""
 
+    def durable_decisions(self) -> Mapping[str, object]:
+        """What this processor decided that a replay of the stored rows cannot rebuild, as JSON; none here.
+
+        In a composite a row is retired once every trainer released it, so a
+        row this processor released may be gone when the trainer is rebuilt,
+        and a decision that hung on it (a group it discarded, say) with it.
+        The trainer records these decisions beside the rows, and
+        :meth:`restore_decisions` reads them back before the replay.
+        """
+        return {}
+
+    def restore_decisions(self, decisions: Mapping[str, object]) -> None:
+        """Take back what :meth:`durable_decisions` recorded, before the rebuilt trainer replays its rows."""
+
     def restore_settled(self, item: AgentRecord) -> None:
         """Learn of a row this processor released without a batch before a restart, still stored for another trainer.
 

@@ -35,7 +35,7 @@ remain in this package.
 from reef.scenario.binding import ScenarioBinding
 from reef.scenario.committer import ScenarioCommitter
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import ReleaseNotRestorable, Scenario, StaleTrainingResultError
+from reef.scenario.scenario import ReleaseNotRestorable, Scenario, SettledTrainingResultError, StaleTrainingResultError
 
 __all__ = [
     "ReleaseNotRestorable",
@@ -43,5 +43,6 @@ __all__ = [
     "ScenarioBinding",
     "ScenarioCommitter",
     "ScenarioRegistry",
+    "SettledTrainingResultError",
     "StaleTrainingResultError",
 ]

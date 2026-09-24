@@ -14,7 +14,7 @@ import tempfile
 import time
 from collections.abc import Mapping, Sequence
 from contextlib import ExitStack
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
 from typing import Any
@@ -39,7 +39,7 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.runtime.recovery import marker_in_flight
 from reef.scenario.registry import ScenarioRegistry
-from reef.scenario.scenario import Scenario, StaleTrainingResultError
+from reef.scenario.scenario import Scenario, SettledTrainingResultError, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.train.backend import CandidateBackend
@@ -542,6 +542,9 @@ class Dispatcher:
 
     def _commit_result(self, scenario: str, result: TrainStepResult, component: str | None = None) -> None:
         current = self._registry.get(scenario)
+        if current.trainer_for(component).result_on_record(result):
+            # Another trainer's commit settled this trainer's durable record since the caller read the result.
+            raise SettledTrainingResultError(f"scenario {scenario!r} component {component!r}: its result is on record")
         context = self._experiment_context(current, component)
         tracked_result = result
         try:
@@ -553,6 +556,35 @@ class Dispatcher:
 
         value = current.commit(tracked_result, component=component)
         self._publication.record(scenario, value)
+        settled = current.settled_sibling_record
+        if settled is not None:
+            # The commit first put a sibling's durable record on record: that step is the sibling's and gets its
+            # own event, from its record, and this commit's step, source and run position follow it.
+            settled_metrics = dict(settled.metrics or {})
+            try:
+                self._experiment_tracker.record(
+                    TrainingExperimentEvent(
+                        context=replace(
+                            self._experiment_context(current, settled.component),
+                            step=settled.step,
+                            source_artifact_ref=context.source_artifact_ref,
+                            run_segment=context.run_segment,
+                            run_step=context.run_step,
+                        ),
+                        produced_artifact_ref=settled.artifact_ref,
+                        metrics=settled_metrics,
+                        outcome="rejected" if settled_metrics.get("selected") is False else "committed",
+                        training_job_id=settled.training_job_id,
+                    )
+                )
+            except Exception:
+                logger.exception("experiment tracker failed to record a settled training step")
+            context = replace(
+                context,
+                step=settled.step + 1,
+                source_artifact_ref=settled.artifact_ref,
+                run_step=context.run_step + 1,
+            )
         # The commit may annotate the result further (a merged result names the release it landed on):
         # the event carries what the record carries. The step is the one this commit took, captured in
         # the context before it: another trainer may have moved the scenario on since.
@@ -868,6 +900,10 @@ class Dispatcher:
                     self._commit_result(scenario, result, component)
                 except StaleTrainingResultError as stale:
                     return self._retry_stale_result(scenario, current, component, stale)
+                except SettledTrainingResultError:
+                    # The step this worker would have made is in the log already; look again for the next one.
+                    logger.info("scenario %r component %r: another commit settled its result", scenario, component)
+                    return True
                 except Exception:
                     # A record may already have crossed the fsync commit point.
                     # Reload before rollback or acceptance can observe the stale

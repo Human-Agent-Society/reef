@@ -8,6 +8,7 @@ retention protects every live report and the inference records it references.
 
 from __future__ import annotations
 
+import json
 import logging
 import math
 import time
@@ -78,6 +79,23 @@ class _PendingReport:
     report: AgentRecord
     group_key: Hashable | None
     slot: Hashable
+
+
+def encoded_group_key(key: Hashable) -> tuple[bool, object]:
+    """A group key as JSON, and whether JSON can carry it: a plain value as is, a tuple as ``{"tuple": [...]}``."""
+    if key is None or isinstance(key, (bool, int, float, str)):
+        return True, key
+    if isinstance(key, tuple):
+        parts = [encoded_group_key(part) for part in key]
+        return all(ok for ok, _ in parts), {"tuple": [value for _, value in parts]}
+    return False, None
+
+
+def decoded_group_key(value: object) -> Hashable:
+    """The group key :func:`encoded_group_key` wrote."""
+    if isinstance(value, Mapping) and isinstance(value.get("tuple"), list):
+        return tuple(decoded_group_key(part) for part in value["tuple"])
+    return cast("Hashable", value)
 
 
 # ------------------------------------------------- reported-feedback processor
@@ -449,6 +467,19 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     def consumed_restored(self, agent_record_ids: frozenset[str]) -> None:
         """The consumed inferences are trained sources now: a report arriving on one is settled, not resolved."""
         self._trained_sources.update(record_id for record_id in agent_record_ids if record_id in self._inferences)
+
+    def durable_decisions(self) -> Mapping[str, object]:
+        """The groups this processor discarded: a retry at one is terminal, and nothing rebuilds them from rows a
+        sibling's commit may have retired. A key JSON cannot carry is left out (it is decided again from the rows)."""
+        encoded = [value for ok, value in (encoded_group_key(key) for key in self._discarded_groups) if ok]
+        if not encoded:
+            return {}
+        return {"discarded_groups": sorted(encoded, key=lambda value: json.dumps(value, sort_keys=True))}
+
+    def restore_decisions(self, decisions: Mapping[str, object]) -> None:
+        discarded = decisions.get("discarded_groups")
+        if isinstance(discarded, list):
+            self._discarded_groups.update(decoded_group_key(value) for value in discarded)
 
     def restore_settled(self, item: AgentRecord) -> None:
         """A row this processor settled before the crash is settled again, not resolved.

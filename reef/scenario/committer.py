@@ -54,6 +54,15 @@ class _ArtifactHeadSync:
     error: str | None = None
 
 
+class SettledTrainingResultError(ReefError):
+    """A trainer's result is on record already: another trainer's commit settled its durable record first.
+
+    The caller read the result before that commit landed. Committing it again
+    would publish a second step with nothing behind it, so the caller looks
+    again instead; the step it would have made is in the log.
+    """
+
+
 class StaleTrainingResultError(ReefError):
     """A local result was prepared against a release that another component's commit has since replaced.
 
@@ -120,6 +129,9 @@ class ScenarioCommitter:
             if not store.durable
             else store.history()
         )
+        #: The sibling record the running commit settled before its own, for the caller's event of that step.
+        # The sibling record the last commit settled before its own, or None.
+        self.settled_sibling: CommitRecord | None = None
         self._latest_training_record = next(
             (record for record in reversed(records) if record.operation == "training"),
             None,
@@ -221,13 +233,15 @@ class ScenarioCommitter:
         """Drop ``component``'s reserved batch, retiring only rows every trainer has released."""
         with self._lock:
             bound = self._bound_trainer(component)
-            compacted = bound.trainer.reject_pending(
-                metrics, compactable=self._compactable_for(bound.component), component=bound.component
-            )
+            compactable = self._compactable_for(bound.component)
+            if compactable is not None:
+                bound.trainer.record_decisions(component=bound.component)
+            compacted = bound.trainer.reject_pending(metrics, compactable=compactable, component=bound.component)
             # Retired rows leave every trainer's memory, as after a commit.
             for other in self._trainers:
                 if other is not bound:
                     other.trainer.compaction_applied(compacted)
+                other.trainer.forget_settlements(compacted)
 
     def settle_released(self, component: str | None) -> None:
         """Put on record what ``component``'s trainer released in memory, when another trainer may retire it."""
@@ -235,6 +249,7 @@ class ScenarioCommitter:
             bound = self._bound_trainer(component)
             if self._compactable_for(bound.component) is None or bound.trainer.candidate_backend is None:
                 return
+            bound.trainer.record_decisions(component=bound.component)
             bound.trainer.settle_released(component=bound.component)
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
@@ -607,7 +622,13 @@ class ScenarioCommitter:
         with self._lock, self._publication_lock:
             bound = self._bound_trainer(component)
             trainer, component = bound.trainer, bound.component
+            self.settled_sibling = None
             self._settle_sibling_record(component)
+            if trainer.result_on_record(result):
+                # A sibling's commit settled this trainer's durable record after the caller read the result.
+                raise SettledTrainingResultError(
+                    f"scenario {self._name!r} component {component!r}: its result is on record already"
+                )
             next_step = self._step + 1
             surface = self._binding.surface
             # Refuse a stale base before the trainer acknowledges its batch, so
@@ -646,7 +667,11 @@ class ScenarioCommitter:
                 )
                 # The record names the base its batch was reserved against; the metrics say what it landed on.
                 result = trainer.add_commit_metrics(result, {"merged_onto": served})
-            prepared = trainer.prepare_commit(result, compactable=self._compactable_for(component))
+            compactable = self._compactable_for(component)
+            if compactable is not None:
+                # A sibling may keep what this record releases: the decisions behind it go on record first.
+                trainer.record_decisions(component=component)
+            prepared = trainer.prepare_commit(result, compactable=compactable)
             recorded = self._recorded_training_retry(prepared, result, next_step, component)
             if recorded is not None:
                 recorded = self._store.commit_step(expected_step=self._step, commit=recorded)
@@ -905,6 +930,7 @@ class ScenarioCommitter:
         # Retired rows leave every trainer's processor memory, not only the committing one's.
         for bound in self._trainers:
             bound.trainer.compaction_applied(prepared.compacted_ids)
+            bound.trainer.forget_settlements(prepared.compacted_ids)
         trainer.commit(prepared)
         if not self._store.durable:
             self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)
@@ -937,6 +963,7 @@ class ScenarioCommitter:
             record = self._store.commit_step(expected_step=self._step, commit=record)
             self._reconcile_recorded_artifact(record)
             self._settle_trainer_commit(prepared, record, self._step + 1, bound.trainer)
+            self.settled_sibling = record
             return
 
     def _recorded_training_retry(

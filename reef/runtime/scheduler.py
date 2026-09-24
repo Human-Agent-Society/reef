@@ -21,8 +21,10 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import random
 import sys
 import traceback
+import zlib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, replace
@@ -413,10 +415,16 @@ class InferenceMemory:
 #: a job an earlier build started, whose payload named no owner, keeps its identity.
 JOB_OWNER_KEY = "owner"
 
-#: The payload key carrying the row order an earlier build shuffled the batch into, when this build's differs: that
-#: build seeded the shuffle from the batch id, this one from the rows. Only the legacy identity reads it; neither
+#: The payload key carrying what an earlier build's shuffle of the batch needs: that build seeded the shuffle from
+#: the batch id, this one from the rows. It names this build's batch row per wire row (``head_rows``), the rollout
+#: groups in batch order (``groups``), the epochs and the batch id. Only the legacy identity reads it; neither
 #: identity hashes it, and the job never carries it to the backend.
 LEGACY_SCHEDULE_KEY = "legacy_schedule"
+
+#: How many batch numbers past the marker's step the legacy identity tries. The earlier build numbered the batches
+#: its process built since it started, a batch built again after a release included, and this build's reload
+#: numbers them again from 1, so the number that build gave a job is not in the payload.
+LEGACY_BATCH_NUMBER_MARGIN = 64
 
 #: The payload lists that follow the wire rows, reordered to the earlier build's order for its identity.
 _ROW_ALIGNED_KEYS = ("samples", "advantages", "producing_runtime_load_ids", "producing_runtime_load_spans")
@@ -441,46 +449,115 @@ def training_job_id(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def legacy_training_job_id(payload: Mapping[str, Any], rollout_id: int) -> str:
-    """The identity an earlier build wrote into its job marker: the payload with the scenario step in it, its rows
-    in the order that build's shuffle gave them when this payload says it differs."""
-    identity = {**payload, "rollout_id": rollout_id}
-    identity.pop("max_staleness", None)
-    identity.pop(JOB_OWNER_KEY, None)
-    legacy = identity.pop(LEGACY_SCHEDULE_KEY, None)
-    if isinstance(legacy, Mapping):
-        identity.update(_legacy_row_order(identity, legacy))
-    if uses_staleness_admission(payload):
-        identity.pop("expected_runtime_load_id", None)
-    encoded = json.dumps(identity, allow_nan=False, separators=(",", ":"), sort_keys=True).encode()
-    return hashlib.sha256(encoded).hexdigest()
+def canonical_json(value: object) -> str:
+    """``value`` encoded as a job identity hashes it."""
+    return json.dumps(value, allow_nan=False, separators=(",", ":"), sort_keys=True)
 
 
-def _legacy_row_order(payload: Mapping[str, Any], legacy: Mapping[str, Any]) -> dict[str, Any]:
-    """The row aligned lists of ``payload`` in the earlier build's row order, with its rollout ids.
+def legacy_shuffle(legacy: Mapping[str, Any], batch_id: str | None) -> tuple[list[int], list[int]] | None:
+    """The wire rows of this build's payload in the order an earlier build's shuffle gave batch ``batch_id`` (the
+    batch id ``legacy`` names when ``None``), and that build's rollout ids; ``None`` when ``legacy`` cannot say.
 
-    ``legacy`` names this payload's batch row per wire row (``head_rows``),
-    the earlier build's batch row per wire row (``row_indices``) and its
-    rollout id per wire row. Rows with one batch row carry one content, so
+    That build seeded ``random.Random(f"{seed}:{epoch}")`` with the CRC32 of
+    the batch id and shuffled the rollout groups of each epoch with it; this
+    repeats that shuffle over ``legacy["groups"]`` as it was, whatever this
+    build's schedule does now. Rows with one batch row carry one content, so
     each earlier wire row takes the first wire row of the same batch row.
     """
     head_rows = legacy.get("head_rows")
-    row_indices = legacy.get("row_indices")
-    rollout_ids = legacy.get("rollout_ids")
-    if not isinstance(head_rows, list) or not isinstance(row_indices, list) or not isinstance(rollout_ids, list):
-        return {}
+    groups = legacy.get("groups")
+    epochs = legacy.get("epochs")
+    if batch_id is None:
+        named = legacy.get("batch_id")
+        batch_id = named if isinstance(named, str) else None
+    if batch_id is None or not isinstance(head_rows, list) or not isinstance(groups, list):
+        return None
+    if not isinstance(epochs, int) or not all(isinstance(rows, list) for rows in groups):
+        return None
+    seed = zlib.crc32(batch_id.encode("utf-8"))
+    batch_rows: list[int] = []
+    rollout_ids: list[int] = []
+    for epoch in range(epochs):
+        order = list(range(len(groups)))
+        random.Random(f"{seed}:{epoch}").shuffle(order)
+        for position, group_index in enumerate(order):
+            for row in groups[group_index]:
+                batch_rows.append(row)
+                rollout_ids.append(epoch * len(groups) + position)
     first: dict[int, int] = {}
     for position, row in enumerate(head_rows):
         first.setdefault(row, position)
-    if any(row not in first for row in row_indices):
-        return {}
-    order = [first[row] for row in row_indices]
-    reordered: dict[str, Any] = {"rollout_ids": list(rollout_ids)}
-    for key in _ROW_ALIGNED_KEYS:
-        values = payload.get(key)
-        if isinstance(values, list) and len(values) == len(head_rows):
-            reordered[key] = [values[position] for position in order]
-    return reordered
+    if len(batch_rows) != len(head_rows) or any(row not in first for row in batch_rows):
+        return None
+    return [first[row] for row in batch_rows], rollout_ids
+
+
+class LegacyJobIdentity:
+    """The identities an earlier build may have written into its job marker for one payload at one step.
+
+    That build hashed the payload with the scenario step in it and its rows in
+    the order its shuffle gave, seeded by the batch id, so each batch id gives
+    one identity. The search tries many batch ids over a payload of many rows:
+    each row is encoded once, and an identity joins the encoded rows in its
+    order, which gives the bytes ``canonical_json`` gives the whole payload.
+    """
+
+    def __init__(self, payload: Mapping[str, Any], rollout_id: int) -> None:
+        identity = {**payload, "rollout_id": rollout_id}
+        identity.pop("max_staleness", None)
+        identity.pop(JOB_OWNER_KEY, None)
+        legacy = identity.pop(LEGACY_SCHEDULE_KEY, None)
+        if uses_staleness_admission(payload):
+            identity.pop("expected_runtime_load_id", None)
+        self.legacy: Mapping[str, Any] | None = legacy if isinstance(legacy, Mapping) else None
+        head_rows = self.legacy.get("head_rows") if self.legacy is not None else None
+        width = len(head_rows) if isinstance(head_rows, list) else -1
+        self.rows = {
+            key: [canonical_json(value) for value in values]
+            for key in _ROW_ALIGNED_KEYS
+            if isinstance(values := identity.get(key), list) and len(values) == width
+        }
+        self.fields = {key: canonical_json(value) for key, value in identity.items() if key not in self.rows}
+
+    def job_id(self, batch_id: str | None = None) -> str:
+        """The identity with the rows in the order the earlier build's shuffle gave batch ``batch_id``."""
+        fields = dict(self.fields)
+        shuffle = legacy_shuffle(self.legacy, batch_id) if self.legacy is not None else None
+        positions = None if shuffle is None else shuffle[0]
+        if shuffle is not None:
+            fields["rollout_ids"] = canonical_json(shuffle[1])
+        for key, rows in self.rows.items():
+            fields[key] = (
+                "[" + ",".join(rows if positions is None else [rows[position] for position in positions]) + "]"
+            )
+        encoded = "{" + ",".join(f"{canonical_json(key)}:{fields[key]}" for key in sorted(fields)) + "}"
+        return hashlib.sha256(encoded.encode()).hexdigest()
+
+
+def legacy_training_job_id(payload: Mapping[str, Any], rollout_id: int, *, batch_id: str | None = None) -> str:
+    """The identity an earlier build wrote into its job marker: the payload with the scenario step in it, its rows
+    in the order that build's shuffle gave them when the batch was ``batch_id`` (the payload's own by default)."""
+    return LegacyJobIdentity(payload, rollout_id).job_id(batch_id)
+
+
+def legacy_batch_ids(payload: Mapping[str, Any], step: int) -> tuple[str | None, ...]:
+    """The batch ids an earlier build may have given this payload's batch, the likeliest first.
+
+    A numbered batch id (``<scenario>:<kind>:<n>``) is tried with its own
+    number, then the number a process that never restarted gives the step,
+    the numbers past it that batches built again leave, and the lower numbers
+    a restart leaves. An instruction batch id names its request and is the
+    same. A payload that names no shuffle has one legacy identity: ``None``.
+    """
+    legacy = payload.get(LEGACY_SCHEDULE_KEY)
+    batch_id = legacy.get("batch_id") if isinstance(legacy, Mapping) else None
+    if not isinstance(batch_id, str):
+        return (None,)
+    prefix, _, number = batch_id.rpartition(":")
+    if not prefix or not number.isdigit():
+        return (batch_id,)
+    numbers = (*range(step + 1, step + 2 + LEGACY_BATCH_NUMBER_MARGIN), *range(step, 0, -1))
+    return (batch_id, *(candidate for index in numbers if (candidate := f"{prefix}:{index}") != batch_id))
 
 
 def _rollout_id(payload: Mapping[str, Any]) -> int:
@@ -516,6 +593,28 @@ class TrainingExecution:
         self._state = state
         self._context = context
         self._publisher = publisher
+        # The last legacy search: the marker's job, this batch's job, and the legacy identity that matched.
+        self.legacy_search: tuple[str, str, str | None] | None = None
+
+    def legacy_job_id(self, payload: Mapping[str, Any], marker: Mapping[str, Any]) -> str | None:
+        """The legacy identity of ``payload`` that names ``marker``'s job still out, or ``None``.
+
+        The search hashes the payload once per batch id it tries, so a job
+        retried against the same marker reuses the last answer.
+        """
+        job_id = training_job_id(payload)
+        if self.legacy_search is not None and self.legacy_search[:2] == (marker["job_id"], job_id):
+            return self.legacy_search[2]
+        step = marker.get("scenario_step", marker["rollout_id"])
+        identity = LegacyJobIdentity(payload, step)
+        found = None
+        for batch_id in legacy_batch_ids(payload, step):
+            legacy = identity.job_id(batch_id)
+            if marker["job_id"] == legacy and marker_disposition(marker, legacy) != "fresh":
+                found = legacy
+                break
+        self.legacy_search = (marker["job_id"], job_id, found)
+        return found
 
     def recover(self) -> dict[str, Any] | None:
         """Read restart state without guessing whether an optimizer step completed."""
@@ -533,17 +632,19 @@ class TrainingExecution:
         if self._store is None:
             raise RuntimeError("training job checkpoint path is not configured")
         marker = self._store.read()
-        if marker is not None and marker["job_id"] != job_id:
-            # A marker an earlier build wrote names the same batch by the step it ran at. Its job replays or
-            # resumes under that name; a batch that trains again from the start carries the current identity.
-            legacy = legacy_training_job_id(legacy_payload, marker.get("scenario_step", marker["rollout_id"]))
-            if marker["job_id"] == legacy and marker_disposition(marker, legacy) != "fresh":
-                job_id = legacy
+        if marker is not None and marker["job_id"] != job_id and marker_in_flight(marker):
+            # A marker an earlier build wrote names the same batch by the step it ran at and the batch number it
+            # shuffled by. Its job replays or resumes under that name; a batch that trains again from the start
+            # carries the current identity. A settled marker names a job that is done: a new job is fresh.
+            job_id = self.legacy_job_id(legacy_payload, marker) or job_id
         disposition = marker_disposition(marker, job_id)
         if disposition == "conflict":
             if marker is None:
                 raise RuntimeError("conflicting training disposition has no marker")
-            raise RuntimeError(f"training marker is {marker['status']}; operator recovery required")
+            raise RuntimeError(
+                f"training marker is {marker['status']} for job {marker['job_id']}, not this batch's job "
+                f"{job_id}; operator recovery required (see Training-step coordination in the executors guide)"
+            )
         if disposition != "fresh":
             if marker is None:
                 raise RuntimeError("replayed training disposition has no marker")

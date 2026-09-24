@@ -7,8 +7,8 @@ failure closes the trainer and opened storage session owned by this attempt.
 
 from __future__ import annotations
 
-from collections.abc import Mapping
-from dataclasses import dataclass
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -73,8 +73,11 @@ class _RecoveredTrainerState:
     consumed_by_step: tuple[tuple[int, frozenset[str]], ...] = ()
     #: The rows its records say it released without training while another trainer held them.
     settled_ids: frozenset[str] = frozenset()
-    #: The rows its settlement receipts name: released in memory between its commits, put on record without a step.
-    settlements: frozenset[str] = frozenset()
+    #: The rows its settlement receipts name, by receipt: released in memory between its commits, put on record
+    #: without a step.
+    settlements: Mapping[str, frozenset[str]] = field(default_factory=dict)
+    #: What its processor decided that the rows cannot rebuild (a group it discarded), by decisions receipt.
+    decisions: Mapping[str, Mapping[str, object]] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -113,18 +116,42 @@ def _dropped_steps(store: ScenarioStore, scenario: str) -> tuple[_DroppedStep, .
     return tuple(dropped)
 
 
-def _settlements(store: ScenarioStore, scenario: str) -> dict[str | None, frozenset[str]]:
-    """The rows each trainer's settlement receipts name as released without training, by component."""
-    settled: dict[str | None, set[str]] = {}
-    for receipt in store.records.compaction_receipts(scenario):
+def settlement_receipts(
+    receipts: Sequence[Mapping[str, object]],
+) -> dict[str | None, dict[str, frozenset[str]]]:
+    """The rows each trainer's settlement receipts name as released without training, by component and receipt.
+
+    A receipt goes once a compaction retired all its rows, so this is bounded
+    by the rows the scenario still keeps, not by the idle cycles that wrote it.
+    """
+    settled: dict[str | None, dict[str, frozenset[str]]] = {}
+    for receipt in receipts:
         metadata = receipt["metadata"]
         if not isinstance(metadata, Mapping) or metadata.get("outcome") != "settled":
             continue
         component = metadata.get("component")
-        settled.setdefault(component if isinstance(component, str) else None, set()).update(
-            str(record_id) for record_id in metadata.get("settled_ids", ())
+        settled.setdefault(component if isinstance(component, str) else None, {})[str(receipt["receipt_id"])] = (
+            frozenset(str(record_id) for record_id in metadata.get("settled_ids", ()))
         )
-    return {component: frozenset(ids) for component, ids in settled.items()}
+    return settled
+
+
+def decision_receipts(
+    receipts: Sequence[Mapping[str, object]],
+) -> dict[str | None, dict[str, Mapping[str, object]]]:
+    """What each trainer's processor put on record as decided, by component and decisions receipt."""
+    decided: dict[str | None, dict[str, Mapping[str, object]]] = {}
+    for receipt in receipts:
+        metadata = receipt["metadata"]
+        if not isinstance(metadata, Mapping) or metadata.get("outcome") != "decisions":
+            continue
+        decisions = metadata.get("decisions")
+        component = metadata.get("component")
+        if isinstance(decisions, Mapping):
+            decided.setdefault(component if isinstance(component, str) else None, {})[
+                str(receipt["receipt_id"])
+            ] = decisions
+    return decided
 
 
 def _recovered_trainer_states(
@@ -145,7 +172,9 @@ def _recovered_trainer_states(
         records = (head_record,)
     components = surface.names or (RECORDS_COMPONENT,)
     dropped = _dropped_steps(store, scenario)
-    settlements = _settlements(store, scenario)
+    receipts = store.records.compaction_receipts(scenario)
+    settlements = settlement_receipts(receipts)
+    decisions = decision_receipts(receipts)
     states: dict[str, _RecoveredTrainerState] = {}
     for component in components:
         own = tuple(
@@ -173,7 +202,8 @@ def _recovered_trainer_states(
             settled_ids=frozenset().union(
                 *(record.settled_ids for record in own), *(drop.settled_ids for drop in own_drops)
             ),
-            settlements=settlements.get(component, frozenset()),
+            settlements=settlements.get(component, {}),
+            decisions=decisions.get(component, {}),
         )
     return states
 
@@ -473,6 +503,9 @@ class ScenarioFactory:
                 recovered = recovered_states.get(bound.component)
                 if recovered is None:
                     continue
+                if recovered.decisions:
+                    # Before the replay: a retry at a group the processor discarded is terminal again.
+                    scenario.recover_decisions(recovered.decisions, component=bound.component)
                 if recovered.settlements:
                     scenario.recover_settled(recovered.settlements, component=bound.component)
                 if recovered.high_water is None:
@@ -482,7 +515,7 @@ class ScenarioFactory:
                     consumed_ids=recovered.consumed_ids,
                     component=bound.component,
                     consumed_by_step=recovered.consumed_by_step,
-                    settled_ids=recovered.settled_ids | recovered.settlements,
+                    settled_ids=recovered.settled_ids.union(*recovered.settlements.values()),
                 )
                 scenario.restore_record_progress(
                     after_sequence=recovered.high_water[0], offset=recovered.high_water[1], component=bound.component

@@ -758,16 +758,35 @@ Resource cleanup failure after ``CHECKPOINT`` also replays the recorded result.
 A job's identity is its batch and admission fence: the scenario step is not
 part of it, since the other components of a composite advance that step while
 the job is out, nor is the processor's batch number, which a reload starts
-again. A marker an earlier build wrote for a job still in flight is matched by
-the step it recorded, so an upgrade mid job replays it on a Slime backend. That
-build seeded a shuffled schedule with the batch number, so a shuffled Slime
-payload also carries, under ``legacy_schedule``, the row order that seed gave;
-the earlier identity is computed in that order, and the backend trains the
-payload without it. A
-Tinker job in flight at an upgrade needs operator recovery: its earlier
-identity carried a batch number a restart does not keep. Scenario/global
-checkpoint indexes and persisted marker fields remain compatible with existing
-deployments.
+again. A marker an earlier build wrote for a job still out (in flight, or
+complete and not acknowledged) is matched by the step it recorded, so an
+upgrade mid job replays it on a Slime backend. That build seeded a shuffled
+schedule with the batch id, whose number counted the batches its process built
+since it started, and a reload here numbers them again from 1. A shuffled Slime
+payload therefore carries, under ``legacy_schedule``, the rollout groups in
+batch order, the epochs and the batch id. The earlier identity is computed for
+each batch number from 1 up to the recorded step plus 64, in the order that
+build's shuffle gave, and the backend trains the payload without it. A marker
+of a job that is done leaves a new job fresh without this search. A Tinker job
+in flight at an upgrade needs operator recovery: its earlier identity carried a
+batch number a restart does not keep. Scenario/global checkpoint indexes and
+persisted marker fields remain compatible with existing deployments.
+
+When no identity matches, the job is refused with ``operator recovery
+required``, and the error names the marker's job and this batch's job. Nothing
+trains. To recover:
+
+1. Stop the service. Start the earlier Reef release on the same storage and
+   training backend. It knows the job by its own identity, so it replays or
+   resumes the job and commits or rejects it.
+2. Wait until ``GET /reef/status`` shows ``training_job`` as ``null``: the job
+   has committed or been rejected.
+3. Stop that service and start this release again.
+
+Do not delete the marker to get past the refusal. From ``CHECKPOINT`` on, the
+optimizer step is in the checkpoint, and a job trained again from the start
+would apply the batch twice. To avoid the refusal, upgrade while no job is out,
+as step 2 checks.
 
 Commit-gated weight publication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

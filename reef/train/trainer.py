@@ -53,6 +53,8 @@ class _PendingStep:
     base_release_id: str | None = None
     #: The prepared step behind ``result``; kept across a stale refusal when the candidate is evaluated again.
     prepared: PreparedStep | None = None
+    #: The values ``result`` held before commit metrics replaced it: a caller may still hold one.
+    earlier_results: tuple[TrainStepResult, ...] = ()
 
     @property
     def batch_id(self) -> str:
@@ -156,6 +158,15 @@ class Trainer:
         # Rows a settlement receipt names that a rebuilt trainer has not read again yet: read, they are settled as
         # they were, not decided again without the rows a sibling's commit retired since.
         self._recovered_settled: set[str] = set()
+        # The result values of the last pending step a commit put on record: committing one again is a second step.
+        self.recorded_results: tuple[TrainStepResult, ...] = ()
+        # Each settlement receipt this trainer wrote or recovered, with its rows no compaction has retired yet; a
+        # receipt left with none names nothing and is deleted at the next settlement.
+        self.open_settlements: dict[str, frozenset[str]] = {}
+        self.retired_settlements: set[str] = set()
+        # The processor decisions this trainer last put on record, and the receipts that hold them.
+        self.recorded_decisions: dict[str, object] = {}
+        self.decisions_receipt_ids: list[str] = []
         self._lock = Lock()
         self.operations = OperationMetrics(("execution",))
 
@@ -520,6 +531,11 @@ class Trainer:
         with self._lock:
             return self._pending is not None and self._pending.prepared is not None
 
+    def result_on_record(self, result: TrainStepResult) -> bool:
+        """Whether ``result`` was this trainer's pending step and a commit put it on record, a sibling's included."""
+        with self._lock:
+            return any(result is recorded for recorded in self.recorded_results)
+
     @property
     def pending_prepared_commit(self) -> PreparedCommit | None:
         """The prepared commit of the pending step, once an attempt prepared it."""
@@ -580,6 +596,8 @@ class Trainer:
         """
         with self._lock:
             if self._pending is None:
+                if any(result is recorded for recorded in self.recorded_results):
+                    raise RuntimeError("training result is on record already: committing it again is a second step")
                 return PreparedCommit(
                     algorithm_state=self.algorithm_state_dict(),
                     high_water_sequence=self._data_sequence,
@@ -645,6 +663,8 @@ class Trainer:
                 raise RuntimeError("prepared commit does not match the pending training step")
             self._state = dict(prepared.algorithm_state)
             self._recorded_ids |= (prepared.consumed_ids | prepared.settled_ids) - prepared.compacted_ids
+            held = self._pending.result
+            self.recorded_results = (*self._pending.earlier_results, *(() if held is None else (held,)))
             self._pending = None
 
     def settle_released(self, *, component: str | None) -> frozenset[str]:
@@ -660,6 +680,9 @@ class Trainer:
         deciding them anew. A receipt moves no cursor.
         """
         with self._lock:
+            if self.retired_settlements:
+                self._records.delete_receipts(self.scenario, sorted(self.retired_settlements))
+                self.retired_settlements.clear()
             if self._pending is not None:
                 return frozenset()
             unrecorded = frozenset(self._releasable_ids() - self._recorded_ids - self._released_stored_ids)
@@ -673,13 +696,78 @@ class Trainer:
                 receipt_id=f"settled:{digest}",
                 receipt_metadata={"outcome": "settled", **content},
             )
+            self.open_settlements[f"settled:{digest}"] = unrecorded
             self._recorded_ids |= unrecorded
             return unrecorded
 
-    def recover_settled(self, settled_ids: frozenset[str]) -> None:
-        """The rows this trainer's settlement receipts name, for a rebuilt trainer to settle when it reads them."""
+    def recover_settled(self, settlements: Mapping[str, frozenset[str]]) -> None:
+        """The rows this trainer's settlement receipts name, by receipt, for a rebuilt trainer to settle when it
+        reads them. A receipt all of whose rows are retired already is deleted at the next settlement."""
         with self._lock:
-            self._recovered_settled = set(settled_ids)
+            named = frozenset().union(*settlements.values())
+            retired = self._records.retired(self.scenario, sorted(named)) if named else frozenset()
+            self._recovered_settled = set(named - retired)
+            self.open_settlements = {}
+            for receipt_id, rows in settlements.items():
+                if rows - retired:
+                    self.open_settlements[receipt_id] = rows - retired
+                else:
+                    self.retired_settlements.add(receipt_id)
+
+    def forget_settlements(self, retired_ids: frozenset[str]) -> None:
+        """Take the rows a compaction retired out of this trainer's settlement receipts.
+
+        Settlement receipts are written on idle cycles, so kept for good they
+        would grow with wakes. A receipt all of whose rows are retired names
+        nothing a rebuild needs, so the next settlement deletes it: what stays
+        is bounded by the rows the scenario still keeps. This only updates
+        memory, so it cannot fail after a durable commit.
+        """
+        if not retired_ids:
+            return
+        with self._lock:
+            kept: dict[str, frozenset[str]] = {}
+            for receipt_id, rows in self.open_settlements.items():
+                if rows - retired_ids:
+                    kept[receipt_id] = rows - retired_ids
+                else:
+                    self.retired_settlements.add(receipt_id)
+            self.open_settlements = kept
+            self._recovered_settled -= retired_ids
+
+    def record_decisions(self, *, component: str | None) -> None:
+        """Put the processor's durable decisions on record when they changed since the last time.
+
+        The committer calls this before every write that releases rows
+        durably (a commit, a drop, a settlement), so a row's release is never
+        on record before the decision that released it. One decisions receipt
+        per trainer holds them, the newest; it names no row and moves no
+        cursor, and the ones it replaces are deleted.
+        """
+        with self._lock:
+            decisions = dict(self._processor.durable_decisions())
+            if not decisions or decisions == self.recorded_decisions:
+                return
+            content = {"component": component, "decisions": decisions}
+            digest = hashlib.sha256(json.dumps(content, sort_keys=True).encode()).hexdigest()[:16]
+            receipt_id = f"decisions:{digest}"
+            self._records.compact(
+                self.scenario, frozenset(), receipt_id=receipt_id, receipt_metadata={"outcome": "decisions", **content}
+            )
+            replaced = [known for known in self.decisions_receipt_ids if known != receipt_id]
+            self.decisions_receipt_ids = [receipt_id, *replaced]
+            self.recorded_decisions = decisions
+            if replaced:
+                self._records.delete_receipts(self.scenario, replaced)
+                self.decisions_receipt_ids = [receipt_id]
+
+    def recover_decisions(self, decisions: Mapping[str, Mapping[str, object]]) -> None:
+        """Hand the rebuilt processor what its decisions receipts say it decided, before the replay reads its rows."""
+        with self._lock:
+            for recorded in decisions.values():
+                self._processor.restore_decisions(recorded)
+            self.decisions_receipt_ids = list(decisions)
+            self.recorded_decisions = dict(self._processor.durable_decisions())
 
     def _unrecorded_settled(self, consumed: frozenset[str], compacted: frozenset[str]) -> frozenset[str]:
         """Rows this trainer released without training that stay stored for another trainer, not yet on record.
@@ -706,6 +794,7 @@ class Trainer:
             if self._pending.result is not result:
                 raise RuntimeError("cannot annotate a result that is not the pending training step")
             annotated = replace(result, metrics={**dict(result.metrics), **dict(metrics)})
+            self._pending.earlier_results = (*self._pending.earlier_results, result)
             self._pending.result = annotated
             return annotated
 

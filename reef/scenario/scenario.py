@@ -16,7 +16,7 @@ from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.committer import ScenarioCommitter, StaleTrainingResultError
+from reef.scenario.committer import ScenarioCommitter, SettledTrainingResultError, StaleTrainingResultError
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
@@ -246,10 +246,17 @@ class Scenario:
                 self._committer.settle_released(component)
             return batch
 
-    def recover_settled(self, settled_ids: frozenset[str], *, component: str | None = None) -> None:
-        """Hand a rebuilt trainer the rows its settlement receipts name."""
+    def recover_settled(self, settlements: Mapping[str, frozenset[str]], *, component: str | None = None) -> None:
+        """Hand a rebuilt trainer the rows its settlement receipts name, by receipt."""
         with self._committer.lock:
-            self.trainer_for(component).recover_settled(settled_ids)
+            self.trainer_for(component).recover_settled(settlements)
+
+    def recover_decisions(
+        self, decisions: Mapping[str, Mapping[str, object]], *, component: str | None = None
+    ) -> None:
+        """Hand a rebuilt trainer what its decisions receipts say its processor decided."""
+        with self._committer.lock:
+            self.trainer_for(component).recover_decisions(decisions)
 
     def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
         """Run the bound dispatched backend for the reserved batch."""
@@ -356,9 +363,16 @@ class Scenario:
 
         Raises :class:`StaleTrainingResultError` when the result was prepared
         against a release another component has since replaced; the caller
-        then calls :meth:`retry_pending` and prepares the batch again.
+        then calls :meth:`retry_pending` and prepares the batch again. Raises
+        :class:`SettledTrainingResultError` when another trainer's commit has
+        already put the result on record.
         """
         return self._committer.commit(result, component=component)
+
+    @property
+    def settled_sibling_record(self) -> CommitRecord | None:
+        """The sibling record the last commit settled before its own: that step is the sibling's."""
+        return self._committer.settled_sibling
 
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Republish the head with the content this Reef ships when it is stale; the new head, or ``None``."""
@@ -424,6 +438,7 @@ __all__ = [
     "SCENARIO_METADATA_KEY",
     "ReleaseNotRestorable",
     "Scenario",
+    "SettledTrainingResultError",
     "StaleTrainingResultError",
     "validate_component_trainers",
 ]
