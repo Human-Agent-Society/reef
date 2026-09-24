@@ -241,7 +241,7 @@ def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
             selected=False, selection=selection, candidate_episodes=[episode], mutation=MUTATION, proposal_notes=notes
         )
     )
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
     result = _section(page, "Result")
     assert "the task &#x27;[health] echo&#x27; failed: no transcript was read" in result or (
         "the task '[health] echo' failed: no transcript was read" in result
@@ -260,7 +260,7 @@ def test_answers_the_proposer_wrote_again_show_under_review_on_both_pages() -> N
         "dropped_attempts": ["answer 1: the harness refused the entries: bad frontmatter"],
     }
     row = _row(_answered(selected=True, published=True, mutation=MUTATION, proposal_notes=notes))
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, row], now=1_100.0)
+    page = build_request_page(_record(), [CREATION, row], now=1_100.0)
     review = _section(page, "Review")
     assert "Answers written again" in review and "the harness refused the entries: bad frontmatter" in review
     version = build_release_page(1, [CREATION, row])
@@ -272,12 +272,12 @@ def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_s
     release waiting for review is served with reef-hermes wait on the request, and the version page's Setup
     note names reef-hermes setup."""
     selected = _row(_answered(selected=True, published=True, mutation=MUTATION))
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, selected], now=1_100.0, adapter="hermes")
+    page = build_request_page(_record(), [CREATION, selected], now=1_100.0, adapter="hermes")
     result = _section(page, "Result")
     assert "<code>reef-hermes update</code>" in result and "start reef-hermes again" in result
     assert "/versions" not in page and "reef-pi" not in page
     pending = _row(_answered(selected=True, mutation=MUTATION), pending=True)
-    page = build_request_page(_record(compacted_at=1_050.0), [CREATION, pending], now=1_100.0, adapter="hermes")
+    page = build_request_page(_record(), [CREATION, pending], now=1_100.0, adapter="hermes")
     assert f"<code>reef-hermes wait {RECORD_ID}</code>" in _section(page, "Result")
     requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
     metrics = _answered(selected=True, published=True, mutation=MUTATION)
