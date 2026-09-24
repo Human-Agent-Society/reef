@@ -664,11 +664,9 @@ two commands, two tools and two event handlers:
   the last poll read. The widget is cleared when the step settles, and a
   headless session draws none.
 - The watch, after any filing: ``ctx.ui.setStatus`` shows ``reef: request
-  <id> queued`` and, once the request's record (``GET
-  /reef/scenarios/<scenario>/records/<id>``, read each poll until then)
-  carries a ``compacted_at`` time, ``reef: step for request <id> running for
-  <Nm SSs>``, counted from the first poll that saw it; a failed record read
-  keeps the footer as it was. Each poll also reads ``GET
+  <id> queued`` and, once progress reports the step running, ``reef: step
+  for request <id> running for <Nm SSs>``. Record reads only detect requests
+  removed from storage. Each poll reads ``GET
   /reef/harness/requests/<id>/progress`` for the step's phase, its episode
   count and its step record, and counts from the step's own
   ``started_at`` when the service reports one; a service without that route

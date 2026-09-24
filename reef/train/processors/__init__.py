@@ -16,10 +16,10 @@ path to a batch — is at https://reefinfra.ai/docs/developer-guide/processors/.
 
 Everything numeric about a method — advantages, loss family — lives in its
 backend training objective, not here: processors own the records and their
-retention, objectives own the training signal.
+memory, objectives own the training signal.
 """
 
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.processors.computed import ComputedFeedbackProcessor
 from reef.train.processors.distill import DistillProcessor
 from reef.train.processors.reported import ReportedFeedbackProcessor
@@ -30,6 +30,5 @@ __all__ = [
     "DataProcessor",
     "DistillProcessor",
     "ReportedFeedbackProcessor",
-    "RetentionDecision",
     "TaskGenerationProcessor",
 ]

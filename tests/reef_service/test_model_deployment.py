@@ -562,3 +562,36 @@ def test_explicitly_disabled_supervision_stays_disabled_with_an_owned_coordinato
     monkeypatch.setattr(training_driver, "threading", SimpleNamespace(Event=Stopping))
     assert training_driver.run_deployment(plan, ready, source=SimpleNamespace()) == 0
     assert not ready.exists()
+
+
+def test_coordinator_is_placed_on_the_trainers_node(monkeypatch):
+    from dataclasses import replace
+
+    from reef.runtime.executor import Executor
+
+    class PlacedResources(Resources):
+        @property
+        def training_node_id(self):
+            return "node-1"
+
+    configs = []
+
+    def capture(config):
+        configs.append(config)
+        raise RuntimeError("stop after capture")
+
+    monkeypatch.setattr(Executor, "create", capture)
+    placed = PlacedResources([], ())
+    plan = ModelDeploymentPlan(
+        placed, Inference(placed), Training(placed), coordinator=CoordinatorConfig(backend="uni")
+    )
+    with pytest.raises(RuntimeError, match="stop after capture"):
+        ModelDeployment(plan).start()
+    assert configs[0].node_id == "node-1"
+
+    # An allocation that names no trainer node leaves the coordinator unplaced.
+    plan, _ = plan_for()
+    plan = replace(plan, coordinator=CoordinatorConfig(backend="uni"))
+    with pytest.raises(RuntimeError, match="stop after capture"):
+        ModelDeployment(plan).start()
+    assert configs[1].node_id is None
