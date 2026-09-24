@@ -102,10 +102,12 @@ scanner would also block a command it cannot resolve, such as
 spawn a background review off (``memory.nudge_interval: 0`` and
 ``skills.creation_nudge_interval: 0``; the review makes model calls and
 writes skills into the tree), the curator off (``curator.enabled: false``;
-it archives and backs up the skills in the tree, which in a ``reef-hermes``
-session is the installed release), and the per session JSON snapshot on
+it writes its state into the tree's ``skills/`` at the first start and later
+archives and backs up the skills there, which in a ``reef-hermes`` session
+are the installed release's), and the per session JSON snapshot on
 (``sessions.write_json_snapshots``), which is the trajectory the
-``hermes-session-json`` reader parses. A composition that flips any of them
+``hermes-session-json`` reader parses. A composition that flips any of them,
+or puts a value that is not an object where a section holding one belongs,
 is refused at render. The quirks also write the
 ``.no-bundled-skills`` marker, so an episode carries the tree's skills and not
 hermes's bundled catalog. Rules render to ``SOUL.md``, the one home level
@@ -126,7 +128,13 @@ root (``${REEF_HARNESS_DEST}/hermes-commands``) for a ``reef-hermes`` session,
 whose home is a temp copy; hermes skips an entry that names no directory.
 A ``reef-hermes`` session keeps ``state.db``, the session snapshots under
 ``sessions/`` and the logs under ``logs/`` in the installed tree, so a later
-session finds what an earlier one wrote.
+session finds what an earlier one wrote. hermes also writes files of its own
+into ``skills/`` that no config key turns off: the bundled skill manifest it
+rewrites at every start, the one essential skill it seeds
+(``autonomous-ai-agents/hermes-agent``), and the usage counts it updates when
+a skill is loaded (``.usage.json`` and its lock). An episode whitelists them;
+in a ``reef-hermes`` session they are written into the installed release's
+``skills/``.
 The model binding is a custom provider with a literal key in ``config.yaml``;
 only the ``openai`` dialect is bound. hermes's own default approval policy
 runs tools inside the working directory with no prompt and refuses a command

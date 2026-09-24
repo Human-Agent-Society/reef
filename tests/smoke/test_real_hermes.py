@@ -16,6 +16,7 @@ import os
 import shutil
 import subprocess
 import threading
+from collections.abc import Sequence
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
@@ -37,13 +38,13 @@ RULES_SENTENCE = "The reef smoke marker phrase is TIDEPOOL-STONE-41."
 
 
 class StubOpenAI(ThreadingHTTPServer):
-    """A canned /v1 endpoint that records every request it is sent. It asks for ``tool_calls`` terminal calls, one
-    per answer, before it replies READY."""
+    """A canned /v1 endpoint that records every request it is sent. It asks for the ``tool_calls``, (tool name,
+    arguments) pairs, one per answer, before it replies READY."""
 
-    def __init__(self, tool_calls: int = 0) -> None:
+    def __init__(self, tool_calls: Sequence[tuple[str, dict[str, str]]] = ()) -> None:
         super().__init__(("127.0.0.1", 0), StubHandler)
         self.requests: list[tuple[str, str | None, str]] = []
-        self.tool_calls = tool_calls
+        self.tool_calls = list(tool_calls)
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -64,8 +65,9 @@ class StubHandler(BaseHTTPRequestHandler):
         answered = sum(1 for message in request.get("messages", []) if message.get("role") == "tool")
         delta: dict[str, Any] = {"role": "assistant", "content": "READY"}
         finish = "stop"
-        if answered < self.server.tool_calls:
-            call = {"name": "terminal", "arguments": json.dumps({"command": f"echo step-{answered}"})}
+        if answered < len(self.server.tool_calls):
+            name, arguments = self.server.tool_calls[answered]
+            call = {"name": name, "arguments": json.dumps(arguments)}
             tool_call = {"index": 0, "id": f"call-{answered}", "type": "function", "function": call}
             delta = {"role": "assistant", "tool_calls": [tool_call]}
             finish = "tool_calls"
@@ -176,7 +178,7 @@ def test_real_hermes_episode_makes_no_background_review_call_after_ten_tool_call
     """hermes reviews the skill library in a background agent after ten tool calls in a turn; the defaults turn that
     off, so an episode makes only its own model calls and writes no skill into the tree. The tree has no rules, like
     a scenario's seed tree, so hermes writes its default SOUL.md, which is not residue."""
-    server = StubOpenAI(tool_calls=10)
+    server = StubOpenAI(tool_calls=[("terminal", {"command": f"echo step-{step}"}) for step in range(10)])
     threading.Thread(target=server.serve_forever, daemon=True).start()
     descriptor = get_adapter("hermes")
     try:
@@ -195,6 +197,33 @@ def test_real_hermes_episode_makes_no_background_review_call_after_ten_tool_call
     completions = [body for path, _, body in server.requests if path.endswith("/chat/completions")]
     assert not [body for body in completions if "update the skill library" in body]
     assert len(completions) == 11, len(completions)  # ten tool calls and the answer
+    assert result.residue == ()
+
+
+def test_real_hermes_episode_that_loads_a_skill_leaves_no_residue() -> None:
+    """A skill_view of a tree skill makes hermes count the load in skills/.usage.json under a lock file, with no
+    config key to turn that off. Both are hermes's own state, so the episode reports no residue."""
+    server = StubOpenAI(tool_calls=[("skill_view", {"name": "notes"})])
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    descriptor = get_adapter("hermes")
+    try:
+        binding = ModelBinding(
+            base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key-1234"
+        )
+        skill = ("skill", {"name": "notes", "text": "# Notes\n\nKeep notes short: NOTES-MARKER-7."})
+        files = render_composition([skill, *binding.compose_nodes(descriptor)], descriptor)
+        result = run_episode(
+            descriptor, files, "Load the notes skill, then reply READY", binary=REAL_HERMES, timeout=300.0
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    completions = [body for path, _, body in server.requests if path.endswith("/chat/completions")]
+    tool_results = [message for message in json.loads(completions[-1])["messages"] if message.get("role") == "tool"]
+    # The skill loaded, which is when hermes counts it.
+    assert len(tool_results) == 1 and "NOTES-MARKER-7" in tool_results[0]["content"], tool_results
     assert result.residue == ()
 
 

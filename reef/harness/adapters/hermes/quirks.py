@@ -12,7 +12,8 @@ capability), since hermes discovers plugins but loads none without consent.
 The traps a mutated config could reopen: the scanner download, the session
 title call, the background review and the curator that write skills into the
 tree, and the snapshot the reader parses. A composition that flips any of
-them is rejected at render, the same gate that rejects an invalid node.
+them, or puts a value that is not an object where a section holding one
+belongs, is rejected at render, the same gate that rejects an invalid node.
 """
 
 from __future__ import annotations
@@ -55,11 +56,30 @@ def _with_frontmatter(path: str, text: str) -> str:
     return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
+def _setting(config: dict[str, Any], *keys: str) -> object:
+    """The value at ``keys`` in the config, None when a section on the way is absent or is not an object."""
+    value: object = config
+    for key in keys:
+        value = value.get(key) if isinstance(value, dict) else None
+    return value
+
+
 def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
-    section = dict(config.get("plugins") or {})
+    section = config.get("plugins") or {}
+    entries = _setting(config, "plugins", "entries") or {}
+    if (
+        not isinstance(section, dict)
+        or not isinstance(entries, dict)
+        or any(not isinstance(entries.get(name) or {}, dict) for name in plugins)
+    ):
+        raise RenderError(
+            "hermes composition must keep plugins, plugins.entries and each rendered plugin's entry objects, "
+            "so the plugin can be granted"
+        )
+    section = dict(section)
     enabled = [name for name in section.get("enabled") or [] if isinstance(name, str)]
     section["enabled"] = enabled + [name for name in plugins if name not in enabled]
-    entries = dict(section.get("entries") or {})
+    entries = dict(entries)
     for name in plugins:
         entry = dict(entries.get(name) or {})
         granted = [item for item in entry.get("granted_capabilities") or [] if isinstance(item, str)]
@@ -71,22 +91,22 @@ def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     config = json.loads(files[_CONFIG])
-    if (config.get("security") or {}).get("tirith_enabled") is not False:
+    if _setting(config, "security", "tirith_enabled") is not False:
         raise RenderError("hermes composition must keep security.tirith_enabled false for benchmark episodes")
-    if ((config.get("auxiliary") or {}).get("title_generation") or {}).get("enabled") is not False:
+    if _setting(config, "auxiliary", "title_generation", "enabled") is not False:
         raise RenderError(
             "hermes composition must keep auxiliary.title_generation.enabled false for benchmark episodes"
         )
-    memory_nudge_interval = (config.get("memory") or {}).get("nudge_interval")
-    skill_nudge_interval = (config.get("skills") or {}).get("creation_nudge_interval")
+    memory_nudge_interval = _setting(config, "memory", "nudge_interval")
+    skill_nudge_interval = _setting(config, "skills", "creation_nudge_interval")
     if memory_nudge_interval != 0 or skill_nudge_interval != 0:
         raise RenderError(
             "hermes composition must keep memory.nudge_interval and skills.creation_nudge_interval 0, "
             "so no background review makes model calls or writes skills"
         )
-    if (config.get("curator") or {}).get("enabled") is not False:
+    if _setting(config, "curator", "enabled") is not False:
         raise RenderError("hermes composition must keep curator.enabled false, so the curator leaves the skills alone")
-    if (config.get("sessions") or {}).get("write_json_snapshots") is not True:
+    if _setting(config, "sessions", "write_json_snapshots") is not True:
         raise RenderError(
             "hermes composition must keep sessions.write_json_snapshots true so Reef can read the trajectory"
         )

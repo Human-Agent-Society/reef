@@ -198,16 +198,20 @@ pool = {"openai-api": [{"source": "env:OPENAI_API_KEY", "secret_fingerprint": "s
 (home / "logs" / "agent.log").write_text("started\\n")
 if not (home / "SOUL.md").exists():
     (home / "SOUL.md").write_text("You are Hermes Agent.\\n")  # the default rules file, for a tree with no rules
+# A skill_view of a tree skill counts the load in the usage file beside the skills, under a lock file.
+(home / "skills" / ".usage.json.lock").write_text("")
+(home / "skills" / ".usage.json").write_text(json.dumps({"notes": {"view_count": 1, "use_count": 1}}))
 print("done")
 """
 
 
-def test_hermes_episode_whitelists_what_hermes_writes_at_boot(tmp_path: Path) -> None:
+def test_hermes_episode_whitelists_what_hermes_writes_at_boot_and_on_a_skill_load(tmp_path: Path) -> None:
     files = render_composition([("skill", {"name": "notes", "text": "Keep notes."})], get_adapter("hermes"))
     result = run_episode(get_adapter("hermes"), files, "list files", binary=fake_binary(tmp_path, HERMES_FAKE))
     assert result.exit_code == 0
     assert [event["type"] for event in result.trajectory] == ["session", "message"]
-    assert result.residue == ()  # the credential pool, its lock, the default rules file and the log
+    # The credential pool, its lock, the default rules file, the log and the skill usage counts with their lock.
+    assert result.residue == ()
 
 
 def test_missing_binary_raises_episode_error(tmp_path: Path) -> None:

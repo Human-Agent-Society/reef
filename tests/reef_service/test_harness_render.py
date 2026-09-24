@@ -13,6 +13,7 @@ import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
@@ -326,6 +327,34 @@ def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:
             render_composition([("config", {"data": review})], descriptor)
     with pytest.raises(RenderError, match=r"curator\.enabled false"):
         render_composition([("config", {"data": {"curator": {"enabled": True}}})], descriptor)
+
+
+def test_hermes_admission_refuses_a_config_section_that_is_not_an_object() -> None:
+    """A config mutation that turns a section the render checks read into a string or a list is a refused
+    proposal, not an error raised out of the admission."""
+    descriptor = get_adapter("hermes")
+    sections = (
+        {"security": "off"},
+        {"auxiliary": {"title_generation": "off"}},
+        {"memory": "on"},
+        {"skills": "notes"},
+        {"curator": "on"},
+        {"sessions": [True]},
+    )
+    for data in sections:
+        entries, refusal = admit_mutations(
+            [], [Mutation("create", "c1", {"name": "config", "config": {"data": data}})], descriptor
+        )
+        assert entries == [] and refusal is not None and refusal.startswith("hermes composition must keep"), data
+    tracer = Mutation(
+        "create",
+        "e1",
+        {"name": "code_extension", "config": {"name": "tracer", "code": "def register(ctx):\n    pass\n"}},
+    )
+    for plugins in ("tracer", {"entries": ["tracer"]}, {"entries": {"tracer": "on"}}):
+        config = Mutation("create", "c1", {"name": "config", "config": {"data": {"plugins": plugins}}})
+        entries, refusal = admit_mutations([], [config, tracer], descriptor)
+        assert entries == [] and refusal is not None and "each rendered plugin's entry objects" in refusal, plugins
 
 
 NATIVE_TOOL = (

@@ -45,7 +45,8 @@ files:
         # "$REEF_HARNESS_WRAPPER" evolve; title_generation is one extra model
         # call per episode; the memory and skill nudges spawn a background
         # review agent, which makes model calls and writes skills into the
-        # tree; the curator archives and backs up skills in the tree; the
+        # tree; the curator writes its state into the tree's skills at the
+        # first start and later archives and backs up skills there; the
         # snapshot is the trajectory the reader parses.
         auxiliary:
           title_generation:
@@ -92,7 +93,11 @@ cleanup_whitelist:
   - "hermes/auth.lock"
   # hermes writes its default rules file when the tree has no rules.
   - "hermes/SOUL.md"
+  # hermes rewrites the bundled skill manifest at every start and counts each
+  # skill load in skills/.usage.json under a lock file; no config key turns
+  # either off.
   - "hermes/skills/.bundled_manifest"
+  - "hermes/skills/.usage.json*"
   - "hermes/logs/**"
   - "hermes/cache/**"
   - "hermes/runtime/**"
