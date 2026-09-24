@@ -182,6 +182,25 @@ def test_an_answer_whose_entries_were_all_dropped_is_written_again_with_the_reas
     assert retry and "config 'chat-hooks' was dropped: it sets hooks" in retry[0]
 
 
+def test_a_retry_shows_every_key_of_a_refused_entry_and_cuts_only_its_long_texts() -> None:
+    """A refused opencode agent with a long prompt: the retry cuts the prompt, not the entry, so the keys after it
+    stay in view and the model sees where the missing permission map belongs."""
+    agent = {"chat": {"prompt": "Answer from web search only. " * 120, "mode": "primary", "description": "Chat"}}
+    unmapped = {"id": "chat-agent", "name": "config", "config": {"target": "primary", "data": {"agent": agent}}}
+    command = {
+        "id": "chat",
+        "name": "agent_command",
+        "config": {"name": "chat", "text": "---\nagent: chat\n---\nChat."},
+    }
+    mapped = {"chat": {**agent["chat"], "permission": {"*": "deny", "websearch": "allow"}}}
+    fixed = {**unmapped, "config": {"target": "primary", "data": {"agent": mapped}}}
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(designed(unmapped, command), designed(fixed, command), review)
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
+    (retry,) = [prompt for prompt in model.prompts if "An earlier answer to this request" in prompt]
+    assert '"mode": "primary", "description": "Chat"' in retry and "Answer from web search only. " * 20 not in retry
+
+
 def test_a_retry_for_a_refused_answer_carries_that_answers_design_and_entries() -> None:
     """opencode refused answer 1 for its agent's missing permission map alone; the retry shows that answer's design
     and entries, so what it got right (a correct leave path, say) is not lost when the model writes again."""

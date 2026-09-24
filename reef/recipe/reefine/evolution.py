@@ -142,8 +142,9 @@ _PREVIEW_CHARS = 240
 #: How much of a design the step records: a few paragraphs with its How to use section, never a second copy of
 #: the entries.
 _DESIGN_CHARS = 4000
-#: How much of each refused entry a retry prompt carries: enough to rewrite from, not the whole answer again.
-EARLIER_ENTRY_CHARS = 1500
+#: How much of each long text in a refused entry a retry shows (a command's body, an agent's prompt): the entry's
+#: keys all stay, so the model sees where a missing one belongs.
+EARLIER_TEXT_CHARS = 400
 
 #: The two words a review result may be.
 REVIEW_RESULTS = ("complete", "partial")
@@ -758,12 +759,22 @@ def declined_answer(
 
 
 def entries_in_short(mutations: Sequence[Mutation]) -> str:
-    """The answer's entries for a retry prompt: each as JSON, its long text cut, so the model can rewrite from it."""
-    lines = []
-    for mutation in mutations:
-        written = json.dumps({"id": mutation.id, **(mutation.options or {})}, ensure_ascii=False)
-        lines.append(f"- {written if len(written) <= EARLIER_ENTRY_CHARS else written[:EARLIER_ENTRY_CHARS] + ' ...'}")
-    return "\n".join(lines)
+    """The answer's entries for a retry prompt: each as JSON with every key it set, each long text in it cut, so the
+    model can rewrite from it and sees where a missing key belongs."""
+
+    def shortened(value: Any) -> Any:
+        if isinstance(value, str):
+            return value if len(value) <= EARLIER_TEXT_CHARS else value[:EARLIER_TEXT_CHARS] + " ..."
+        if isinstance(value, Mapping):
+            return {key: shortened(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [shortened(item) for item in value]
+        return value
+
+    return "\n".join(
+        f"- {json.dumps(shortened({'id': mutation.id, **(mutation.options or {})}), ensure_ascii=False)}"
+        for mutation in mutations
+    )
 
 
 def _config_agents(config: Any) -> Mapping[str, Any]:
