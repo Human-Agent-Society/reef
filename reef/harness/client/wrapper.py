@@ -18,8 +18,9 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
      the agent at the proxy instead of Reef directly. The copy is made in
      ``$XDG_CACHE_HOME/reef-harness/sessions`` (``~/.cache`` by default),
      never in TMPDIR, which the codex and dsh sandboxes can write. With a
-     record, the copy links only the files the install wrote and the client
-     state; a link a session put at a client state path is removed first.
+     record, the copy holds copies of the files the install wrote and links
+     to the client state, nothing else; a link a session put at a client
+     state path is removed first.
   3. Runs the agent binary as a subprocess. SIGHUP (the terminal closed)
      and SIGTERM are passed to the agent; once it exits, the steps below
      still run and the wrapper exits 128 plus the signal number.
@@ -503,24 +504,38 @@ def _temp_copies_dir() -> Path:
 
 
 def _create_temp_composition(
-    adapter: str, compose_dir: str, proxy_port: int, linked: Sequence[PurePosixPath] | None = None
+    adapter: str,
+    compose_dir: str,
+    proxy_port: int,
+    copied: Sequence[PurePosixPath] | None = None,
+    linked: Sequence[PurePosixPath] = (),
 ) -> str:
-    """Symlink the composition into a temp dir, overriding the binding files.
+    """Build the composition in a temp dir, overriding the binding files.
 
     The temp dir is made in ``_temp_copies_dir``, readable by the person
-    alone. ``linked`` names the paths below the composition directory to
-    link one by one, in real directories: the files the install recorded
-    and the client state, so a file added to the installed tree after the
-    install never reaches a session, and what the binary creates beside a
-    linked file stays in the temp copy. None links every top-level item,
-    for a tree the install recorded nothing for."""
+    alone. ``copied`` names the files below the composition directory the
+    install recorded, each copied with its mode into real directories, and
+    ``linked`` the client state, linked one by one, so a file added to the
+    installed tree after the install never reaches a session, what the
+    binary writes over a copied file stays in the temp copy, and a binary
+    that skips a linked file (Codex skips a linked ``SKILL.md``) still reads
+    the tree. A recorded file that is a link now is not copied, so the copy
+    never reads through a link. None links every top-level item, for a tree
+    the install recorded nothing for."""
     compose = Path(compose_dir)
     copies = _temp_copies_dir()
     copies.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp_dir = tempfile.mkdtemp(prefix="reef-harness-", dir=copies)
     temp = Path(temp_dir)
 
-    for relative in [PurePosixPath(item.name) for item in compose.iterdir()] if linked is None else linked:
+    for relative in copied or ():
+        src, dst = compose / relative, temp / relative
+        if src.is_symlink() or not src.is_file():
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        shutil.copymode(src, dst)
+    for relative in [PurePosixPath(item.name) for item in compose.iterdir()] if copied is None else linked:
         src, dst = compose / relative, temp / relative
         if dst.exists() or dst.is_symlink() or not (src.exists() or src.is_symlink()):
             continue
@@ -1043,18 +1058,18 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             path.parent.mkdir(parents=True, exist_ok=True)
             with contextlib.closing(sqlite3.connect(path)) as database:
                 database.execute("VACUUM")  # writes the database header, so the file is a database
-    # With a record, the session gets the files the install wrote and the client state, nothing else in the tree.
-    linked: list[PurePosixPath] | None
+    # With a record, the session gets copies of the files the install wrote and the client state, nothing else in
+    # the tree.
+    copied: list[PurePosixPath] | None
     if install_record is None:
-        linked = None
+        copied = None
     else:
         recorded = [PurePosixPath(relative) for relative in _recorded_files(install_record)]
-        below = {
+        copied = sorted(
             path.relative_to(subdir)
             for path in recorded
             if subdir in path.parents and not _is_client_state(descriptor, path)
-        }
-        linked = sorted(below | set(kept.values()))
+        )
     env = os.environ.copy()
     # What an interactive run needs beyond the episode env; the person's own setting wins.
     for key, value in descriptor.client_env.items():
@@ -1099,7 +1114,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     temp_dir: str | None = None
     returncode = 0
     try:
-        temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port, linked)
+        temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port, copied, sorted(set(kept.values())))
         env[env_var] = temp_dir
         if not received:
             # As subprocess.run does: Ctrl-C reaches the agent too, and a KeyboardInterrupt here kills it.

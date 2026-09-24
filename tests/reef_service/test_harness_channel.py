@@ -1735,6 +1735,34 @@ def _refusal(root: str, *entries: str) -> list[str]:
 
 
 @pytest.mark.unit
+def test_a_session_reads_copies_of_the_files_the_install_wrote_and_links_only_the_client_state(tmp_path) -> None:
+    """Codex skips a linked ``SKILL.md`` and hermes warns on every linked skill, so the temp copy holds each file the
+    install wrote as a regular file with its mode, and links only the client state. What the session writes over a
+    copied file stays in the temp copy: the installed file keeps its bytes and the next session starts."""
+    script, dest, prefix, env = _session_install(tmp_path)
+    assert _run_install(script, dest, prefix, env).returncode == 0
+    (dest / "pi-agent/skills/notes/SKILL.md").chmod(0o600)
+    record = tmp_path / "types.txt"
+    _write_executable(
+        prefix / "node_modules/.bin/pi",
+        '#!/bin/sh\n[ "$1" = --version ] && { echo 0.84.2; exit 0; }\n'
+        f'cd "$PI_CODING_AGENT_DIR" && {{ find . -type l | sort | sed "s/^/link /"; '
+        f'find . -type f | sort | sed "s/^/file /"; stat -f "%Lp" skills/notes/SKILL.md 2>/dev/null '
+        f'|| stat -c "%a" skills/notes/SKILL.md; }} > "{record}"\n'
+        'echo "session rules" > AGENTS.md\n',
+    )
+    rules = (dest / "pi-agent/AGENTS.md").read_bytes()
+    assert _start_session(dest, env).returncode == 0
+    lines = record.read_text().split("\n")
+    assert "file ./AGENTS.md" in lines and "file ./skills/notes/SKILL.md" in lines and "file ./models.json" in lines
+    # pi's sessions and settings are client state, what the session writes into the tree.
+    assert [line for line in lines if line.startswith("link ")] == ["link ./sessions", "link ./settings.json"]
+    assert lines[-2] == "600"
+    assert (dest / "pi-agent/AGENTS.md").read_bytes() == rules
+    assert _start_session(dest, env).returncode == 0
+
+
+@pytest.mark.unit
 def test_a_link_inside_the_install_root_counts_as_changed_and_the_install_puts_a_regular_file_there(
     tmp_path,
 ) -> None:
