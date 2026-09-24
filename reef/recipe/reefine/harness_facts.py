@@ -44,6 +44,8 @@ _CONVERSATION_MODE = (
     "the rules make no tool call on any turn: a rule applies to every turn of every session, the mode's turns or "
     "not. While the mode is on, the model declines a skill that the person's message loads, other than the mode's "
     "own command ({skill}), and tries the tool the mode allows before it refuses a question that tool can answer. "
+    "A reply that declines names the mode's off command as the way out and never suggests a route around the mode, "
+    "such as a shell command the person runs themselves ({escape}). "
     "The design, the How to use paragraph and the command's reply say the model follows the mode and never "
     "claim the other tools are unavailable. A request for a hard restriction (no other tool or skill may run at "
     "all) is only partly met this way, and no answer here can do more: the review lists that point under limits."
@@ -69,6 +71,7 @@ FACTS = {
             title="Claude Code",
             skill="Claude Code puts a typed skill's SKILL.md into the message, after the line 'Base directory for "
             "this skill:'",
+            escape="Claude Code runs a line that starts with ! in the person's shell",
         ),
         config_keys=("permissions",),
         config_example=(
@@ -92,13 +95,17 @@ FACTS = {
             "sets web_search)"
         ),
         mode=_CONVERSATION_MODE.format(
-            title="Codex", skill="Codex puts a typed $<name> skill into the message as a <skill> block with its <name>"
+            title="Codex",
+            skill="Codex puts a typed $<name> skill into the message as a <skill> block with its <name>",
+            escape="Codex runs a line that starts with ! in the person's shell",
         ).replace("the same command", "the same skill"),
         config_keys=("web_search",),
         config_example=(
             '{"target": "primary", "data": {"web_search": "live"}} gives sessions the web_search tool (evaluation '
             "episodes keep it off). Web search comes only from this entry: it takes effect in a new reef-codex session "
-            "after reef-codex update, and the person never edits a config file, since every install writes it again"
+            "after reef-codex update, and the person never edits a config file, since every install writes it again. "
+            "The entry turns the hosted search on in every session of the release, not only while a mode is on: How "
+            "to use says so, and the review lists that point under limits"
         ),
     ),
     "opencode": HarnessFacts(
@@ -116,16 +123,24 @@ FACTS = {
         ),
         mode=(
             "A mode is an agent. A config entry defines it in opencode.json with a permission map, which limits the "
-            "tools the model gets and so enforces the mode, and a prompt, which replaces opencode's own system "
-            "prompt while the agent runs. The person enters the mode by selecting the agent: with /agents (or Tab), "
-            "or by typing an agent_command with agent: <name> in its frontmatter as the first message of a new "
-            "session, which starts the session in that agent; the same command typed later in a session runs only "
+            "tools the model may call and so enforces the mode for the model, and a prompt, which replaces opencode's "
+            "own system prompt while the agent runs. The person enters the mode by selecting the agent: with /agents "
+            "(or Tab), or by typing an agent_command with agent: <name> in its frontmatter as the first message of a "
+            "new session, which starts the session in that agent; the same command typed later in a session runs only "
             "its own turn with the agent, and the next message is back in the selected one. The person leaves with "
-            "/agents, choosing build; Tab from the mode's agent reaches plan first, since Tab cycles build and then "
-            "the other primary agents by name. A command with agent: build does not leave the mode, so write no "
-            "leave command. Write the agent and its entering command in the same reply. The restriction's wording "
-            "lives only in that agent's own prompt, never in rules or in a command's text, so it ends when the "
-            "session leaves the agent. Say how to enter and leave in the command's reply and in How to use."
+            "/agents, choosing build (Tab from the mode's agent reaches plan first, since Tab cycles build and then the "
+            "other primary agents by name), together with a leave command, an agent_command with agent: build whose "
+            "text says the mode has ended and every tool is back, in either order: opencode tells the model nothing "
+            "when the agent changes, so without that turn the build model keeps refusing from the history. The "
+            "permission map limits only the model's tool calls: a skill the person types as /<name>, a file the person "
+            "attaches with @ and a !command the person runs still run in any agent, so the agent's prompt declines "
+            "skill text a person's message carries (a SKILL.md after the line 'Base directory for this skill:') and "
+            "the review lists those person paths under limits. Write the agent, its entering command and its leave "
+            "command in the same reply. The restriction's wording lives only in that agent's own prompt, never in "
+            "rules or in a command's text: a command's text stays in the conversation as the person's message, so the "
+            "entering command states no restriction, and it says the session stays in the mode only when the command "
+            "opened the session (typed later, the person selects the agent with /agents). Say how to enter and leave "
+            "in the command's reply and in How to use."
         ),
         config_keys=("agent",),
         config_example=(
@@ -151,6 +166,7 @@ FACTS = {
             title="Hermes",
             skill="hermes puts a typed skill into the message after the line '[IMPORTANT: The user has invoked the "
             '"<name>" skill\'',
+            escape="a command the person runs in another terminal",
         ),
     ),
     "terminus": HarnessFacts(
@@ -159,7 +175,9 @@ FACTS = {
             "Terminus 2 has no session a person types in: a person's words reach the model only as a Harbor task's "
             "instruction, and each run is one task. An agent_command renders as a skill, listed in "
             "available_skills beside the others, which the model may open while it works on a task; nothing marks "
-            "it as a command and nobody types it."
+            "it as a command and nobody types it. A run has no reply a person reads: what a person sees is the files "
+            "the task leaves in the container, the verifier's reward and the trial's trajectory, so a design names "
+            "those as its visible result."
         ),
         tools=(
             "keystrokes into a tmux shell in the task's Linux container, where curl reaches the web when the task "
@@ -184,15 +202,19 @@ FACTS = {
             "person's message; that message holds what they typed after /<id>."
         ),
         tools=(
-            "bash (it writes only inside the working directory and the temp directories), read, write, edit, glob, "
-            "grep, skill, subagent, subagent_fork, workflow, ask_user_question, todo_write, web_fetch (reads one URL) "
-            "and web_search, which needs DEEPSEEK_API_KEY on the person's machine: a "
+            "ask_user_question, bash (it writes only inside the working directory and the temp directories), "
+            "create_goal, edit, exit_plan_mode, get_goal, glob, grep, interrupt_agent, job_kill, job_list, job_output, "
+            "list_agents, ralph, read, read_image, send_message, skill, subagent, subagent_fork, todo_write, "
+            "update_goal, workflow, write, web_fetch (reads one URL) and web_search, which needs DEEPSEEK_API_KEY on "
+            "the person's machine: a "
             'change that relies on web_search declares {"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": '
             '"<one sentence>"} as a requires item, and its How to use names reef-dsh setup as the way to give the '
             "key"
         ),
         mode=_CONVERSATION_MODE.format(
-            title="dsh", skill='dsh puts a typed skill into the message as a <skill_content name="<name>"> block'
+            title="dsh",
+            skill='dsh puts a typed skill into the message as a <skill_content name="<name>"> block',
+            escape="a command the person runs in a terminal",
         ),
     ),
 }

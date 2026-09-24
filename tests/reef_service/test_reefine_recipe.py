@@ -133,10 +133,13 @@ def test_off_pi_no_agent_proposer_is_built_or_warned_about(caplog) -> None:
         built = ReefineRecipe.from_environment({"REEF_PROPOSER_SANDBOX": "none"}, config=config)
     assert isinstance(built, ReefineRecipe) and built.agent_executor is None
     assert "sandbox is none" not in caplog.text
+    # The step builds no agent host off pi, so its activity never says the agent proposer is off on this host.
+    assert not built.propose.runs_agent
     with caplog.at_level("WARNING"):
         pi = ReefineRecipe.from_environment({"REEF_PROPOSER_SANDBOX": "none"}, config={"evolution": {"tasks": ["x"]}})
     assert isinstance(pi, ReefineRecipe) and pi.agent_executor is not None
     assert "sandbox is none" in caplog.text
+    assert pi.propose.runs_agent
 
 
 def test_the_profile_seeds_the_shipped_entries_only_on_the_adapter_that_ships_them(caplog) -> None:

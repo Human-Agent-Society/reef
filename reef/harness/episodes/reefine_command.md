@@ -2,7 +2,7 @@
 
 The person typed {command} to ask Reef for a change to this harness. The request is {request}. If it is empty, ask the person what they want changed and stop.
 
-File the request with Reef and report what Reef does with it. Do not make the change yourself and do not edit any file: Reef writes, tests and publishes the change as a new version of this harness.{wrapper_note}
+File the request with Reef and report what Reef does with it. Do not make the change yourself and do not edit any file: Reef writes, tests and publishes the change as a new version of this harness.{wrapper_note} Talk to the person in the language their request is written in, and quote each line the commands print as it printed it.
 
 1. Run this shell command once. Put the request in single quotes, copying the text after {command} exactly, character for character: do not translate, correct or rephrase it. Write each single quote inside it as '\'':
 

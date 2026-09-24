@@ -502,6 +502,11 @@ class AgentProposer(Proposer):
         self.provider = provider
         self.adapter = adapter
 
+    @property
+    def runs_agent(self) -> bool:
+        """The agent runs for pi alone: off pi the step builds no host for it and notes nothing about one."""
+        return self.adapter == "pi" and super().runs_agent
+
     def __call__(
         self,
         nodes: tuple[tuple[str, object], ...],

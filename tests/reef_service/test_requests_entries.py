@@ -148,6 +148,8 @@ def test_an_adapter_without_an_extension_seeds_one_reefine_command_the_wrapper_a
     )
     # The request is filed as typed, and a step that still runs is read from the output, not the exit status.
     assert f"copying the text after {typed} exactly, character for character" in text
+    # A Chinese request gets its answer in Chinese; the wrapper's own lines stay as printed.
+    assert "Talk to the person in the language their request is written in" in text
     assert "While it prints `no result yet` the step still runs" in text and "status 2" not in text
     assert timeout in text and "Its --timeout counts seconds." in text
     assert f"reef-{adapter} setup" in text and "{" not in text

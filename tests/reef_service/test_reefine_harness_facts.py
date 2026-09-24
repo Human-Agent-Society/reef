@@ -11,10 +11,12 @@ step records when a reply gives nothing to apply.
 from __future__ import annotations
 
 import json
+import re
 
 import pytest
 from reef_service.test_harness_example import NODES, PLAN_MARKER, REQUEST, Model, failure_of, request_reply
 
+from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.recipe.reefine import evolution
 from reef.recipe.reefine.harness_facts import FACTS
@@ -199,19 +201,61 @@ def test_the_tool_lists_are_what_a_session_offers_and_claude_replaces_every_argu
     assert "replaces every $ARGUMENTS in the file" in FACTS["claude"].command
 
 
-def test_opencode_enters_a_mode_by_selecting_its_agent_and_leaves_it_through_agents() -> None:
+def test_the_dsh_tools_are_the_26_a_pinned_dsh_session_offers() -> None:
+    """dsh 0.1.2-alpha.5's standard preset offers these 26 tools (read from a recorded reef-dsh session); a version
+    bump fails here, so someone checks the list again."""
+    offered = [
+        "ask_user_question",
+        "bash",
+        "create_goal",
+        "edit",
+        "exit_plan_mode",
+        "get_goal",
+        "glob",
+        "grep",
+        "interrupt_agent",
+        "job_kill",
+        "job_list",
+        "job_output",
+        "list_agents",
+        "ralph",
+        "read",
+        "read_image",
+        "send_message",
+        "skill",
+        "subagent",
+        "subagent_fork",
+        "todo_write",
+        "update_goal",
+        "web_fetch",
+        "web_search",
+        "workflow",
+        "write",
+    ]
+    install = get_adapter("dsh").install
+    assert install is not None and install.version == "0.1.2-alpha.5"
+    listed = set(re.findall(r"[a-z_]+", FACTS["dsh"].tools))
+    assert len(offered) == 26 and set(offered) <= listed
+
+
+def test_opencode_enters_a_mode_by_selecting_its_agent_and_leaves_it_through_agents_and_a_leave_turn() -> None:
     """A command's agent: runs only that command's turn, and a new session's first message sets the session's agent:
-    so the mode is entered with /agents or with its command as a new session's first message, and left with
-    /agents (Tab reaches plan first); a leave command with agent: build does not leave, so none is written."""
+    so the mode is entered with /agents or with its command as a new session's first message. It is left with
+    /agents (Tab reaches plan first) together with a leave command, since opencode tells the model nothing when the
+    agent changes; what the person starts (a typed skill, @file, !command) still runs, and is a limit."""
     model = Model(request_reply(RULES))
     evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
-    assert "enforces the mode" in model.prompt and "every tool stays in its list" not in model.prompt
+    assert "enforces the mode for the model" in model.prompt and "every tool stays in its list" not in model.prompt
     assert "agent: <name> to run that command's own turn with that agent" in model.prompt
     assert "as the first message of a new session, which starts the session in that agent" in model.prompt
     assert "/agents, choosing build" in model.prompt and "Tab from the mode's agent reaches plan first" in model.prompt
-    assert "A command with agent: build does not leave the mode, so write no leave command" in model.prompt
+    assert "together with a leave command, an agent_command with agent: build" in model.prompt
+    assert "opencode tells the model nothing when the agent changes" in model.prompt
+    assert "a !command the person runs still run in any agent" in model.prompt
+    assert "the review lists those person paths under limits" in model.prompt
+    assert "the entering command states no restriction" in model.prompt
     assert "The restriction's wording lives only in that agent's own prompt, never in rules" in model.prompt
-    assert "switch the session to it" not in model.prompt and "second agent_command that leaves" not in model.prompt
+    assert "write no leave command" not in model.prompt and "switch the session to it" not in model.prompt
     assert "Tab cycles the primary agents, build first" not in model.prompt
     assert "Quote a frontmatter value that holds ': '" in model.prompt
 
@@ -294,3 +338,70 @@ def test_terminus_gets_its_own_facts_and_no_setup_command() -> None:
     assert evolution.request_kinds("terminus") == ("skill", "rules", "agent_command")
     (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
     assert "This harness is Terminus 2" in text and "pi.registerCommand" not in text
+
+
+def _review_prompt(model: Model) -> str:
+    (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
+    return text
+
+
+def test_the_review_object_has_a_limits_key_where_the_harness_notes_send_points_there() -> None:
+    """The harness review commands send a point no answer can deliver to a limits list in the object below, so the
+    object carries that key; pi's review has no harness notes and no limits key."""
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(request_reply(CHAT, RULES), review)
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="dsh")
+    assert '"uncovered": ["<one point per item>"], "limits": ["<one point per item>"]}' in _review_prompt(model)
+    model = Model(request_reply(CHAT, RULES), review)
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert '"limits"' not in _review_prompt(model)
+
+
+@pytest.mark.parametrize("adapter", ["claude", "codex", "opencode", "hermes", "dsh", "terminus"])
+def test_off_pi_the_prompts_speak_of_entries_not_of_extensions_and_process_env(adapter: str) -> None:
+    """Only a pi extension reads process.env: off pi the request prompt, its setup sentence and the review say how an
+    entry gets a value, and name no extension, no process.env and no pi variable."""
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(request_reply(CHAT, RULES), review)
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter=adapter)
+    for text in (model.prompt, _review_prompt(model)):
+        assert "process.env" not in text and "PI_OFFLINE" not in text and "the extension" not in text
+    assert "reaches the harness's environment at run time" in model.prompt
+    assert "which the harness finds in its environment at run time" in model.prompt
+    assert "When these kinds cannot deliver" in model.prompt
+    assert "a variable an entry relies on that no requires item names" in _review_prompt(model)
+    if get_adapter(adapter).install is not None:
+        assert f"reef-{adapter} setup shows" in model.prompt and "at install time; no entry asks for it itself." in (
+            model.prompt
+        )
+
+
+def test_a_prompt_level_mode_names_its_off_command_and_no_route_around_it() -> None:
+    """A reply that declines names the mode's off command and never suggests a shell line the person runs, such as
+    Claude Code's ! prefix."""
+    model = Model(request_reply(RULES))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="claude")
+    assert "names the mode's off command as the way out and never suggests a route around the mode" in model.prompt
+    assert "Claude Code runs a line that starts with ! in the person's shell" in model.prompt
+
+
+def test_terminus_says_a_run_has_no_reply_and_codex_says_web_search_is_on_in_every_session() -> None:
+    """A terminus run's visible result is its files, reward and trajectory; a codex web_search entry is on in every
+    session of the release, which How to use and the review limits say."""
+    model = Model(request_reply(RULES))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="terminus")
+    assert "A run has no reply a person reads" in model.prompt and "the verifier's reward" in model.prompt
+    model = Model(request_reply(RULES))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="codex")
+    assert "turns the hosted search on in every session of the release, not only while a mode is on" in model.prompt
+
+
+def test_the_step_names_the_earlier_answer_it_kept() -> None:
+    """When a later answer covers less than an earlier one, the earlier one stands and the notes say which it was;
+    when the last answer is kept the notes stay as they were."""
+    first = json.dumps({"result": "partial", "delivers": True, "covered": [], "uncovered": ["no off"]})
+    worse = json.dumps({"result": "partial", "delivers": True, "covered": [], "uncovered": ["no off", "no header"]})
+    model = Model(request_reply(CHAT, RULES), first, request_reply(CHAT, RULES), worse, request_reply(CHAT), worse)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="hermes")
+    assert proposal.notes["attempts"] == 3 and proposal.notes["kept_attempt"] == 1
+    assert proposal.notes["review"]["uncovered"] == ["no off"]

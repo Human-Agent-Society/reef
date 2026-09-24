@@ -188,14 +188,13 @@ REQUEST_PROMPT = (
     "an agent_command or a tool; never a rule that assumes the state holds.\n"
     "3. List what only the user can provide (a phone number, a credential, a permission, an account): each "
     "is a requires item, described below, with a prompt sentence that tells the user what to enter or "
-    "grant. The value of an env item is read at run time from process.env.NAME; an extension never asks "
-    "the user for it, never stores it in a file of its own and never hardcodes it.\n"
+    "grant. {env_value}\n"
     "4. Describe how the user discovers, invokes and sees the result through the existing UI, and how to "
     "check that path. For a mode, include visible state and a way to turn it off. End the design with a "
     "paragraph headed 'How to use', written for the user: the exact command or trigger, what they see, how "
     "to turn it off or undo it, and anything they must set up first.\n"
     "5. Then write the entries: complete for what the request implies, and nothing the request did not "
-    "ask for. When these kinds and the extension API cannot deliver the behavior the request asks for, "
+    "ask for. When {means} cannot deliver the behavior the request asks for, "
     "write the design saying why and no entry: a rule, a note or a workaround that only imitates the "
     "behavior is not an answer.\n\n"
     "Current harness entries (id, kind, and the start of each body):\n{entries}\n\n"
@@ -216,7 +215,7 @@ REQUEST_PROMPT = (
     "When the change needs something only the user can provide or set up on their machine, end the array "
     'with one more object, {{"requires": [...]}}, one item per need. Each item carries a prompt: one '
     "sentence, under 200 characters, {setup} The kinds, each with an example:\n"
-    "- env, a value the user enters, which the extension reads at run time from process.env.NAME; name is "
+    "- env, a value the user enters, {env_reader}; name is "
     "the variable name, there is no check, and the value is never written into the tree: "
     '{{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}}\n'
     "- permission, an OS permission the user grants; check is a shell command that exits 0 once granted: "
@@ -235,8 +234,33 @@ REQUEST_PROMPT = (
 #: Who reads a requires item's prompt: reef-<adapter> setup where Reef installs the harness.
 SETUP_SENTENCE = (
     "that reef-{wrapper} setup shows when it asks the user for the value or the permission, once, at install time; "
-    "the extension itself never asks."
+    "{asker}."
 )
+
+#: How the request prompt says an env item's value reaches the change: pi's extensions read process.env, another
+#: harness's entries find the value in its environment.
+ENV_WORDS = {
+    True: {
+        "env_value": "The value of an env item is read at run time from process.env.NAME; an extension never asks "
+        "the user for it, never stores it in a file of its own and never hardcodes it.",
+        "env_reader": "which the extension reads at run time from process.env.NAME",
+        "means": "these kinds and the extension API",
+        "asker": "the extension itself never asks",
+        "env_check": "a variable an extension reads that no requires item names (PI_OFFLINE, PI_CODING_AGENT_DIR and "
+        "the REEF_ variables are reef's own and need none), a value the user must provide that the extension asks for "
+        "or stores itself instead of declaring it as a requires item.",
+    },
+    False: {
+        "env_value": "The value of an env item reaches the harness's environment at run time; no entry asks the user "
+        "for it, stores it in a file of its own or hardcodes it.",
+        "env_reader": "which the harness finds in its environment at run time",
+        "means": "these kinds",
+        "asker": "no entry asks for it itself",
+        "env_check": "a variable an entry relies on that no requires item names (the REEF_ variables are reef's own "
+        "and need none), a value the user must provide that an entry asks for or stores itself instead of declaring "
+        "it as a requires item.",
+    },
+}
 
 #: The same on an adapter Reef installs nothing for (terminus), which has no setup command.
 NO_SETUP_SENTENCE = (
@@ -276,9 +300,7 @@ REVIEW_PROMPT = (
     "Entries written:\n{entries}\n\n"
     "List what the request asks for or implies that the entries cover, and what they leave uncovered: "
     "a trigger with no source, a state the user has no way to turn on and off, a step the request names "
-    "that no entry performs, a variable an extension reads that no requires item names (PI_OFFLINE, "
-    "PI_CODING_AGENT_DIR and the REEF_ variables are reef's own and need none), a value the user must "
-    "provide that the extension asks for or stores itself instead of declaring it as a requires item. "
+    "that no entry performs, {env_check} "
     "{commands}"
     "Check that menu selection and direct invocation reach the same behavior, arguments and cancellation "
     "are handled, results and failures are visible, and modes expose their current state and an off path. "
@@ -293,7 +315,7 @@ REVIEW_PROMPT = (
     "A gap beside a delivered behavior is uncovered, not undelivered.\n"
     "Respond with one JSON object and nothing else:\n"
     '{{"result": "complete" or "partial", "delivers": true or false, "covered": ["<one point per item>"], '
-    '"uncovered": ["<one point per item>"]}}\n'
+    '"uncovered": ["<one point per item>"]{limits_key}}}\n'
     "The result is complete only when uncovered is empty. When delivers is false, the first uncovered item "
     "says what the entries put in the behavior's place."
 )
@@ -514,6 +536,7 @@ def _answer_request(
     reviewed = ""
     retry = ""
     attempt = 0
+    kept_attempt = 0
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
         asked = prompt if not retry else prompt.rstrip("\n") + "\n\n" + retry
@@ -542,6 +565,7 @@ def _answer_request(
             )
         elif kept is None or _uncovered_count(notes) < _uncovered_count(kept[2]):
             kept = (mutations, added, notes)
+            kept_attempt = attempt
         if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
             break
         if review.get("limits") and not review["uncovered"] and review.get("delivers") is not False:
@@ -565,6 +589,9 @@ def _answer_request(
     mutations, added, notes = kept
     if attempt > 1:
         notes["attempts"] = attempt
+        if kept_attempt != attempt:
+            # An earlier answer covered more than the later ones: the pages say which one the step kept.
+            notes["kept_attempt"] = kept_attempt
     if dropped_attempts:
         notes["dropped_attempts"] = dropped_attempts
     # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
@@ -791,8 +818,13 @@ def _request_prompt(
     # off pi the harness's own tools, which the plan call is told about, before the step is called undone.
     tool_steps = _tool_steps(models, request_text, entries_text, None if facts is None else facts.tools)
     steps = "\n".join(f"- {step}" for step in tool_steps)
+    # pi's extensions read process.env; another harness's entries find a value in its environment.
+    words = ENV_WORDS[extensions]
     return REQUEST_PROMPT.format(
         request=request_text,
+        env_value=words["env_value"],
+        env_reader=words["env_reader"],
+        means=words["means"],
         # A harness that runs away from the person's machine says where; the client's report is not that place.
         machine="" if facts is not None and facts.machine else client_text(request),
         kinds=kind_lines(adapter),
@@ -802,7 +834,11 @@ def _request_prompt(
             if facts is not None and facts.machine
             else PLATFORMS_SENTENCE.format(platform="branch on process.platform, " if extensions else "")
         ),
-        setup=(NO_SETUP_SENTENCE if get_adapter(adapter).install is None else SETUP_SENTENCE.format(wrapper=adapter)),
+        setup=(
+            NO_SETUP_SENTENCE
+            if get_adapter(adapter).install is None
+            else SETUP_SENTENCE.format(wrapper=adapter, asker=words["asker"])
+        ),
         failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
         entries=entries_text,
         reserved=", ".join(sorted(RESERVED_ENTRY_IDS)),
@@ -870,11 +906,15 @@ def _review(
     written: list[dict[str, Any]] = [{"op": m.op, "id": m.id, **(m.options or {})} for m in mutations]
     if requires:
         written.append({"requires": [dict(item) for item in requires]})
+    notes_harness = adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None
     prompt = REVIEW_PROMPT.format(
         request=untrusted_text(request_text, "user request"),
         design="(none written)" if design is None else design,
         entries=json.dumps(written, indent=2, ensure_ascii=False),
+        env_check=ENV_WORDS["code_extension" in request_kinds(adapter)]["env_check"],
         commands=review_commands(adapter),
+        # The harness notes send a point no answer can deliver to limits: the object has the key for it.
+        limits_key=', "limits": ["<one point per item>"]' if notes_harness else "",
     )
     # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live,
     # and 16384 still does on a long change, so a reply the reasoning ate is asked once more with room for both.

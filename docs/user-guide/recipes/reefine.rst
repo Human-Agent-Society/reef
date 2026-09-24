@@ -62,7 +62,8 @@ How it works
    substitute in its place, such as a rule describing it. When the review
    is partial or finds a substitute, the model writes the answer again with
    the review's findings, up to three answers in all. The step keeps the
-   delivering answer with the fewest uncovered points; when no answer
+   delivering answer with the fewest uncovered points, and both pages say
+   which answer it kept when it wrote more than one; when no answer
    delivers, it is skipped with the reason. A point the harness's facts say
    no answer there can deliver (a hard tool lockout on a harness whose
    commands cannot take a tool away) is a limit, listed apart from the
@@ -122,11 +123,12 @@ Behavior and configuration
   account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
   ``prompt`` is one sentence of at most 200 characters that setup shows when
   it asks for the item; the Setup table of the step's page has a prompt
-  column. An ``env`` item's value is read at run time from
+  column. On pi an ``env`` item's value is read at run time from
   ``process.env.NAME``: the proposer is told that an extension never asks
   you for it in the session, never stores it in a file of its own and never
   hardcodes it, and its review lists a value the extension asks for or
-  stores itself as uncovered.
+  stores itself as uncovered. On another adapter the value reaches the
+  harness's environment at run time, and the same holds for its entries.
 
 Adapters other than pi
 ----------------------
@@ -188,14 +190,26 @@ command cannot take a tool away, so a mode there is guidance the model
 follows while every tool stays offered: the design and the command's reply
 say so, the mode's state lives in the conversation (the command's reply and
 the header on each reply) and never in a file a tool writes or reads, the
-model declines a skill the person's message loads while the mode is on, and
-the review lists a request for a hard restriction under limits. On
+model declines a skill the person's message loads while the mode is on and
+names the mode's off command rather than a way around it (Claude Code's
+``!`` line, say), and the review lists a request for a hard restriction
+under limits. On
 ``opencode`` an agent with a permission map is the mode, and the model gets
 only the tools it allows: an answer whose agent has no permission map is
 written again, since that agent is offered every tool. A command's
 ``agent:`` runs only that command's turn, so the person enters the mode with
 ``/agents`` (or with its command as a new session's first message) and
-leaves it with ``/agents``, choosing build.
+leaves it with ``/agents``, choosing build, together with a leave command
+whose text says every tool is back: opencode tells the model nothing when
+the agent changes. The permission map limits the model's own tool calls
+only; a skill the person types, a file attached with ``@`` and a ``!``
+command still run, and the review lists them under limits. On ``codex`` a
+``web_search`` config entry turns the hosted search on in every session of
+the release, which How to use says. A ``terminus`` run has no reply a
+person reads, so its design names the files the task leaves, the
+verifier's reward and the trajectory as the visible result, and its pages
+name no wrapper command: ``GET /reef/harness`` serves the published tree,
+and what the release requires must hold in the Harbor task a run uses.
 
 An answer whose form slipped is written again while attempts remain: JSON
 that does not parse, entries every one of which was dropped, or entries the
