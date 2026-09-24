@@ -340,6 +340,11 @@ UNRESTRICTED_AGENT = (
     '{{"*": "deny", "websearch": "allow"}}'
 )
 
+#: The Claude Code permission rules a request's config entry may add: tools that read the web and run no shell. A
+#: rule for a shell, a wildcard or a whole MCP server would let every session run it without asking the person.
+CLAUDE_PREAPPROVED = ("WebSearch", "WebFetch")
+CLAUDE_FETCH_DOMAIN = re.compile(r"WebFetch\(domain:[A-Za-z0-9.-]+\)")
+
 #: The prompt section a request gets again after a review found the previous answer short.
 RETRY_SECTION = (
     "An earlier answer to this request was reviewed and fell short.{delivered} Its design was:\n{design}\n"
@@ -617,6 +622,9 @@ def _answer_once(
     unrestricted = _unrestricted_agents(mutations, nodes, entries)
     if unrestricted:
         return _Unusable("; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design)
+    widened = _widened_permissions(mutations) if adapter == "claude" else []
+    if widened:
+        return _Unusable("; ".join(widened), design)
     added, refused = _parse_requires(reply)
     notes: dict[str, Any] = {}
     if design is not None:
@@ -671,6 +679,35 @@ def _unrestricted_agents(
             if not (isinstance(permission, Mapping) and permission) and name not in mapped:
                 names.append(str(name))
     return names
+
+
+def _widened_permissions(mutations: Sequence[Mutation]) -> list[str]:
+    """Why the answer's Claude Code permissions reach past what a request may grant: every session of the release
+    runs under them, so an entry may only add an allow rule for a tool in ``CLAUDE_PREAPPROVED`` (or a
+    ``WebFetch(domain:<host>)`` rule), never a mode, a directory, a deny or ask edit, a shell or a wildcard."""
+    reasons: list[str] = []
+    for mutation in mutations:
+        options = mutation.options or {}
+        config = options.get("config")
+        data = config.get("data") if options.get("name") == "config" and isinstance(config, Mapping) else None
+        if not isinstance(data, Mapping) or "permissions" not in data:
+            continue
+        permissions = data["permissions"]
+        if not isinstance(permissions, Mapping):
+            reasons.append("permissions must be an object holding an allow list")
+            continue
+        reasons.extend(
+            f"a request may not set permissions.{key}: it changes what every session does unasked"
+            for key in sorted(set(permissions) - {"allow"})
+        )
+        allow = permissions.get("allow", [])
+        rules = allow if isinstance(allow, list) else [allow]
+        reasons.extend(
+            f"permissions.allow may name only WebSearch, WebFetch or WebFetch(domain:<host>), not {rule!r}"
+            for rule in rules
+            if not (isinstance(rule, str) and (rule in CLAUDE_PREAPPROVED or CLAUDE_FETCH_DOMAIN.fullmatch(rule)))
+        )
+    return reasons
 
 
 def _with_dropped(proposal: StepProposal, dropped_attempts: Sequence[str]) -> StepProposal:

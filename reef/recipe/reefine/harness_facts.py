@@ -73,7 +73,8 @@ FACTS = {
         config_keys=("permissions",),
         config_example=(
             '{"target": "primary", "data": {"permissions": {"allow": ["WebSearch"]}}} lets WebSearch run without '
-            "asking the person each time"
+            "asking the person each time. Every session of the release runs under it, so the allow list may name "
+            "only WebSearch, WebFetch or WebFetch(domain:<host>), and no other permissions key"
         ),
     ),
     "codex": HarnessFacts(

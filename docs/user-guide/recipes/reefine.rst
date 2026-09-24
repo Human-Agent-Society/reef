@@ -175,7 +175,8 @@ tree. The agent proposer runs on pi
 alone; on another adapter the served model answers a request with rules,
 skills and commands, and with a config entry where the harness's config
 enforces a behavior (an opencode agent with a permission map, Claude Code
-permissions, Codex's ``web_search``). It writes no ``code_extension``,
+permissions that pre-approve only ``WebSearch`` and ``WebFetch``, Codex's
+``web_search``). It writes no ``code_extension``,
 since it knows pi's extension API and no other. The prompt tells it that
 harness's own facts from ``reef/recipe/reefine/harness_facts.py``: how you
 type a command there, which file holds the rules, which tools the harness

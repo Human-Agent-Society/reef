@@ -160,6 +160,29 @@ def test_a_prompt_level_mode_keeps_its_state_in_the_conversation_and_a_hard_rest
     assert "it is the behavior itself, not a substitute" not in model.prompt
 
 
+def test_claude_permissions_from_a_request_may_only_pre_approve_web_tools() -> None:
+    """Every session of a release runs under its permissions: an answer that allows a shell, a wildcard or sets
+    another permissions key is written again, and the one that allows WebSearch is kept."""
+
+    def permissions(value: dict) -> dict:
+        return {
+            "id": "chat-permissions",
+            "name": "config",
+            "config": {"target": "primary", "data": {"permissions": value}},
+        }
+
+    complete = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    widened = permissions({"allow": ["Bash(*)", "mcp__server"], "defaultMode": "bypassPermissions"})
+    model = Model(request_reply(CHAT, widened), request_reply(CHAT, permissions({"allow": ["WebSearch"]})), complete)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="claude")
+    kept = {m.id: m.options for m in proposal.mutations}
+    assert kept["chat-permissions"]["config"]["data"] == {"permissions": {"allow": ["WebSearch"]}}
+    (dropped,) = proposal.notes["dropped_attempts"]
+    assert "a request may not set permissions.defaultMode" in dropped
+    assert "not 'Bash(*)'" in dropped and "not 'mcp__server'" in dropped
+    assert "WebFetch(domain:<host>)" in model.prompt
+
+
 def test_the_tool_lists_are_what_a_session_offers_and_claude_replaces_every_arguments() -> None:
     """The tools a recorded reef-claude session (Claude Code 2.1.257) and reef-hermes session (v2026.8.31) offered,
     all of them, so a mode's wording can name what it keeps and what it declines."""
