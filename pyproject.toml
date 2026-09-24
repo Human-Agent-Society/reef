@@ -198,7 +198,7 @@ ignore_missing_imports = true
 # The training runtime and its GPU dependencies do not ship type information
 # with Reef.
 [[tool.mypy.overrides]]
-module = ["slime.*", "slime_plugins.*"]
+module = ["slime.*", "slime_plugins.*", "vllm.*"]
 ignore_missing_imports = true
 
 [tool.coverage.run]
