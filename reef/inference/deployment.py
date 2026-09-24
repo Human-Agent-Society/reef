@@ -10,7 +10,10 @@ from typing import Any
 from reef.core.errors import DeployConfigError
 from reef.runtime.deployment import InferenceService
 
-_BUILTINS = {"sglang": "reef.inference.sglang.deployment:create_inference"}
+_BUILTINS = {
+    "sglang": "reef.inference.sglang.deployment:create_inference",
+    "vllm": "reef.inference.vllm.deployment:create_inference",
+}
 
 
 def inference_service_for(name: str | None, config: Mapping[str, Any]) -> InferenceService:

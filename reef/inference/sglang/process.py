@@ -1,43 +1,12 @@
-"""Native SGLang process entrypoints and node-local address allocation."""
+"""Native SGLang process entrypoints; address and readiness helpers come from :mod:`reef.inference.process`."""
 
 from __future__ import annotations
 
 import multiprocessing
 import os
-import socket
-import time
-from contextlib import ExitStack, suppress
 from typing import Any
 
-import requests
-
-
-def node_address_and_port(start_port: int = 15000, consecutive: int = 1) -> tuple[str, int]:
-    import ray
-
-    address = os.environ.get("REEF_INFERENCE_HOST") or ray.util.get_node_ip_address()
-    address = address.strip("[]")
-    family = socket.AF_INET6 if ":" in address else socket.AF_INET
-    for port in range(start_port, 65536 - consecutive):
-        with suppress(OSError):
-            with ExitStack() as stack:
-                for offset in range(consecutive):
-                    sock = stack.enter_context(socket.socket(family, socket.SOCK_STREAM))
-                    sock.bind((address, port + offset))
-            return (f"[{address}]" if family == socket.AF_INET6 else address), port
-    raise RuntimeError("no free SGLang port range")
-
-
-def local_gpu_id(physical_gpu: int) -> int:
-    visible = os.environ.get("CUDA_VISIBLE_DEVICES")
-    if not visible:
-        return physical_gpu
-    devices = [int(value.strip()) for value in visible.split(",") if value.strip()]
-    if physical_gpu in devices:
-        return devices.index(physical_gpu)
-    if 0 <= physical_gpu < len(devices):
-        return physical_gpu
-    raise ValueError(f"GPU {physical_gpu} is outside CUDA_VISIBLE_DEVICES")
+from reef.inference.process import local_gpu_id, node_address_and_port, wait_ready
 
 
 def _run_engine(options: dict[str, Any]) -> None:
@@ -73,14 +42,4 @@ def launch_router(options: dict[str, Any]) -> Any:
     return process
 
 
-def wait_ready(url: str, process: Any, timeout: float, *, path: str = "/health_generate") -> None:
-    deadline = time.monotonic() + timeout
-    while process.is_alive() and time.monotonic() < deadline:
-        try:
-            response = requests.get(url + path, timeout=5)
-            if response.status_code == 200:
-                return
-        except requests.RequestException:
-            pass
-        time.sleep(1)
-    raise RuntimeError(f"SGLang process did not become ready at {url}")
+__all__ = ["launch_engine", "launch_router", "local_gpu_id", "node_address_and_port", "wait_ready"]
