@@ -183,6 +183,12 @@ def test_claude_permissions_from_a_request_may_only_pre_approve_web_tools() -> N
     assert "WebFetch(domain:<host>)" in model.prompt
 
 
+def test_dsh_names_its_setup_as_the_way_to_give_the_web_search_key() -> None:
+    model = Model(request_reply(RULES))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="dsh")
+    assert "its How to use names reef-dsh setup as the way to give the key" in model.prompt
+
+
 def test_the_tool_lists_are_what_a_session_offers_and_claude_replaces_every_arguments() -> None:
     """The tools a recorded reef-claude session (Claude Code 2.1.257) and reef-hermes session (v2026.8.31) offered,
     all of them, so a mode's wording can name what it keeps and what it declines."""

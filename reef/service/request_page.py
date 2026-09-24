@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 
+from reef.core.requirements import required_by
 from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
 from reef.harness.episodes.version_check import ships_version_check
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
@@ -264,10 +265,13 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
     return f"the step ended as {selection_result}"
 
 
-def next_action(adapter: str, step: int, selection_result: str, record_id: str) -> tuple[str, str, str] | None:
+def next_action(
+    adapter: str, step: int, selection_result: str, record_id: str, requires: Sequence[str] = ()
+) -> tuple[str, str, str] | None:
     """The next action a settled step offers: its heading, the command and where to run it; ``None`` when a
     rejected or skipped step offers none. pi installs from its own session (``/versions``); another adapter's
-    person runs its wrapper in a terminal."""
+    person runs its wrapper in a terminal, setup first when the release's chain requires items (``requires``,
+    their names): the install refuses a release whose items are not set up."""
     if selection_result not in ("pending", "selected"):
         return None
     if ships_version_check(adapter):
@@ -281,6 +285,13 @@ def next_action(adapter: str, step: int, selection_result: str, record_id: str) 
             "Read this page, then serve it",
             f"reef-{adapter} wait {record_id}",
             "Run this in a terminal: it asks whether to serve this release, then installs it.",
+        )
+    if requires:
+        return (
+            "Set up, then install",
+            f"reef-{adapter} setup, then reef-{adapter} update",
+            f"Run these in a terminal: setup asks for what this release needs ({', '.join(requires)}), update "
+            f"installs it; then start reef-{adapter} again to use the new version.",
         )
     return (
         "Install when ready",
@@ -319,7 +330,9 @@ def result_html(
         parts.append(f'<div class="failure"><h3>Proposer failure</h3><p>{escape(failure)}</p></div>')
     # Carry the scenario and authentication to the version page without displaying the token.
     href = step_href(step, link_query)
-    offered = next_action(adapter, step, selection_result, record_id)
+    release_id = row.get("release_id")
+    requires = [item["name"] for item in required_by(rows, release_id if isinstance(release_id, str) else None)]
+    offered = next_action(adapter, step, selection_result, record_id, requires)
     if offered is not None:
         action, command, where = offered
         parts.append(

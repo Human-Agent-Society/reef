@@ -781,6 +781,11 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_
     assert _sections(usage_page)[:3] == ["Why", "Design", "How to use"]
     assert '<p class="text">Add /away.</p>' in _section(usage_page, "Design")
     assert '<p class="text">/away on</p>' in _section(usage_page, "How to use")
+    # The heading may also lead its own line's text, as a model often writes it.
+    inline = dict(row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\nHow to use: /away on"}})
+    inline_page = build_release_page(1, [creation, inline])
+    assert '<p class="text">/away on</p>' in _section(inline_page, "How to use")
+    assert '<p class="text">Add /away.</p>' in _section(inline_page, "Design")
     review = _section(page, "Review")
     assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
     assert (

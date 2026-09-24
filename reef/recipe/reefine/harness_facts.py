@@ -188,7 +188,8 @@ FACTS = {
             "grep, skill, subagent, subagent_fork, workflow, ask_user_question, todo_write, web_fetch (reads one URL) "
             "and web_search, which needs DEEPSEEK_API_KEY on the person's machine: a "
             'change that relies on web_search declares {"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": '
-            '"<one sentence>"} as a requires item'
+            '"<one sentence>"} as a requires item, and its How to use names reef-dsh setup as the way to give the '
+            "key"
         ),
         mode=_CONVERSATION_MODE.format(
             title="dsh", skill='dsh puts a typed skill into the message as a <skill_content name="<name>"> block'

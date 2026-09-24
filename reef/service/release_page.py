@@ -265,7 +265,8 @@ def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
 
 
 #: The heading that ends a design and starts its How to use section: a markdown heading or a labelled line.
-USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
+#: The How to use heading: a line of its own, or ``How to use:`` with the usage after it on the same line.
+USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use(?:\s*:[ \t]*|\s*$)", re.IGNORECASE | re.MULTILINE)
 
 
 def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:

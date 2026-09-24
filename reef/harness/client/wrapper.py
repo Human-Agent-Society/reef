@@ -1112,6 +1112,13 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
                 f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it "
                 "(the update notice offers it)."
             )
+        release_id = row.get("release_id")
+        if required_by(rows, release_id if isinstance(release_id, str) else None):
+            # The install refuses a release whose items are not set up: setup comes first.
+            return (
+                f"'{ask}' is published as release {release}. Run reef-{adapter} setup, then reef-{adapter} update, "
+                f"then restart reef-{adapter}."
+            )
         return f"'{ask}' is published as release {release}. Run reef-{adapter} update, then restart reef-{adapter}."
     if selection_result == "pending":
         where = (

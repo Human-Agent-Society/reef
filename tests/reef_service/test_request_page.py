@@ -324,6 +324,10 @@ def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_s
     step = _row(metrics)
     version = build_release_page(1, [CREATION, step], adapter="dsh")
     assert "reef-dsh setup lists these" in version and "reef-pi setup" not in version
+    # The install refuses a release whose items are not set up: the request page names setup first.
+    page = build_request_page(_record(), [CREATION, step], now=1_100.0, adapter="dsh")
+    result = _section(page, "Result")
+    assert "<code>reef-dsh setup, then reef-dsh update</code>" in result and "DEEPSEEK_API_KEY" in result
 
 
 def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_what_it_proposed() -> None:

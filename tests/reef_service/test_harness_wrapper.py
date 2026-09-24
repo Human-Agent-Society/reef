@@ -27,6 +27,7 @@ from reef.harness.client.wrapper import (
     harness,
     main,
     report,
+    result_line,
     run_agent,
     setup,
     setup_json,
@@ -1395,6 +1396,19 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
         "pending": pending,
         "metrics": {"training_request": {"id": request_id, "text": "text me when you are blocked"}, **metrics},
     }
+
+
+@pytest.mark.unit
+def test_a_published_release_that_requires_setup_names_setup_before_update() -> None:
+    """The install refuses a release whose chain requires items not set up, so the result line off pi names
+    reef-<adapter> setup first; a release that requires nothing names update alone."""
+    requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
+    row = _step_row("rel-1", {"selected": True, "published": True})
+    row["metrics"]["training_request"]["requires"] = requires
+    line = result_line("dsh", 1, [CREATION_ROW, row], "page")
+    assert "Run reef-dsh setup, then reef-dsh update, then restart reef-dsh." in line
+    plain = _step_row("rel-1", {"selected": True, "published": True})
+    assert "Run reef-dsh update, then restart reef-dsh." in result_line("dsh", 1, [CREATION_ROW, plain], "page")
 
 
 @pytest.mark.unit
