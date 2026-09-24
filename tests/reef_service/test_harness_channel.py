@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import shutil
+import signal
 import subprocess
 import sys
 from pathlib import Path, PurePosixPath
@@ -725,9 +726,23 @@ def _source_env(shim: Path, home: Path) -> dict:
 def _run_install(
     script: Path, dest: Path, prefix: Path, env: dict, cwd: Path | None = None
 ) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["sh", str(script), str(dest), str(prefix)], env=env, cwd=cwd, capture_output=True, text=True, timeout=60
+    # A hung install (a read of a FIFO, say) is killed with its whole process group, so no child outlives the test.
+    process = subprocess.Popen(
+        ["sh", str(script), str(dest), str(prefix)],
+        env=env,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
     )
+    try:
+        stdout, stderr = process.communicate(timeout=60)
+    except subprocess.TimeoutExpired:
+        os.killpg(process.pid, signal.SIGKILL)
+        process.communicate()
+        raise
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
 
 
 @pytest.mark.unit
