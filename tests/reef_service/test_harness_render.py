@@ -520,6 +520,22 @@ def test_opencode_admits_the_frontmatter_forms_it_reads_as_opencode_does() -> No
     )
 
 
+def test_opencode_gives_a_skill_without_frontmatter_the_name_and_description_it_lists_skills_by() -> None:
+    """opencode lists no skill whose SKILL.md lacks name and description, so a bare one gets them: the directory and
+    the first line, as strings to js-yaml too; a file with a block of its own is left as written."""
+    descriptor = get_adapter("opencode")
+    for text, description in (("# Answer style\n\nBe brief.", "Answer style"), ("yes\n", "yes"), ("1e5", "1e5")):
+        files = render_composition([("skill", {"name": "answer-style", "text": text})], descriptor)
+        rendered = files["opencode/skill/answer-style/SKILL.md"]
+        assert read_frontmatter("skill", rendered) == {"name": "answer-style", "description": description}
+        assert rendered.rstrip("\n").endswith(text.rstrip("\n"))
+    own = "---\nname: notes\ndescription: Notes.\n---\n"
+    assert (
+        render_composition([("skill", {"name": "notes", "text": own})], descriptor)["opencode/skill/notes/SKILL.md"]
+        == own
+    )
+
+
 def test_opencode_reads_frontmatter_again_as_opencode_rewrites_it() -> None:
     """When js-yaml cannot read a block, opencode rewrites each top level value that holds ': ' and is not quoted as
     a block scalar and reads the file again; render reads the same keys, so it admits a file opencode loads and

@@ -44,6 +44,11 @@ neither a subagent nor hidden, since opencode otherwise fails the command, or
 every run, with an opaque server error. A command field, or an agent's
 ``disable``, ``hidden`` or ``mode``, of a type opencode's schema does not
 allow makes opencode refuse its whole configuration.
+
+opencode lists a skill only when its SKILL.md carries ``name`` and
+``description`` frontmatter, so a SKILL.md with no frontmatter block gets
+both, the name from its directory and the description from its first
+non empty line, written as double quoted strings both readers read alike.
 """
 
 from __future__ import annotations
@@ -400,7 +405,7 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
     for name, command in commands.items() if isinstance(commands, dict) else ():
         if isinstance(command, dict):
             check_command(f"command {name!r} in opencode.json", command, agents)
-    for path, text in files.items():
+    for path, text in list(files.items()):
         if path.startswith(COMMAND_DIR) and path.endswith(".md"):
             command_name = path[len(COMMAND_DIR) : -len(".md")]
             where = f"command {command_name!r}"
@@ -414,5 +419,17 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
                 )
             check_command(where, frontmatter, agents)
         elif path.startswith(SKILL_DIR) and path.endswith("/SKILL.md"):
-            read_frontmatter(f"skill {path[len(SKILL_DIR) : -len('/SKILL.md')]!r}", text)
+            skill = path[len(SKILL_DIR) : -len("/SKILL.md")]
+            # The file is read as it came first, so a form the check refuses stays refused.
+            if not read_frontmatter(f"skill {skill!r}", text) and (
+                not text.startswith("---") or text.startswith("----")
+            ):
+                first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
+                header = {"name": skill, "description": first[:200] or skill}
+                files[path] = (
+                    "---\n"
+                    + "".join(f"{key}: {json.dumps(value, ensure_ascii=False)}\n" for key, value in header.items())
+                    + "---\n"
+                    + text
+                )
     return files
