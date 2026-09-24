@@ -322,8 +322,12 @@ sampled token with the weight version that produced it::
    --kv-transfer-config '{"kv_connector": "ReefConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
 
 The connector moves no KV and composes with another connector under vLLM's
-``MultiConnector``. A local release without it serves under its release id; a
-live release without it is rejected.
+``MultiConnector``. To combine it with vLLM's native CPU offloading, list
+``OffloadingConnector`` and ``ReefConnector`` as ``MultiConnector`` children
+in ``--kv-transfer-config``; the ``--kv-offloading-size`` flag replaces the
+configured connector, so it cannot be combined with this one. A local release
+without the connector serves under its release id; a live release without it
+is rejected.
 
 ``rollout_log_probs`` must mean the same thing on every engine as in the
 trainer. Sampling runs through::
