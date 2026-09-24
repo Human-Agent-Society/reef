@@ -254,7 +254,7 @@ class RequestService:
     ) -> tuple[dict[str, Any], AgentRecord | None]:
         """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
         ``evaluated`` component (see ``Surface.inference_for_evaluation``)."""
-        operations = await self.inference_operations(headers)
+        operations = await self.inference_operations(headers, record=record)
         # Evaluation traffic is measured apart, so a step's episodes do not read as served requests.
         measurement = operations.start(f"{request_family(record)}/request")
         succeeded = False
@@ -347,7 +347,7 @@ class RequestService:
         record: bool = True,
         evaluated: str | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
-        operations = await self.inference_operations(headers)
+        operations = await self.inference_operations(headers, record=record)
         measurement = operations.start(f"{request_family(record)}/request")
         try:
             prepared, payload = await self._prepare_request(
@@ -481,17 +481,23 @@ class RequestService:
                 if pending.admission is not None:
                     pending.admission.release()
 
-    async def inference_operations(self, headers: Mapping[str, str]) -> OperationMetrics:
+    async def inference_operations(self, headers: Mapping[str, str], *, record: bool = True) -> OperationMetrics:
         """Resolve the scenario before measuring its inference request lifetime."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(
-            self._dispatcher.get_or_create_scenario,
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
+        scenario = await asyncio.to_thread(self._inference_scenario, parsed, record=record)
+        return scenario.operations
+
+    def _inference_scenario(self, parsed: RequestHeaders, *, record: bool) -> Scenario:
+        """The scenario an inference serves. A recorded call may create it; an evaluation call (``record`` False)
+        reads the loaded instance only, never waiting for the scenario's lock and never creating it (see
+        ``ScenarioRegistry.get_loaded``)."""
+        if record:
+            scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)
+        else:
+            scenario = self._dispatcher.loaded_scenario(parsed.scenario, release_id=parsed.release_id)
         if scenario is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        return scenario.operations
+        return scenario
 
     async def _prepare_request(
         self,
@@ -509,13 +515,7 @@ class RequestService:
         an evaluation call (``record`` False) runs every component's hooks but
         the ``evaluated`` one's, whose candidate the episode runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        initial = await asyncio.to_thread(
-            self._dispatcher.get_or_create_scenario,
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
-        if initial is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        initial = await asyncio.to_thread(self._inference_scenario, parsed, record=record)
         if evaluated is not None and evaluated not in initial.surface.names:
             raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
@@ -527,7 +527,7 @@ class RequestService:
             # Re-resolve after admission: a queued request must freeze the head
             # committed by the weight update that released it, never the head it
             # observed before waiting.
-            prepared = await asyncio.to_thread(self._prepare_inference, parsed, handler, admission)
+            prepared = await asyncio.to_thread(self._prepare_inference, parsed, handler, admission, record=record)
             hooks = prepared.surface.inference if record else prepared.surface.inference_for_evaluation(evaluated)
             prepared = replace(prepared, hooks=hooks)
             transformed = (
@@ -580,13 +580,10 @@ class RequestService:
         parsed: RequestHeaders,
         handler: InferenceHandler | None,
         admission: InferenceAdmissionHandle | None,
+        *,
+        record: bool = True,
     ) -> PreparedInference:
-        scenario = self._dispatcher.get_or_create_scenario(
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
-        if scenario is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        scenario = self._inference_scenario(parsed, record=record)
         selected_handler = handler if handler is not None else scenario.inference_handler
         if selected_handler is None:
             raise RecipeConfigError("the served recipe has no inference handler")

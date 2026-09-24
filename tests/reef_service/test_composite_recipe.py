@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.artifact.artifact import ArtifactValidator
 from reef.artifact.composite import compose_release
 from reef.core import AgentRecord, RequestType
-from reef.core.errors import ReefError
+from reef.core.errors import ReefError, UnknownScenario
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
@@ -670,6 +671,8 @@ def test_an_evaluation_call_is_served_and_kept_by_nobody(tmp_path: Path) -> None
     try:
         service = RequestService(dispatcher)
         headers = {"x-reef-scenario": "agent"}
+        # An episode runs for a loaded scenario's step, so its calls find the scenario loaded.
+        assert dispatcher.get_or_create_scenario("agent") is not None
 
         async def run() -> None:
             response, item = await service.infer_with_data(
@@ -724,6 +727,7 @@ def test_a_flat_scenario_without_a_durable_log_still_serves_its_head(tmp_path: P
 def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> None:
     dispatcher = _serve(_composite(tmp_path), tmp_path)
     try:
+        assert dispatcher.get_or_create_scenario("agent") is not None
 
         async def run() -> None:
             client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoHandler())))
@@ -737,13 +741,98 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
                 assert (await response.json())["choices"][0]["message"]["content"] == "ok"
                 missing = await client.post("/reef/scenarios/agent/evaluation/v1/nothing", json={})
                 assert missing.status == 404
+                # An evaluation call never creates a scenario: only a loaded one has episodes.
+                unknown = await client.post(
+                    "/reef/scenarios/other/evaluation/v1/chat/completions", json={"messages": []}
+                )
+                assert unknown.status == 404
             finally:
                 await client.close()
 
         asyncio.run(run())
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None and scenario.records.count("agent") == 0
+        assert dispatcher.get_or_create_scenario("other", allow_implicit_creation=False) is None
     finally:
+        dispatcher.close()
+
+
+class _ClosingBackend(_FileBackend):
+    """A backend whose close waits for the episode call in flight, as a worker pool's close waits for its batch."""
+
+    def __init__(self, label: str, artifact_dir: Path, closing: threading.Event, episode_done: threading.Event) -> None:
+        super().__init__(label, artifact_dir)
+        self.closing = closing
+        self.episode_done = episode_done
+
+    def close(self) -> None:
+        self.closing.set()
+        self.episode_done.wait(10)
+
+
+@dataclass(frozen=True)
+class _EpisodeTreeRecipe(_TreeRecipe):
+    """The tree recipe whose backend closes only once its evaluation episode has made its last call."""
+
+    closing: threading.Event = field(default_factory=threading.Event)
+    episode_done: threading.Event = field(default_factory=threading.Event)
+
+    def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
+        return Trainer.build(
+            scenario,
+            records,
+            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            candidate_backend=_ClosingBackend(self.label, self.artifact_dir, self.closing, self.episode_done),
+            algorithm_state=algorithm_state,
+            report_type=self.report_type,
+            experiment_logger=experiment_logger,
+            training_mode=self.training_mode,
+        )
+
+
+@pytest.mark.unit
+def test_an_evaluation_call_during_a_delete_neither_holds_it_up_nor_brings_the_scenario_back(tmp_path: Path) -> None:
+    """A delete closes the scenario's backend, which waits for the evaluation episode in flight; the episode's call
+    must not wait for the scenario the delete holds, and must not create the scenario again once the delete ends."""
+    harness = _EpisodeTreeRecipe(label="harness", artifact_dir=tmp_path / "steps", seed={"AGENTS.md": "seed"})
+    dispatcher = _serve(CompositeRecipe(components={"harness": harness, "config": _ConfigRecipe()}), tmp_path)
+    service = RequestService(dispatcher)
+    try:
+        assert dispatcher.get_or_create_scenario("agent") is not None
+        deleted: dict[str, Any] = {}
+        deleting = threading.Thread(target=lambda: deleted.update(dispatcher.delete_scenario("agent")))
+        deleting.start()
+        assert harness.closing.wait(10)
+        answers: list[str] = []
+
+        def episode_call() -> None:
+            try:
+                asyncio.run(
+                    service.infer_with_data(
+                        {"x-reef-scenario": "agent"},
+                        {"messages": []},
+                        "/v1/chat/completions",
+                        _EchoHandler(),
+                        record=False,
+                        evaluated="harness",
+                    )
+                )
+                answers.append("served")
+            except UnknownScenario:
+                answers.append("unknown")
+            finally:
+                harness.episode_done.set()
+
+        calling = threading.Thread(target=episode_call)
+        calling.start()
+        calling.join(5)
+        assert not calling.is_alive(), "the episode call waited for the scenario the delete holds"
+        deleting.join(10)
+        assert not deleting.is_alive() and deleted["scenario"] == "agent"
+        assert answers == ["unknown"]
+        assert dispatcher.get_or_create_scenario("agent", allow_implicit_creation=False) is None
+    finally:
+        harness.episode_done.set()
         dispatcher.close()
 
 
@@ -765,6 +854,7 @@ def test_an_evaluation_call_runs_every_hook_but_the_evaluated_components(tmp_pat
     dispatcher = _serve(_composite(tmp_path), tmp_path)
     handler = _CaptureHandler()
     try:
+        assert dispatcher.get_or_create_scenario("agent") is not None
 
         async def run() -> None:
             client = TestClient(TestServer(create_app(dispatcher, inference_handler=handler)))

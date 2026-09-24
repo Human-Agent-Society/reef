@@ -154,6 +154,19 @@ class ScenarioRegistry:
                 return None
             return self._resolve(scenario, release_id)
 
+    def get_loaded(self, scenario: str, release_id: str | None = None) -> Scenario | None:
+        """The loaded instance, or None: nothing is created or recovered, and the scenario's lock is not taken.
+
+        An evaluation episode's call resolves this way. A delete or a
+        reload holds the scenario's lock while it closes the instance, which
+        waits for the episode in flight, and an episode of a deleted
+        scenario must not bring the scenario back.
+        """
+        current = self.get_optional(scenario)
+        if current is not None:
+            self._scenario_factory.validate_existing(current, release_id)
+        return current
+
     def require(self, scenario: str) -> Scenario:
         """Resolve an existing scenario; raise UnknownScenario if not found."""
         if not self.has(scenario):

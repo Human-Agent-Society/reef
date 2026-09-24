@@ -38,7 +38,9 @@ Routes
 |                                                                                  | the named scenario and kept by nobody: what a     |
 |                                                                                  | recipe's evaluation episodes call; a flat         |
 |                                                                                  | release's request hooks stay out, since the       |
-|                                                                                  | episode runs a candidate of it                    |
+|                                                                                  | episode runs a candidate of it. It serves a       |
+|                                                                                  | scenario loaded in this process and never creates |
+|                                                                                  | one: 404 for a scenario deleted under its episode |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
 |                                                                                  | composed release: every other component's hooks   |
