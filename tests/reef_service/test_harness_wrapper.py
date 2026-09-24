@@ -1819,6 +1819,20 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
 
 
 @pytest.mark.unit
+def test_the_how_to_use_line_keeps_a_long_first_paragraph_whole_and_drops_backticks() -> None:
+    """Entering and leaving a mode often share the first paragraph, so a long one is not cut at a few hundred
+    characters; backticks go, so a model that quotes the line in inline code renders it whole."""
+    from reef.harness.client.wrapper import _usage_of
+
+    leave = "Type `$chat off` to leave, and every tool is back in the next turn."
+    usage = "Type `$chat` in a Codex session to enter chat mode. " + "It answers from web search only. " * 12 + leave
+    design = f"A chat skill.\n\nHow to use: {usage}\n\nA second paragraph stays on the page."
+    line = _usage_of(_step_row("rel-1", {"selected": True, "proposal_notes": {"design": design}}))
+    assert line.startswith("Type $chat in a Codex session") and line.endswith(leave.replace("`", ""))
+    assert "`" not in line and "second paragraph" not in line
+
+
+@pytest.mark.unit
 def test_wait_names_the_release_how_to_use_and_a_declined_step_is_answered_with_no_change(tmp_path, capsys) -> None:
     """The result carries the release's own How to use, so the session model tells the person the form the release
     takes ($chat on codex), not one from the request; a step whose design declined on purpose says it was answered

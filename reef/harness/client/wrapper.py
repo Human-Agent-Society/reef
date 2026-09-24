@@ -1025,8 +1025,9 @@ def _spooled_session(scenario: str) -> str | None:
     return None
 
 
-#: How much of a release's How to use a result line carries: its first paragraph, cut short.
-USAGE_CHARS = 300
+#: How much of a release's How to use a result line carries: its first paragraph, cut only when it runs long (entering
+#: and leaving a mode often share one).
+USAGE_CHARS = 1200
 
 
 def _clip(text: str, limit: int) -> str:
@@ -1107,12 +1108,13 @@ def _declined_of(row: Mapping[str, Any]) -> str:
 
 
 def _usage_of(row: Mapping[str, Any]) -> str:
-    """The first paragraph of the release's How to use, on one line and cut short: the form a person types, from
-    the release itself, never from the request's wording. Empty when the design has none."""
+    """The first paragraph of the release's How to use on one line, cut only when long: the form a person types,
+    from the release itself, never from the request's wording. Markdown backticks go, so a model that quotes the line
+    in its own inline code renders it whole. Empty when the design has none."""
     notes = _metrics_of(row).get("proposal_notes")
     _, usage = design_sections(notes if isinstance(notes, Mapping) else {})
-    first = " ".join(usage.split("\n\n", 1)[0].split())
-    return _clip(first, USAGE_CHARS)
+    first = usage.split("\n\n", 1)[0]
+    return _clip(" ".join(first.replace("`", "").split()), USAGE_CHARS)
 
 
 def _failure_of(row: Mapping[str, Any]) -> str:

@@ -198,8 +198,14 @@ def missed_episode_text(episode: Mapping[str, Any]) -> str:
 
 
 #: The How to use heading that ends a design: a markdown heading or a line of its own, or ``How to use:`` with the
-#: usage after it on the same line.
-USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use(?:\s*:[ \t]*|\s*$)", re.IGNORECASE | re.MULTILINE)
+#: usage after it on the same line, bold or not, with an ASCII or a full width colon (a design in Chinese writes
+#: ``How to use\uff1a``); in the middle of a line only right after a sentence ends and with its colon, so a sentence
+#: that merely says how to use something is no heading.
+USAGE_HEADING = re.compile(
+    r"^(?:#{1,6}\s*)?(?:\*\*|__)?how to use(?:\*\*|__)?(?:\s*[:\uff1a](?:\*\*|__)?[ \t]*|\s*$)"
+    r"|(?<=[.!?\u3002])[ \t]+(?:\*\*|__)?how to use(?:\*\*|__)?\s*[:\uff1a](?:\*\*|__)?[ \t]*",
+    re.IGNORECASE | re.MULTILINE,
+)
 
 
 def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:

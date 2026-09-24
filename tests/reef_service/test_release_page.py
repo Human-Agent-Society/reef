@@ -25,6 +25,7 @@ from reef_service.test_harness_requests import _post, _request
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
+from reef.core.training_request import design_sections
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe.cordis import CordisRecipe
@@ -786,6 +787,18 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_
     inline_page = build_release_page(1, [creation, inline])
     assert '<p class="text">/away on</p>' in _section(inline_page, "How to use")
     assert '<p class="text">Add /away.</p>' in _section(inline_page, "Design")
+    # A design in Chinese writes a full width colon, a one line design puts the heading after its last sentence, and
+    # a bold heading is common; each is found, while a sentence that says how to use something is no heading.
+    for text, expected in (
+        ("\u8bbe\u8ba1\u3002\n\nHow to use\uff1a\u8f93\u5165 /chat", ("\u8bbe\u8ba1\u3002", "\u8f93\u5165 /chat")),
+        ("A chat mode. How to use: type /chat, then /chat off.", ("A chat mode.", "Type /chat, then /chat off.")),
+        ("Add /away.\n\n**How to use:** /away on", ("Add /away.", "/away on")),
+        (
+            "It says how to use the tool. How to use the mode is simple.",
+            ("It says how to use the tool. How to use the mode is simple.", ""),
+        ),
+    ):
+        assert design_sections({"design": text}) == expected, text
     review = _section(page, "Review")
     assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
     assert (
