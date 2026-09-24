@@ -541,6 +541,40 @@ def test_hermes_session_snapshots_and_logs_outlive_the_run(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_after_a_hermes_session_the_wrapper_names_the_resume_command_that_works(tmp_path, capsys) -> None:
+    """hermes ends by naming `hermes --resume <id>`, which runs outside this install; the wrapper then names
+    `reef-hermes --resume <id>` for the one session this run wrote, and nothing when the run wrote none."""
+    compose = tmp_path / "compose"
+    (compose / "sessions").mkdir(parents=True)
+    (compose / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
+    )
+    (compose / "sessions" / "session_20260924_000000_older.json").write_text("{}")
+    binary = tmp_path / "fake-hermes"
+    binary.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import os, sys
+            from pathlib import Path
+            if sys.argv[-1] != "none":
+                (Path(os.environ["HERMES_HOME"]) / "sessions" / f"session_{sys.argv[-1]}.json").write_text("{}")
+            """
+        )
+    )
+    binary.chmod(0o755)
+    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
+        with contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["20260924_183446_468762"])
+        assert "reef-hermes: resume this session with: reef-hermes --resume 20260924_183446_468762" in (
+            capsys.readouterr().err
+        )
+        with contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["none"])
+        assert "resume this session" not in capsys.readouterr().err
+
+
+@pytest.mark.unit
 def test_hermes_finds_the_agent_commands_in_a_session_and_in_an_episode(tmp_path) -> None:
     """A reef-hermes session's home is a temp copy, so HERMES_HOME/.. is not the install root; the commands
     root is still found there, through REEF_HARNESS_DEST, and an episode home still finds it beside itself."""
