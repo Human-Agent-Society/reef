@@ -18,6 +18,7 @@ from typing import Any
 import pytest
 
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
 from reef.harness.tree.render import render_composition
 
@@ -108,28 +109,9 @@ def test_real_pi_episode_renders_runs_and_cleans_up(tmp_path: Path) -> None:
     server = StubOpenAI()
     threading.Thread(target=server.serve_forever, daemon=True).start()
     try:
-        base_url = f"http://127.0.0.1:{server.server_address[1]}/v1"
-        nodes = [
-            ("config", {"data": {"defaultProvider": "stub", "defaultModel": MODEL}}),
-            (
-                "config",
-                {
-                    "target": "models",
-                    "data": {
-                        "providers": {
-                            "stub": {
-                                "name": "stub",
-                                "api": "openai-completions",
-                                "apiKey": "dummy",
-                                "baseUrl": base_url,
-                                "models": [{"id": MODEL, "name": MODEL}],
-                            }
-                        }
-                    },
-                },
-            ),
-            ("rules", {"text": RULES_SENTENCE}),
-        ]
+        # The model comes through Reef's binding, as in every episode: a tree may not name a provider of its own.
+        binding = ModelBinding(base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="dummy")
+        nodes = [("rules", {"text": RULES_SENTENCE}), *binding.compose_nodes(get_adapter("pi"))]
         files = render_composition(nodes, get_adapter("pi"))
         capture = Path(os.environ.get("REEF_REAL_PI_SESSION_OUT", tmp_path / "real-pi-session.jsonl"))
         binary = capturing_wrapper(tmp_path, capture)
