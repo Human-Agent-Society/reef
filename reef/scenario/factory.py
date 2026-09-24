@@ -40,6 +40,7 @@ from reef.train.trainer import Trainer
 def _consumed_by_committed_steps(
     store: ScenarioStore,
     head_record: CommitRecord | None,
+    scenario: str,
 ) -> frozenset[str]:
     """The rows every committed step's batch consumed.
 
@@ -56,6 +57,8 @@ def _consumed_by_committed_steps(
     consumed: set[str] = set()
     for record in records:
         consumed |= record.consumed_ids
+    for receipt in store.records.consumption_receipts(scenario):
+        consumed.update(receipt["consumed_ids"])
     return frozenset(consumed)
 
 
@@ -250,10 +253,12 @@ class ScenarioFactory:
             )
             # Replay retained, unconsumed rows behind the watermark before resuming
             # the cursor. Retention may keep already-consumed rows for audit.
+            consumed = _consumed_by_committed_steps(store, head_record, name)
             if high_water is not None:
-                consumed = _consumed_by_committed_steps(store, head_record)
                 scenario.reingest(up_to_sequence=high_water[0], consumed_ids=consumed)
                 scenario.restore_record_progress(after_sequence=high_water[0], offset=high_water[1])
+            elif consumed:
+                scenario.reingest(up_to_sequence=0, consumed_ids=consumed)
             # A scenario created or last stepped by an older Reef serves that Reef's shipped content (the harness
             # requests extension, for one) until it is republished; every later step builds on what it serves.
             scenario.publish_shipped_content()

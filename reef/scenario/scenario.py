@@ -123,7 +123,7 @@ class Scenario:
         against rollback and commit by the committer lock. Reading state
         that is not part of a transaction (objective identity, consumption
         watermarks, processor schema) is safe here; do not reserve batches,
-        replace results, or compact through this handle.
+        or replace results through this handle.
         """
         return self._trainer
 
@@ -155,7 +155,7 @@ class Scenario:
         return self._trainer.execute_reserved_step(self.scenario_step)
 
     def reject_pending(self, metrics: Mapping[str, Any] | None = None) -> None:
-        """Drop the reserved batch and durably compact whatever it released."""
+        """Drop the reserved batch and persist its consumption."""
         with self._committer.lock:
             self._trainer.reject_pending(metrics)
 

@@ -1,4 +1,4 @@
-"""The contract every processor implements, and its retention type.
+"""The contract every processor implements.
 
 The two processors that implement it for recipes live beside this module:
 ``reported`` (feedback received in a report) and ``computed`` (feedback
@@ -15,24 +15,6 @@ from reef.core.records_types import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.observability import ExperimentLogger
 from reef.train.types import ProcessorContext, TrainingBatch
-
-
-@dataclass(frozen=True)
-class RetentionDecision:
-    """Processor-owned semantic decision about stored records.
-
-    A record is compactable only when it is explicitly releasable.
-    Protected records document the processor's current dependencies
-    and take precedence.
-    """
-
-    protected_agent_record_ids: frozenset[str] = frozenset()
-    releasable_agent_record_ids: frozenset[str] = frozenset()
-
-    def __post_init__(self) -> None:
-        overlap = self.protected_agent_record_ids & self.releasable_agent_record_ids
-        if overlap:
-            raise ValueError(f"retention decision cannot protect and release the same records: {sorted(overlap)!r}")
 
 
 @dataclass(frozen=True)
@@ -72,8 +54,8 @@ class DataProcessor:
     a job.
 
     ``DataProcessor`` itself is never a recipe's processor. Instantiated
-    bare it is the no-update default: it ingests records for audit
-    (retaining only their ids) but never becomes ready and never produces a
+    bare it is the no-update default: it leaves records in storage
+    but never becomes ready and never produces a
     batch. The tradeoff of folding that default into the base (rather than
     keeping it abstract with a separate ``NoUpdateProcessor``) is that a
     half-written subclass that forgets to override ``build_batch`` silently
@@ -110,8 +92,6 @@ class DataProcessor:
         # The error of each buffered instruction whose step failed; its next batch is a skip row, not a run.
         self._request_failures: dict[str, InstructionFailure] = {}
         self._scenario = context.scenario
-        # No-update default: retain only ids for retention; never build a batch.
-        self._agent_record_ids: set[str] = set()
         self._batch_size = int(context.config.get("batch_size", 1))
         if self._batch_size <= 0:
             raise ValueError("batch_size must be positive")
@@ -183,8 +163,6 @@ class DataProcessor:
             request = replace(TrainingRequest.from_dict(item.payload), id=item.agent_record_id)
             if request.id not in self._consumed_requests:
                 self._training_requests.setdefault(request.id, request)
-        else:
-            self._agent_record_ids.add(item.agent_record_id)
 
     # ------------------------------------------------------------ batch cycle
     #
@@ -225,7 +203,7 @@ class DataProcessor:
         """Select inputs for one batch; in ``manual`` and ``hybrid`` a queued instruction arrives as ``request``.
 
         Override this single assembly hook to take instructions. Ingestion,
-        acknowledgement and retention operate on the same state in every mode.
+        acknowledgement and buffer release operate on the same state in every mode.
         With a request the hook's own batch id is replaced by
         ``<scenario>:instruction:<request id>`` and the request is attached.
         """
@@ -288,21 +266,12 @@ class DataProcessor:
         """
         return frozenset()
 
-    def retention_decision(self) -> RetentionDecision:
-        """Return the records the processor currently protects or releases.
+    def releasable_record_ids(self) -> frozenset[str]:
+        """Records whose buffered state can be released after a durable commit."""
+        return frozenset(self._consumed_requests)
 
-        The no-update default protects every ingested id (audit-only retention).
-        Subclasses with real pairing semantics override this to derive
-        protected/releasable sets from their own state.
-        """
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(self._agent_record_ids | self._training_requests.keys()),
-            releasable_agent_record_ids=frozenset(self._consumed_requests),
-        )
-
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
-        """Forget semantic markers whose positioned records were deleted."""
-        self._agent_record_ids -= agent_record_ids
+    def release_records(self, agent_record_ids: frozenset[str]) -> None:
+        """Release committed in-memory state without changing stored records."""
         self._consumed_requests -= agent_record_ids
 
     def derivation_pending(self) -> bool:

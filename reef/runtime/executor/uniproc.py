@@ -66,6 +66,8 @@ class UniProcExecutor(SubmittingExecutor):
             raise ValueError("UniProcExecutor accepts at most one worker; use mp for multiple workers")
         if self.config.options or any(spec.options for spec in self.config.workers):
             raise ValueError("UniProcExecutor does not accept worker resource or backend options")
+        if self.config.node_id is not None:
+            raise ValueError("UniProcExecutor runs in this process and cannot place its worker on a cluster node")
         self._workers: tuple[Any, ...] = ()
         self._owned = True
         self._pools: dict[int, ThreadPoolExecutor] = {}

@@ -2,7 +2,7 @@ Processors
 ==========
 
 A processor is a scenario's batch builder: records in, one typed training
-batch out, plus the answer to what the record store may delete. This page
+batch out, with ownership of its in-memory buffers. Storage owns deletion. This page
 explains the two feedback engines, the task-generation ABC, and the path a
 record takes to a batch.
 
@@ -34,9 +34,11 @@ and group completeness remain recipe decisions. There is no separate dataset
 container. See `batch values <../reference/python-api.rst#batch>`__ for formats
 and algorithm support.
 
-The processor also controls retention. The trainer reads
-``retention_decision()`` (protected vs releasable ids) and reports deletions
-back through ``compaction_applied()``. A batch the backend dropped as stale is
+The processor controls its in-memory buffers. ``releasable_record_ids()``
+returns completed records with no remaining buffered dependents, and
+``release_records(ids)`` frees their memory after a successful commit. New commits retain the stored bodies; consumption progress prevents
+retraining on restart. Storage can independently evict any body under capacity
+pressure, with warnings and durable loss totals. A batch the backend dropped as stale is
 announced through ``dropped()`` before its acknowledgement, for a processor
 that paces work on what actually trained.
 Nothing numeric lives here. Advantages and the loss family are the step
@@ -54,7 +56,7 @@ Explicit manual training
 
 ``training_mode`` is an attribute of each ``DataProcessor``. The recipe passes
 its initial value through ``Trainer.build`` and ``ProcessorContext``; it
-defaults to ``auto``. Ingestion, acknowledgement, retention and compaction use
+defaults to ``auto``. Ingestion, acknowledgement and buffer release use
 the same methods and buffers in every mode. ``GET /reef/status`` reports
 ``pending_instructions`` as the processor's ``buffered_requests`` plus the
 instructions still unread in storage.
@@ -259,4 +261,4 @@ references or eligibility flags fail explicitly and need correction before repla
 The harness recipe no longer supports ``max_score`` or filters successful
 reports. Remove that setting from configuration and Python construction.
 Identical report retries still return their original receipt, including after
-source compaction; changed content with the same id still conflicts.
+source eviction; changed content with the same id still conflicts.
