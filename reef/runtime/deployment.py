@@ -39,6 +39,15 @@ _logger = logging.getLogger(__name__)
 class DeploymentResources(ABC):
     """A coordinated allocation and its runtime connection, owned by Reef."""
 
+    @property
+    def training_node_id(self) -> str | None:
+        """Cluster node hosting the trainer's rank 0, or None when the allocation names none.
+
+        Components that must see the trainer's node-local files, such as the
+        coordinator verifying the checkpoints it writes, are placed there.
+        """
+        return None
+
     @abstractmethod
     def start(self) -> None:
         """Acquire resources; close must also handle a partially failed start."""
@@ -303,6 +312,9 @@ class ModelDeployment:
         inference = self.plan.inference
         if config is None or inference is None:
             return
+        # The coordinator verifies the checkpoints the trainer writes, so on a
+        # multi-node cluster it runs on the trainer's node; node-local
+        # checkpoint storage is invisible from anywhere else.
         self._coordinator = Executor.create(
             ExecutorConfig(
                 backend=config.backend,
@@ -314,6 +326,7 @@ class ModelDeployment:
                     ),
                 ),
                 options=config.options,
+                node_id=self.plan.resources.training_node_id,
                 launch_timeout_s=config.launch_timeout_s,
             )
         )

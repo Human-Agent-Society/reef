@@ -204,7 +204,6 @@ class ScenarioCommitter:
                     record_progress=RecordProgress(
                         high_water_sequence=prepared.high_water_sequence,
                         high_water_offset=prepared.high_water_offset,
-                        compacted_ids=prepared.compacted_ids,
                         consumed_ids=prepared.consumed_ids,
                     ),
                     metrics=prepared.metrics,
@@ -390,7 +389,6 @@ class ScenarioCommitter:
                     record_progress=RecordProgress(
                         high_water_sequence=prepared.high_water_sequence,
                         high_water_offset=prepared.high_water_offset,
-                        compacted_ids=prepared.compacted_ids,
                         consumed_ids=prepared.consumed_ids,
                     ),
                     metrics=prepared.metrics,
@@ -417,7 +415,7 @@ class ScenarioCommitter:
             else:
                 if not durable:
                     # Without a durable commit point, reject a changed serving
-                    # head before recording or compacting the prepared step.
+                    # head before recording the prepared step.
                     artifacts.advance(local_artifact.ref, expected=head)
                 record = self._append_commit_record(
                     step=next_step,
@@ -477,7 +475,6 @@ class ScenarioCommitter:
     def _settle_trainer_commit(self, prepared: PreparedCommit, record: CommitRecord, next_step: int) -> None:
         """Finish recoverable effects before exposing the prepared state."""
         self._trainer.commit_applied(prepared.algorithm_state)
-        self._trainer.compaction_applied(prepared.compacted_ids)
         self._trainer.commit(prepared)
         if not self._store.durable:
             self._artifact_head_sync = _ArtifactHeadSync("synchronized", self._artifacts.checkpoint.release_id)
@@ -529,7 +526,6 @@ class ScenarioCommitter:
             record.algorithm_state == prepared.algorithm_state
             and record.high_water_sequence == prepared.high_water_sequence
             and record.high_water_offset == prepared.high_water_offset
-            and record.compacted_ids == prepared.compacted_ids
             and record.consumed_ids == prepared.consumed_ids
             and record.metrics == prepared.metrics
             and record.training_job_id == prepared.training_job_id
@@ -575,7 +571,6 @@ class ScenarioCommitter:
             algorithm_state=prepared.algorithm_state,
             high_water_sequence=prepared.high_water_sequence,
             high_water_offset=prepared.high_water_offset,
-            compacted_ids=prepared.compacted_ids,
             consumed_ids=prepared.consumed_ids,
             operation=operation,
             rollback_target_release_id=rollback_target_release_id,
