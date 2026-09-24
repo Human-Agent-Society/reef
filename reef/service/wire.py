@@ -18,10 +18,12 @@ from reef.core.records_types import RequestType, parse_references
 SCENARIO_HEADER = "x-reef-scenario"
 RELEASE_ID_HEADER = "x-reef-release-id"
 #: Harness-stamped side-channel context (method-integration RFC §3.2). The
-#: service never reads a tag's meaning — it carries the pair through to
-#: the INFERENCE record so a processor can correlate on it. Header-free
-#: correlation stays the fallback; a tag is what a harness offers when its
-#: agent does not resend the transcript it is continuing.
+#: service carries each pair through to the INFERENCE record so a processor
+#: can correlate on it, and reads one value itself: ``release``, the release
+#: a client runs, which names the record's artifact where the client pulls
+#: the release (``recorded_ref``). Header-free correlation stays the
+#: fallback; a tag is what a harness offers when its agent does not resend
+#: the transcript it is continuing.
 TAG_HEADER_PREFIX = "x-reef-tag-"
 
 
