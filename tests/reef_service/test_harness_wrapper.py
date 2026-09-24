@@ -1104,7 +1104,9 @@ def _make_waiting_pi(tmp_path: Path) -> Path:
             signal.signal(signal.SIGHUP, note)
             signal.signal(signal.SIGTERM, note)
             (here / "agent.json").write_text(json.dumps({"dir": str(agent_dir)}))
-            while True:
+            # A test that fails before it signals must not leave this process running for good.
+            deadline = time.monotonic() + 120
+            while time.monotonic() < deadline:
                 time.sleep(0.05)
             """
         )
