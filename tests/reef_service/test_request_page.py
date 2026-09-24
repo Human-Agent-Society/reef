@@ -326,6 +326,26 @@ def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_s
     assert "reef-dsh setup lists these" in version and "reef-pi setup" not in version
 
 
+def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_what_it_proposed() -> None:
+    """A skip row whose candidate reached its evaluation says where the step failed, on both pages, and lists the
+    change that was proposed instead of saying no change was produced."""
+    mutation = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
+    metrics = _answered(
+        skipped="instruction failed",
+        error="AttributeError: 'str' object has no attribute 'get'",
+        failed_stage="evaluating",
+        mutations=[mutation],
+        proposal_notes={"design": "one rules entry"},
+    )
+    failed = _row(metrics, release_id="rel-0")
+    page = build_request_page(_record(), [CREATION, failed], now=1_100.0)
+    result = _section(page, "Result")
+    assert "The step failed during its evaluation" in result and "before evaluation" not in result
+    assert "r1" in _section(page, "Proposed changes") and "No changes were produced" not in page
+    version = build_release_page(1, [CREATION, failed])
+    assert "The step failed during its evaluation" in version and "before evaluation" not in version
+
+
 @pytest.mark.parametrize("review_key", ["result", "verdict"])
 def test_a_skipped_request_shows_why_the_proposer_produced_nothing_and_what_the_review_left_uncovered(
     review_key,

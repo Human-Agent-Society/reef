@@ -801,6 +801,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
         self._current_step_record: Path | None = None
+        # What a step that raised had reached: its phase, and past a candidate its proposal, for the skip row.
+        self._failed_step: dict[str, Any] = {}
         # Written by the training thread, read by the service's request page from another: each write is one
         # assignment of a frozen value, which is all the synchronization a reader that tolerates a stale phase needs.
         self._step_progress: StepProgress | None = None
@@ -958,9 +960,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     ) -> PreparedStep:
         self._current_step_record = None
         self._step_progress = None
+        self._failed_step = {}
         try:
             prepared = self._prepare_step(batch, state, scenario_step)
         except BaseException:
+            if self._step_progress is not None:
+                self._failed_step = {"failed_stage": self._step_progress.phase}
             self._step_progress = None
             raise
         progress = self._step_progress
@@ -1425,6 +1430,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     def abort_step(self, prepared: PreparedStep) -> None:
         self._step_progress = None
         candidate = self._candidate_from(prepared)
+        # The candidate reached its evaluation: the skip row keeps what was proposed and why, and says where it
+        # stopped, so the page does not read the step as one that never got that far.
+        self._failed_step = {
+            "failed_stage": "evaluating",
+            "mutations": [_mutation_record(mutation) for mutation in candidate.mutations],
+            **{key: prepared.metrics[key] for key in ("proposal_notes",) if key in prepared.metrics},
+        }
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
         if candidate.proposal_id is not None and self.proposals is not None:
             # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
@@ -1450,8 +1462,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         return read_step_records(self._step_record_dir, directory, relative)
 
     def failed_step_metrics(self) -> Mapping[str, Any]:
-        """Keep the failed attempt's exact directory when the trainer consumes its instruction after reload."""
-        return {} if self._current_step_record is None else {"step_record": str(self._current_step_record)}
+        """Keep the failed attempt's exact directory when the trainer consumes its instruction after reload, the
+        phase it failed in and, past a candidate, its proposal."""
+        record = {} if self._current_step_record is None else {"step_record": str(self._current_step_record)}
+        return {**record, **self._failed_step}
 
     def _agent_host(self, step_dir: Path | None, calls: ProposerCalls) -> AgentHost | None:
         """What an agent proposer runs in this step, or ``None`` when the deployment configured no agent."""

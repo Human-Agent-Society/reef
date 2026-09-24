@@ -27,7 +27,7 @@ from collections.abc import Mapping, Sequence
 from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
 from reef.harness.episodes.version_check import ships_version_check
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
-from reef.service.release_page import design_sections, mutations_of, result_of, served_step, step_href
+from reef.service.release_page import design_sections, failed_words, mutations_of, result_of, served_step, step_href
 from reef.train.cordis_backend.contracts import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -260,7 +260,7 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
     if selection_result == "skipped":
         return f"produced no change ({metrics.get('skipped')}); nothing changed"
     if selection_result == "failed":
-        return "The step failed before evaluation. Nothing was published; see the error below before retrying."
+        return failed_words(metrics)
     return f"the step ended as {selection_result}"
 
 

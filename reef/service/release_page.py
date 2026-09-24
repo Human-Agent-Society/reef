@@ -77,6 +77,18 @@ RESULT_WORDS = {
     "recovery": "The head this process recovered at boot.",
 }
 
+
+def failed_words(metrics: Mapping[str, Any]) -> str:
+    """What a failed step means, by the phase it failed in: a step whose candidate reached its evaluation failed
+    there, not before it."""
+    if metrics.get("failed_stage") == "evaluating":
+        return (
+            "The step failed during its evaluation: the change was proposed and its episodes ran, but the "
+            "evaluation raised. Nothing was published; see the error below before retrying."
+        )
+    return RESULT_WORDS["failed"]
+
+
 #: Node kinds whose config carries the change as ``text``; the page shows that text instead of the config JSON.
 TEXT_KINDS = ("rules", "skill", "agent_command")
 
@@ -435,7 +447,7 @@ def evaluation_token_counts(metrics: Mapping[str, Any]) -> tuple[int, int] | Non
 def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
     """The Result section: the headline and what it means, then the evaluation's numbers and the step's record."""
     selection_result = result_of(row, rows)
-    words = dict(RESULT_WORDS)
+    words = {**RESULT_WORDS, "failed": failed_words(metrics)}
     if tone(selection_result) == "promoted":
         words[selection_result] = (
             f"Passed the checks and was {selection_result}; the release that step published serves it."
@@ -736,6 +748,7 @@ __all__ = [
     "before_release_id",
     "build_release_page",
     "build_running_step_page",
+    "failed_words",
     "mutations_of",
     "result_of",
     "served_step",
