@@ -126,7 +126,8 @@ approve it when Codex asks. Episodes never ask, and ``reef-codex exec``
 cannot ask, so its shell cannot reach Reef. Answer "Yes, proceed", which
 approves one call. "Yes, and don't ask again" runs every command that starts
 with the text Codex shows in that answer with no question until the session
-ends. An approved call runs the ``reef-codex`` file as it is at that moment,
+ends, and after it too when the installed tree has a ``codex/rules``
+directory, since the rule then lands there. An approved call runs the ``reef-codex`` file as it is at that moment,
 and when the harness is installed inside the project directory the session
 can change that file before the call. Terminus accepts one Python module
 defining ``Agent(Terminus2)`` when Reef's sandbox isolates the runner and
