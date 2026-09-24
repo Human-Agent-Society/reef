@@ -680,6 +680,12 @@ def test_a_step_that_declined_on_purpose_reads_as_answered_with_no_change_on_bot
     version = build_release_page(1, [CREATION, step], adapter="terminus")
     assert "answered with a design and no entry" in version and "a mode a person enters" in version
     assert "before retrying" not in version
+    # The step page words the step the same way throughout: an answer with no change, never a skip.
+    assert "the step skipped" not in version and "<dt>Skipped</dt>" not in version
+    assert (
+        "nothing: the step answered with no change" in version
+        and "<dt>Answered</dt><dd>with no change</dd>" in version
+    )
 
 
 def test_a_config_entry_reads_as_text_and_how_to_use_starts_with_a_capital() -> None:

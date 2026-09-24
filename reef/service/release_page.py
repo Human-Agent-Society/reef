@@ -392,6 +392,8 @@ def _what_changed(
     mutations = mutations_of(metrics)
     if mutations:
         return "".join(_mutation_block(m, row, before_entries, before_files, node_paths) for m in mutations)
+    if declined(metrics):
+        return '<p class="empty">nothing: the step answered with no change</p>'
     if metrics.get("skipped"):
         return f'<p class="empty">nothing: the step skipped ({escape(metrics["skipped"])})</p>'
     if metrics.get("recheck"):
@@ -508,7 +510,9 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
         )
     grid = f'<dl class="metrics">{"".join(numbers)}</dl>' if numbers else ""
     details = []
-    if metrics.get("skipped"):
+    if declined(metrics):
+        details.append("<div><dt>Answered</dt><dd>with no change</dd></div>")
+    elif metrics.get("skipped"):
         details.append(f"<div><dt>Skipped</dt><dd>{escape(metrics['skipped'])}</dd></div>")
     selection = metrics.get("selection")
     if isinstance(selection, Mapping) and selection.get("reason"):
