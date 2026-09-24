@@ -237,6 +237,8 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
+    own = ("skill", {"name": "own", "text": "---\r\nname: own\r\ndescription: mine\r\n---\r\nBody.\r\n"})
+    assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
     # The web profile reef-dsh web boots: the same defaults and binding (the config node targets the headless
     # patch alone), the headless profile's extension by relative path, and a manifest that reads the patch once.
     web = yaml.safe_load(files[DSH_WEB_PATCH].replace("!!js ", ""))
@@ -253,10 +255,11 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
 
 
 def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
-    """A command's frontmatter keeps the node's keys, but only the person can run it, and dsh's required keys
-    are filled in; frontmatter that dsh would ignore is refused at render."""
+    """A command's frontmatter, read the way dsh reads it, keeps the node's keys, but only the person can run it,
+    and a name or description dsh would not accept is filled in; frontmatter that does not parse is refused."""
     descriptor = get_adapter("dsh")
     path = "dsh-agents/skills/chat/SKILL.md"
+    user_only = "---\nname: chat\ndescription: Chat\ndisable-model-invocation: true\n---\n"
 
     def command(text: str) -> str:
         return render_composition([("agent_command", {"name": "chat", "text": text})], descriptor)[path]
@@ -266,17 +269,40 @@ def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
         "---\nname: chat\ndescription: Enter chat mode\nwhenToUse: on request\ndisable-model-invocation: true\n"
         "---\n# Chat\n\nSearch only.\n"
     )
-    # The node cannot make its command model invocable or hide it from the person.
+    # The node cannot make its command model invocable or hide it from the person, and dsh ignores a skill that
+    # holds a camelCase invocation key.
     flipped = "---\nname: chat\ndescription: Chat\ndisable-model-invocation: false\nuser-invocable: false\n---\nBody\n"
-    assert command(flipped) == "---\nname: chat\ndescription: Chat\ndisable-model-invocation: true\n---\nBody\n"
-    # dsh ignores a skill without name and description, so a description only header gets the name.
-    assert command("---\ndescription: Chat\n---\nBody\n") == (
-        "---\nname: chat\ndescription: Chat\ndisable-model-invocation: true\n---\nBody\n"
-    )
+    assert command(flipped) == user_only + "Body\n"
+    legacy = "---\nname: chat\ndescription: Chat\nuserInvocable: true\ndisableModelInvocation: false\nmodelInvocable: true\n"
+    assert command(legacy + "---\nBody\n") == user_only + "Body\n"
+    # dsh ignores a skill whose name is not a skill name or whose description is empty or not a string, so a header
+    # that lacks either, or holds another value, gets the one a header without frontmatter gets.
+    for header in (
+        "description: Chat",
+        "name:\ndescription: ''",
+        "name: 123\ndescription: [a]",
+        "name: Chat Mode",
+        "description: 09",
+    ):
+        assert command(f"---\n{header}\n---\n# Chat\n") == user_only + "# Chat\n"
+    assert command("---\n---\n# Chat\n") == user_only + "# Chat\n"
+    # dsh reads YAML 1.2, where Yes and 1:30 are strings, so the header does too, and every header is written so
+    # that YAML 1.2 reads a string back where YAML 1.1 or 1.2 would read another type.
+    for written in ("Yes", "off", "1:30", "=", "'09'", "'0o17'"):
+        value = written.strip("'")
+        assert command(f"---\nname: chat\ndescription: {written}\n---\nBody\n") == (
+            f"---\nname: chat\ndescription: '{value}'\ndisable-model-invocation: true\n---\nBody\n"
+        )
+    assert command("1e3\n") == "---\nname: chat\ndescription: '1e3'\ndisable-model-invocation: true\n---\n1e3\n"
+    # dsh takes a fence line less one trailing carriage return, and a close at the end of the file.
+    assert command("---\r\nname: chat\r\ndescription: Chat\r\n---\r\nBody\r\n") == user_only + "Body\r\n"
+    assert command("---\nname: chat\ndescription: Chat\n---") == user_only
     for broken, reason in (
         ("---\nname: [chat\n---\nBody\n", "not valid YAML"),
+        ("---\nname: chat\ndescription: !!binary aGk=\n---\nBody\n", "not valid YAML: a value has the tag"),
         ("---\n- chat\n---\nBody\n", "not a YAML mapping"),
         ("---\nname: chat\ndescription: Chat\nBody\n", "never closes"),
+        ("---\r\nname: chat\r\ndescription: Chat\r\nBody\r\n", "never closes"),
     ):
         with pytest.raises(RenderError, match=f"{path} .*{reason}"):
             command(broken)

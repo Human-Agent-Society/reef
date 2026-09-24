@@ -88,10 +88,17 @@ frontmatter with ``name`` and ``description``, synthesized when the node
 text has none); an ``agent_command`` renders as a user invocable skill
 (``disable-model-invocation: true``, run as ``/name``) under the second
 skill root ``DSH_AGENTS_HOME``, the only command surface dsh has. When the
-command text carries its own frontmatter, the adapter keeps its keys, adds a
-missing ``name`` or ``description``, sets ``disable-model-invocation: true``
-and removes ``user-invocable``, so the model never runs a command and the
-person always can; frontmatter that does not parse is refused at render. A
+command text carries its own frontmatter, the adapter reads it the way dsh
+does (between two ``---`` lines that may end in a carriage return, as YAML
+1.2, where ``Yes`` and ``1:30`` are strings), keeps its keys, sets
+``disable-model-invocation: true`` and removes ``user-invocable`` and the
+camelCase keys dsh refuses (``userInvocable``, ``disableModelInvocation``,
+``modelInvocable``), so the model never runs a command and the person
+always can. A ``name`` that is not a skill name, or a ``description`` that
+is empty or not a string, is written the way a missing one is, since dsh
+ignores the file otherwise, and every value is written so that YAML 1.2
+reads it back with its type. Frontmatter that does not parse, holds a tag
+other than ``!!str`` or is not a mapping is refused at render. A
 ``code_extension`` renders as a plugin module the patch layer inserts by
 relative path. The model binding declares an ``llm-pi-ai`` route whose key
 is named by ``apiKeyEnv`` and supplied through the ``env`` target, dsh's
