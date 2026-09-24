@@ -306,7 +306,9 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
     The binding is written after the checksum and on every run, so a rerun
     re-points an installed tree at the Reef the script came from; the
     checksum still covers the served composition alone, and the current
-    check leaves out the served files the binding rewrites."""
+    check leaves out the served files the binding rewrites. Each binding
+    file is made readable by its owner alone before the token is written into
+    it (``chmod`` changes nothing on a native Windows file system)."""
     if not bindings:
         return []
     lines = [
@@ -322,6 +324,9 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
         lines.append(_write_file_block(relative, bindings[relative]).rstrip("\n"))
         lines.extend(
             [
+                # Owner only before the token goes in, a file an earlier install left readable included: the
+                # token then never sits in a file another user on the machine can read.
+                f'chmod 600 "$DEST/{_double_quoted(relative)}"',
                 f'"$PYTHON" - "$DEST/{_double_quoted(relative)}" <<\'REEF_BIND_EOF\'',
                 "import os, sys",
                 "path = sys.argv[1]",

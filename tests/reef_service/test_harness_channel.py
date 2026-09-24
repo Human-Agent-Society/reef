@@ -767,6 +767,28 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
     assert _extract_reef_token("pi", dest / "pi-agent") is None
 
 
+@pytest.mark.unit
+def test_the_binding_that_holds_the_token_is_readable_by_its_owner_alone(tmp_path) -> None:
+    """The token is a credential: the binding file that holds it is mode 600 on a first install and on a rerun over
+    a file an earlier install left readable, while a composition file keeps the ordinary mode."""
+    binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
+    bound = render_composition(
+        [("rules", {"text": "old rules"}), *binding.compose_nodes(get_adapter("pi"))], get_adapter("pi")
+    )
+    binding_files = {"pi-agent/models.json": bound["pi-agent/models.json"]}
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", binding_files=binding_files
+    )
+    models = dest / "pi-agent/models.json"
+    for attempt in range(2):
+        result = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-123"})
+        assert result.returncode == 0, result.stderr
+        assert "tok-123" in models.read_text(encoding="utf-8")
+        assert models.stat().st_mode & 0o777 == 0o600, attempt
+        models.chmod(0o644)  # as an install from before this change left it
+    assert (dest / "pi-agent/AGENTS.md").stat().st_mode & 0o077 != 0
+
+
 #: The bundled adapters whose descriptor declares an install section: the ones GET /reef/harness/install serves.
 INSTALLABLE_ADAPTERS = tuple(
     name for name in reef.harness.adapters.BUILTIN_ADAPTERS if get_adapter(name).install is not None
