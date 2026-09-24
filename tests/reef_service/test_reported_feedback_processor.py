@@ -94,7 +94,7 @@ def test_inferences_wait_for_reports_and_batch_counts_completed_samples() -> Non
     assert not processor.ready()
     processor.ingest(report("r2", "i2"))
     assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r1", "r2")
-    assert "i3" in processor.retention_decision().protected_agent_record_ids
+    assert "i3" not in processor.releasable_record_ids()
 
 
 def test_report_before_inference_fails_without_queuing_it() -> None:
@@ -115,7 +115,7 @@ def test_invalid_references_do_not_create_a_sample(references: tuple[str, ...]) 
     with pytest.raises(ReportValidationError):
         processor.ingest(report("r1", *references))
     assert not processor.ready()
-    assert processor.retention_decision().protected_agent_record_ids == {"i1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.parametrize("request_type", [RequestType.INFERENCE, RequestType.REPORT])
@@ -152,7 +152,7 @@ def test_assembly_failure_protects_inputs_and_does_not_acknowledge_a_retry() -> 
     for _ in range(2):
         with pytest.raises(ValueError, match="broken training data"):
             processor.ingest(report("r1", "i1"))
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
     assert not processor.ready()
     processor.fail_assembly = False
     processor.ingest(report("r1", "i1"))
@@ -168,7 +168,7 @@ def test_duplicate_reports_and_batch_polls_do_not_assemble_twice() -> None:
     assert processor.build_batch() is batch
     assert processor.assembled == ["r1"]
     processor.release_batch(batch.batch_id)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
     batch = processor.build_batch()
     assert processor.acknowledge(batch.batch_id) == {"i1", "r1"}
     processor.ingest(report("late", "i1"))
@@ -182,12 +182,11 @@ def test_live_report_keeps_a_shared_source_protected_until_its_consumption() -> 
     processor.ingest(report("r1", "i1"))
     processor.ingest(report("r2", "i1"))
     processor.acknowledge(processor.build_batch().batch_id)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r2"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r2"})
     processor.acknowledge(processor.build_batch().batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == {"i1", "r1", "r2"}
-    processor.compaction_applied(frozenset({"i1", "r1", "r2"}))
-    assert processor.retention_decision().protected_agent_record_ids == set()
-    assert processor.retention_decision().releasable_agent_record_ids == set()
+    assert processor.releasable_record_ids() == {"i1", "r1", "r2"}
+    processor.release_records(frozenset({"i1", "r1", "r2"}))
+    assert processor.releasable_record_ids() == set()
 
 
 def test_group_waits_for_complete_samples() -> None:
@@ -206,7 +205,7 @@ def test_group_discard_releases_all_members_and_refuses_later_members() -> None:
         processor.ingest(inference(f"i{index}"))
         processor.ingest(report(f"r{index}", f"i{index}"))
     assert not processor.ready()
-    assert processor.retention_decision().releasable_agent_record_ids == {"i1", "i2", "i3", "r1", "r2", "r3"}
+    assert processor.releasable_record_ids() == {"i1", "i2", "i3", "r1", "r2", "r3"}
 
 
 def test_slot_retry_preserves_first_report() -> None:
@@ -216,7 +215,7 @@ def test_slot_retry_preserves_first_report() -> None:
         record = report(f"r-{record_id}", record_id)
         processor.ingest(replace(record, payload={**record.payload, "metadata": {"slot": slot}}))
     assert tuple(str(item.task_path) for item in processor.build_batch().items) == ("r-first", "r-second")
-    assert {"r-retry", "retry"} <= processor.retention_decision().releasable_agent_record_ids
+    assert {"r-retry", "retry"} <= processor.releasable_record_ids()
 
 
 def test_ordered_groups_can_coexist_with_singleton_samples() -> None:
@@ -247,7 +246,7 @@ def test_group_arrivals_after_reservation_are_left_for_the_next_batch() -> None:
     processor.ingest(report("r3", "i3"))
     assert processor.build_batch() is first
     assert processor.acknowledge(first.batch_id) == {"i1", "i2", "r1", "r2"}
-    assert processor.retention_decision().protected_agent_record_ids == {"i3", "r3"}
+    assert processor.releasable_record_ids().isdisjoint({"i3", "r3"})
     assert not processor.ready()
     processor.ingest(inference("i4"))
     processor.ingest(report("r4", "i4"))
@@ -273,7 +272,6 @@ def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> N
     batch = processor.build_batch()
     assert [str(item.task_path) for item in batch.items] == ["r1"]
     assert processor.acknowledge(batch.batch_id) == {"i1", "i2", "r1", "r2"}
-    assert processor.retention_decision().protected_agent_record_ids == set()
     assert not processor.ready()
 
 
@@ -287,7 +285,7 @@ def test_untyped_assembly_output_fails_and_keeps_report_retryable() -> None:
     processor.fail_assembly = True
     with pytest.raises(TypeError, match="TrainDataItem"):
         processor.ingest(report("r1", "i1"))
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
     processor.fail_assembly = False
     processor.ingest(report("r1", "i1"))
     assert processor.acknowledge(processor.build_batch().batch_id) == {"i1", "r1"}

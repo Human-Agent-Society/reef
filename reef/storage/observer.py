@@ -11,11 +11,11 @@ part of record acceptance or the commit transaction.
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.storage.commits import CommitRecord
-from reef.storage.records import AppendResult, RecordStore, StoredRecord
+from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
 from reef.storage.scenario import ScenarioStorage, ScenarioStore
 
 logger = logging.getLogger(__name__)
@@ -51,12 +51,21 @@ class ObservedRecordStore(RecordStore):
 
     def append_result(self, item: AgentRecord) -> AppendResult:
         appended = self._inner.append_result(item)
-        if appended.inserted:
-            try:
-                self._observer.record_accepted(appended.item)
-            except Exception:
-                logger.exception("record observer failed on accepted record %s", appended.item.agent_record_id)
+        self.notify_accepted((appended,))
         return appended
+
+    def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
+        appended = self._inner.append_many(items)
+        self.notify_accepted(appended)
+        return appended
+
+    def notify_accepted(self, results: Sequence[AppendResult]) -> None:
+        for appended in results:
+            if appended.inserted:
+                try:
+                    self._observer.record_accepted(appended.item)
+                except Exception:
+                    logger.exception("record observer failed on accepted record %s", appended.item.agent_record_id)
 
     def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:
         return self._inner.existing_receipt(item)
@@ -83,21 +92,21 @@ class ObservedRecordStore(RecordStore):
     ) -> tuple[StoredRecord, ...]:
         return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
 
-    def compact(
+    def record_consumption(
         self,
         scenario: str,
         agent_record_ids: frozenset[str],
         *,
-        receipt_id: str | None = None,
-        receipt_metadata: Mapping[str, object] | None = None,
+        receipt_id: str,
+        metadata: Mapping[str, object],
     ) -> None:
-        self._inner.compact(scenario, agent_record_ids, receipt_id=receipt_id, receipt_metadata=receipt_metadata)
+        self._inner.record_consumption(scenario, agent_record_ids, receipt_id=receipt_id, metadata=metadata)
 
-    def purge_compacted(self, scenario: str, *, before: float, limit: int = 256) -> int:
-        return self._inner.purge_compacted(scenario, before=before, limit=limit)
+    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
+        return self._inner.consumption_receipts(scenario)
 
-    def compaction_receipts(self, scenario: str) -> tuple[dict[str, object], ...]:
-        return self._inner.compaction_receipts(scenario)
+    def loss(self, scenario: str) -> RecordLoss:
+        return self._inner.loss(scenario)
 
     def close(self) -> None:
         self._inner.close()

@@ -18,7 +18,6 @@ def record_metadata(stored: StoredRecord) -> dict[str, Any]:
         "agent_record_id": item.agent_record_id,
         "request_type": item.request_type.value,
         "created_at": item.created_at,
-        "compacted_at": stored.compacted_at,
         "references": list(item.references),
         "artifact_ref": encode_artifact_ref(item.artifact_ref) if item.artifact_ref else None,
         "score": item.payload.get("score"),

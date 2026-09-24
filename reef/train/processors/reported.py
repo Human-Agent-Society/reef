@@ -3,7 +3,7 @@
 Ingress validates references against storage before accepting reports. The
 processor consumes records in append order, so references are already present.
 Deduplication, consumed-source tracking, and group slots preserve retry behavior;
-retention protects every live report and the inference records it references.
+buffer release preserves every live report and the inference records it references.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any, cast
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.processors.common import (
     make_multi_turn_policy_trajectory,
     make_policy_trajectory,
@@ -88,7 +88,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
 
     Recipes implement ``make_sample`` and ``make_batch``, plus ``grouping``
     and ``decide_group`` for grouped methods. The engine owns deduplication, group slots, reservations,
-    consumption, and retention. Invalid references raise immediately; training
+    consumption, and buffer release. Invalid references raise immediately; training
     data failures propagate instead of silently dropping reports.
     """
 
@@ -210,7 +210,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             return
         context = self._report_context(item)
         # Retain the report before assembly: a contract failure must not let
-        # compaction delete its inputs or turn a retry into a successful no-op.
+        # buffer release drop its inputs or turn a retry into a successful no-op.
         self._reports[item.agent_record_id] = item
         sample = self.make_sample(context)
         if not isinstance(sample, (TrajectoryItem, TaskItem)):
@@ -385,13 +385,13 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._pending_reports = None
         return frozenset(consumed_reports | trained_sources)
 
-    # -------------------------------------------------------------- retention
+    # ---------------------------------------------------------- buffer release
 
     def _live_references(self) -> set[str]:
         return {ref for report in self._reports.values() for ref in report.references}
 
-    def retention_decision(self) -> RetentionDecision:
-        """Derive retention from live state — a pure read, nothing mutates.
+    def releasable_record_ids(self) -> frozenset[str]:
+        """Find completed records with no remaining buffered dependents.
 
         The releasable-source set is recomputed here every time: a source is
         releasable while a terminal report owns it (or a batch consumed it)
@@ -401,15 +401,10 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         live_references = self._live_references()
         releasable_sources = (self._terminal_owned_sources | self._trained_sources) - live_references
         releasable = self._consumed | self._terminal | releasable_sources
-        protected = set(self._reports) | live_references
-        protected.update(inference_id for inference_id in self._inferences if inference_id not in releasable_sources)
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(protected | self._training_requests.keys()),
-            releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
-        )
+        return frozenset(releasable | self._consumed_requests)
 
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
-        super().compaction_applied(agent_record_ids)
+    def release_records(self, agent_record_ids: frozenset[str]) -> None:
+        super().release_records(agent_record_ids)
         # --- scalar id sets ---
         self._consumed -= agent_record_ids
         self._terminal -= agent_record_ids
@@ -417,11 +412,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._terminal_owned_sources -= agent_record_ids
         self._seen_reports -= agent_record_ids
 
-        # Stored records: only inferences can be here. The trainer compacts
-        # ``releasable - protected``, and every live report, every reference
-        # a live report holds, and every buffered report are protected —
-        # so a compacted id is never in _reports, singletons, or a
-        # group.
+        # Only completed inferences without live report references are released.
         for agent_record_id in agent_record_ids:
             self._inferences.pop(agent_record_id, None)
 

@@ -37,6 +37,10 @@ Routes
 | ``POST /v1/images``, ``/v1/embeddings``,               | multimodal call, relayed by the recipe to its     |
 | ``/v1/audio/speech``, ``/v1/decisions``                | gateway; not recorded, 501 when it offers none    |
 +--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records``                                 | import one existing inference or report           |
++--------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records/batch``                           | atomically import a batch of records              |
++--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/report``                                  | submit feedback about one or more receipts        |
 +--------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                   | enqueue one training instruction                  |
@@ -125,6 +129,130 @@ defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
 protocols, persistence and model bindings used throughout evolution.
+
+Import records for cold-start learning
+--------------------------------------
+
+``POST /reef/records`` accepts an existing inference or report without calling
+an inference provider. It uses the usual Bearer token and ``x-reef-scenario``
+header. Submit one record per request and use a stable ``agent_record_id``:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/records \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'x-reef-scenario: my-agent' \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "agent_record_id": "offline-0001",
+       "request_type": "inference",
+       "payload": {
+         "model": "example-model",
+         "messages": [{"role": "user", "content": "What is 2 + 2?"}],
+         "response": {"choices": [{"message": {"role": "assistant", "content": "4"}}]}
+       }
+     }'
+
+The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
+"request_type":"inference"}``. HTTP 200 acknowledges record admission; it does
+not mean a training step has finished. Identical retries return the existing
+receipt, including after capacity eviction; reusing the ID with different content
+returns HTTP 409. Authentication failures return 401 and invalid envelopes,
+report schemas or references return 400. Scenario selection comes only from
+headers; envelope fields other than the three shown above are rejected.
+
+``request_type`` may be ``inference`` or ``report``. Inference payloads follow
+the selected recipe's recorded-input contract: native provider request fields
+with an existing ``response``, or another complete example that its processor
+understands. Import does not synthesize missing training tensors, run inference,
+or assign the current serving artifact to externally generated examples.
+Reports use the same schema and reference validation as ``POST /reef/report``;
+import referenced inferences first. Training instructions use ``POST /reef/train``.
+
+For existing datasets, use the batch endpoint and resumable JSONL importer
+below. Both endpoints retain the existing 1 MiB HTTP request-body limit.
+
+Imported records enter the same scenario storage and wake the same training
+worker as live traffic. Keep the same scenario header when subsequently calling
+``POST /v1/chat/completions``: its records continue through the existing
+processor, with no processor replacement or end-of-dataset signal. A processor
+that needs reward/report feedback still needs it for both imported and live
+records; submit each example's feedback promptly so completed batches can drain.
+For example, feedback for the imported record can be sent as:
+
+.. code:: json
+
+   {"agent_record_id": "offline-score-0001", "request_type": "report",
+    "payload": {"references": ["offline-0001"], "score": 1.0}}
+
+Batching, buffering, retention and training policy remain owned by the selected
+recipe and processor. Uploading can overlap training; this API adds no dataset
+epochs, cold-start completion barrier, or automatic algorithm switch. To start
+chat traffic after cold-start training has finished, use the recipe's progress
+and commit status to determine when its imported examples have been consumed.
+
+Batch imports and resume
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
+record uses the same three-field envelope as ``POST /reef/records``. The batch
+must contain 1 to 1000 records and fit within the 1 MiB request-body limit.
+All records share the request's scenario, release and tag headers. Put an
+inference before reports that reference it, including within the same batch.
+
+Reef validates the entire batch and persists it in one database transaction.
+Malformed records or missing references return 400; conflicting IDs return
+409. Neither failure persists any new records from the batch. Identical retries
+are accepted, including after training or capacity eviction. Oversized requests return
+413. The response is ``{"records": [receipt, ...]}``, in input order, with the
+same receipt fields as the single-record endpoint. A successful import wakes
+the existing consumer once after commit. Atomicity applies to one request,
+not the entire dataset or subsequent training.
+
+On the user machine, install the standalone ``reef-client`` package; no Reef
+service or training dependencies are needed. For a large local dataset, save
+one envelope per line in an immutable UTF-8 JSONL file. Keep original record IDs
+and report references; the importer does not generate new IDs or convert
+arbitrary dataset schemas.
+
+.. code:: bash
+
+   # Authentication is read from REEF_TOKEN when set.
+   reef-client import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
+
+The CLI reads incrementally and sends batches limited by both ``--batch-size``
+(default 128 records) and ``--max-batch-bytes`` (default 524288 bytes). Only a
+bounded batch and one look-ahead record are buffered. The defaults are starting
+settings, not throughput guarantees. A single JSONL line must fit the byte
+limit; increase it, below 1048576, for larger records.
+
+Progress is saved to ``records.jsonl.reef-import.json``, or ``--progress PATH``.
+It contains the destination, scenario, source checksum and last acknowledged
+byte offset/count; it contains no token or record payloads. Each invocation
+first hashes the complete file with bounded memory to verify its identity,
+then seeks to the saved offset. The source must remain unchanged during import.
+A local file lock prevents simultaneous use of the same checkpoint.
+
+Run the same command after interruption to continue. Transient connection
+failures and HTTP 408, 429, 500, 502, 503 or 504 are retried up to ``--retries``
+(default 3) with backoff and unchanged IDs. If a reply is lost after commit,
+server deduplication prevents the replayed batch from being inserted again.
+Permanent errors stop without advancing that batch's checkpoint. Earlier
+acknowledged batches remain stored. A modified source or different destination
+requires a separate progress file; existing IDs still deduplicate at the server.
+The reported count includes every acknowledged source row, including retries
+of records already present, and does not count completed training samples.
+
+This importer supports local JSONL on platforms with POSIX file locking, including
+Linux and macOS. Parquet/Hugging Face schema conversion and server-side S3 import
+jobs are not part of this interface. Import completion acknowledges storage;
+use the scenario's training progress before treating cold-start learning as done.
+
+The upload buffer limit does not bound processor memory. Report-based processors
+may retain inference records while waiting for feedback; placing all inferences
+before all reports can therefore build a large in-memory backlog. Where possible,
+place reports close to their referenced inferences. Large-dataset throughput and
+end-to-end memory use require measurement with the selected recipe.
 
 Manual training
 ---------------
@@ -241,7 +369,7 @@ a reason to refuse the request, and ``training_request.client`` carries what
 was kept.
 
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
-without another step, including after record compaction; reusing the id with
+without another step, including after capacity eviction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
 id. Empty text, text longer than 4000 characters, missing or non-string
 session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
@@ -490,15 +618,13 @@ conflict rather than overwriting. Reef keeps track of consumed records so
 retried reports and late reports whose references already trained are not
 counted twice.
 
-Training compaction retires records without deleting their original payloads.
-Reef's explicit Python audit reads can inspect retained requests, responses,
-references, and compaction timestamps; ordinary training reads exclude retired
-records. There is no new HTTP record-query endpoint. Separate background
-retention limits compacted bodies to 7 days and a shared 20 GiB by default;
-see `Configuration <configuration.rst>`__ for scope and `Python API <python-api.rst>`__
-for audit and purge methods. A compaction timestamp alone does not prove that a record was
-used for learning: per-step ``consumed_ids`` in the commit log identifies that
-relationship.
+Training records remain readable after consumption. Storage evicts the oldest
+bodies only when the shared capacity budget is exceeded (20 GiB by default),
+with warnings and durable loss totals. Audit endpoints expose retained requests,
+responses and references. Per-step ``consumed_ids`` records processed
+inputs, including intentional skips, rather than proving a model update.
+See `Configuration <configuration.rst>`__ and `Python API <python-api.rst>`__.
+
 
 Receiving an update
 -------------------
@@ -878,7 +1004,7 @@ request headers, assistant messages and tool events; reconstructed inputs are
 not exact provider request bodies. They do not retain provider response IDs,
 and a compaction event may prevent complete input reconstruction. Reads neither
 copy records into another store nor change retention. Step files remain separate
-from compacted online record-body retention.
+from online record-body capacity eviction.
 
 Status
 ------
@@ -997,14 +1123,13 @@ Record and commit history
 -------------------------
 
 ``GET /reef/scenarios/{scenario}/records`` reads retained record metadata,
-including compacted records. ``after_sequence`` defaults to 0 and ``limit``
+including consumed records. ``after_sequence`` defaults to 0 and ``limit``
 defaults to 50 (1 to 100). ``request_type`` (``inference``, ``report`` or
 ``train``) lists one type only; another value is HTTP 400. Records are oldest
 first; ``next_after_sequence`` is null at the end. Each row contains
 ``sequence``, ``agent_record_id``, ``request_type``, ``created_at``,
-``compacted_at``, ``references``, the recorded ``artifact_ref``, and the
-payload's ``score`` field. No record payload or learning classification is
-included.
+``references``, the recorded ``artifact_ref``, and the payload's ``score``
+field. No record payload or learning classification is included.
 
 ``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
 and the stored ``payload``. A missing body returns 404: it may have expired or
@@ -1035,5 +1160,4 @@ cached commit log; the response is bounded, not a new persisted index.
 
 Reef does not join these endpoints into learning links or assign learning
 states, human-readable explanations, policy capability flags, or evaluation
-results. The console owns that interpretation. In particular, compaction
-alone is not proof of consumption, and consumption is not proof of promotion.
+results. The console owns that interpretation. Consumption is not proof of promotion.

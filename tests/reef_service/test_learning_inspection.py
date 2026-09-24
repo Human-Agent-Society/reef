@@ -12,6 +12,7 @@ from reef.dispatcher import build_default_dispatcher
 from reef.service.app import create_app
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.commits import CommitRecord
+from reef.storage.records import RecordRetention
 from reef.storage.sqlite import SQLiteScenarioStorage
 
 
@@ -52,12 +53,10 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             high_water_sequence=3,
             high_water_offset=3,
             consumed_ids=frozenset({"consumed"}),
-            compacted_ids=frozenset({"consumed", "retired"}),
             metrics={"selected": False, "selection": {"candidate_id": "candidate-one", "reason": "regressed"}},
         )
         log.append(commit)
-        log.append(replace(commit, step=2, consumed_ids=frozenset(), compacted_ids=frozenset({"waiting"})))
-        scenario.records.compact("one", frozenset({"consumed", "retired"}))
+        log.append(replace(commit, step=2, consumed_ids=frozenset()))
         before = scenario.records.count("one")
         client = TestClient(TestServer(create_app(dispatcher, tokens="inspection-test-token")))
         await client.start_server()
@@ -73,7 +72,6 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             assert all(
                 "learning_state" not in r and "reason" not in r and "learning_steps" not in r for r in page["records"]
             )
-            assert all(r["compacted_at"] is not None for r in page["records"])
             contract = await (await client.get("/reef/scenarios/one/contract", headers=headers)).json()
             assert "historical_decisions_available" not in contract
             assert "training_mode" in contract
@@ -111,7 +109,6 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
             tail = await response.json()
             assert [r["agent_record_id"] for r in tail["records"]] == ["waiting"]
             assert tail["next_after_sequence"] is None
-            assert tail["records"][0]["compacted_at"] is None
             response = await client.get("/reef/scenarios/one/records/consumed", headers=headers)
             assert response.status == 200
             assert (await response.json())["payload"]["messages"][0]["content"] == "test trace"
@@ -123,9 +120,10 @@ def test_history_reads_preserve_compacted_bodies_and_isolate_scenarios(tmp_path)
                 assert (await client.get(route, headers=headers)).status == 404
             for query in ("limit=0", "limit=101", "after_sequence=-1", "after_sequence=oops"):
                 assert (await client.get(f"/reef/scenarios/one/records?{query}", headers=headers)).status == 400
-            scenario.records.purge_compacted("one", before=10**12)
+            dispatcher.prune_record_archives(RecordRetention(max_bytes=1))
             assert (await client.get("/reef/scenarios/one/records/consumed", headers=headers)).status == 404
-            assert scenario.records.count("one") == before
+            assert before == 3
+            assert scenario.records.count("one") == 0
             durable = await (
                 await client.get("/reef/scenarios/one/commits?record_id=consumed", headers=headers)
             ).json()
