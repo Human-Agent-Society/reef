@@ -5,7 +5,7 @@ from __future__ import annotations
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import make_trajectory, source_record_id
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor, reported_task
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
@@ -98,14 +98,9 @@ class RecordDrivenTraceProcessor(DataProcessor):
         self._released |= consumed
         return consumed
 
-    def retention_decision(self) -> RetentionDecision:
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(
-                {record.agent_record_id for record in self._records} | self._training_requests.keys()
-            ),
-            releasable_agent_record_ids=frozenset(self._released | self._consumed_requests),
-        )
+    def releasable_record_ids(self) -> frozenset[str]:
+        return frozenset(self._released | self._consumed_requests)
 
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
-        super().compaction_applied(agent_record_ids)
+    def release_records(self, agent_record_ids: frozenset[str]) -> None:
+        super().release_records(agent_record_ids)
         self._released -= agent_record_ids
