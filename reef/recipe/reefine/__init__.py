@@ -22,6 +22,7 @@ from reef.recipe.config_fields import config_field
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine.agent import AgentProposer
+from reef.recipe.reefine.evolution import EXTENSION_ADAPTER
 from reef.recipe.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
 from reef.runtime.interfaces import MultimodalRelay
 
@@ -102,20 +103,25 @@ class ReefineRecipe(CordisRecipe):
         except DescriptorError as exc:
             raise RecipeConfigError(str(exc)) from exc
         channel = "requests come through POST /reef/train; GET /reef/harness serves a published tree"
+        # Warnings, so the startup log shows them, as the docs say.
         if merged.get("requests") is True and not ships_requests(adapter):
             merged["requests"] = False
-            logger.info(
+            logger.warning(
                 "adapter %r ships no /reefine command (requests off); %s",
                 adapter,
                 f"requests come through reef-{adapter} evolve" if installs else channel,
             )
         if merged.get("version_check") is True and not ships_version_check(adapter):
             merged["version_check"] = False
-            logger.info(
+            logger.warning(
                 "adapter %r ships no update notice (version_check off); %s",
                 adapter,
                 f"reef-{adapter} update installs a release" if installs else channel,
             )
+        if adapter != EXTENSION_ADAPTER:
+            # The agent proposer answers requests on pi alone (reef.recipe.reefine.agent); on another adapter the text
+            # proposer does, so no agent is built, jailed or warned about.
+            merged["proposer_agent"] = None
         kwargs = super()._recipe_kwargs({**settings, "evolution": merged}, values)
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(evolution.get("multimodal"), values)

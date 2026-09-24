@@ -172,7 +172,7 @@ version by starting ``reef-<adapter>`` again.
 ``terminus`` has no session to type in and no install: a request comes
 through ``POST /reef/train``, and ``GET /reef/harness`` serves a published
 tree. The agent proposer runs on pi
-alone; on another adapter the served model answers a request with rules,
+alone, so another adapter builds no agent and needs no proposer sandbox; on another adapter the served model answers a request with rules,
 skills and commands, and with a config entry where the harness's config
 enforces a behavior (an opencode agent with a permission map, Claude Code
 permissions that pre-approve only ``WebSearch`` and ``WebFetch``, Codex's
