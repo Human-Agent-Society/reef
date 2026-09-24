@@ -172,6 +172,8 @@ class MultiprocExecutor(SubmittingExecutor):
         self._monitor_thread: threading.Thread | None = None
         if self.config.options:
             raise ValueError("MultiprocExecutor accepts only per-worker cuda_visible_devices, not cluster options")
+        if self.config.node_id is not None:
+            raise ValueError("MultiprocExecutor runs local processes and cannot place workers on a cluster node")
         specs = [self._spawn_spec(spec) for spec in self.config.workers]
         context = multiprocessing.get_context("spawn")
         deadline = None if self.config.launch_timeout_s is None else monotonic() + self.config.launch_timeout_s

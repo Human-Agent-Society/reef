@@ -121,7 +121,6 @@ def test_rollback_metadata_preserves_its_operation() -> None:
     metadata["record_progress"] = {
         "high_water_sequence": 0,
         "high_water_offset": 0,
-        "compacted_ids": [],
         "consumed_ids": [],
     }
     _, _, checkpoint = parse_scenario_metadata(
@@ -295,8 +294,7 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
     assert checkpoint.algorithm_state == {"steps": 3}
     assert checkpoint.high_water_sequence == 7
     assert checkpoint.high_water_offset == 5
-    assert checkpoint.compacted_ids == frozenset({"old-record"})
-    assert checkpoint.consumed_ids == frozenset({"trained-record"})
+    assert checkpoint.consumed_ids == frozenset({"trained-record", "old-record"})
     assert checkpoint.operation == (operation or "training")
     assert checkpoint.operation_verified is (operation is not None)
     assert checkpoint.rollback_target_release_id == metadata.get("rollback_target_release_id")
@@ -311,7 +309,6 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
         record_progress=RecordProgress(
             checkpoint.high_water_sequence,
             checkpoint.high_water_offset,
-            checkpoint.compacted_ids,
             checkpoint.consumed_ids,
         ),
         operation=checkpoint.operation,
@@ -319,7 +316,15 @@ def test_checkpoint_metadata_decodes_directly_to_commit_record(operation) -> Non
         metrics=checkpoint.metrics,
         training_job_id=checkpoint.training_job_id,
     )
-    assert encoded == {**metadata, "operation": operation or "training"}
+    assert encoded == {
+        **metadata,
+        "operation": operation or "training",
+        "record_progress": {
+            "high_water_sequence": 7,
+            "high_water_offset": 5,
+            "consumed_ids": ["old-record", "trained-record"],
+        },
+    }
 
     metadata["algorithm_state"]["steps"] = 99
     metadata["metrics"]["loss"] = 99
@@ -351,7 +356,6 @@ def test_checkpoint_metadata_rejects_invalid_recovery_state(changes, message) ->
         "record_progress": {
             "high_water_sequence": 0,
             "high_water_offset": 0,
-            "compacted_ids": [],
             "consumed_ids": [],
         },
         **changes,

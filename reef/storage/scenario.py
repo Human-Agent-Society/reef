@@ -23,7 +23,7 @@ class ScenarioStore(ABC):
 
     The caller closes the session when the scenario is unloaded. Closing is
     idempotent; subsequent reads and writes fail. Records from other scenarios
-    must never be committed or compacted through this session.
+    must never be committed through this session.
     """
 
     @property
@@ -46,23 +46,23 @@ class ScenarioStore(ABC):
 
     @abstractmethod
     def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
-        """Commit exactly ``expected_step + 1`` and settle its record compaction.
+        """Persist exactly ``expected_step + 1`` with its consumption progress.
 
         Conflicting writers are serialized across sessions. An identical retry
         (ignoring only ``recorded_at``) returns the original record, even after
-        later steps, and repairs interrupted compaction. Different content or
+        later steps. Different content or
         a stale expected step raises ``ScenarioStoreConflict``.
 
-        An exception can occur after durability but before compaction. Callers
+        An exception can occur after the commit becomes durable. Callers
         inspect history or retry the same commit before repeating training.
         """
 
     @abstractmethod
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
-        """Reconcile a checkpoint commit with history and replay compaction.
+        """Reconcile a checkpoint commit with history.
 
         ``None`` denotes initial registration before any committed step.
-        A checkpoint ahead of history is adopted durably before compaction.
+        A checkpoint ahead of history is adopted durably.
         Validate scenario identity and continuity after the checkpoint. Return
         the committed head, or ``None`` at creation, without publishing artifacts.
         """
@@ -95,7 +95,7 @@ class ScenarioStorage(ABC):
 
     @abstractmethod
     def prune(self, *, days: float, max_bytes: int) -> int:
-        """Purge retained compacted bodies across active and archived storage."""
+        """Evict oldest bodies over max_bytes; days is a deprecated compatibility argument."""
 
     @abstractmethod
     def close(self) -> None:
