@@ -383,12 +383,21 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
         render_composition([("config", {"data": {"env": {"DISABLE_AUTOUPDATER": "0"}}})], get_adapter("claude"))
 
 
-@pytest.mark.parametrize("value", ["0", "false", ""])
-def test_claude_quirk_keeps_the_update_commands_off(value: str) -> None:
-    """Claude Code copies settings.env over its environment, so a tree must not undo reef-claude's DISABLE_UPDATES."""
-    render_composition([("config", {"data": {"env": {"DISABLE_UPDATES": "1"}}})], get_adapter("claude"))
-    with pytest.raises(RenderError, match="DISABLE_UPDATES"):
-        render_composition([("config", {"data": {"env": {"DISABLE_UPDATES": value}}})], get_adapter("claude"))
+@pytest.mark.parametrize("key", ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "disable_updates"])
+@pytest.mark.parametrize("value", ["x", "maybe", "2", "1"])
+def test_claude_quirk_refuses_a_tree_that_sets_the_updater_switches(key: str, value: str) -> None:
+    """Claude Code copies settings.env over its environment and reads the updater switches as on only for 1, true,
+    yes or on, so a tree must not set them at all: the episode env and reef-claude's client_env own them. Windows
+    matches env names in any case."""
+    with pytest.raises(RenderError, match=f"must not set {key} in settings.env"):
+        render_composition([("config", {"data": {"env": {key: value}}})], get_adapter("claude"))
+
+
+def test_claude_quirk_renders_a_tree_env_without_the_updater_switches() -> None:
+    assert "env" not in json.loads(render_composition([], get_adapter("claude"))["claude/settings.json"])
+    node = ("config", {"data": {"env": {"BASH_MAX_TIMEOUT_MS": "600000"}}})
+    rendered = json.loads(render_composition([node], get_adapter("claude"))["claude/settings.json"])
+    assert rendered["env"] == {"BASH_MAX_TIMEOUT_MS": "600000"}
 
 
 @pytest.mark.parametrize("value", [None, "enable", False])

@@ -3,9 +3,12 @@
 # CLAUDE_CONFIG_DIR relocates the whole config tree (settings.json, CLAUDE.md,
 # skills/, commands/, plugins/, and the session transcripts under projects/)
 # into the episode root, so nothing is read from or written to the user's real
-# ~/.claude. The three DISABLE_* variables stop the startup network work
+# ~/.claude. DISABLE_AUTOUPDATER, DISABLE_TELEMETRY and
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC stop the startup network work
 # (auto-update, telemetry, and the non-essential background traffic) that
-# would otherwise make episodes non-deterministic. `-p --output-format json`
+# would otherwise make episodes non-deterministic. DISABLE_UPDATES makes
+# Claude Code's own update and install commands refuse, so an episode's shell
+# commands cannot replace the pinned version either. `-p --output-format json`
 # is Claude Code's headless mode, which skips the folder trust prompt;
 # `--permission-mode auto` matches opencode's `--auto` and pi's json
 # mode — auto-approve without dropping every safety check, which is the
@@ -23,6 +26,7 @@ argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
 env:
   CLAUDE_CONFIG_DIR: "{root}/claude"
   DISABLE_AUTOUPDATER: "1"
+  DISABLE_UPDATES: "1"
   DISABLE_TELEMETRY: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 # An interactive run through reef-claude gets only CLAUDE_CONFIG_DIR from the
@@ -37,7 +41,9 @@ env:
 # exit 0. A lone --update or --upgrade, which Claude Code reads as `update`
 # only with nothing else on the command line, stops at "unknown option" after
 # the --settings below. reef-claude update is reef's own install of the
-# served release.
+# served release. Claude Code copies settings.env over its environment, so
+# the quirks refuse a tree whose settings.env sets either switch; a project
+# .claude/settings.json of the person's own can still set them.
 client_env:
   DISABLE_AUTOUPDATER: "1"
   DISABLE_UPDATES: "1"

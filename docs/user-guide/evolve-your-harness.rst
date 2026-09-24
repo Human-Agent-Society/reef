@@ -608,7 +608,11 @@ shell sets it:
 ``reef-claude upgrade`` and ``reef-claude install`` reach Claude Code's own
 update and install commands, which print that updates are disabled, and
 ``reef-claude update`` is Reef's own command, which installs the served
-release. Pinning,
+release. Reef refuses a harness tree whose ``settings.json`` sets
+``DISABLE_UPDATES``, but a ``.claude/settings.json`` of your own in the
+project folder can still turn those commands back on: Claude Code applies
+that file's ``env`` over the environment, and it reads ``DISABLE_UPDATES``
+as on only for ``1``, ``true``, ``yes`` or ``on``. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
