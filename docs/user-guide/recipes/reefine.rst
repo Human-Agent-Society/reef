@@ -152,15 +152,15 @@ version by starting ``reef-<adapter>`` again.
    * - ``opencode``
      - ``reef-opencode``
      - ``/reefine <request>``
-     -
+     - no flag (the default openai dialect)
    * - ``hermes``
      - ``reef-hermes``
      - ``/reefine <request>``
-     -
+     - no flag (the default openai dialect)
    * - ``dsh``
      - ``reef-dsh web``
      - ``/reefine <request>``
-     -
+     - no flag (the default openai dialect)
 
 ``terminus`` has no session to type in. The agent proposer runs on pi
 alone; on another adapter the served model answers a request with rules,
