@@ -212,13 +212,31 @@ name no wrapper command: ``GET /reef/harness`` serves the published tree,
 and what the release requires must hold in the Harbor task a run uses.
 
 An answer whose form slipped is written again while attempts remain: JSON
-that does not parse, entries every one of which was dropped, or entries the
-harness's own admission refuses (the admission the step meets next runs on
-each answer). Each dropped answer's reason is recorded
-(``proposal_notes.dropped_attempts``) and shows under Review on the request
-and step pages. A review reply whose JSON a stray quote broke is asked once
-more. The review reads the whole design; the step records it cut to 4000
-characters with its last paragraph, the How to use, kept whole.
+that does not parse (a list or an object that decodes inside a broken outer
+array is a fragment of it, not the answer), entries every one of which was
+dropped, or entries the harness's own admission refuses (the admission the
+step meets next runs on each answer). When admission refused the entries,
+the retry shows that answer's design and entries, so what it got right
+stays. Each dropped answer's reason is recorded
+(``proposal_notes.dropped_attempts``), shows in the request page's Activity
+while the step runs, and shows under Review on the request and step pages.
+A review reply whose JSON a stray quote broke is asked once more. The review
+reads the whole design; the step records it cut to 4000 characters with its
+last paragraph, the How to use, kept whole.
+
+Off pi, a design that says no entry this harness takes can deliver the
+request is an answer, not a failure: the review runs on it, the step
+records it under ``proposal_notes.declined`` with the design and what is
+out of reach, and the pages and the result line say it was answered with
+no change. When that review finds a point an entry could still deliver,
+the request is written again. On pi such a reply stays a proposal with
+nothing to apply, its reason under ``failure``.
+
+The result line after a published step carries the release's own How to
+use (``how to use: ...``, its first paragraph), and ``reef-<adapter>
+update`` prints it after the install, so the session tells the person the
+form the release takes (``$chat`` on codex) rather than one taken from the
+request. What the harness puts out of reach prints one point per line.
 
 The agent proposer
 ------------------

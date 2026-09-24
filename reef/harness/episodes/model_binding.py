@@ -239,6 +239,10 @@ class ModelBinding:
         """
         return getattr(self, "_last_response", None)
 
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """A line for the step's activity, where the caller runs inside a step that shows one (the request
+        page's Activity); a plain binding keeps none."""
+
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """POST one request in the binding's native dialect and return the
         response object: Chat Completions for ``openai``, Responses for

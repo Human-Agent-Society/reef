@@ -142,6 +142,8 @@ _PREVIEW_CHARS = 240
 #: How much of a design the step records: a few paragraphs with its How to use section, never a second copy of
 #: the entries.
 _DESIGN_CHARS = 4000
+#: How much of each refused entry a retry prompt carries: enough to rewrite from, not the whole answer again.
+EARLIER_ENTRY_CHARS = 1500
 
 #: The two words a review result may be.
 REVIEW_RESULTS = ("complete", "partial")
@@ -378,8 +380,18 @@ RETRY_SECTION = (
 #: entries every one of which was dropped, or entries the harness's admission refuses.
 RETRY_UNUSABLE_SECTION = (
     "An earlier answer to this request could not be used: {reason}. Write the whole answer again, design first, "
-    "as the one JSON array described above; escape every double quote inside a JSON string.\n\n"
+    "as the one JSON array described above; escape every double quote inside a JSON string and close every object "
+    "and array.\n\n"
 )
+
+#: What the unusable retry adds when the refused answer parsed: its design and entries, so what it got right stays.
+RETRY_EARLIER_ANSWER = (
+    "The refused answer's design and entries were (keep what they got right and change what the reason names):\n"
+    "Design:\n{design}\nEntries:\n{entries}\n\n"
+)
+
+#: What a request step records under ``declined`` when the reply is a design saying no entry can deliver it.
+DECLINED = "the design says no entry this harness takes can deliver the request"
 
 #: What the retry section adds when the earlier answer only put a substitute in place of the behavior.
 RETRY_UNDELIVERED = (
@@ -537,6 +549,7 @@ def _answer_request(
     retry = ""
     attempt = 0
     kept_attempt = 0
+    declined: StepProposal | None = None
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
         asked = prompt if not retry else prompt.rstrip("\n") + "\n\n" + retry
@@ -545,8 +558,29 @@ def _answer_request(
             # A slip in the answer's form is asked again while attempts remain.
             unusable = answer
             dropped_attempts.append(f"answer {attempt}: {answer.reason}")
+            if attempt < REQUEST_ATTEMPTS and isinstance(models.served, ModelBinding):
+                # The request page shows it while the step runs, not only once the step settles.
+                models.served.note("check", f"answer {attempt} written again: {answer.reason}", failed=True)
             retry = reviewed + RETRY_UNUSABLE_SECTION.format(reason=answer.reason)
+            if answer.entries is not None:
+                retry += RETRY_EARLIER_ANSWER.format(design=answer.design or "(none written)", entries=answer.entries)
             continue
+        if isinstance(answer, DeclinedAnswer):
+            declined = answer.proposal
+            review = declined.notes.get("review")
+            if review is not None and review["uncovered"] and attempt < REQUEST_ATTEMPTS and kept is None:
+                # The review found points an entry could deliver: the design gave up early, so it is asked again.
+                reviewed = RETRY_SECTION.format(
+                    design=declined.notes.get("design", "(none written)"),
+                    findings="\n".join(f"- {point}" for point in review["uncovered"]),
+                    delivered="",
+                )
+                retry = reviewed
+                continue
+            if kept is None:
+                notes = declined.notes if attempt == 1 else {**declined.notes, "attempts": attempt}
+                return _with_dropped(StepProposal((), notes), dropped_attempts)
+            break
         if isinstance(answer, StepProposal):
             # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
             # earlier substitute says more about the request than the failed call does.
@@ -579,6 +613,8 @@ def _answer_request(
         )
         retry = reviewed
     if kept is None:
+        if declined is not None:
+            return _with_dropped(StepProposal((), {**declined.notes, "attempts": attempt}), dropped_attempts)
         if undelivered is not None:
             return _with_dropped(undelivered, dropped_attempts)
         # Every answer was unusable: the last one's reason, with its design when it wrote one.
@@ -602,10 +638,20 @@ def _answer_request(
 
 @dataclass(frozen=True)
 class _Unusable:
-    """An answer the loop may ask again: why it could not be used, and the design it carried."""
+    """An answer the loop may ask again: why it could not be used, the design it carried and, when its entries
+    parsed and something refused them, those entries in short, for the retry to start from."""
 
     reason: str
     design: str | None = None
+    entries: str | None = None
+
+
+@dataclass(frozen=True)
+class DeclinedAnswer:
+    """A design that says no entry of the kinds this harness takes can deliver the request: an answer with no
+    change, its notes holding the design, ``declined`` and the review that names what is out of reach."""
+
+    proposal: StepProposal
 
 
 def _answer_once(
@@ -617,41 +663,51 @@ def _answer_once(
     own: Sequence[Mapping[str, Any]],
     kinds: Sequence[str] = tuple(REQUEST_KINDS),
     adapter: str = EXTENSION_ADAPTER,
-) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal | _Unusable:
+) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal | _Unusable | DeclinedAnswer:
     """One answer and its review: the mutations, the requires items the reply added and the notes; an
     ``_Unusable`` the loop asks again (JSON that does not parse, every entry dropped, entries the harness's
-    admission refuses); or a proposal without mutations whose notes say why there is nothing to apply (a failed
-    call, a reply whose design says no entry can deliver the request)."""
+    admission refuses); a ``DeclinedAnswer`` design that says no entry can deliver the request; or a proposal without
+    mutations whose notes say why there is nothing to apply (a failed call, a provider refusal)."""
     # An extension is longer than a skill, and a thinking model reasons for tens of thousands of tokens before
     # it writes one, answering with no text when the budget ends inside that reasoning; the request path pays
     # for the room and the minutes, the failure path and the review keep their shorter budgets.
     reply, failure = _ask(models, prompt, max_tokens=_max_tokens(65536), timeout_s=_timeout_s(600.0))
     if reply is None:
         return StepProposal((), {"failure": failure})
-    proposals = _parse_proposal(reply, kinds=tuple(kinds), config_keys=request_config_keys(adapter))
+    # A value that decodes inside a broken outer one is a fragment of it (a list nested in an entry, say), never
+    # the answer: the reply is a slip, asked again.
+    slipped = slipped_json(reply)
+    proposals = (
+        None if slipped else _parse_proposal(reply, kinds=tuple(kinds), config_keys=request_config_keys(adapter))
+    )
     design = _design_text(reply)
     if proposals is None:
         refusal = _provider_refusal(models)
         if refusal is not None:
             return _nothing_to_apply(reply, f"the provider refused the reply ({refusal})")
+        if slipped is not None:
+            return _Unusable(slipped, design)
         if reply.strip() and not _items_in(reply):
-            # No JSON parsed at all (a stray quote broke it): a slip, asked again. A design with no entry is an answer.
+            # No JSON at all: a slip, asked again.
             return _Unusable("the reply holds no usable entry", design)
+        if design is not None and adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None:
+            return declined_answer(models, request, design, own, adapter)
         return _nothing_to_apply(reply, "the reply holds no usable entry")
     mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
     if not mutations:
         return _Unusable("every entry in the reply was dropped: a reserved id, or an id another kind holds", design)
+    written = entries_in_short(mutations)
     if entries:
         # The admission the step meets next, run here so a refused entry is written again instead of losing the step.
         _, refusal = admit_mutations(entries, mutations, get_adapter(adapter))
         if refusal is not None:
-            return _Unusable(f"the harness refused the entries: {refusal}", design)
+            return _Unusable(f"the harness refused the entries: {refusal}", design, written)
     unrestricted = _unrestricted_agents(mutations, nodes, entries)
     if unrestricted:
-        return _Unusable("; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design)
+        return _Unusable("; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design, written)
     widened = _widened_permissions(mutations) if adapter == "claude" else []
     if widened:
-        return _Unusable("; ".join(widened), design)
+        return _Unusable("; ".join(widened), design, written)
     added, refused = _parse_requires(reply)
     notes: dict[str, Any] = {}
     if design is not None:
@@ -673,6 +729,34 @@ def _answer_once(
     if undeclared:
         notes["undeclared_env"] = undeclared
     return mutations, added, notes
+
+
+def declined_answer(
+    models: ModelBindings,
+    request: Mapping[str, Any],
+    design: str,
+    own: Sequence[Mapping[str, Any]],
+    adapter: str,
+) -> DeclinedAnswer:
+    """A design that writes no entry, on a harness whose notes name what no answer there can deliver: an answer
+    with no change, reviewed like one, so those limits reach the pages and a point an entry could still deliver
+    sends the request back. On pi such a reply stays a proposal with nothing to apply."""
+    notes: dict[str, Any] = {"design": _kept_design(design), "declined": DECLINED}
+    review, review_failure = _review(models, str(request.get("text", "")), design, [], own, adapter=adapter)
+    if review is not None:
+        notes["review"] = review
+    else:
+        notes["review_failure"] = review_failure or "the review did not run"
+    return DeclinedAnswer(StepProposal((), notes))
+
+
+def entries_in_short(mutations: Sequence[Mutation]) -> str:
+    """The answer's entries for a retry prompt: each as JSON, its long text cut, so the model can rewrite from it."""
+    lines = []
+    for mutation in mutations:
+        written = json.dumps({"id": mutation.id, **(mutation.options or {})}, ensure_ascii=False)
+        lines.append(f"- {written if len(written) <= EARLIER_ENTRY_CHARS else written[:EARLIER_ENTRY_CHARS] + ' ...'}")
+    return "\n".join(lines)
 
 
 def _config_agents(config: Any) -> Mapping[str, Any]:
@@ -1244,14 +1328,64 @@ def _items_in(reply: str) -> list[Any]:
 def _json_in(reply: str, openers: Sequence[str] = ("[", "{")) -> Any:
     """The JSON array or object inside the model's text, fences and prose around it dropped; ``None`` when none
     parses. ``openers`` says which to look for and in what order."""
+    found = json_found(reply, openers)
+    return None if found is None else found[1]
+
+
+def json_found(reply: str, openers: Sequence[str] = ("[", "{")) -> tuple[int, Any] | None:
+    """Where ``_json_in``'s value starts in the reply, and the value; ``None`` when none parses."""
     decoder = json.JSONDecoder()
     # The first array, else the first object, decoded in place: prose after it (a bracketed citation, say) is ignored.
     for opener in openers:
-        decoded = (_decoded_at(decoder, reply, at) for at, char in enumerate(reply) if char == opener)
-        value = next((item for item in decoded if item is not None), None)
-        if value is not None:
-            return value
+        for at, char in enumerate(reply):
+            if char == opener:
+                value = _decoded_at(decoder, reply, at)
+                if value is not None:
+                    return at, value
     return None
+
+
+def slipped_json(reply: str) -> str | None:
+    """Why the reply's outermost JSON does not parse; ``None`` when it parses or the reply holds no bracket.
+
+    The outermost value starts at the first bracket or brace. When it does not
+    decode, a value that decodes later stands for the answer only when the
+    text before it closed every bracket it opened (a stray bracket in prose),
+    never when it sits inside the broken value."""
+    starts = [at for at in (reply.find("["), reply.find("{")) if at >= 0]
+    if not starts:
+        return None
+    start = min(starts)
+    try:
+        json.JSONDecoder().raw_decode(reply, start)
+        return None
+    except json.JSONDecodeError as error:
+        failure = error
+    found = json_found(reply)
+    if found is not None and open_brackets(reply[start : found[0]]) <= 0:
+        return None
+    return f"the reply's JSON does not parse ({failure.msg} at line {failure.lineno} column {failure.colno})"
+
+
+def open_brackets(text: str) -> int:
+    """How many brackets and braces ``text`` leaves open, the ones inside JSON strings not counted."""
+    depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+    return depth
 
 
 def _decoded_at(decoder: json.JSONDecoder, reply: str, at: int) -> Any:

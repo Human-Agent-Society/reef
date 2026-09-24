@@ -12,8 +12,10 @@ from __future__ import annotations
 import json
 
 from reef_service.test_harness_example import (
+    DESIGN,
     ENTRIES,
     NODES,
+    PLAN_MARKER,
     REQUEST,
     REVIEW,
     SHORT,
@@ -24,6 +26,7 @@ from reef_service.test_harness_example import (
     skill,
 )
 
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.recipe.reefine import evolution
 
 #: An extension pi's admission refuses: it writes to the session's stdout while it has a UI.
@@ -59,7 +62,10 @@ def test_an_answer_whose_json_does_not_parse_goes_on_to_the_next_attempt() -> No
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
     assert [m.id for m in proposal.mutations] == ["third"]
     assert proposal.notes["attempts"] == 3
-    assert proposal.notes["dropped_attempts"] == ["answer 2: the reply holds no usable entry"]
+    # The reason names where the JSON broke, so the retry prompt tells the model what to close or escape.
+    assert proposal.notes["dropped_attempts"] == [
+        "answer 2: the reply's JSON does not parse (Expecting ',' delimiter at line 1 column 17)"
+    ]
     # A design that says no entry can deliver the request is an answer, not a slip: it is not asked again.
     model = Model(designed())
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
@@ -102,3 +108,105 @@ def test_the_review_reads_the_whole_design_in_its_own_script_and_the_record_keep
     review_prompt = model.prompts[2]
     assert design in review_prompt  # the whole design, not the record's cut
     assert f"# {chat}" in review_prompt and "\\u804a" not in review_prompt
+
+
+#: A claude answer as a model writes it: the design, a command, rules and the web permission.
+CLAUDE_ANSWER = [
+    {"design": DESIGN},
+    {
+        "id": "chat",
+        "name": "agent_command",
+        "config": {"name": "chat", "text": "---\nallowed-tools: [WebSearch]\n---\nChat."},
+    },
+    {"id": "chat-rules", "name": "rules", "config": {"text": "While chat mode is on, only search the web."}},
+    {
+        "id": "chat-permissions",
+        "name": "config",
+        "config": {"target": "primary", "data": {"permissions": {"allow": ["WebSearch", "WebFetch"]}}},
+    },
+]
+
+
+def test_a_reply_whose_outer_json_broke_is_written_again_not_read_by_a_list_nested_in_it() -> None:
+    """The recorded claude answer lacked two closing braces: its nested allow list decoded on its own and the step
+    ended with no entry and no retry. A value that decodes inside a broken outer one is a fragment, so the reply is
+    a slip and the next answer is asked for, the reason naming where the JSON broke."""
+    whole = json.dumps(CLAUDE_ANSWER)
+    broken = whole[: whole.rindex("]}}}}]")] + "]}}]"
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(broken, whole, review)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="claude")
+    assert [m.id for m in proposal.mutations] == ["chat", "chat-rules", "chat-permissions"]
+    (dropped,) = proposal.notes["dropped_attempts"]
+    assert dropped.startswith("answer 1: the reply's JSON does not parse (")
+    assert "close every object and array" in model.prompts[2]
+    # A stray bracket in prose before a whole answer is no slip: the text before it closes what it opened.
+    prose = "Notes [draft] follow.\n" + whole
+    assert evolution.slipped_json(prose) is None and evolution.slipped_json(broken) is not None
+    assert evolution.slipped_json("no json here") is None
+
+
+def test_a_design_that_says_no_entry_can_deliver_is_answered_with_no_change_and_its_limits() -> None:
+    """Off pi, a design with no entry is an answer, not a failure: the review runs on it, so what the harness notes
+    put out of reach reaches the pages, and the step records it under declined. A review that finds a point an
+    entry could still deliver sends the request back."""
+    limits_only = json.dumps(
+        {"result": "complete", "delivers": False, "covered": [], "uncovered": [], "limits": ["a mode to enter"]}
+    )
+    model = Model(designed(), limits_only)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="terminus")
+    assert proposal.mutations == () and "failure" not in proposal.notes
+    assert proposal.notes["declined"] == evolution.DECLINED and proposal.notes["design"] == DESIGN
+    assert proposal.notes["review"]["limits"] == ["a mode to enter"]
+    assert model.answered == 2  # the answer and its review, no retry
+    short = json.dumps(
+        {"result": "partial", "delivers": False, "covered": [], "uncovered": ["a skill could search with curl"]}
+    )
+    complete = json.dumps({"result": "complete", "delivers": True, "covered": ["search"], "uncovered": []})
+    model = Model(designed(), short, designed(skill("search")), complete)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="terminus")
+    assert [m.id for m in proposal.mutations] == ["search"]
+    assert "- a skill could search with curl" in model.prompts[3]
+
+
+def test_a_retry_for_a_refused_answer_carries_that_answers_design_and_entries() -> None:
+    """opencode refused answer 1 for its agent's missing permission map alone; the retry shows that answer's design
+    and entries, so what it got right (a correct leave path, say) is not lost when the model writes again."""
+    agent = {"chat": {"mode": "primary", "prompt": "Leave with /agents, choosing build."}}
+    unmapped = {"id": "chat-agent", "name": "config", "config": {"target": "primary", "data": {"agent": agent}}}
+    command = {
+        "id": "chat",
+        "name": "agent_command",
+        "config": {"name": "chat", "text": "---\nagent: chat\n---\nChat."},
+    }
+    mapped = {"chat": {**agent["chat"], "permission": {"*": "deny", "websearch": "allow"}}}
+    fixed = {**unmapped, "config": {"target": "primary", "data": {"agent": mapped}}}
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(designed(unmapped, command), designed(fixed, command), review)
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
+    (retry,) = [prompt for prompt in model.prompts if "could not be used" in prompt]
+    assert "The refused answer's design and entries were" in retry
+    assert "Leave with /agents, choosing build." in retry and DESIGN in retry
+
+
+class _NotedBinding(ModelBinding):
+    """A served model with canned replies that keeps the activity lines a method writes through it."""
+
+    def chat(self, messages, *, timeout_s=None, **params) -> str:
+        replies = self.__dict__.setdefault("replies", [])
+        if PLAN_MARKER in messages[-1]["content"]:
+            return "[]"
+        return replies.pop(0) if len(replies) > 1 else replies[0]
+
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        self.__dict__.setdefault("notes", []).append((kind, text, failed))
+
+
+def test_a_refused_answer_is_on_the_activity_while_the_step_runs() -> None:
+    """The Activity says an answer was written again, and why, before the step settles, not only in its record."""
+    served = _NotedBinding(base_url="http://127.0.0.1:1", model="m")
+    served.__dict__["replies"] = [designed(LOUD), designed(skill("run-tests")), json.dumps(REVIEW)]
+    evolution.propose(NODES, (), ModelBindings(served=served), requests=(REQUEST,), entries=ENTRIES)
+    ((kind, text, failed),) = served.__dict__["notes"]
+    assert (kind, failed) == ("check", True)
+    assert text.startswith("answer 1 written again: the harness refused the entries: ")

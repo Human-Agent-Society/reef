@@ -461,6 +461,10 @@ class _BudgetedBinding(ModelBinding):
         """The provider response of the latest call, as the wrapped binding kept it."""
         return self._inner.last_response() if isinstance(self._inner, ModelBinding) else None
 
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """A method's own line in the step's activity, beside the lines the calls write."""
+        self._calls.note(kind, text, failed=failed)
+
     def _note_answer(self, entry: Mapping[str, Any]) -> None:
         """One activity line for a finished call: how long it took and its tokens, or its error."""
         seconds = entry.get("seconds", 0)
