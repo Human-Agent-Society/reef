@@ -87,6 +87,8 @@ ROUTE_KEYS = (
 BODY_MODEL_KEYS = ("model", "models")
 #: The providers an auxiliary task may keep: hermes runs both on the main model.
 MAIN_MODEL_PROVIDERS = ("auto", "main")
+#: The older compression keys hermes moves into ``auxiliary.compression`` (provider, model, base_url).
+COMPRESSION_KEYS = ("summary_base_url", "summary_model", "summary_provider")
 
 # hermes's boot scaffolds the home on every start: state directories, the
 # runtime and cache files, lock files beside the state store, and the seed
@@ -173,6 +175,11 @@ def check_model_route(config: dict[str, Any]) -> None:
     for key in MOA_KEYS:
         if is_set(moa.get(key)):
             raise RenderError(f"hermes composition must not set moa.{key}: {refusal}")
+    compression = section_of(config, "compression")
+    for key in COMPRESSION_KEYS:
+        value = compression.get(key)
+        if is_set(value) and not (key == "summary_provider" and value in MAIN_MODEL_PROVIDERS):
+            raise RenderError(f"hermes composition must not set compression.{key}: {refusal}")
     auxiliary = section_of(config, "auxiliary")
     if is_set(auxiliary.get("openrouter_model")):
         raise RenderError(f"hermes composition must not set auxiliary.openrouter_model: {refusal}")

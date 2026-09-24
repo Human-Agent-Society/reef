@@ -146,6 +146,10 @@ HERMES_REFUSED = [
         id="auxiliary-fallback-chain-key-name",
     ),
     pytest.param({"auxiliary": {"vision": {"api_key_env": "OPENROUTER_API_KEY"}}}, True, id="auxiliary-key-name"),
+    # The older compression keys, which hermes moves into auxiliary.compression.
+    pytest.param({"compression": {"summary_base_url": OTHER}}, True, id="compression-summary-base-url"),
+    pytest.param({"compression": {"summary_model": "m"}}, True, id="compression-summary-model"),
+    pytest.param({"compression": {"summary_provider": "openrouter"}}, True, id="compression-summary-provider"),
     pytest.param(
         {"curator": {"auxiliary": {"provider": "openrouter", "model": "m", "base_url": OTHER}}}, True, id="curator"
     ),
@@ -206,6 +210,7 @@ def test_hermes_keeps_the_settings_a_tree_tunes() -> None:
             "request_overrides": {"service_tier": "priority", "extra_body": {"provider": {"sort": "throughput"}}},
         },
         "curator": {"enabled": False},
+        "compression": {"summary_provider": "auto", "threshold": 0.5},
     }
     rendered = yaml.safe_load(render("hermes", [config(tuned)], bound=True)["hermes/config.yaml"])
     assert rendered["model"] == {
