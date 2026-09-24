@@ -158,13 +158,13 @@ def test_reads_and_retries_leave_store_ready_for_external_and_local_writes(tmp_p
         with pytest.raises(RecordConflict):
             first.append(replace(original, payload={"value": "changed"}))
 
-        second.compact("math", frozenset({"a"}))
-        assert first.get("math", "a") is None
+        second.record_consumption("math", frozenset({"a"}), receipt_id="skip", metadata={})
+        assert first.get("math", "a") == original
         first.append(item("c", "math"))
-        assert [record.agent_record_id for record in second.replay("math")] == ["b", "c"]
+        assert [record.agent_record_id for record in second.replay("math")] == ["a", "b", "c"]
 
     with SQLiteRecordStore(database) as recovered:
-        assert [record.agent_record_id for record in recovered.replay("math")] == ["b", "c"]
+        assert [record.agent_record_id for record in recovered.replay("math")] == ["a", "b", "c"]
 
 
 @pytest.mark.unit
@@ -204,253 +204,6 @@ def test_conflicting_retry_is_rejected_after_store_restart(tmp_path) -> None:
 
 
 @pytest.mark.unit
-def test_compact_hides_records_but_retains_retry_tombstones(tmp_path) -> None:
-    database = tmp_path / "records.sqlite3"
-    inference = item("inference", "math")
-    retained = item("retained", "math")
-    report = item("report", "math", RequestType.REPORT, references=("inference",))
-    with SQLiteRecordStore(database) as records:
-        for record in (inference, retained, report):
-            records.append(record)
-        records.compact("math", frozenset({"inference", "report"}))
-        assert [record.agent_record_id for record in records.replay("math")] == ["retained"]
-        assert records.get("math", "inference") is None
-        assert records.get("math", "retained") is not None
-        archived = records.get_for_audit("math", "inference")
-        assert archived is not None and archived.item == inference
-        assert archived.compacted_at is not None
-        assert records.get_for_audit("code", "inference") is None
-
-    with SQLiteRecordStore(database) as recovered:
-        assert recovered.append_result(inference).inserted is False
-        late = item("late", "math", RequestType.REPORT, references=("inference",))
-        assert recovered.append_result(late).inserted is False
-        assert recovered.count("math") == 1
-        assert recovered.get_for_audit("math", "inference") == archived
-        assert recovered.get_for_audit("math", "report").item == report
-        assert recovered.existing_receipt(inference).agent_record_id == inference.agent_record_id
-
-
-@pytest.mark.unit
-def test_compacted_record_id_rejects_a_retry_with_different_content(tmp_path) -> None:
-    database = tmp_path / "records.sqlite3"
-    original = AgentRecord.create(
-        agent_record_id="same",
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload={"value": "original"},
-        created_at=1.0,
-    )
-    conflicting = AgentRecord.create(
-        agent_record_id="same",
-        scenario="math",
-        request_type=RequestType.INFERENCE,
-        payload={"value": "changed"},
-        created_at=2.0,
-    )
-    with SQLiteRecordStore(database) as records:
-        records.append(original)
-        records.compact("math", frozenset({"same"}))
-
-    with SQLiteRecordStore(database) as recovered, pytest.raises(RecordConflict, match="same"):
-        recovered.append(conflicting)
-
-
-@pytest.mark.unit
-def test_discarded_report_keeps_the_stored_content_canonical() -> None:
-    records = SQLiteRecordStore()
-    records.append(item("inference", "math"))
-    stored = item("report", "math", RequestType.REPORT, references=("inference",))
-    records.append(stored)
-    records.compact("math", frozenset({"inference"}))
-
-    divergent = AgentRecord.create(
-        agent_record_id="report",
-        scenario="math",
-        request_type=RequestType.REPORT,
-        payload={"value": "changed"},
-        created_at=6.0,
-        references=("inference",),
-    )
-    with pytest.raises(RecordConflict, match="report"):
-        records.append(divergent)
-
-    assert records.get("math", "report") == stored
-    assert records.append_result(stored).inserted is False
-
-
-@pytest.mark.unit
-def test_compact_is_a_noop_for_empty_id_set() -> None:
-    records = SQLiteRecordStore()
-    records.append(item("a", "math"))
-    records.compact("math", frozenset())
-    assert records.count("math") == 1
-
-
-@pytest.mark.unit
-def test_compact_skips_unknown_ids_silently() -> None:
-    records = SQLiteRecordStore()
-    records.append(item("a", "math"))
-    records.compact("math", frozenset({"missing"}))
-    assert records.count("math") == 1
-
-
-@pytest.mark.unit
-def test_compact_fingerprints_large_id_sets_in_bounded_queries() -> None:
-    records = SQLiteRecordStore()
-    items = [item(f"record-{index}", "math") for index in range(1001)]
-    for record in items:
-        records.append(record)
-
-    records.compact("math", frozenset(record.agent_record_id for record in items))
-
-    assert records.count("math") == 0
-    assert records.append_result(items[-1]).inserted is False
-    archived = records.audit_page("math", limit=1001)
-    assert len(archived) == 1001
-    assert all(record.compacted_at is not None for record in archived)
-
-
-@pytest.mark.unit
-def test_compaction_receipt_is_atomic_with_retirement_and_persists(tmp_path) -> None:
-    database = tmp_path / "records.sqlite3"
-    with SQLiteRecordStore(database) as records:
-        records.append(item("inference", "math"))
-        records.append(item("report", "math", RequestType.REPORT, references=("inference",)))
-        records.compact(
-            "math",
-            frozenset({"inference", "report"}),
-            receipt_id="batch-1",
-            receipt_metadata={
-                "outcome": "stale",
-                "metrics": {
-                    "staleness/samples_dropped": 1,
-                    "staleness/source_agent_record_ids": ["inference"],
-                },
-            },
-        )
-        assert records.count("math") == 0
-
-    with SQLiteRecordStore(database) as recovered:
-        receipts = recovered.compaction_receipts("math")
-
-        assert len(receipts) == 1
-        assert receipts[0]["receipt_id"] == "batch-1"
-        assert receipts[0]["compacted_ids"] == ("inference", "report")
-        assert receipts[0]["metadata"] == {
-            "outcome": "stale",
-            "metrics": {
-                "staleness/samples_dropped": 1,
-                "staleness/source_agent_record_ids": ["inference"],
-            },
-        }
-        assert isinstance(receipts[0]["recorded_at"], float)
-        assert all(record.compacted_at is not None for record in recovered.audit_page("math"))
-
-
-@pytest.mark.unit
-def test_compaction_receipt_is_idempotent_and_conflicting_content_fails() -> None:
-    records = SQLiteRecordStore()
-    metadata = {"outcome": "stale", "metrics": {"staleness/samples_dropped": 1}}
-
-    records.compact("math", frozenset(), receipt_id="batch-1", receipt_metadata=metadata)
-    records.compact("math", frozenset(), receipt_id="batch-1", receipt_metadata=metadata)
-
-    assert len(records.compaction_receipts("math")) == 1
-    with pytest.raises(RecordConflict, match="different content"):
-        records.compact(
-            "math",
-            frozenset(),
-            receipt_id="batch-1",
-            receipt_metadata={"outcome": "stale", "metrics": {"staleness/samples_dropped": 2}},
-        )
-
-    records.compact(
-        "math",
-        frozenset({"other"}),
-        receipt_id="batch-1",
-        receipt_metadata=metadata,
-    )
-    assert len(records.compaction_receipts("math")) == 2
-
-
-@pytest.mark.unit
-def test_audit_reads_preserve_trace_content_without_reactivating_it() -> None:
-    trace = AgentRecord.create(
-        agent_record_id="trace",
-        scenario="code",
-        request_type=RequestType.INFERENCE,
-        created_at=10.0,
-        payload={
-            "messages": [{"role": "user", "content": "修复登录重试"}],
-            "response": {"choices": [{"message": {"role": "assistant", "content": "先复现失败。"}}]},
-        },
-        artifact_ref=ArtifactRef("artifact", "release", "initial"),
-    )
-    report = replace(item("feedback", "code", RequestType.REPORT, references=("trace",)), payload={"score": 0.2})
-    with SQLiteRecordStore() as records:
-        records.append(trace)
-        records.append(report)
-        records.compact("code", frozenset({"trace", "feedback"}))
-
-        page = records.audit_page("code")
-        assert [entry.item for entry in page] == [trace, report]
-        assert all(entry.compacted_at is not None for entry in page)
-        assert records.get_for_audit("code", "feedback").item.references == ("trace",)
-        assert records.count("code") == 0
-        assert records.replay("code") == ()
-        assert records.replay_page("code") == ()
-        assert records.get("code", "trace") is None
-        assert records.append_result(trace).inserted is False
-        assert records.append_result(item("late", "code", RequestType.REPORT, references=("trace",))).inserted is False
-        assert records.count("code") == 0
-
-
-@pytest.mark.unit
-def test_training_pages_skip_compacted_gaps_and_audit_pages_include_them() -> None:
-    with SQLiteRecordStore() as records:
-        for record in (
-            item("a", "code"),
-            item("other", "math"),
-            item("b", "code", RequestType.REPORT),
-            item("c", "code"),
-            item("d", "code"),
-            item("e", "code", RequestType.REPORT),
-        ):
-            records.append(record)
-        records.compact("code", frozenset({"a", "c", "other"}))
-        assert records.get("math", "other") is not None
-        first = records.replay_page("code", limit=1)
-        second = records.replay_page("code", after_sequence=first[0][0], limit=1)
-        assert [row.agent_record_id for _, row in first] == ["b"]
-        assert [row.agent_record_id for _, row in second] == ["d"]
-        assert [row.agent_record_id for row in records.replay("code", offset=1, limit=1)] == ["d"]
-        assert records.count("code") == 3
-        assert records.count("code", request_type=RequestType.INFERENCE) == 1
-        assert records.count("code", request_type=RequestType.REPORT, after_sequence=first[0][0]) == 1
-        audit_first = records.audit_page("code", limit=2)
-        audit_second = records.audit_page("code", after_sequence=audit_first[-1].sequence, limit=2)
-        assert [row.item.agent_record_id for row in audit_first] == ["a", "b"]
-        assert [row.item.agent_record_id for row in audit_second] == ["c", "d"]
-        assert audit_first[0].compacted_at is not None
-        assert audit_first[1].compacted_at is None
-        assert records.audit_page("missing") == ()
-
-
-@pytest.mark.unit
-def test_repeated_compaction_preserves_the_first_retirement_time(monkeypatch) -> None:
-    with SQLiteRecordStore() as records:
-        records.append(item("a", "math"))
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
-        records.compact("math", frozenset({"a"}))
-        first = records.get_for_audit("math", "a")
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 200.0)
-        records.compact("math", frozenset({"a"}))
-        assert records.get_for_audit("math", "a") == first
-        assert first.compacted_at == 100.0
-
-
-@pytest.mark.unit
 def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bodies(tmp_path) -> None:
     database = tmp_path / "legacy.sqlite3"
     with sqlite3.connect(database) as connection:
@@ -474,7 +227,7 @@ def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bod
         with SQLiteRecordStore(database) as records:
             assert records.get("math", "live") == item("live", "math")
             entry = records.get_for_audit("math", "live")
-            assert entry.sequence == 7 and entry.compacted_at is None
+            assert entry.sequence == 7
             assert records.get_for_audit("math", "deleted") is None
 
     # Concurrent openers must see one atomic, idempotent schema upgrade.
@@ -485,18 +238,19 @@ def test_old_schema_migrates_without_losing_live_records_or_reviving_deleted_bod
         assert records.append_result(late).inserted is False
         records.append(item("next", "math"))
         assert records.get_for_audit("math", "next").sequence > 7
-        records.compact("math", frozenset({"live"}))
+
     with SQLiteRecordStore(database) as records:
-        assert records.get("math", "live") is None
+        assert records.get("math", "live") == item("live", "math")
         assert records.get_for_audit("math", "live").item == item("live", "math")
         with closing(SQLiteScenarioStorage(tmp_path)) as factory:
-            assert factory.prune(days=7, max_bytes=1) == 1
+            assert factory.prune(days=7, max_bytes=1) == 2
         assert records.get_for_audit("math", "live") is None
-        assert records.get("math", "next") is not None
+        assert records.get("math", "next") is None
+        assert records.loss("math").record_count == 2
 
 
 @pytest.mark.unit
-def test_intermediate_schema_preserves_retirement_and_backfills_utf8_body_sizes(tmp_path, monkeypatch) -> None:
+def test_legacy_schema_migrates_consumption_and_backfills_utf8_body_sizes(tmp_path, monkeypatch) -> None:
     database = tmp_path / "legacy.sqlite3"
     legacy_database(database)
     payload_json = '{"text":"海"}'
@@ -515,15 +269,16 @@ def test_intermediate_schema_preserves_retirement_and_backfills_utf8_body_sizes(
     with SQLiteRecordStore(database) as records:
         retired = records.get_for_audit("math", "retired")
         assert retired.sequence == 7
-        assert retired.compacted_at == 100.0
+        assert records.consumption_receipts("math")[0]["consumed_ids"] == ("retired",)
         assert retired.item.payload == {"text": "海"}
         assert retired.item.references == ("起点",)
         assert retired.item.artifact_ref == ArtifactRef("内容", "发布", None)
-        assert records.replay("math") == (item("live", "math"),)
+        assert records.replay("math") == (retired.item, item("live", "math"))
 
     with SQLiteRecordStore(database) as records:
         monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 200.0)
         expected_bytes = len((payload_json + references_json + artifact_json).encode("utf-8"))
+        expected_bytes += len(b'{"value":"live"}[]')
         with closing(SQLiteScenarioStorage(tmp_path)) as factory:
             assert factory.prune(days=7, max_bytes=expected_bytes) == 0
             assert factory.prune(days=7, max_bytes=expected_bytes - 1) == 1
@@ -576,96 +331,6 @@ def test_failed_append_does_not_include_record_payload_in_error_text(tmp_path) -
 
         assert private_text not in str(failure.value)
         assert records.count("math") == 0
-
-
-@pytest.mark.unit
-def test_compaction_failure_rolls_back_body_state_hashes_and_receipt(tmp_path) -> None:
-    database = tmp_path / "records.sqlite3"
-    with SQLiteRecordStore(database) as records:
-        records.append(item("a", "math"))
-        with sqlite3.connect(database) as connection:
-            connection.execute(
-                "CREATE TRIGGER reject_compaction BEFORE UPDATE OF compacted_at ON agent_record "
-                "BEGIN SELECT RAISE(ABORT, 'injected compaction failure'); END"
-            )
-        with pytest.raises(IntegrityError, match="injected compaction failure"):
-            records.compact("math", frozenset({"a"}), receipt_id="batch", receipt_metadata={"outcome": "stale"})
-        assert records.get("math", "a") is not None
-        assert records.get_for_audit("math", "a").compacted_at is None
-        assert records.compaction_receipts("math") == ()
-        assert records.append_result(item("report", "math", RequestType.REPORT, references=("a",))).inserted is True
-
-
-@pytest.mark.unit
-def test_purge_is_bounded_scoped_and_preserves_retry_and_receipt_contracts(tmp_path, monkeypatch) -> None:
-    database = tmp_path / "records.sqlite3"
-    original = item("a", "math")
-    with SQLiteRecordStore(database) as records:
-        for record in (
-            original,
-            item("b", "math"),
-            item("newer", "math"),
-            item("active", "math"),
-            item("other", "code"),
-        ):
-            records.append(record)
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
-        records.compact("math", frozenset({"a", "b"}), receipt_id="batch", receipt_metadata={"outcome": "stale"})
-        records.compact("code", frozenset({"other"}))
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 200.0)
-        records.compact("math", frozenset({"newer"}))
-        assert records.purge_compacted("math", before=100.0) == 0
-        assert records.purge_compacted("math", before=150.0, limit=1) == 1
-        assert records.get_for_audit("math", "a") is None
-        assert records.get_for_audit("math", "b") is not None
-        assert records.purge_compacted("math", before=150.0) == 1
-        assert records.purge_compacted("math", before=150.0) == 0
-        assert records.get_for_audit("math", "newer") is not None
-        assert records.get("math", "active") is not None
-        assert records.get_for_audit("code", "other") is not None
-
-    with SQLiteRecordStore(database) as records:
-        assert records.append_result(original).inserted is False
-        assert records.existing_receipt(original).agent_record_id == "a"
-        with pytest.raises(RecordConflict):
-            records.append(replace(original, payload={"value": "changed"}))
-        assert records.append_result(item("late", "math", RequestType.REPORT, references=("a",))).inserted is False
-        assert records.get_for_audit("math", "a") is None
-        assert records.compaction_receipts("math")[0]["receipt_id"] == "batch"
-        assert records.count("math") == 1
-
-
-@pytest.mark.unit
-def test_append_sequence_is_not_reused_after_every_body_is_purged(tmp_path, monkeypatch) -> None:
-    database = tmp_path / "records.sqlite3"
-    with SQLiteRecordStore(database) as records:
-        records.append(item("old", "math"))
-        old_sequence = records.replay_page("math")[0][0]
-        monkeypatch.setattr("reef.storage.sql_records.time.time", lambda: 100.0)
-        records.compact("math", frozenset({"old"}))
-        assert records.purge_compacted("math", before=101.0) == 1
-        assert records.audit_page("math") == ()
-
-    with SQLiteRecordStore(database) as records:
-        records.append(item("new", "math"))
-        page = records.replay_page("math", after_sequence=old_sequence)
-        assert len(page) == 1
-        assert page[0][0] > old_sequence
-        assert page[0][1].agent_record_id == "new"
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("before", [float("nan"), float("inf"), float("-inf")])
-def test_purge_rejects_non_finite_cutoffs(before: float) -> None:
-    with SQLiteRecordStore() as records, pytest.raises(ValueError, match="finite"):
-        records.purge_compacted("math", before=before)
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("limit", [0, -1, True, 1.5])
-def test_purge_rejects_invalid_limits(limit) -> None:
-    with SQLiteRecordStore() as records, pytest.raises(ValueError, match="positive integer"):
-        records.purge_compacted("math", before=100.0, limit=limit)
 
 
 @pytest.mark.unit
@@ -767,3 +432,60 @@ def test_concurrent_openers_all_upgrade_a_rollback_mode_database(tmp_path) -> No
         legacy_database(database)
         with ThreadPoolExecutor(max_workers=12) as executor:
             tuple(executor.map(open_store, range(12)))  # raises if any opener saw "database is locked"
+
+
+@pytest.mark.parametrize(
+    "ids_json, metadata_json",
+    [('["source", "report"]', '{"outcome":"stale"}'), ("[]", '{"consumed_ids":["report","source"]}')],
+)
+def test_legacy_consumption_receipts_are_migrated_once(tmp_path, ids_json, metadata_json):
+    database = tmp_path / "legacy.sqlite3"
+    with SQLiteRecordStore(database):
+        pass
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            "CREATE TABLE compaction_receipts (scenario TEXT, receipt_id TEXT, compacted_ids_json TEXT, "
+            "metadata_json TEXT, recorded_at REAL, PRIMARY KEY (scenario, receipt_id, compacted_ids_json))"
+        )
+        connection.execute(
+            "INSERT INTO compaction_receipts VALUES ('math', 'batch-1', ?, ?, 123)",
+            (ids_json, metadata_json),
+        )
+    with SQLiteRecordStore(database) as records:
+        [receipt] = records.consumption_receipts("math")
+        assert receipt["consumed_ids"] == ("report", "source")
+        assert receipt["receipt_id"] == "legacy:batch-1"
+        assert receipt["recorded_at"] == 123
+
+
+def test_legacy_retirement_migration_pages_ids_and_rolls_back_as_one_upgrade(tmp_path):
+    database = tmp_path / "records.sqlite3"
+    with SQLiteRecordStore(database) as records:
+        records.append_many([item(str(index), "math") for index in range(600)])
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            "ALTER TABLE agent_record ADD COLUMN compacted_at REAL;"
+            "UPDATE agent_record SET compacted_at=1;"
+            "CREATE INDEX agent_record_active_sequence ON agent_record(sequence) WHERE compacted_at IS NULL;"
+            "CREATE TRIGGER reject_migration BEFORE INSERT ON record_consumption "
+            "BEGIN SELECT RAISE(ABORT, 'injected migration failure'); END;"
+        )
+    with pytest.raises(IntegrityError, match="injected migration failure"):
+        SQLiteRecordStore(database)
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM agent_record WHERE compacted_at=1").fetchone() == (600,)
+        assert connection.execute("SELECT COUNT(*) FROM record_consumption").fetchone() == (0,)
+        connection.execute("DROP TRIGGER reject_migration")
+    for _ in range(2):
+        with SQLiteRecordStore(database) as records:
+            assert records.count("math") == 600
+            receipts = records.consumption_receipts("math")
+            assert len(receipts) == 3
+            assert {key for receipt in receipts for key in receipt["consumed_ids"]} == {
+                str(index) for index in range(600)
+            }
+    with sqlite3.connect(database) as connection:
+        assert "compacted_at" not in {row[1] for row in connection.execute("PRAGMA table_info(agent_record)")}
+        assert "agent_record_active_sequence" not in {
+            row[1] for row in connection.execute("PRAGMA index_list(agent_record)")
+        }

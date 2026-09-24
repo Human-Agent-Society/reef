@@ -177,7 +177,7 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
     assert not processor.ready()
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
     # The report and its inference are released for compaction.
-    assert {"r1", "i1"} <= processor.retention_decision().releasable_agent_record_ids
+    assert {"r1", "i1"} <= processor.releasable_record_ids()
 
     # A later report that fits still trains.
     processor.ingest(short_request)
