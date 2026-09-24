@@ -362,6 +362,21 @@ def test_the_review_object_has_a_limits_key_where_the_harness_notes_send_points_
     assert '"limits"' not in _review_prompt(model)
 
 
+def test_the_prompt_names_only_the_reserved_entries_the_adapter_ships() -> None:
+    """pi's tree carries three entries Reef ships, claude's the /reefine command alone and terminus's none: the
+    prompt forbids touching only those, so a harness's prompt never names pi's extension API."""
+    for adapter, reserved in (
+        ("pi", "reef-pi-extension-api, reef-requests, reef-version-check"),
+        ("claude", "reef-requests"),
+    ):
+        model = Model(request_reply(RULES))
+        evolution.propose(NODES, (), model, requests=(REQUEST,), adapter=adapter)
+        assert f"Never touch these reserved entries: {reserved}.\n" in model.prompt
+    model = Model(request_reply(RULES))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="terminus")
+    assert "reserved entries" not in model.prompt and "reef-pi-extension-api" not in model.prompt
+
+
 @pytest.mark.parametrize("adapter", ["claude", "codex", "opencode", "hermes", "dsh", "terminus"])
 def test_off_pi_the_prompts_speak_of_entries_not_of_extensions_and_process_env(adapter: str) -> None:
     """Only a pi extension reads process.env: off pi the request prompt, its setup sentence and the review say how an

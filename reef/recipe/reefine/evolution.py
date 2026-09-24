@@ -26,8 +26,10 @@ from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, ships_requests
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
 from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.recipe.reefine.harness_facts import harness_facts
@@ -205,7 +207,7 @@ REQUEST_PROMPT = (
     "{kinds}"
     "{extensions}"
     "{platforms}"
-    "Never touch these reserved entries: {reserved}.\n\n"
+    "{reserved}"
     "{plan}"
     "{api}"
     "Respond with a JSON array and nothing else. Its first object is your design, points 1 to 4 in a few "
@@ -889,6 +891,18 @@ def client_text(request: Mapping[str, Any]) -> str:
     )
 
 
+def reserved_sentence(adapter: str) -> str:
+    """The prompt's sentence naming the reserved entries the adapter's tree carries, the ones Reef ships there (the
+    /reefine command, pi's update notice and extension API); none when it ships none, as on terminus."""
+    shipped = (
+        (REQUESTS_ENTRY_ID, ships_requests(adapter)),
+        (VERSION_CHECK_ENTRY_ID, ships_version_check(adapter)),
+        (API_SKILL_NAME, adapter == EXTENSION_ADAPTER),
+    )
+    reserved = sorted(entry for entry, ships in shipped if ships)
+    return f"Never touch these reserved entries: {', '.join(reserved)}.\n\n" if reserved else ""
+
+
 def _request_prompt(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
@@ -943,7 +957,7 @@ def _request_prompt(
         ),
         failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
         entries=entries_text,
-        reserved=", ".join(sorted(RESERVED_ENTRY_IDS)),
+        reserved=reserved_sentence(adapter),
         plan=(
             ""
             if not tool_steps
