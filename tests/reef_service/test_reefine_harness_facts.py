@@ -190,7 +190,10 @@ def test_an_opencode_agent_without_a_permission_map_is_written_again() -> None:
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
     assert [m.id for m in proposal.mutations] == ["chat-agent", "chat"]
     assert proposal.mutations[0].options["config"]["data"]["agent"]["chat"]["permission"] == mapped
-    reason = "agent 'chat' has no permission map, so it is offered every tool"
+    reason = (
+        "agent 'chat' has no permission map, so it is offered every tool: add agent.chat.permission, for example "
+        '{"*": "deny", "websearch": "allow"}'
+    )
     assert proposal.notes["dropped_attempts"] == [f"answer 1: {reason}"]
     (retry,) = [prompt for prompt in model.prompts if "could not be used" in prompt]
     assert reason in retry

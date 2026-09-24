@@ -335,7 +335,10 @@ REQUEST_ATTEMPTS = 3
 
 #: Why an answer is refused before its review on opencode: an agent it defines without a permission map is offered
 #: every tool, so a mode built on it restricts nothing.
-UNRESTRICTED_AGENT = "agent {name!r} has no permission map, so it is offered every tool"
+UNRESTRICTED_AGENT = (
+    "agent {name!r} has no permission map, so it is offered every tool: add agent.{name}.permission, for example "
+    '{{"*": "deny", "websearch": "allow"}}'
+)
 
 #: The prompt section a request gets again after a review found the previous answer short.
 RETRY_SECTION = (
@@ -502,16 +505,19 @@ def _answer_request(
     unusable: _Unusable | None = None
     # Why each answer that could not be used was dropped, so the page says what the kept one replaced.
     dropped_attempts: list[str] = []
+    # The last review's findings stay in every later retry: an unusable answer after it does not erase them.
+    reviewed = ""
     retry = ""
     attempt = 0
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
-        answer = _answer_once(prompt + retry, request, models, nodes, entries, own, kinds, adapter)
+        asked = prompt if not retry else prompt.rstrip("\n") + "\n\n" + retry
+        answer = _answer_once(asked, request, models, nodes, entries, own, kinds, adapter)
         if isinstance(answer, _Unusable):
             # A slip in the answer's form is asked again while attempts remain.
             unusable = answer
             dropped_attempts.append(f"answer {attempt}: {answer.reason}")
-            retry = RETRY_UNUSABLE_SECTION.format(reason=answer.reason)
+            retry = reviewed + RETRY_UNUSABLE_SECTION.format(reason=answer.reason)
             continue
         if isinstance(answer, StepProposal):
             # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
@@ -537,11 +543,12 @@ def _answer_request(
             # What remains is what the harness notes say no answer here can deliver: another answer changes nothing.
             break
         findings = [*review["uncovered"], *notes.get("dropped", ())]
-        retry = RETRY_SECTION.format(
+        reviewed = RETRY_SECTION.format(
             design=notes.get("design", "(none written)"),
             findings="\n".join(f"- {point}" for point in findings) or "- (the review named no point)",
             delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
         )
+        retry = reviewed
     if kept is None:
         if undelivered is not None:
             return _with_dropped(undelivered, dropped_attempts)

@@ -71,6 +71,18 @@ def test_an_answer_whose_json_does_not_parse_goes_on_to_the_next_attempt() -> No
     assert model.calls == 2
 
 
+def test_a_retry_after_an_unusable_answer_keeps_the_last_reviews_findings_after_a_blank_line() -> None:
+    """The review of answer 1 found a gap and answer 2 could not be used: answer 3 is asked with both, the review's
+    findings first, and the retry starts after a blank line instead of running on from the prompt."""
+    broken = '[{"design": "a "quoted" word"}, {"id": "x"'
+    model = Model(designed(skill("first")), json.dumps(SHORT), broken, designed(skill("third")), json.dumps(REVIEW))
+    evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    (third,) = [prompt for prompt in model.prompts if "could not be used" in prompt]
+    assert "The review found:\n- no retry\n" in third
+    assert third.index("The review found:") < third.index("could not be used")
+    assert "\n\nAn earlier answer to this request was reviewed and fell short." in third
+
+
 def test_a_review_reply_a_stray_quote_broke_is_asked_once_more() -> None:
     broken = '{"result": "complete", "covered": ["the "tests" run first"], "uncovered": []}'
     model = Model(designed(skill("run-tests")), broken, json.dumps(REVIEW))
