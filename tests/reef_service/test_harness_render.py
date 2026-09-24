@@ -285,7 +285,8 @@ def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
         "description: 09",
     ):
         assert command(f"---\n{header}\n---\n# Chat\n") == user_only + "# Chat\n"
-    assert command("---\n---\n# Chat\n") == user_only + "# Chat\n"
+    for empty in ("---\n---\n# Chat\n", "---\n~\n---\n# Chat\n"):
+        assert command(empty) == user_only + "# Chat\n"
     # dsh reads YAML 1.2, where Yes and 1:30 are strings, so the header does too, and every header is written so
     # that YAML 1.2 reads a string back where YAML 1.1 or 1.2 would read another type.
     for written in ("Yes", "off", "1:30", "=", "'09'", "'0o17'"):
@@ -294,6 +295,14 @@ def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
             f"---\nname: chat\ndescription: '{value}'\ndisable-model-invocation: true\n---\nBody\n"
         )
     assert command("1e3\n") == "---\nname: chat\ndescription: '1e3'\ndisable-model-invocation: true\n---\n1e3\n"
+    # A scalar tagged ! is a string to dsh, so the name true and the description 123 are kept, a list tagged ! is
+    # a list, and a quoted true with a newline is written quoted again.
+    assert command("---\nname: ! true\ndescription: ! 123\nx: ! [a]\n---\nBody\n") == (
+        "---\nname: 'true'\ndescription: '123'\nx:\n- a\ndisable-model-invocation: true\n---\nBody\n"
+    )
+    assert command('---\nname: chat\ndescription: ! "true\\n"\n---\nBody\n') == (
+        "---\nname: chat\ndescription: 'true\n\n  '\ndisable-model-invocation: true\n---\nBody\n"
+    )
     # dsh takes a fence line less one trailing carriage return, and a close at the end of the file.
     assert command("---\r\nname: chat\r\ndescription: Chat\r\n---\r\nBody\r\n") == user_only + "Body\r\n"
     assert command("---\nname: chat\ndescription: Chat\n---") == user_only
@@ -301,6 +310,7 @@ def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
         ("---\nname: [chat\n---\nBody\n", "not valid YAML"),
         ("---\nname: chat\ndescription: !!binary aGk=\n---\nBody\n", "not valid YAML: a value has the tag"),
         ("---\n- chat\n---\nBody\n", "not a YAML mapping"),
+        ("---\nname: chat\nx: " + "[" * 3000 + "]" * 3000 + "\n---\nBody\n", "nested too deeply"),
         ("---\nname: chat\ndescription: Chat\nBody\n", "never closes"),
         ("---\r\nname: chat\r\ndescription: Chat\r\nBody\r\n", "never closes"),
     ):

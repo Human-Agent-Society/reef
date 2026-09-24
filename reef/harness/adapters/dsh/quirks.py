@@ -20,13 +20,15 @@ dsh has. A command is always ``disable-model-invocation: true``, with no
 (``userInvocable``, ``disableModelInvocation``, ``modelInvocable``).
 Frontmatter the command text carries is read the way dsh reads it: between
 two ``---`` lines, either one allowed a trailing carriage return, as YAML
-1.2, where ``Yes`` and ``1:30`` are strings. It keeps its other keys; a
-``name`` or ``description`` dsh would not accept (absent, empty, not a
-string, or a name that is not a skill name) is written the way a missing
-one is; and frontmatter that does not parse, holds a tag other than
-``!!str`` or is not a mapping is refused at render. Every header is written
-so that YAML 1.2 reads each value back with its type: a string that YAML
-1.1 or 1.2 would read as a number, a boolean or a null is quoted.
+1.2, where ``Yes`` and ``1:30`` are strings and so is a value tagged ``!``
+or ``!!str``. It keeps its other keys; a ``name`` or ``description`` dsh
+would not accept (absent, empty, not a string, or a name that is not a
+skill name) is written the way a missing one is, and an empty or null block
+counts as a mapping with no keys; frontmatter that does not parse, nests
+too deeply to read, holds any other tag, or is any other value than a
+mapping is refused at render. Every header is written so that YAML 1.2
+reads each value back with its type: a string that YAML 1.1 or 1.2 would
+read as a number, a boolean or a null is quoted.
 
 The traps a mutated patch could reopen, in either profile: the session log
 must stay plain JSONL (the reader cannot parse zstd, and a compressed
@@ -105,9 +107,10 @@ class _Dumper(yaml.SafeDumper):
 
 
 class FrontmatterLoader(yaml.SafeLoader):
-    """``yaml.safe_load`` as dsh reads frontmatter: YAML 1.2 types for plain values, and no tag but ``!!str``.
+    """``yaml.safe_load`` as dsh reads frontmatter: YAML 1.2 types for plain values; no tag but ``!`` and ``!!str``.
 
-    A tagged value is refused because dsh types it where PyYAML may type it another way or fail.
+    A scalar tagged ``!`` is a string, as it is to dsh. Any other tag is refused because dsh types it where PyYAML
+    may type it another way or fail.
     """
 
     yaml_implicit_resolvers: ClassVar[dict[str, list[tuple[str, re.Pattern[str]]]]] = {}
@@ -117,6 +120,9 @@ class FrontmatterLoader(yaml.SafeLoader):
         event_tag = event.tag if isinstance(event, (yaml.ScalarEvent, yaml.CollectionStartEvent)) else None
         if event_tag not in (None, "!", "tag:yaml.org,2002:str"):
             raise yaml.MarkedYAMLError(problem=f"a value has the tag {event_tag!r}", problem_mark=event.start_mark)
+        if event_tag == "!" and isinstance(event, yaml.ScalarEvent):
+            # PyYAML resolves this scalar as a plain one, so ! true would be a boolean and ! "true\n" would fail.
+            event.tag = "tag:yaml.org,2002:str"
         return super().compose_node(parent, index)
 
     def construct_yaml_int(self, node: yaml.ScalarNode) -> int:
@@ -169,6 +175,9 @@ def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
             own = yaml.load("\n".join(lines[1:close]), Loader=FrontmatterLoader)
         except yaml.YAMLError as exc:
             raise RenderError(f"dsh command {path} has frontmatter that is not valid YAML: {exc}") from exc
+        except RecursionError as exc:
+            # PyYAML reads a nested value by recursion; the dump of a header that loads recurses less.
+            raise RenderError(f"dsh command {path} has frontmatter nested too deeply to read") from exc
         if own is not None and not isinstance(own, dict):
             raise RenderError(f"dsh command {path} has frontmatter that is not a YAML mapping")
         header, body = own or {}, "\n".join(lines[close + 1 :])

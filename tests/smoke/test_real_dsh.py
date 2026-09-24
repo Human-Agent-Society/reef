@@ -118,13 +118,14 @@ def test_real_dsh_runs_a_command_that_the_model_cannot_list() -> None:
     descriptor = get_adapter("dsh")
     # Each header after the first is one the adapter must repair or must not break: dsh ignores a camelCase
     # invocation key and a name or description that is not a string, reads Yes and 1:30 as strings where YAML 1.1
-    # does not, and allows \r\n after a fence.
+    # does not, reads a value tagged ! as a string, and allows \r\n after a fence.
     headers = {
         "marker": "---\nname: marker\ndescription: Reply with the reef marker\n---\n",
         "legacy": "---\nname: legacy\ndescription: Legacy keys\nuserInvocable: true\nmodelInvocable: false\n---\n",
         "yes": "---\nname: yes\ndescription: Yes\n---\n",
         "clock": "---\nname: clock\ndescription: 1:30\n---\n",
         "blank": "---\nname: 123\ndescription: ''\n---\n",
+        "bang": '---\nname: ! bang\ndescription: ! "true\\n"\n---\n',
         "crlf": "---\r\nname: crlf\r\ndescription: Windows line ends\r\n---\r\n",
     }
     try:

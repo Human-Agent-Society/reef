@@ -97,8 +97,10 @@ camelCase keys dsh refuses (``userInvocable``, ``disableModelInvocation``,
 always can. A ``name`` that is not a skill name, or a ``description`` that
 is empty or not a string, is written the way a missing one is, since dsh
 ignores the file otherwise, and every value is written so that YAML 1.2
-reads it back with its type. Frontmatter that does not parse, holds a tag
-other than ``!!str`` or is not a mapping is refused at render. A
+reads it back with its type. A value tagged ``!`` or ``!!str`` is a string,
+as it is to dsh, and an empty or null block counts as a mapping with no
+keys. Frontmatter that does not parse, nests too deeply to read, holds any
+other tag, or is any other value than a mapping is refused at render. A
 ``code_extension`` renders as a plugin module the patch layer inserts by
 relative path. The model binding declares an ``llm-pi-ai`` route whose key
 is named by ``apiKeyEnv`` and supplied through the ``env`` target, dsh's
