@@ -1149,12 +1149,11 @@ def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cle
     wrapper = _start_wrapper(tmp_path, _make_waiting_pi(tmp_path), compose, captures)
     temp = Path(json.loads((tmp_path / "agent.json").read_text())["dir"])
     assert temp.is_dir() and temp.name.startswith("reef-harness-")
-    assert temp.parent == cache_home / "reef-harness" / "sessions"
     os.kill(wrapper.pid, signum)
     assert wrapper.wait(timeout=30) == 128 + signum
     reef.close()
     assert (tmp_path / "signal").read_text() == str(int(signum))
-    assert not temp.exists()
+    assert not temp.exists() and temp.parent == cache_home / "reef-harness" / "sessions"
     (spooled,) = captures.glob("*.pending.json")
     assert [turn["receipt"] for turn in json.loads(spooled.read_text())["turns"]] == ["ask-receipt"]
 
