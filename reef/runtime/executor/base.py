@@ -45,13 +45,16 @@ class ExecutorConfig:
     """Worker topology and executor selection; workers define rank order.
 
     ``options`` contains backend-specific defaults. For Ray these are actor
-    options, overridden per worker by ``WorkerSpec.options``.
+    options, overridden per worker by ``WorkerSpec.options``. ``node_id``
+    names the cluster node every worker must be placed on, in the backend's
+    own node identity; executors without cluster placement reject it.
     """
 
     backend: str | type[Executor] = "auto"
     workers: tuple[WorkerSpec, ...] = ()
     options: Mapping[str, Any] = field(default_factory=dict)
     launch_timeout_s: float | None = 300.0
+    node_id: str | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.backend, (str, type)) or not self.backend:
@@ -64,6 +67,8 @@ class ExecutorConfig:
             raise TypeError("executor options must be a mapping")
         if self.launch_timeout_s is not None and self.launch_timeout_s <= 0:
             raise ValueError("executor launch_timeout_s must be positive or None")
+        if self.node_id is not None and (not isinstance(self.node_id, str) or not self.node_id):
+            raise TypeError("executor node_id must be a non-empty string or None")
         object.__setattr__(self, "workers", tuple(self.workers))
         object.__setattr__(self, "options", dict(self.options))
 

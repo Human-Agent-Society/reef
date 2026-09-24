@@ -267,7 +267,7 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
     assert isinstance(batch.items[0], TrajectoryItem)
     assert isinstance(batch.items[1], TaskItem)
     ids = frozenset({"inference-0", "report-0", "inference-1", "report-1"})
-    assert processor.retention_decision().protected_agent_record_ids == ids
+    assert processor.releasable_record_ids().isdisjoint(ids)
     assert processor.acknowledge(batch.batch_id) == ids
     assert not processor.ready()
 

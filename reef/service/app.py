@@ -24,7 +24,7 @@ async def _maintain_records(dispatcher: Dispatcher, retention: RecordRetention, 
         try:
             purged = await asyncio.to_thread(dispatcher.prune_record_archives, retention)
             if purged:
-                logger.info("purged %d compacted trace bodies under record retention limits", purged)
+                logger.warning("record capacity limit evicted %d bodies; training data may be incomplete", purged)
         except Exception:
             logger.exception("record retention failed; will retry on the next sweep")
         try:

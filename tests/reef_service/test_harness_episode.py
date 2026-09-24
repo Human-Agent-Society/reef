@@ -301,6 +301,27 @@ def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_p
     assert reader_for("deepseek-session-jsonl").format == "deepseek-session-jsonl"
 
 
+def test_deepseek_reader_lifts_each_events_data_so_the_final_assistant_text_is_found(tmp_path: Path) -> None:
+    """dsh wraps every event in {type, seq, time, data}; the scorers read a message at the top, as pi writes it."""
+    log = tmp_path / "slug" / "session-01" / "session.jsonl"
+    log.parent.mkdir(parents=True)
+    message = {
+        "role": "assistant",
+        "content": [{"type": "reasoning", "text": "run it"}, {"type": "text", "text": "The output:\n\nreef-ok"}],
+    }
+    log.write_text(
+        '{"type": "session", "version": 0}\n'
+        + json.dumps({"type": "turn/start", "seq": 0, "time": 1, "data": {"turn": 1}})
+        + "\n"
+        + json.dumps({"type": "assistant/message", "seq": 1, "time": 2, "data": {"turn": 1, "message": message}})
+        + "\n"
+    )
+    events = read_deepseek_session(tmp_path)
+    assert events[1] == {"type": "turn/start", "seq": 0, "time": 1, "turn": 1}
+    assert events[2]["message"] == message and "data" not in events[2]
+    assert final_assistant_text(events) == "The output:\n\nreef-ok"
+
+
 def test_hermes_reader_emits_a_session_event_then_one_event_per_message(tmp_path: Path) -> None:
     snapshot = {
         "session_id": "s1",
