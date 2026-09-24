@@ -28,6 +28,7 @@ from urllib.parse import quote, urlencode
 
 from reef.core.requirements import required_by
 from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
+from reef.harness.adapters import get_adapter
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
@@ -408,6 +409,9 @@ def _review(metrics: Mapping[str, Any]) -> str:
     if isinstance(review, Mapping):
         review_result = status_span(str(review.get("result", review.get("verdict")) or "unknown"))
         parts.append(f"<p>The proposer's review of its entries against the request: {review_result}</p>")
+        kept = kept_answer(notes)
+        if kept is not None:
+            parts.append(f"<p>{escape(kept)}; the others are in the step record</p>")
         parts.append("<h3>Covered</h3>" + _listed(_strings(review.get("covered")), "nothing listed as covered"))
         parts.append("<h3>Uncovered</h3>" + _listed(_strings(review.get("uncovered")), "nothing left uncovered"))
         limits = _strings(review.get("limits"))
@@ -534,6 +538,22 @@ def _refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
+def reef_installs(adapter: str) -> bool:
+    """Whether Reef installs ``adapter``'s harness with a wrapper that sets up and updates it; terminus, a batch
+    runner, has none: its tree is served by ``GET /reef/harness`` and a run's Harbor task holds what it needs."""
+    return get_adapter(adapter).install is not None
+
+
+def kept_answer(notes: Mapping[str, Any]) -> str | None:
+    """Which of the proposer's answers the step kept, when it wrote more than one and kept one: ``kept_attempt``,
+    or the last answer when the notes name none; nothing for a step whose answers all failed."""
+    attempts = notes.get("attempts")
+    if not isinstance(attempts, int) or attempts < 2 or notes.get("failure"):
+        return None
+    kept = notes.get("kept_attempt", attempts)
+    return f"Kept answer {kept} of {attempts}" if isinstance(kept, int) and 1 <= kept <= attempts else None
+
+
 def _setup(
     row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], adapter: str = "pi"
 ) -> str:
@@ -579,6 +599,8 @@ def _setup(
         )
     parts.append(
         f'<p class="note">reef-{escape(adapter)} setup lists these and runs a check only after you confirm it</p>'
+        if reef_installs(adapter)
+        else '<p class="note">these must hold in the Harbor task a run uses; nothing checks them</p>'
     )
     return "".join(parts) + tail
 

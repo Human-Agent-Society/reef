@@ -1484,15 +1484,20 @@ def _report_request(
     if uncovered:
         # After a rejection the checks decided; the review's points are notes on the change, not the cause.
         label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
-        print(f"reef-{adapter}: {label}: {'; '.join(uncovered)}")
+        print(f"reef-{adapter}: {label}: {_joined(uncovered)}")
     limits = _uncovered(rows[step], "limits")
     if limits:
-        print(f"reef-{adapter}: out of reach on this harness: {'; '.join(limits)}")
+        print(f"reef-{adapter}: out of reach on this harness: {_joined(limits)}")
     if selection_result in ("rejected", "skipped"):
         return 1
     release = str(rows[step].get("release_id") or "")
     needs_setup = bool(release) and _needs_setup(compose_dir, rows, release)
     return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result, needs_setup)
+
+
+def _joined(points: Sequence[str]) -> str:
+    """Review points on one line: each point's own final period dropped, so no '.;' sits between them."""
+    return "; ".join(point.rstrip().rstrip(".") for point in points)
 
 
 def _page_cache_dir() -> Path:

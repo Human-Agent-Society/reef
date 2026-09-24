@@ -1746,7 +1746,8 @@ def test_a_step_that_could_not_be_evaluated_and_a_limit_are_said_as_such(tmp_pat
         "reason": "candidate missed the floor on 1 of 1 tasks",
         "metrics": {"floor_score": 1},
     }
-    notes = {"review": {"result": "partial", "covered": [], "uncovered": [], "limits": ["no tool lockout"]}}
+    limits = ["no tool lockout.", "a typed skill still loads."]
+    notes = {"review": {"result": "partial", "covered": [], "uncovered": [], "limits": limits}}
     rejected = _step_row(
         "rel-0", {"selected": False, "selection": selection, "candidate_episodes": [failed], "proposal_notes": notes}
     )
@@ -1761,7 +1762,8 @@ def test_a_step_that_could_not_be_evaluated_and_a_limit_are_said_as_such(tmp_pat
         "reef-claude: 'text me when you are blocked' could not be evaluated: harness binary reef-terminus not found. "
         "Nothing judged the change and nothing was published; fix that and ask again."
     )
-    assert out[2] == "reef-claude: out of reach on this harness: no tool lockout"
+    # Each point's own final period is dropped, so none sits before the separator.
+    assert out[2] == "reef-claude: out of reach on this harness: no tool lockout; a typed skill still loads"
 
 
 def _claude_ask_tree(tmp_path: Path, port: int) -> tuple[str, Path]:

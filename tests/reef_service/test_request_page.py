@@ -330,6 +330,39 @@ def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_s
     assert "<code>reef-dsh setup, then reef-dsh update</code>" in result and "DEEPSEEK_API_KEY" in result
 
 
+def test_on_terminus_the_pages_name_no_wrapper_command() -> None:
+    """terminus has no install and no wrapper: a published release says GET /reef/harness serves it, the Setup note
+    says its items must hold in the Harbor task, and no page names reef-terminus setup or update."""
+    requires = [{"name": "task-network", "kind": "service", "prompt": "The task allows network access"}]
+    metrics = _answered(selected=True, published=True, mutation=MUTATION)
+    metrics["training_request"]["requires"] = requires
+    step = _row(metrics)
+    page = build_request_page(_record(), [CREATION, step], now=1_100.0, adapter="terminus")
+    result = _section(page, "Result")
+    assert "GET /reef/harness serves it from now on" in result and "<code>GET /reef/harness</code>" in result
+    assert "must hold in the Harbor task" in result and "current session" not in result
+    version = build_release_page(1, [CREATION, step], adapter="terminus")
+    assert "these must hold in the Harbor task a run uses; nothing checks them" in version
+    for text in (page, version):
+        assert "reef-terminus setup" not in text and "reef-terminus update" not in text
+
+
+def test_both_pages_say_which_answer_the_step_kept() -> None:
+    """A step that wrote three answers and kept the first says so on both pages; one that kept its last answer
+    names it the same way, and a single answer says nothing."""
+    review = {"result": "partial", "covered": ["chat"], "uncovered": ["no off"]}
+    for notes, words in (
+        ({"review": review, "attempts": 3, "kept_attempt": 1}, "Kept answer 1 of 3"),
+        ({"review": review, "attempts": 2}, "Kept answer 2 of 2"),
+        ({"review": review}, None),
+    ):
+        row = _row(_answered(selected=True, published=True, mutation=MUTATION, proposal_notes=notes))
+        request = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Review")
+        version = _section(build_release_page(1, [CREATION, row]), "Review")
+        for text in (request, version):
+            assert (words in text) if words else ("Kept answer" not in text)
+
+
 def test_a_step_that_failed_during_its_evaluation_says_so_and_shows_what_it_proposed() -> None:
     """A skip row whose candidate reached its evaluation says where the step failed, on both pages, and lists the
     change that was proposed instead of saying no change was produced."""

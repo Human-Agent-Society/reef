@@ -28,7 +28,16 @@ from reef.core.requirements import required_by
 from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
 from reef.harness.episodes.version_check import ships_version_check
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
-from reef.service.release_page import design_sections, failed_words, mutations_of, result_of, served_step, step_href
+from reef.service.release_page import (
+    design_sections,
+    failed_words,
+    kept_answer,
+    mutations_of,
+    reef_installs,
+    result_of,
+    served_step,
+    step_href,
+)
 from reef.train.cordis_backend.contracts import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -221,10 +230,14 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
     )
 
 
-def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[str, object]) -> str:
+def meaning(
+    selection_result: str, row: Mapping[str, object], metrics: Mapping[str, object], adapter: str = "pi"
+) -> str:
     """What the result means for the person who asked, with the next action; the words the session prints."""
     release = str(row.get("release_id") or "-")[:8]
     if selection_result == "selected":
+        if not reef_installs(adapter):
+            return f"Published as release {release}. GET /reef/harness serves it from now on."
         return f"Published as release {release}. Your current session keeps its installed harness until you choose to update."
     if selection_result == "pending":
         return (
@@ -274,6 +287,16 @@ def next_action(
     their names): the install refuses a release whose items are not set up."""
     if selection_result not in ("pending", "selected"):
         return None
+    if not reef_installs(adapter):
+        # A batch runner with no wrapper: nothing to set up or update on this machine.
+        if selection_result != "selected":
+            return None
+        return (
+            "Run it",
+            "GET /reef/harness",
+            "It serves this release's tree now; a run gets it from there. What the release requires must hold in "
+            "the Harbor task the run uses.",
+        )
     if ships_version_check(adapter):
         return (
             "Read this page, then install" if selection_result == "pending" else "Install when ready",
@@ -313,7 +336,7 @@ def result_html(
     selection_result = result_of(row, rows)
     parts = [
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
-        f"<p>{escape(meaning(selection_result, row, metrics))}</p></div>",
+        f"<p>{escape(meaning(selection_result, row, metrics, adapter))}</p></div>",
         '<dl class="fact-list">',
         f"<div><dt>Version</dt><dd>v{step}</dd></div>",
         f'<div><dt>Release</dt><dd class="id">{escape(row.get("release_id"))}</dd></div>',
@@ -398,9 +421,11 @@ def review_html(metrics: Mapping[str, object], rejected: bool = False) -> str:
         if reach
         else ""
     )
+    kept = kept_answer(notes)
     return (
         f'<section class="card review-card">\n<h2>Review</h2>\n<p>Coverage of the request: '
         f'{status_span(str(review.get("result", review.get("verdict")) or "unknown"))}</p>\n'
+        + ("" if kept is None else f"<p>{escape(kept)}; the others are in the step record.</p>\n")
         + (
             (
                 "<h3>Review notes</h3><p>The checks decided this result; these are the review's notes on the change."
