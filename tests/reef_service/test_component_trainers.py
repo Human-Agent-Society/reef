@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import socket
 import threading
 import time
 import uuid
@@ -11,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from aiohttp.test_utils import TestServer
 
 from reef.artifact import Artifact, ArtifactNotFound, ArtifactRef, InMemoryRepositoryBackend
 from reef.artifact.release_chain import ArtifactReleaseChain
@@ -25,6 +28,7 @@ from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError
 from reef.scenario import Scenario, StaleTrainingResultError
 from reef.scenario.scenario import validate_component_trainers
+from reef.service.app import create_app
 from reef.service.request_service import RequestService
 from reef.storage.commits import (
     SCENARIO_METADATA_KEY,
@@ -268,6 +272,7 @@ def _dispatcher(
     hybrid_components: frozenset[str] = frozenset(),
     experiment_tracker: ExperimentTracker | None = None,
     training: StubTrainingRuntime | None = None,
+    hold_local_cycles: bool = False,
 ) -> tuple[Dispatcher, dict[str, _ComponentBackend]]:
     initial = tmp_path / "initial"
     if not initial.exists():
@@ -295,6 +300,7 @@ def _dispatcher(
         agent_record_dir=records,
         scenario_storage=SQLiteScenarioStorage(records),
         experiment_tracker=experiment_tracker,
+        hold_local_cycles=hold_local_cycles,
     )
     return dispatcher, backends
 
@@ -691,6 +697,90 @@ def test_a_harness_backlog_is_kept_for_the_next_start_when_the_service_stops(tmp
         assert backends[HARNESS].prepared == 2 and trained == [HARNESS, HARNESS]
     finally:
         restarted.close()
+
+
+@pytest.mark.unit
+def test_held_local_cycles_run_nothing_until_the_service_answers(tmp_path: Path) -> None:
+    """A service whose recipe calls itself holds its local cycles while it starts: a harness step woken by the
+    preload or by a record would fail its model calls into a skip that consumes its batch."""
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path), hold_local_cycles=True)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        dispatcher._preload_scenarios(("agent",))
+        for record in _records(2):
+            dispatcher.accept_record(record)
+        time.sleep(0.5)
+        assert backends[HARNESS].prepared == 0
+        dispatcher.open_local_cycles()
+        deadline = time.monotonic() + 10
+        while backends[HARNESS].prepared < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+        trained = [row["component"] for row in scenario.releases() if row["operation"] == "training"]
+        assert backends[HARNESS].prepared == 2 and trained == [HARNESS, HARNESS]
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_the_app_opens_held_local_cycles_once_it_listens(tmp_path: Path) -> None:
+    dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path), hold_local_cycles=True)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        app = create_app(dispatcher, open_local_cycles_at=f"http://127.0.0.1:{port}")
+
+        async def serve() -> None:
+            server = TestServer(app, host="127.0.0.1", port=port)
+            await server.start_server()
+            try:
+                deadline = time.monotonic() + 10
+                while backends[HARNESS].prepared == 0 and time.monotonic() < deadline:
+                    await asyncio.sleep(0.05)
+            finally:
+                await server.close()
+
+        asyncio.run(serve())
+        assert backends[HARNESS].prepared == 1
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_an_instance_parked_while_its_cycle_lock_is_held_closes_when_the_holder_lets_go(tmp_path: Path) -> None:
+    """A reload lands while a colocated job holds every cycle lock: the instance it replaced closes when the job's
+    turn ends, not at shutdown."""
+    backends = {
+        WEIGHTS: _ColocatedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        closed: list[bool] = []
+        close = scenario.close
+
+        def observed_close() -> None:
+            closed.append(True)
+            close()
+
+        scenario.close = observed_close  # type: ignore[method-assign]
+        with dispatcher.dispatched_turn(scenario, WEIGHTS):
+            dispatcher._registry.reload("agent")
+            assert closed == []
+        assert closed == [True]
+        with dispatcher._training.lock:
+            assert dispatcher._training.replaced.get("agent") in (None, [])
+    finally:
+        dispatcher.close()
 
 
 @pytest.mark.unit

@@ -125,6 +125,8 @@ class _LifecycleState:
     closed: Event = field(default_factory=Event)
     #: The service is stopping: local cycles start no more and commit nothing (see ``stop_local_cycles``).
     local_cycles_stopped: Event = field(default_factory=Event)
+    #: Local cycles may run: set at once, or once the service answers (see ``open_local_cycles``).
+    local_cycles_open: Event = field(default_factory=Event)
     preload_thread: Thread | None = None
     metrics_thread: Thread | None = None
 
@@ -198,7 +200,10 @@ class Dispatcher:
         allow_implicit_creation: bool = True,
         experiment_tracker: ExperimentTracker | None = None,
         scenario_storage: ScenarioStorage,
+        hold_local_cycles: bool = False,
     ) -> None:
+        """``hold_local_cycles``: run no local cycle until :meth:`open_local_cycles`, for a service whose recipe
+        calls this same service, which does not answer yet while the dispatcher starts."""
         self._recipe = recipe
         self._storage = scenario_storage
         self._record_retention_lock = Lock()
@@ -217,6 +222,8 @@ class Dispatcher:
         self._publication = _PublicationState()
         self._training = _TrainingState()
         self._lifecycle = _LifecycleState()
+        if not hold_local_cycles:
+            self._lifecycle.local_cycles_open.set()
         if isinstance(backend_factory, EnumerableRepositoryBackendFactory):
             self._lifecycle.preload_thread = Thread(
                 target=self._preload_scenarios,
@@ -805,6 +812,10 @@ class Dispatcher:
         finally:
             self._close_replaced(scenario)
 
+    def _local_cycles_run(self) -> bool:
+        """Whether a local cycle may start: the service answers and is not stopping."""
+        return self._lifecycle.local_cycles_open.is_set() and not self._lifecycle.local_cycles_stopped.is_set()
+
     def retire_replaced(self, instance: Scenario) -> None:
         """A reload replaced ``instance``: close it now, or when the local cycle running on it ends."""
         with self._training.lock:
@@ -819,15 +830,21 @@ class Dispatcher:
         reload after a failed commit may land during one, must not.
         """
         lock = self._local_cycle_lock(scenario)
-        if not lock.acquire(blocking=False):
-            return
-        try:
+        while True:
+            if not lock.acquire(blocking=False):
+                # Whoever holds it closes what is parked when it lets go: a cycle, a dispatched turn, or this loop.
+                return
+            try:
+                with self._training.lock:
+                    replaced = self._training.replaced.pop(scenario, [])
+                for instance in replaced:
+                    instance.close()
+            finally:
+                lock.release()
             with self._training.lock:
-                replaced = self._training.replaced.pop(scenario, [])
-            for instance in replaced:
-                instance.close()
-        finally:
-            lock.release()
+                # An instance parked while this loop held the lock found it taken: close it too.
+                if not self._training.replaced.get(scenario):
+                    return
 
     def _stale_refusals_total(self, scenario: str, component: str | None) -> int:
         with self._training.lock:
@@ -864,7 +881,7 @@ class Dispatcher:
             # A dispatched job waiting for its turn goes before the next cycle; it wakes the workers after.
             while (
                 not self._training.turn_waiting.is_set()
-                and not self._lifecycle.local_cycles_stopped.is_set()
+                and self._local_cycles_run()
                 and self._process_local_backend_step(scenario, component)
             ):
                 pass
@@ -971,7 +988,7 @@ class Dispatcher:
         # each refusal threw away a full candidate evaluation. A dispatched
         # commit still lands meanwhile; the stale policy answers it.
         with self._local_cycle(scenario):
-            if self._lifecycle.local_cycles_stopped.is_set():
+            if not self._local_cycles_run():
                 return False
             loaded = self._registry.get_optional(scenario)
             if loaded is None:
@@ -1244,6 +1261,9 @@ class Dispatcher:
         with self._training.lock:
             names.update(self._training.local_cycle_locks)
         names.add(current.name)
+        # Registered first, so it runs once every cycle lock is released: what a reload parked meanwhile closes.
+        for name in sorted(names):
+            turn.callback(self._close_replaced, name)
         self._training.turn_waiting.set()
         try:
             for name in sorted(names):
@@ -1483,6 +1503,12 @@ class Dispatcher:
         return {} if status is None else {self._recipe.name: status}
 
     # -- Lifecycle -------------------------------------------------------
+
+    def open_local_cycles(self) -> None:
+        """Let local cycles run, and wake every loaded scenario's workers for the rows they hold."""
+        self._lifecycle.local_cycles_open.set()
+        for current in self._registry.loaded_scenarios():
+            self._wake_training(current)
 
     def stop_local_cycles(self) -> None:
         """Local cycles start no more, and one that ends from now on commits nothing; its rows wait for the next start.

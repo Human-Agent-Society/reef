@@ -270,7 +270,11 @@ def _served_url(host: str, port: int) -> str:
 
 
 def build_dispatcher(
-    settings: ServiceConfig, *, environ: Mapping[str, str] | None = None, connector: Any = None
+    settings: ServiceConfig,
+    *,
+    environ: Mapping[str, str] | None = None,
+    connector: Any = None,
+    hold_local_cycles: bool = False,
 ) -> Dispatcher:
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
@@ -318,6 +322,7 @@ def build_dispatcher(
             scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
+            hold_local_cycles=hold_local_cycles,
         )
     except BaseException:
         if scenario_storage is not None:
@@ -340,7 +345,9 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
         max_s=settings.inference_retry_max_s,
         timeout_s=settings.inference_retry_timeout_s,
     )
-    dispatcher = build_dispatcher(settings, environ=environ, connector=connector)
+    # A recipe's model calls come back to this service, which answers only once the app listens: its local
+    # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
+    dispatcher = build_dispatcher(settings, environ=environ, connector=connector, hold_local_cycles=True)
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
@@ -351,6 +358,7 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
             inference_retry_policy=retry_policy,
             close_dispatcher=True,
             record_retention=record_retention,
+            open_local_cycles_at=_served_url(settings.host, settings.port),
         )
     except BaseException:
         with suppress(Exception):
