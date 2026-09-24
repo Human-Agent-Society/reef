@@ -949,8 +949,8 @@ step holds this request, ``started_at``, ``episodes_total``,
 empty otherwise) from the backend's progress. The phase is what the pi
 extension's spinner names while the step runs, and opening the spinner lists
 the latest four activity lines. Unlike the two pages this is
-an ordinary route: it reads the headers alone, and a ``?token=`` is HTTP
-401. An unknown id, or one that is not a training instruction, is HTTP 404
+an ordinary route: it reads the headers alone, and a ``?key=`` or a
+``?token=`` is HTTP 401. An unknown id, or one that is not a training instruction, is HTTP 404
 naming it.
 
 Evaluation metadata uses ``evaluation``, ``evaluation_sides``,
@@ -962,18 +962,23 @@ phase ``evaluating``. Reviews and settled proposals store their outcome under
 for existing clients.
 
 Both pages are links a person opens in a browser, which sends no header, so
-they also take the scenario and the token as query parameters,
-``?scenario=<name>&token=<token>``, in place of ``x-reef-scenario`` and
+they also take the scenario and a credential as query parameters,
+``?scenario=<name>&key=<page key>``, in place of ``x-reef-scenario`` and
 ``Authorization: Bearer``; a header wins when present, and each page's links
-to the other carry the parameters it was opened with.
-The token then sits in the URL, in the browser's history and in whatever
-logs request lines, so a deployment that hands out such links is a local
-one. Every other route reads the headers alone; a ``?token=`` elsewhere is
-HTTP 401.
+to the other carry the parameters it was opened with. The page key is the
+HMAC SHA-256 of ``reef-page``, a newline and the scenario name, keyed by the
+SHA-256 digest of the token, as hex (``reef.core.page_key.page_key``): it
+opens these two pages of that one scenario and no other route, a request
+whose ``x-reef-scenario`` header names another scenario is HTTP 401, and the
+token cannot be read back from it. The links ``reef-<adapter>`` and pi's
+extension print carry it, since a session's model reads them. The pages
+still take ``?token=<token>``, which then sits in the URL, in the browser's
+history and in whatever logs request lines. Every other route reads the
+headers alone; a ``?key=`` or a ``?token=`` elsewhere is HTTP 401.
 
 .. code:: text
 
-   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&token=<token>
+   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&key=<page key>
 
 Retained step files
 ~~~~~~~~~~~~~~~~~~~
@@ -1058,7 +1063,7 @@ Status codes
 |        | declared schema                                             |
 +--------+-------------------------------------------------------------+
 | 401    | missing or wrong bearer token; the two harness pages also   |
-|        | read ``?token=`` (see Request page)                         |
+|        | read ``?key=`` and ``?token=`` (see Request page)           |
 +--------+-------------------------------------------------------------+
 | 403    | relayed from the upstream provider. Reef issues none of its |
 |        | own: an unaccepted token is 401, and per-scenario           |

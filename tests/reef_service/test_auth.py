@@ -25,6 +25,7 @@ def _make_client(tokens) -> TestClient:
     app.router.add_post("/reef/harness/requests/{record_id}/page", _ok)
     app.router.add_get("/reef/harness/releases", _ok)
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/records", _ok)
+    app.router.add_get("/reef/harness/requests/{record_id}/progress", _ok)
     return TestClient(TestServer(app))
 
 
@@ -136,5 +137,45 @@ def test_the_authorization_header_wins_over_the_query_token() -> None:
             assert resp.status == 401
             resp = await client.get(path, params={"token": "nope"}, headers={"Authorization": "Bearer secret"})
             assert resp.status == 200
+
+    asyncio.run(run())
+
+
+def test_a_page_key_opens_the_two_pages_of_its_scenario_and_nothing_else() -> None:
+    """The links a session's model reads carry the scenario's page key, never the token: the key opens that
+    scenario's request and step pages, and 401s on another scenario and on every other route."""
+    from reef.core.page_key import page_key
+
+    async def run() -> None:
+        client = _make_client(["old", "secret"])
+        key = page_key("secret", "mine")
+        async with client:
+            for path in ("/reef/harness/requests/3f1c2a9d0b7e/page", "/reef/harness/releases/3/page"):
+                resp = await client.get(path, params={"scenario": "mine", "key": key})
+                assert resp.status == 200, path
+                resp = await client.get(path, params={"scenario": "mine", "key": page_key("old", "mine")})
+                assert resp.status == 200, path
+                # Another scenario, by the query or by the header the page would render instead.
+                resp = await client.get(path, params={"scenario": "theirs", "key": key})
+                assert resp.status == 401, path
+                resp = await client.get(
+                    path, params={"scenario": "mine", "key": key}, headers={"x-reef-scenario": "b"}
+                )
+                assert resp.status == 401, path
+                for params in ({"key": key}, {"scenario": "mine", "key": page_key("nope", "mine")}):
+                    resp = await client.get(path, params=params)
+                    assert resp.status == 401, path
+            for path in (
+                "/protected",
+                "/reef/harness/releases",
+                "/reef/harness/releases/3/records",
+                "/reef/harness/requests/3f1c2a9d0b7e/progress",
+            ):
+                resp = await client.get(path, params={"scenario": "mine", "key": key})
+                assert resp.status == 401, path
+            resp = await client.post(
+                "/reef/harness/requests/3f1c2a9d0b7e/page", params={"scenario": "mine", "key": key}
+            )
+            assert resp.status == 401
 
     asyncio.run(run())

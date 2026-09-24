@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 import yaml
 
+from reef.core.page_key import page_key
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.client.wrapper import (
     harness,
@@ -1192,7 +1193,7 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     out = capsys.readouterr().out.splitlines()
     assert out[-3] == "reef-pi: training request q-1 accepted"
     # The link to the request's page follows, with the scenario and the shell's token as query parameters.
-    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=tok"
+    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={page_key('tok', 'ask-scenario')}"
     assert out[-2] == f"reef-pi: watch it here: {link}"
     assert out[-1] == "reef-pi: reef is running the step; add --wait to stay here, or check /versions later"
 
@@ -1473,11 +1474,11 @@ def test_harness_wait_prints_the_result_line_and_exits_by_it(tmp_path, capsys, r
     upstream = f"http://127.0.0.1:{reef.port}"
     assert out[:3] == [
         "reef-pi: training request q-1 accepted",
-        f"reef-pi: watch it here: {upstream}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=dummy",
+        f"reef-pi: watch it here: {upstream}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={page_key('dummy', 'ask-scenario')}",
         "reef-pi: reef is running the step; waiting up to 5 s for its result",
     ]
     # The pending line names the step's page link, the scenario and the token as query parameters.
-    page = f"{upstream}/reef/harness/releases/1/page?scenario=ask-scenario&token=dummy"
+    page = f"{upstream}/reef/harness/releases/1/page?scenario=ask-scenario&key={page_key('dummy', 'ask-scenario')}"
     # Without a terminal (pytest's stdin is none) the next step is printed as commands, never asked.
     assert out[3:] == [line.replace("{page}", page) for line in lines]
     assert [call["path"] for call in reef.seen] == ["/reef/train", "/reef/harness/releases"]
@@ -1645,7 +1646,7 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     out = capsys.readouterr().out.splitlines()
     assert out[3] == "reef-pi: no result yet for 'text me' after 0.05 s; /versions shows it when it settles"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 2
-    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&token=dummy"
+    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={page_key('dummy', 'ask-scenario')}"
     assert out[-3:] == [
         "reef-pi: training request q-1 accepted",
         f"reef-pi: watch it here: {link}",
@@ -1700,7 +1701,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
 @pytest.mark.unit
 def test_a_wait_on_a_running_step_names_its_phase_and_its_time_so_far(tmp_path, capsys) -> None:
     """Each wait on a running step ends with the phase and the time the step has run, which grows between waits, so
-    a harness that stops a repeated identical call never reads the waits as a loop."""
+    a harness that stops a repeated identical call never reads the waits as a loop; the link holds no token."""
     rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     progress = {"state": "evaluating", "settled": False, "started_at": time.time() - 125}
@@ -1716,6 +1717,7 @@ def test_a_wait_on_a_running_step_names_its_phase_and_its_time_so_far(tmp_path, 
         r"reef-claude wait q-1 waits again",
         out[-1],
     ), out[-1]
+    assert not any("token=" in line or "dummy" in line for line in out)
 
 
 @pytest.mark.unit
@@ -2998,7 +3000,7 @@ def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, ca
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
     assert any(line.startswith("ok  release") and "rel-1 installed, the served head" in line for line in out)
-    page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&token=dummy"
+    page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&key={page_key('dummy', 'doc-scenario')}"
     assert out[-1].startswith("ok  review") and out[-1].endswith(f"rel-2222 waits for your review: {page}")
     reef.close()
 

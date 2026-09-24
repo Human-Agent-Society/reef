@@ -7,6 +7,8 @@ from collections.abc import Iterable
 
 from aiohttp import web
 
+from reef.core.page_key import page_key_for_digest
+
 
 def normalize_tokens(tokens: str | Iterable[str] | None) -> frozenset[str]:
     """Coerce a configured token value into the set of accepted Bearer tokens.
@@ -33,7 +35,7 @@ def _digest(token: str) -> bytes:
     return hashlib.sha256(token.encode("utf-8")).digest()
 
 
-#: The harness pages a person opens by a link: the only routes that read the token from the query string.
+#: The harness pages a person opens by a link: the only routes that read a credential from the query string.
 PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|releases/\d{1,9})/page$")
 
 
@@ -46,13 +48,18 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
     authorization is the gateway's job, not Reef's. Error translation lives in
     :mod:`reef.service.errors`.
 
-    The two harness pages (``PAGE_ROUTES``) also accept the token as
-    ``?token=`` on a GET that carries no Authorization header: they are links
-    a person opens in a browser, which cannot send the header. The token then
-    sits in the URL, in the browser's history and in whatever logs request
-    lines, so the deployment that hands out such links is a local one, as the
-    profiles that print them are. Every other route, and any request that
-    carries the header, is judged by the header alone.
+    The two harness pages (``PAGE_ROUTES``) also accept a credential in the
+    query on a GET that carries no Authorization header: they are links a
+    person opens in a browser, which cannot send the header. ``?key=`` is the
+    page key of the query's ``scenario`` (:mod:`reef.core.page_key`) for an
+    accepted token: it opens those two pages of that scenario alone, a
+    request whose ``x-reef-scenario`` header names another scenario is
+    refused, and the token cannot be read back from it, so the links the
+    harness wrapper and pi's extension print, which a session's model reads,
+    carry it. ``?token=`` still opens them too; that token sits in the URL,
+    in the browser's history and in whatever logs request lines. Every other
+    route, and any request that carries the header, is judged by the header
+    alone.
     """
 
     # Compare digests in constant time so the response time leaks nothing
@@ -73,7 +80,27 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
             return request.query.get("token") or None
         return None
 
+    def _page_key_opens(request: web.Request) -> bool:
+        """Whether ``?key=`` on a page GET with no Authorization header is the page key of the query's scenario."""
+        if "Authorization" in request.headers or request.method != "GET" or not PAGE_ROUTES.match(request.path):
+            return False
+        key = request.query.get("key") or ""
+        scenario = request.query.get("scenario", "").strip()
+        if not key or not scenario:
+            return False
+        # The page renders the header's scenario when both are present: a key opens only the scenario it names.
+        header = request.headers.get("x-reef-scenario")
+        if header is not None and header.strip() != scenario:
+            return False
+        presented = key.encode("utf-8")
+        matched = False
+        for digest in accepted:
+            matched |= secrets.compare_digest(presented, page_key_for_digest(digest, scenario).encode("utf-8"))
+        return matched
+
     def _authorized(request: web.Request) -> bool:
+        if _page_key_opens(request):
+            return True
         credential = _presented(request)
         if credential is None:
             return False

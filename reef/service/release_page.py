@@ -211,7 +211,8 @@ def before_release_id(row: Mapping[str, Any]) -> str | None:
 
 
 def step_href(step: int, link_query: Mapping[str, str] | None) -> str:
-    """The page of another step, opened the way this one was: the scenario and the token travel in the query."""
+    """The page of another step, opened the way this one was: the scenario and the page key or token travel in the
+    query."""
     href = f"/reef/harness/releases/{step}/page"
     if link_query:
         href += "?" + urlencode(dict(link_query))

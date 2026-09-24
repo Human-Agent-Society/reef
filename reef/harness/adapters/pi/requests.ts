@@ -28,6 +28,7 @@
 // lazily from pi's own loader, so plain node loads the file without it. Evaluation
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
 // evaluation never sees the commands or the tools.
+import { createHash, createHmac } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { release } from "node:os";
 import { delimiter, join } from "node:path";
@@ -399,10 +400,16 @@ export default function requests(pi) {
     return { "x-reef-scenario": scenario, ...(token ? { authorization: `Bearer ${token}` } : {}) };
   };
 
-  // A page a browser opens: the query carries what curl sends as headers, the scenario and the token.
+  // A page a browser opens: the query carries the scenario and, in place of the token, its page key (reef's
+  // reef/core/page_key.py), which opens this scenario's two pages alone. The model reads these links in tool
+  // results and prompts, so they must not carry the token.
+  const pageKey = (token) =>
+    createHmac("sha256", createHash("sha256").update(token, "utf8").digest())
+      .update(`reef-page\n${scenario}`, "utf8")
+      .digest("hex");
   const pageLink = (path) => {
     const token = process.env.REEF_TOKEN;
-    const query = `scenario=${encodeURIComponent(scenario)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
+    const query = `scenario=${encodeURIComponent(scenario)}${token ? `&key=${pageKey(token)}` : ""}`;
     return `${serviceUrl}${path}?${query}`;
   };
   const requestPageLink = (recordId) => pageLink(`/reef/harness/requests/${encodeURIComponent(recordId)}/page`);

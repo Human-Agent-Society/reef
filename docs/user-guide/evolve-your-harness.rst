@@ -629,8 +629,10 @@ fresh session id when nothing is spooled. A request can execute without inferenc
 captured receipts remain available for a later feedback report. Acceptance
 returns a training record id and does not mean the change has passed the
 evaluation: the wrapper prints ``watch it here: <link>``, the request's page
-(``GET /reef/harness/requests/<id>/page`` with the scenario and the token
-as query parameters, so a browser opens it as is), and says ``reef is
+(``GET /reef/harness/requests/<id>/page`` with the scenario and its page
+key as query parameters, so a browser opens it as is; the key opens this
+scenario's two pages alone and never carries the token, since a session's
+model reads the link), and says ``reef is
 running the step; add --wait to stay here, or check /versions later``.
 With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
 release catalog every 5 s for the step that consumed the request, says

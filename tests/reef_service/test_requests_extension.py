@@ -32,6 +32,7 @@ from typing import Any
 
 import pytest
 
+from reef.core.page_key import page_key
 from reef.core.training_request import CLIENT_COMMANDS, TrainingRequest
 
 ASSET = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "requests.ts"
@@ -274,6 +275,8 @@ def _of_kind(out: dict[str, Any], kind: str) -> list[dict[str, Any]]:
 # What a filing says: the accepted notice ends with the request's page link, which carries the scenario and,
 # when the shell has one, the token as query parameters, since a browser sends no header.
 REQUEST_PAGE = "http://reef:8900/reef/harness/requests/q-1/page?scenario=code-repair"
+#: What the links carry in place of the token "tok": the page key of the scenario.
+KEY = f"&key={page_key('tok', 'code-repair')}"
 ACCEPTED_NOTICE = f"Training request q-1 accepted; the step usually takes a few minutes. Watch it here: {REQUEST_PAGE}"
 REQUESTS_FILE = ".reef-harness-requests.json"
 
@@ -370,7 +373,7 @@ def test_the_command_submits_native_training_without_touching_receipts(tmp_path:
     assert list(client["commands"]) == list(CLIENT_COMMANDS)
     assert client["commands"]["node"] is True  # the test runs the extension under node, which is on the PATH
     assert TrainingRequest.from_dict({**request["body"], "client": client}).client == client
-    assert _notices(out) == [{"kind": "notify", "message": f"{ACCEPTED_NOTICE}&token=tok", "type": "info"}]
+    assert _notices(out) == [{"kind": "notify", "message": f"{ACCEPTED_NOTICE}{KEY}", "type": "info"}]
     # The watch starts once the request is filed: the footer names the record until the step settles.
     assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}]
     assert _of_kind(out, "user_message") == []
@@ -549,7 +552,7 @@ def test_versions_with_a_step_offers_its_page_and_opens_it(tmp_path: Path) -> No
     assert prompt["title"] == "Open harness v3?"
     assert prompt["message"] == "rel-3333-pending (pending)"
     # The page a browser opens carries the scenario and the token as query parameters, and is one argument.
-    page = "http://reef:8900/reef/harness/releases/3/page?scenario=code-repair&token=tok"
+    page = f"http://reef:8900/reef/harness/releases/3/page?scenario=code-repair{KEY}"
     assert opened["events"][2]["args"] == [page]
     # Declining opens nothing and leaves the URL to open by hand.
     declined = _versions(tmp_path, agent_dir, CATALOG, args="3", REEF_TOKEN="tok")
@@ -586,7 +589,8 @@ def test_versions_install_serves_a_pending_release_before_installing_it(tmp_path
     assert prompt["title"] == "Install release rel-3333 now?"
     # The confirmation says what makes this release different and where to read it before answering.
     assert "runs in pi with your privileges" in prompt["message"]
-    assert "http://reef:8900/reef/harness/releases/3/page?scenario=code-repair&token=tok" in prompt["message"]
+    assert f"http://reef:8900/reef/harness/releases/3/page?scenario=code-repair{KEY}" in prompt["message"]
+    assert "token=" not in prompt["message"]
     promote = confirmed["events"][2]
     assert promote["method"] == "POST" and promote["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
     assert promote["headers"] == {
@@ -814,7 +818,7 @@ OTHER = "Other (type an answer)"
 CANCEL = "Cancel this request"
 FILED = (
     "filed request q-1; reef is running the step, which usually takes a few minutes, and will report here "
-    f"when it settles. Watch it here: {REQUEST_PAGE}&token=tok"
+    f"when it settles. Watch it here: {REQUEST_PAGE}{KEY}"
 )
 
 
@@ -901,7 +905,7 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
     assert entry["customType"] == "reef-harness-clarify"
     data = entry["data"]
     assert data["outcome"] == "filed" and data["request"] == "text me when you are blocked"
-    assert data["summary"].startswith(f"filed request q-1; watch it at {REQUEST_PAGE}&token=tok (")
+    assert data["summary"].startswith(f"filed request q-1; watch it at {REQUEST_PAGE}{KEY} (")
     kinds = [item["kind"] for item in data["transcript"]]
     assert kinds == ["thinking", "reef_ask_user", "result", "reef_file_request", "result"]
     assert data["transcript"][-1]["text"] == FILED
@@ -1488,7 +1492,7 @@ def test_the_footer_says_queued_until_progress_reports_a_running_step_then_count
     assert reads[0]["method"] == "GET"
     assert reads[0]["headers"] == {"x-reef-scenario": "code-repair", "authorization": "Bearer tok"}
     assert len([event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]) > 3
-    assert _notices(out) == [{"kind": "notify", "message": f"{ACCEPTED_NOTICE}&token=tok", "type": "info"}]
+    assert _notices(out) == [{"kind": "notify", "message": f"{ACCEPTED_NOTICE}{KEY}", "type": "info"}]
 
 
 def test_session_shutdown_clears_the_watch(tmp_path: Path) -> None:

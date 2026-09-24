@@ -194,6 +194,7 @@ from typing import Any
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
+from reef.core.page_key import page_key
 from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS, missed_episode_text, missed_episodes, unscored_failures
 from reef.harness.adapters import get_adapter
@@ -1022,10 +1023,11 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _page_link(upstream: str, path: str, scenario: str, token: str | None) -> str:
-    """A page a browser opens: the query carries what the wrapper sends as headers, the scenario and the token."""
+    """A page a browser opens: the query carries the scenario and, in place of the token, its page key, which opens
+    this scenario's two pages alone; a session's model reads the link, so it must not carry the token."""
     query = f"scenario={urllib.parse.quote(scenario, safe='')}"
     if token:
-        query += f"&token={urllib.parse.quote(token, safe='')}"
+        query += f"&key={page_key(token, scenario)}"
     return f"{upstream}{path}?{query}"
 
 

@@ -20,6 +20,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef_service.test_harness_proposals import _dispatcher, _recipe
 
 from reef.core import AgentRecord, RequestType
+from reef.core.page_key import page_key
 from reef.service.app import create_app
 from reef.service.release_page import build_release_page
 from reef.service.request_page import (
@@ -531,6 +532,13 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             running = await response.text()
             assert response.status == 200 and "This step is running" in running and REFRESH in running
             assert f'href="{link}?scenario=agents&amp;token=secret">Follow the request' in running
+            # The page key the wrapper prints opens both pages of this scenario, and their links carry it forward.
+            keyed = {"scenario": SCENARIO, "key": page_key("secret", SCENARIO)}
+            response = await client.get("/reef/harness/releases/1/page", params=keyed)
+            assert response.status == 200
+            assert f'href="{link}?scenario=agents&amp;key={keyed["key"]}">Follow the request' in await response.text()
+            assert (await client.get(link, params=keyed)).status == 200
+            assert (await client.get(progress_route, params=keyed)).status == 401
             assert (await client.get("/reef/harness/releases/2/page", params=QUERY)).status == 404
             response = await client.get(link, params={**QUERY, "token": "nope"})
             assert response.status == 401 and await response.text() == "invalid service token"
