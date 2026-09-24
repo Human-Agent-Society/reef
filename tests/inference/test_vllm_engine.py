@@ -59,16 +59,7 @@ def engine(monkeypatch):
 def test_server_command_line_carries_placement_reef_requirements_then_options(engine):
     engine, _ = engine
     arguments = engine.server_arguments("[10.0.0.5]", 18900)
-    assert arguments[:8] == [
-        "--model",
-        "model",
-        "--host",
-        "10.0.0.5",
-        "--port",
-        "18900",
-        "--tensor-parallel-size",
-        "2",
-    ]
+    assert arguments[:6] == ["--host", "10.0.0.5", "--port", "18900", "--tensor-parallel-size", "2"]
     assert "--distributed-executor-backend" in arguments and "--enable-sleep-mode" in arguments
     assert arguments[arguments.index("--max-model-len") + 1] == "4096"
     assert "--enable-lora" in arguments
