@@ -34,14 +34,14 @@ class EngineProcess:
             self._process.wait(timeout)
 
 
-def launch_server(arguments: Sequence[str], env: Mapping[str, str]) -> EngineProcess:
-    """Start vLLM's OpenAI-compatible server with the control routes Reef drives enabled."""
+def launch_server(model_path: str, arguments: Sequence[str], env: Mapping[str, str]) -> EngineProcess:
+    """Run ``vllm serve`` from this interpreter with the control routes Reef drives enabled."""
     environment = {**os.environ, **env, "VLLM_SERVER_DEV_MODE": "1"}
     # The inference allocator must not inherit training's expandable segments.
     environment.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     environment.pop("PYTORCH_ALLOC_CONF", None)
     process = subprocess.Popen(
-        [sys.executable, "-m", "vllm.entrypoints.openai.api_server", *arguments],
+        [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model_path, *arguments],
         env=environment,
         start_new_session=True,
     )

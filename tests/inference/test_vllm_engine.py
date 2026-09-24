@@ -163,7 +163,9 @@ def test_init_launches_the_server_and_waits_for_its_health_route(monkeypatch):
     launched = []
     process = SimpleNamespace(is_alive=lambda: True)
     monkeypatch.setattr(
-        engine_module, "launch_server", lambda arguments, env: launched.append((arguments, env)) or process
+        engine_module,
+        "launch_server",
+        lambda model_path, arguments, env: launched.append((model_path, arguments, env)) or process,
     )
     waited = []
     monkeypatch.setattr(
@@ -172,6 +174,6 @@ def test_init_launches_the_server_and_waits_for_its_health_route(monkeypatch):
     engine = ReefVLLMEngine(VLLMConfig("model", 1, 1, 1, startup_timeout=7), rank=0, gpu_ids=(0,))
     engine.init("10.0.0.5", 18900)
     assert engine.get_url() == "http://10.0.0.5:18900"
-    assert launched[0][1]["CUDA_VISIBLE_DEVICES"] == "0"
+    assert launched[0][0] == "model" and launched[0][2]["CUDA_VISIBLE_DEVICES"] == "0"
     assert waited == [("http://10.0.0.5:18900", process, 7, "/health")]
     assert engine.process is process

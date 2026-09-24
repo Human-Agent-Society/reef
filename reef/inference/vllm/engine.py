@@ -47,15 +47,15 @@ class ReefVLLMEngine:
 
     def init(self, host: str, port: int) -> None:
         self.server_host, self.server_port = host, port
-        self.process = launch_server(self.server_arguments(host, port), self.server_environment())
+        self.process = launch_server(
+            self.config.model_path, self.server_arguments(host, port), self.server_environment()
+        )
         wait_ready(self.get_url(), self.process, self.config.startup_timeout, path="/health")
         logger.info("vLLM engine %d serves %s on GPUs %s", self.rank, self.get_url(), list(self.gpu_ids))
 
     def server_arguments(self, host: str, port: int) -> list[str]:
-        """The server command line: placement, what Reef serving needs, then the configured options."""
+        """The ``vllm serve`` options after the model: placement, what Reef serving needs, then the configured options."""
         arguments = [
-            "--model",
-            self.config.model_path,
             "--host",
             host.strip("[]"),
             "--port",
