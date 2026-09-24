@@ -10,10 +10,14 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import os
+import re
 import shlex
+import signal
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 REFERENCE_COMMIT = "7c457fc1b1f636ae794eb0362ba37d4743b06fbc"
@@ -65,9 +69,90 @@ def build_command(args: argparse.Namespace) -> list[str]:
                 "actor_rollout_ref.actor.self_distillation.include_environment_feedback": "False",
             }
         )
+    if args.evaluate_first:
+        overrides["trainer.val_before_train"] = "True"
     if args.steps:
         overrides["trainer.total_training_steps"] = args.steps
     return [*command, *(f"{key}={value}" for key, value in overrides.items())]
+
+
+def progress_record(line: str) -> tuple[int, float, bool] | None:
+    """Read the pinned console logger; its step timer excludes validation."""
+    plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", line)
+    step = re.search(r"\bstep:(\d+) - ", plain)
+    timing = re.search(r"(?:^| - )timing_s/step:([0-9.eE+-]+)(?: - |$)", plain.strip())
+    if step is None or timing is None:
+        return None
+    seconds = float(timing.group(1))
+    if not math.isfinite(seconds) or seconds <= 0:
+        raise ValueError("reference emitted an invalid training-step duration")
+    return int(step.group(1)), seconds, " - val-core/" in plain
+
+
+def run_training(command, *, cwd, environment, output, training_hours: float) -> None:
+    """Stop a time-budget run after the first validation beyond its boundary.
+
+    This leaves the author's checkout untouched. Evaluate the best checkpoint
+    at or below each time boundary; the final over-budget validation is only a
+    completion boundary and is ineligible for the paper's within-budget score.
+    """
+    seen: set[int] = set()
+    elapsed = 0.0
+    stopped = False
+    with (output / "train.log").open("w") as stream:
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            start_new_session=True,
+        )
+        try:
+            if process.stdout is None:
+                raise RuntimeError("reference output pipe is unavailable")
+            for line in process.stdout:
+                stream.write(line)
+                stream.flush()
+                record = progress_record(line)
+                if record is None or record[0] in seen:
+                    continue
+                step, seconds, validated = record
+                seen.add(step)
+                elapsed += seconds
+                print(f"Reference step {step}: {elapsed:.1f}s training; validation={validated}", flush=True)
+                stopped = bool(training_hours and elapsed >= training_hours * 3600 and validated)
+                status = {
+                    "steps": len(seen),
+                    "last_step": step,
+                    "training_seconds": elapsed,
+                    "training_hours_limit": training_hours,
+                    "validation_completed": validated,
+                    "stopped_at_budget_boundary": stopped,
+                }
+                (output / "progress.json").write_text(json.dumps(status, indent=2) + "\n")
+                if stopped:
+                    break
+            if not stopped:
+                process.wait()
+        finally:
+            if process.poll() is None:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGTERM)
+                try:
+                    process.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    os.killpg(process.pid, signal.SIGKILL)
+            returncode = process.wait()
+            if process.stdout is not None:
+                process.stdout.close()
+        if returncode and not stopped:
+            raise subprocess.CalledProcessError(returncode, command)
+    if training_hours and not stopped:
+        raise RuntimeError("reference ended before a validation covered the requested training-time budget")
 
 
 def main() -> None:
@@ -83,12 +168,23 @@ def main() -> None:
     parser.add_argument("--minibatch", type=int, choices=(8, 32), default=32)
     parser.add_argument("--learning-rate", type=float, choices=(1e-5, 1e-6), default=1e-5)
     parser.add_argument(
-        "--steps", type=int, default=2, help="0 selects the full 30-epoch budget; otherwise a labeled smoke run"
+        "--steps", type=int, default=2, help="0 removes the smoke ceiling and keeps the author's 30-epoch upper limit"
     )
+    parser.add_argument(
+        "--training-hours",
+        type=float,
+        default=0,
+        help="with --steps 0, stop after validation first crosses this pure-training budget (paper: 5h)",
+    )
+    parser.add_argument("--evaluate-first", action="store_true", help="also retain an untrained avg@16 evaluation")
     parser.add_argument("--dry-run", action="store_true")
     args = parser.parse_args()
     if args.steps < 0 or args.gpus < 1 or 256 % args.gpus:
         parser.error("steps must be nonnegative; GPU count must divide 256")
+    if not math.isfinite(args.training_hours) or args.training_hours < 0:
+        parser.error("training-hours must be finite and nonnegative")
+    if args.training_hours and args.steps:
+        parser.error("use --steps 0 with a training-time budget")
     if args.method == "sdpo" and (args.minibatch != 32 or args.learning_rate != 1e-5):
         parser.error("Section 3 SDPO uses minibatch 32 and LR 1e-5")
     revision = subprocess.check_output(["git", "-C", str(args.reference), "rev-parse", "HEAD"], text=True).strip()
@@ -112,7 +208,8 @@ def main() -> None:
         "data_sha256": hashes,
         "seed": args.seed,
         "gpus": args.gpus,
-        "kind": "smoke" if args.steps else "paper_budget",
+        "kind": "smoke" if args.steps else ("training_time_budget" if args.training_hours else "author_epoch_ceiling"),
+        "training_hours": args.training_hours,
         "steps": args.steps,
         "command": command,
         "dry_run": args.dry_run,
@@ -139,10 +236,9 @@ def main() -> None:
     # Record the resolved Hydra configuration before any model training.
     resolved = subprocess.check_output([*command, "--cfg", "job", "--resolve"], cwd=args.reference, env=environment)
     (args.output / "resolved.yaml").write_bytes(resolved)
-    with (args.output / "train.log").open("w") as stream:
-        subprocess.run(
-            command, cwd=args.reference, env=environment, stdout=stream, stderr=subprocess.STDOUT, check=True
-        )
+    run_training(
+        command, cwd=args.reference, environment=environment, output=args.output, training_hours=args.training_hours
+    )
 
 
 if __name__ == "__main__":

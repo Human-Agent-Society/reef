@@ -38,10 +38,17 @@ python recipes/sdpo/examples/paper/run_reference.py \
 ```
 
 Add `--dry-run` to write the command and manifest without loading the model.
-Use a new output directory each time. `--steps 0` selects the author's full
-30-epoch budget. `--method grpo --minibatch 32 --learning-rate 1e-5` selects a
-matched GRPO comparator; the author also sweeps minibatch 8 and LR 1e-6, which
-must be reported as separate settings. The launcher records the dataset hashes,
+Use a new output directory each time. For a paper-style time budget use
+`--steps 0 --training-hours 5 --evaluate-first`. The initial avg@16 evaluation records the untrained model. The launcher totals
+the author's `timing_s/step`
+(which excludes initialization and validation) and stops the process group after
+the first scheduled validation beyond five hours. The checkout stays unmodified.
+Report the highest avg@16 at or below each 1h/5h boundary; the final validation
+beyond the boundary is ineligible. `--steps 0` alone retains the author's
+30-epoch upper limit; that is not the paper's comparison budget. `--method grpo --minibatch 32 --learning-rate 1e-5` selects a
+matched on-policy GRPO comparator. Table 13's default off-policy GRPO uses
+`--method grpo --minibatch 8 --learning-rate 1e-6`; keep these comparisons
+separately labeled. The author sweeps both minibatches and both learning rates. The launcher records the dataset hashes,
 seed, model revision, resolved Hydra configuration and training log. It preserves
 the author's preprocessing and scoring functions.
 
@@ -83,7 +90,8 @@ Resolve these settings from `experiments/generalization/run_sdpo_all.sh`,
 | Environment feedback | disabled in the generalization sweep |
 | Optimizer | AdamW, LR 1e-5, weight decay 0.01, clip 1, warmup 10 |
 | Validation | every 5 steps; avg@16, temperature 0.6, top-p 0.95 |
-| Author's epoch budget | 30; compare explicitly matched step/token budgets |
+| Paper reporting budget | highest avg@16 within 1h / 5h training time, excluding initialization and validation |
+| Author's epoch ceiling | 30; not the paper's reporting budget |
 
 The generalization sweep overrides some actor YAML defaults. In particular,
 using the dataclass's prompt whitespace or success/feedback defaults does not
@@ -93,6 +101,12 @@ The pinned Chemistry files contain 1890 train and 210 test examples. SHA-256:
 
 - `datasets/sciknoweval/chemistry/train.json`: `dc841dc92a16a6af3944336ecd887e80907bc9244f2bd51cd2e3869959a84029`
 - `datasets/sciknoweval/chemistry/test.json`: `772adb9f2bdb1bbc2a542f350b55a1b23091fa98e793f5e24c5dba410ce299bf`
+
+[Table 3 of the paper](https://arxiv.org/html/2601.20802v1#S3) reports 1h/5h
+training budgets on four GH200s (about six hours including initialization and
+validation). Report H100 results with their own hardware and timing; do not
+interpret equal wall time across different GPUs as equal compute. Also retain
+step/token counts for comparisons with Reef.
 
 Preserve the fixed split and author's prompt/scoring functions. Test examples
 never become training reports; a ground-truth answer is used by the scorer,
@@ -132,3 +146,10 @@ passed (maximum gradient error 3.21e-9). The worker's 31 SDPO tests also passed.
 The synthetic updates had finite, nonzero loss and gradients; all task scores
 were zero and formatting feedback supplied the teacher targets. These results
 qualify the training integration, not benchmark accuracy or paper reproduction.
+
+The [author-reference smoke](results/2026-09-24/author-reference-smoke.json)
+also completed two OLMo-3-7B-Instruct updates on four H100s with the complete
+32×8 sampling batch and 210×16 final validation. Training took 420.3 seconds;
+validation took 510.7 seconds. Its final avg@16 was 0.24970. There was no
+untrained evaluation in this short qualification, so it does not measure an
+accuracy improvement or reproduce the paper's 1h/5h results.
