@@ -249,7 +249,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -262,7 +262,7 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -272,7 +272,7 @@ def test_processor_rejects_non_finite_report_scores() -> None:
     with pytest.raises(ReportValidationError, match="finite"):
         processor.ingest(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready()
-    assert processor.retention_decision().protected_agent_record_ids == {"i1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.unit
@@ -284,7 +284,7 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -308,12 +308,12 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
                 processor.ingest(item)
         else:
             processor.ingest(item)
-        processor.retention_decision()  # a read between arrivals must not latch the release
+        processor.releasable_record_ids()  # a read between arrivals must not latch the release
 
     batch = processor.build_batch()
     assert [source_record_id(sample) for sample in batch.items] == ["i1"]
     processor.acknowledge(batch.batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"retry", "i1"})
+    assert processor.releasable_record_ids() == frozenset({"retry", "i1"})
 
 
 # --- backend preparation ---------------------------------------------------
@@ -615,8 +615,8 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
 @pytest.mark.integration
 def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
-    # A second rollout after a fresh Trainer built from the persisted algorithm
-    # state must resume the step counter, mirroring recovery from a checkpoint.
+    # Restore algorithm state and record progress as scenario recovery does;
+    # retained records from the first rollout must not train again.
     database = tmp_path / "records.sqlite3"
     first_inference = _sao_inference("i1")
     first_report = _sao_report("r1", "i1", 1.0)
@@ -638,7 +638,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         assert result is not None
         prepared = first.prepare_commit(result)
         first.commit(prepared)
-        first.apply_compaction(prepared.compacted_ids)
+        assert first_store.count("math") == 4
 
     with SQLiteRecordStore(database) as second_store:
         second = Trainer.build(
@@ -646,8 +646,10 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             second_store,
             processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
             candidate_backend=_StateOnlySaoBackend(),
-            algorithm_state={"steps": 1},
+            algorithm_state=prepared.algorithm_state,
         )
+        second.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+        second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == {"steps": 1}
         assert second.reserve_training_batch() is not None
         assert source_record_id(second.pending_batch.items[0]) == "i2"
