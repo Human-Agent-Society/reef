@@ -634,7 +634,7 @@ as query parameters, so a browser opens it as is), and says ``reef is
 running the step; add --wait to stay here, or check /versions later``.
 With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
 release catalog every 5 s for the step that consumed the request, says
-``the step started; usually one to three minutes`` once the request's
+``the step started; usually a few minutes`` once the request's
 progress (``GET /reef/harness/requests/<id>/progress``) shows a step took it,
 and prints one line with the result and the
 next action, quoting the request: a selected release to restart ``reef-pi``

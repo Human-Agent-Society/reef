@@ -274,9 +274,7 @@ def _of_kind(out: dict[str, Any], kind: str) -> list[dict[str, Any]]:
 # What a filing says: the accepted notice ends with the request's page link, which carries the scenario and,
 # when the shell has one, the token as query parameters, since a browser sends no header.
 REQUEST_PAGE = "http://reef:8900/reef/harness/requests/q-1/page?scenario=code-repair"
-ACCEPTED_NOTICE = (
-    f"Training request q-1 accepted; the step usually takes one to three minutes. Watch it here: {REQUEST_PAGE}"
-)
+ACCEPTED_NOTICE = f"Training request q-1 accepted; the step usually takes a few minutes. Watch it here: {REQUEST_PAGE}"
 REQUESTS_FILE = ".reef-harness-requests.json"
 
 
@@ -815,7 +813,7 @@ QUESTIONS = {
 OTHER = "Other (type an answer)"
 CANCEL = "Cancel this request"
 FILED = (
-    "filed request q-1; reef is running the step, which usually takes one to three minutes, and will report here "
+    "filed request q-1; reef is running the step, which usually takes a few minutes, and will report here "
     f"when it settles. Watch it here: {REQUEST_PAGE}&token=tok"
 )
 

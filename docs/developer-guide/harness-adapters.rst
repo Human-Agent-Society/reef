@@ -621,8 +621,8 @@ registers two commands, two tools and two event handlers:
 - ``reef_file_request``, a tool: the request verbatim, then, when there are
   clarifications, a ``Clarifications:`` block of ``- Q:`` / ``A:`` pairs,
   capped at 4000 characters, filed the way the command files it. It returns
-  ``filed request <id>; reef is running the step, which usually takes one to
-  three minutes, and will report here when it settles. Watch it here:
+  ``filed request <id>; reef is running the step, which usually takes a few
+  minutes, and will report here when it settles. Watch it here:
   <link>`` and throws the command's error messages; the command's own filing
   notifies the same expected time and the same link. The link is the
   request's page, ``GET /reef/harness/requests/<id>/page`` with ``scenario``

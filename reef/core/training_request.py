@@ -144,6 +144,48 @@ def missed_episodes(metrics: Mapping[str, Any]) -> list[Mapping[str, Any]]:
     return missed
 
 
+def unscored_failures(metrics: Mapping[str, Any]) -> list[str]:
+    """Why the evaluation could not run: the distinct failures, when every candidate episode failed before it was
+    scored (a launch that found no binary, say), so the step judged nothing; none when any episode was scored or
+    the step recorded no episodes."""
+    episodes = metrics.get("candidate_episodes")
+    if not isinstance(episodes, list) or not episodes:
+        return []
+    causes: list[str] = []
+    for episode in episodes:
+        if not isinstance(episode, Mapping) or episode.get("score") is not None or not episode.get("failure"):
+            return []
+        cause = str(episode["failure"])
+        if cause not in causes:
+            causes.append(cause)
+    return causes
+
+
+def floor_tasks_note(metrics: Mapping[str, Any]) -> str | None:
+    """For a step that answered a request under a floor: its floor tasks were set before the request and check that
+    the changed harness still passes them, not what the request asks for, which only the review reads; ``None``
+    for any other step."""
+    selection = metrics.get("selection")
+    if not isinstance(metrics.get("training_request"), Mapping) or not isinstance(selection, Mapping):
+        return None
+    if selection.get("policy") != "floor":
+        return None
+    episodes = metrics.get("candidate_episodes")
+    tasks: list[str] = []
+    for episode in episodes if isinstance(episodes, list) else ():
+        task = str(episode.get("task") or "").strip() if isinstance(episode, Mapping) else ""
+        # A Harbor task directory shows as its name, a prompt as its start.
+        name = task.rstrip("/").rsplit("/", 1)[-1] if task.startswith("/") else task
+        name = name if len(name) <= 60 else f"{name[:57]}..."
+        if name and name not in tasks:
+            tasks.append(name)
+    named = f" ({'; '.join(tasks)})" if tasks else ""
+    return (
+        f"The floor tasks{named} were set before this request: they check that the changed harness still passes "
+        "them, not what the request asks for, which only the review reads."
+    )
+
+
 def missed_episode_text(episode: Mapping[str, Any]) -> str:
     """One missed episode in words: the task, then why it failed, or its score and the reply that was graded."""
     task = str(episode.get("task") or "").strip()

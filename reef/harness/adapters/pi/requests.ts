@@ -1010,7 +1010,7 @@ export default function requests(pi) {
         {
           type: "text",
           text:
-            `filed request ${recordId}; reef is running the step, which usually takes one to three minutes, ` +
+            `filed request ${recordId}; reef is running the step, which usually takes a few minutes, ` +
             `and will report here when it settles. Watch it here: ${requestPageLink(recordId)}`,
         },
       ],
@@ -1220,7 +1220,7 @@ export default function requests(pi) {
         return;
       }
       ctx.ui.notify(
-        `Training request ${recordId} accepted; the step usually takes one to three minutes. ` +
+        `Training request ${recordId} accepted; the step usually takes a few minutes. ` +
           `Watch it here: ${requestPageLink(recordId)}`,
         "info",
       );

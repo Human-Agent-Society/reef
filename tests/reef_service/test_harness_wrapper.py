@@ -12,6 +12,7 @@ import shutil
 import sys
 import tempfile
 import textwrap
+import time
 import urllib.error
 import uuid
 from pathlib import Path
@@ -1668,7 +1669,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
             assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
         reef.close()
         out = capsys.readouterr().out.splitlines()
-        assert out[3] == "reef-pi: the step started; usually one to three minutes"
+        assert out[3] == "reef-pi: the step started; usually a few minutes"
         assert out[4].startswith("reef-pi: no result yet for 'text me' after 0.1 s") and len(out) == 5
         record_reads = [call for call in reef.seen if call["path"] == record_path]
         assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
@@ -1694,6 +1695,55 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     out = capsys.readouterr().out.splitlines()
     assert out[3] == "reef-pi: request q-1 is no longer on the service (its scenario was reset); ask again"
     assert len(out) == 4 and len([call for call in reef.seen if call["path"] == record_path]) == 2
+
+
+@pytest.mark.unit
+def test_a_wait_on_a_running_step_names_its_phase_and_its_time_so_far(tmp_path, capsys) -> None:
+    """Each wait on a running step ends with the phase and the time the step has run, which grows between waits, so
+    a harness that stops a repeated identical call never reads the waits as a loop."""
+    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    progress = {"state": "evaluating", "settled": False, "started_at": time.time() - 125}
+    reef = _FakeReef(answer, rows=rows, progress=progress)
+    compose, captures = _claude_ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert harness("ask-scenario", "claude", compose, "text me") == 0
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=0.05, poll_s=0.01) == 2
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    assert re.fullmatch(
+        r"reef-claude: no result yet for 'request q-1' after 0\.05 s; the step is evaluating, 2 min 0[5-7] s in; "
+        r"reef-claude wait q-1 waits again",
+        out[-1],
+    ), out[-1]
+
+
+@pytest.mark.unit
+def test_a_step_that_could_not_be_evaluated_and_a_limit_are_said_as_such(tmp_path, capsys) -> None:
+    """A step whose every candidate episode failed before a score says the evaluation could not run, with the cause,
+    not that the change missed the checks; what the harness puts out of reach gets its own line."""
+    failed = {"task": "[health] x", "score": None, "failure": "harness binary reef-terminus not found", "reply": None}
+    selection = {
+        "policy": "floor",
+        "reason": "candidate missed the floor on 1 of 1 tasks",
+        "metrics": {"floor_score": 1},
+    }
+    notes = {"review": {"result": "partial", "covered": [], "uncovered": [], "limits": ["no tool lockout"]}}
+    rejected = _step_row(
+        "rel-0", {"selected": False, "selection": selection, "candidate_episodes": [failed], "proposal_notes": notes}
+    )
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    reef = _FakeReef(answer, rows=[CREATION_ROW, rejected])
+    compose, captures = _claude_ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=5, poll_s=0.01) == 1
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    assert out[1] == (
+        "reef-claude: 'text me when you are blocked' could not be evaluated: harness binary reef-terminus not found. "
+        "Nothing judged the change and nothing was published; fix that and ask again."
+    )
+    assert out[2] == "reef-claude: out of reach on this harness: no tool lockout"
 
 
 def _claude_ask_tree(tmp_path: Path, port: int) -> tuple[str, Path]:

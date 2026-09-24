@@ -27,7 +27,7 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from reef.core.requirements import required_by
-from reef.core.training_request import missed_episode_text, missed_episodes
+from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
@@ -396,6 +396,10 @@ def _review(metrics: Mapping[str, Any]) -> str:
         parts.append(f"<p>The proposer's review of its entries against the request: {review_result}</p>")
         parts.append("<h3>Covered</h3>" + _listed(_strings(review.get("covered")), "nothing listed as covered"))
         parts.append("<h3>Uncovered</h3>" + _listed(_strings(review.get("uncovered")), "nothing left uncovered"))
+        limits = _strings(review.get("limits"))
+        if limits:
+            # What the harness's notes say no answer can deliver there: not a gap in this change.
+            parts.append("<h3>Out of reach on this harness</h3>" + _listed(limits, ""))
     elif isinstance(failure, str) and failure.strip():
         parts.append(
             "<p>The proposer's review of its entries against the request did not run, so nothing checked "
@@ -435,6 +439,13 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
         words[selection_result] = (
             f"Passed the checks and was {selection_result}; the release that step published serves it."
         )
+    # Every candidate episode failed before a score: the checks judged nothing, so no score stands for the change.
+    unscored = unscored_failures(metrics) if selection_result == "rejected" else []
+    if unscored:
+        words["rejected"] = (
+            "The evaluation could not run: every candidate episode failed before it was scored, so nothing judged "
+            "the change. The head stayed where it was."
+        )
     summary = (
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
         f"<p>{escape(words.get(selection_result, f'The step ended as {selection_result}.'))}</p></div>"
@@ -442,6 +453,8 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     numbers = []
     for field in RESULT_FIELDS:
         legacy_field = "gate_sides" if field == "evaluation_sides" else field
+        if unscored and field == "candidate_score":
+            continue
         if field in metrics or legacy_field in metrics:
             value = metrics.get(field, metrics.get(legacy_field))
             if isinstance(value, Sequence) and not isinstance(value, str):
@@ -461,7 +474,9 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     selection = metrics.get("selection")
     if isinstance(selection, Mapping) and selection.get("reason"):
         details.append(f"<div><dt>Reason</dt><dd>{escape(selection['reason'])}</dd></div>")
-    if selection_result == "rejected":
+    if unscored:
+        details.extend(f"<div><dt>Could not run</dt><dd>{escape(cause)}</dd></div>" for cause in unscored)
+    elif selection_result == "rejected":
         # What the checks saw: each missed episode's task, and why it failed or the reply that was graded.
         details.extend(
             f"<div><dt>Missed</dt><dd>{escape(missed_episode_text(episode))}</dd></div>"
@@ -470,6 +485,9 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     if metrics.get("step_record"):
         details.append(f'<div><dt>Step record</dt><dd class="id">{escape(metrics["step_record"])}</dd></div>')
     listed = f'<dl class="details">{"".join(details)}</dl>' if details else ""
+    note = floor_tasks_note(metrics)
+    if note is not None:
+        listed += f'<p class="note">{escape(note)}</p>'
     failure = _notes(metrics).get("failure")
     if isinstance(failure, str) and failure.strip():
         # Why the proposer produced nothing: a failed model call, a reply with no entry.

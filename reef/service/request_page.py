@@ -24,7 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 
-from reef.core.training_request import missed_episode_text, missed_episodes
+from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
 from reef.harness.episodes.version_check import ships_version_check
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import design_sections, mutations_of, result_of, served_step, step_href
@@ -233,6 +233,12 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
     if selection_result.startswith("promoted"):
         return f"passed the checks and was {selection_result}; the release that step published serves it"
     if selection_result == "rejected":
+        unscored = unscored_failures(metrics)
+        if unscored:
+            return (
+                f"the evaluation could not run: {'; '.join(unscored)}; nothing judged the change and nothing was "
+                "published"
+            )
         selection = metrics.get("selection")
         reason = selection.get("reason") if isinstance(selection, Mapping) else None
         missed = missed_episodes(metrics)
@@ -302,6 +308,9 @@ def result_html(
         f'<div><dt>Release</dt><dd class="id">{escape(row.get("release_id"))}</dd></div>',
         "</dl>",
     ]
+    note = floor_tasks_note(metrics)
+    if note is not None:
+        parts.append(f'<p class="live-note">{escape(note)}</p>')
     if metrics.get("error"):
         parts.append(f'<div class="failure"><h3>Error</h3><p>{escape(metrics["error"])}</p></div>')
     notes = metrics.get("proposal_notes")
@@ -368,6 +377,14 @@ def review_html(metrics: Mapping[str, object], rejected: bool = False) -> str:
     uncovered = review.get("uncovered")
     items = [item for item in uncovered if isinstance(item, str)] if isinstance(uncovered, Sequence) else []
     listed = "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>" if items else ""
+    limits = review.get("limits")
+    reach = [item for item in limits if isinstance(item, str)] if isinstance(limits, Sequence) else []
+    # What the harness's notes say no answer can deliver there: not a gap in this change.
+    out_of_reach = (
+        "<h3>Out of reach on this harness</h3><ul>" + "".join(f"<li>{escape(item)}</li>" for item in reach) + "</ul>\n"
+        if reach
+        else ""
+    )
     return (
         f'<section class="card review-card">\n<h2>Review</h2>\n<p>Coverage of the request: '
         f'{status_span(str(review.get("result", review.get("verdict")) or "unknown"))}</p>\n'
@@ -381,6 +398,7 @@ def review_html(metrics: Mapping[str, object], rejected: bool = False) -> str:
             if items
             else '<p class="empty">Nothing left uncovered.</p>\n'
         )
+        + out_of_reach
         + again
         + "</section>\n"
     )

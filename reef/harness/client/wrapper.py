@@ -195,7 +195,7 @@ import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
 from reef.core.requirements import required_by
-from reef.core.training_request import CLIENT_COMMANDS, missed_episode_text, missed_episodes
+from reef.core.training_request import CLIENT_COMMANDS, missed_episode_text, missed_episodes, unscored_failures
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 from reef.harness.episodes.version_check import ships_version_check
@@ -1074,11 +1074,12 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
     return str(row.get("operation") or "unknown")
 
 
-def _uncovered(row: Mapping[str, Any]) -> list[str]:
-    """What the step's review left uncovered, when it recorded one."""
+def _uncovered(row: Mapping[str, Any], key: str = "uncovered") -> list[str]:
+    """What the step's review left uncovered, when it recorded one; ``key="limits"`` for what the harness's notes
+    put out of reach."""
     notes = _metrics_of(row).get("proposal_notes")
     review = notes.get("review") if isinstance(notes, Mapping) else None
-    items = review.get("uncovered") if isinstance(review, Mapping) else None
+    items = review.get(key) if isinstance(review, Mapping) else None
     if not isinstance(items, list):
         return []
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
@@ -1121,6 +1122,12 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
             f"runs: {where}. Page: {page}"
         )
     if selection_result == "rejected":
+        unscored = unscored_failures(metrics)
+        if unscored:
+            return (
+                f"'{ask}' could not be evaluated: {'; '.join(unscored)}. Nothing judged the change and nothing was "
+                "published; fix that and ask again."
+            )
         selection = metrics.get("selection")
         reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
         missed = missed_episodes(metrics)
@@ -1148,10 +1155,10 @@ def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
     return next((step for step, row in enumerate(rows) if _request_of(row).get("id") == record_id), None)
 
 
-def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
+def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> tuple[str, Mapping[str, Any]]:
     """Where the request stands by its progress (``GET /reef/harness/requests/<id>/progress``, the request page's
-    reading): ``started`` once its state is past ``queued`` (a settled request's state is its result), ``gone``
-    when the service answers 404 (its scenario was reset), else ``waiting``.
+    reading), and that reading: ``started`` once its state is past ``queued`` (a settled request's state is its
+    result), ``gone`` when the service answers 404 (its scenario was reset), else ``waiting``.
 
     A read that fails for any other reason is no reason to stop waiting, so
     it reads as waiting and the next poll asks again."""
@@ -1161,12 +1168,27 @@ def _request_state(upstream: str, scenario: str, token: str | None, record_id: s
         with urllib.request.urlopen(req, timeout=30) as response:
             progress = json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        return "gone" if exc.code == 404 else "waiting"
+        return ("gone" if exc.code == 404 else "waiting"), {}
     except (OSError, ValueError):
-        return "waiting"
+        return "waiting", {}
     if isinstance(progress, Mapping) and isinstance(progress.get("state"), str) and progress["state"] != "queued":
-        return "started"
-    return "waiting"
+        return "started", progress
+    return "waiting", {}
+
+
+def _step_words(progress: Mapping[str, Any]) -> str:
+    """Where a running step stands, for the line a wait ends with: its phase and its time so far, which grows with
+    every wait, so no two waits print the same line (a harness that stops an identical repeated call reads it
+    as a loop); empty before a step took the request."""
+    state = progress.get("state")
+    if not isinstance(state, str) or not state:
+        return ""
+    started_at = progress.get("started_at")
+    if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
+        whole = max(0, int(time.time() - started_at))
+        clock = f"{whole} s" if whole < 120 else f"{whole // 60} min {whole % 60:02d} s"
+        return f"; the step is {state}, {clock} in"
+    return f"; the step is {state}"
 
 
 def _await_step(
@@ -1190,6 +1212,7 @@ def _await_step(
     deadline = time.monotonic() + timeout_s
     started = False
     missing = 0
+    progress: Mapping[str, Any] = {}
     while True:
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
@@ -1201,10 +1224,10 @@ def _await_step(
                 if ships_version_check(adapter)
                 else f"reef-{adapter} wait {record_id} waits again"
             )
-            print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; {later}")
+            print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s{_step_words(progress)}; {later}")
             return "timeout"
         if not started:
-            state = _request_state(upstream, scenario, token, record_id)
+            state, progress = _request_state(upstream, scenario, token, record_id)
             missing = missing + 1 if state == "gone" else 0
             if missing >= 2:
                 print(
@@ -1214,7 +1237,7 @@ def _await_step(
                 return "gone"
             if state == "started":
                 started = True
-                print(f"reef-{adapter}: the step started; usually one to three minutes")
+                print(f"reef-{adapter}: the step started; usually a few minutes")
         time.sleep(poll_s)
 
 
@@ -1440,6 +1463,9 @@ def _report_request(
         # After a rejection the checks decided; the review's points are notes on the change, not the cause.
         label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
         print(f"reef-{adapter}: {label}: {'; '.join(uncovered)}")
+    limits = _uncovered(rows[step], "limits")
+    if limits:
+        print(f"reef-{adapter}: out of reach on this harness: {'; '.join(limits)}")
     if selection_result in ("rejected", "skipped"):
         return 1
     release = str(rows[step].get("release_id") or "")

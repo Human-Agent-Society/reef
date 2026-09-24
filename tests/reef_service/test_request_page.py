@@ -253,6 +253,44 @@ def test_a_rejected_request_names_the_missed_episode_on_both_pages() -> None:
     assert "Missed" in version and "no transcript was read" in version
 
 
+def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_score() -> None:
+    """Every candidate episode failed before a score (the runner was not found): the checks judged nothing, so both
+    pages say the evaluation could not run and quote the cause, and the version page shows no candidate score. Both
+    pages say the floor tasks were set before the request and do not test what it asks for."""
+    selection = {
+        "policy": "floor",
+        "reason": "candidate missed the floor on 1 of 1 tasks",
+        "metrics": {"floor_score": 1},
+    }
+    cause = "harness binary reef-terminus not found"
+    episode = {"task": "/checkout/reef/recipe/reefine/health", "score": None, "failure": cause, "reply": None}
+    metrics = _answered(
+        selected=False, selection=selection, candidate_episodes=[episode], candidate_score=0.0, mutation=MUTATION
+    )
+    row = _row(metrics)
+    result = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Result")
+    assert f"the evaluation could not run: {cause}" in result and "did not pass the checks" not in result
+    note = "The floor tasks (health) were set before this request"
+    assert note in result
+    version = build_release_page(1, [CREATION, row])
+    assert "The evaluation could not run" in version and f"<dt>Could not run</dt><dd>{cause}</dd>" in version
+    assert "Candidate score" not in version and "Missed" not in version and note in version
+    # A scored miss keeps the checks' own words and its candidate score.
+    scored = _row({**metrics, "candidate_episodes": [{**episode, "score": 0.0, "failure": None, "reply": "no"}]})
+    version = build_release_page(1, [CREATION, scored])
+    assert "The evaluation could not run" not in version and "Candidate score" in version
+
+
+def test_what_the_harness_puts_out_of_reach_shows_apart_from_the_uncovered_gaps() -> None:
+    notes = {"review": {"result": "partial", "covered": ["chat"], "uncovered": [], "limits": ["no tool lockout"]}}
+    row = _row(_answered(selected=True, published=True, mutation=MUTATION, proposal_notes=notes))
+    review = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Review")
+    assert "Out of reach on this harness" in review and "no tool lockout" in review
+    assert "Still uncovered" not in review
+    version = _section(build_release_page(1, [CREATION, row]), "Review")
+    assert "Out of reach on this harness" in version and "no tool lockout" in version
+
+
 def test_answers_the_proposer_wrote_again_show_under_review_on_both_pages() -> None:
     """An answer whose form slipped is written again; the Review says what the kept one replaced."""
     notes = {

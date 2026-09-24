@@ -63,9 +63,16 @@ How it works
    is partial or finds a substitute, the model writes the answer again with
    the review's findings, up to three answers in all. The step keeps the
    delivering answer with the fewest uncovered points; when no answer
-   delivers, it is skipped with the reason. The evaluation runs the
-   candidate on the health task: it publishes when the tree still works,
-   and the step's page carries the design and the review either way. A
+   delivers, it is skipped with the reason. A point the harness's facts say
+   no answer there can deliver (a hard tool lockout on a harness whose
+   commands cannot take a tool away) is a limit, listed apart from the
+   uncovered points: it starts no retry, and the loop ends when only limits
+   remain. The evaluation runs the candidate on the health task: it
+   publishes when the tree still works, and both pages say the health task
+   is no test of the requested behavior, which only the review reads; when
+   every candidate episode fails before it is scored (the runner was not
+   found, say), both pages say the evaluation could not run and quote the
+   cause. The step's page carries the design and the review either way. A
    review call that answers with no text is asked once more with room for
    both its reasoning and its reply; when it still gives none, the step
    records why and both pages say the review did not run, rather than
@@ -162,7 +169,9 @@ version by starting ``reef-<adapter>`` again.
      - ``/reefine <request>``
      - no flag (the default openai dialect)
 
-``terminus`` has no session to type in. The agent proposer runs on pi
+``terminus`` has no session to type in and no install: a request comes
+through ``POST /reef/train``, and ``GET /reef/harness`` serves a published
+tree. The agent proposer runs on pi
 alone; on another adapter the served model answers a request with rules,
 skills and commands, and with a config entry where the harness's config
 enforces a behavior (an opencode agent with a permission map, Claude Code
@@ -176,9 +185,13 @@ the same facts. Its design says when the request needs behavior these
 kinds cannot give. On ``claude``, ``codex``, ``hermes`` and ``dsh`` a
 command cannot take a tool away, so a mode there is guidance the model
 follows while every tool stays offered: the design and the command's reply
-say so, and the review lists a request for a hard restriction as partly
-covered. On ``opencode`` an agent with a permission map is the mode, and
-the model gets only the tools it allows.
+say so, the mode's state lives in the conversation (the command's reply and
+the header on each reply) and never in a file a tool writes or reads, and
+the review lists a request for a hard restriction under limits. On
+``opencode`` an agent with a permission map is the mode, and the model gets
+only the tools it allows: an answer whose agent has no permission map is
+written again, since that agent is offered every tool, and a second command
+with ``agent: build`` leaves the mode.
 
 An answer whose form slipped is written again while attempts remain: JSON
 that does not parse, entries every one of which was dropped, or entries the
@@ -369,8 +382,9 @@ them:
   page's Design section.
 * ``review``: the second call's result, ``complete`` or ``partial``, with
   the points of the request the entries cover and the ones they leave
-  uncovered, as the Review section; the result line in the session and
-  from ``--wait`` names the uncovered points. Absent when the review call
+  uncovered, and the ``limits`` the harness puts out of reach, as the
+  Review section; the result line in the session and from ``--wait`` names
+  the uncovered points and the limits. Absent when the review call
   failed, which never blocks the step.
 * ``refused_requires``: the ``requires`` items the proposer wrote that could
   not be honored, each with the reason, under "refused by the step" in the
