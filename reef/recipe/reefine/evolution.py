@@ -557,11 +557,12 @@ def _answer_request(
         if isinstance(answer, _Unusable):
             # A slip in the answer's form is asked again while attempts remain.
             unusable = answer
-            dropped_attempts.append(f"answer {attempt}: {answer.reason}")
+            why = answer.reason if not answer.dropped else f"{answer.reason}: {'; '.join(answer.dropped)}"
+            dropped_attempts.append(f"answer {attempt}: {why}")
             if attempt < REQUEST_ATTEMPTS and isinstance(models.served, ModelBinding):
                 # The request page shows it while the step runs, not only once the step settles.
-                models.served.note("check", f"answer {attempt} written again: {answer.reason}", failed=True)
-            retry = reviewed + RETRY_UNUSABLE_SECTION.format(reason=answer.reason)
+                models.served.note("check", f"answer {attempt} written again: {why}", failed=True)
+            retry = reviewed + RETRY_UNUSABLE_SECTION.format(reason=why)
             if answer.entries is not None:
                 retry += RETRY_EARLIER_ANSWER.format(design=answer.design or "(none written)", entries=answer.entries)
             continue
@@ -639,11 +640,13 @@ def _answer_request(
 @dataclass(frozen=True)
 class _Unusable:
     """An answer the loop may ask again: why it could not be used, the design it carried and, when its entries
-    parsed and something refused them, those entries in short, for the retry to start from."""
+    parsed and something refused them, those entries in short, for the retry to start from; ``dropped`` names why
+    the parser dropped each entry, for the retry alone (the step's failure keeps the reason)."""
 
     reason: str
     design: str | None = None
     entries: str | None = None
+    dropped: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -690,6 +693,10 @@ def _answer_once(
         if reply.strip() and not _items_in(reply):
             # No JSON at all: a slip, asked again.
             return _Unusable("the reply holds no usable entry", design)
+        dropped = _dropped_entries(reply, kinds, request_config_keys(adapter))
+        if dropped:
+            # Entries the parser dropped, one and all: an answer to write again, never a design that declined.
+            return _Unusable("the reply holds no usable entry", design, dropped=tuple(dropped))
         if design is not None and adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None:
             return declined_answer(models, request, design, own, adapter)
         return _nothing_to_apply(reply, "the reply holds no usable entry")
@@ -1448,6 +1455,37 @@ def _parse_entry(item: Any, kinds: Sequence[str], config_keys: Sequence[str] = (
     if "name" in fields and config.get("name", entry_id) != entry_id:
         return None
     return entry_id, kind, {field: (entry_id if field == "name" else body) for field in fields}
+
+
+def _dropped_entries(reply: str, kinds: Sequence[str], config_keys: Sequence[str]) -> list[str]:
+    """Why each entry shaped object in the reply was dropped, one line each: a kind this harness does not take, a
+    config entry that sets a key outside ``config_keys`` or another target, an empty body or an id that is no entry
+    name, an id that is not its config name. Empty when every entry parsed, or when the reply holds none."""
+    lines = []
+    for item in _items_in(reply):
+        if not isinstance(item, dict) or not ({"kind", "name"} & set(item)) or not ({"id", "config"} & set(item)):
+            continue
+        if _parse_entry(item, kinds, config_keys) is not None:
+            continue
+        kind = item["kind"] if item.get("kind") in REQUEST_KINDS else item.get("name")
+        label = f"{kind} {item.get('id')!r}" if item.get("id") is not None else str(kind)
+        config = item.get("config")
+        if kind not in kinds or kind not in REQUEST_KINDS:
+            lines.append(f"{label} was dropped: this harness takes {', '.join(kinds)}")
+        elif kind == "config" and isinstance(config, dict) and isinstance(config.get("data"), dict):
+            outside = sorted(set(config["data"]) - set(config_keys))
+            where = f"it sets {', '.join(outside)}" if outside else "it names another target"
+            allowed = ", ".join(config_keys) or "no key"
+            lines.append(f"{label} was dropped: {where}, and a request's config entry may set {allowed}")
+        elif (
+            isinstance(config, dict)
+            and "name" in REQUEST_KINDS[kind]
+            and config.get("name") not in (None, item.get("id"))
+        ):
+            lines.append(f"{label} was dropped: its id must equal its config name {config.get('name')!r}")
+        else:
+            lines.append(f"{label} was dropped: its body is empty or its id is not a lowercase entry name")
+    return lines
 
 
 def _misnamed(reply: str, kinds: Sequence[str]) -> list[str]:

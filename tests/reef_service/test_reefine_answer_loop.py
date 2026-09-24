@@ -169,6 +169,19 @@ def test_a_design_that_says_no_entry_can_deliver_is_answered_with_no_change_and_
     assert "- a skill could search with curl" in model.prompts[3]
 
 
+def test_an_answer_whose_entries_were_all_dropped_is_written_again_with_the_reasons() -> None:
+    """A claude config entry that sets hooks is dropped by the parser, the answer's only entry: that answer is
+    written again with the reason, never recorded as a design that declined."""
+    hooks = {"id": "chat-hooks", "name": "config", "config": {"target": "primary", "data": {"hooks": {"x": []}}}}
+    rules = {"id": "chat-rules", "name": "rules", "config": {"text": "While chat mode is on, only search the web."}}
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(designed(hooks), designed(rules), review)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="claude")
+    assert [m.id for m in proposal.mutations] == ["chat-rules"] and "declined" not in proposal.notes
+    retry = [prompt for prompt in model.prompts if "An earlier answer to this request" in prompt]
+    assert retry and "config 'chat-hooks' was dropped: it sets hooks" in retry[0]
+
+
 def test_a_retry_for_a_refused_answer_carries_that_answers_design_and_entries() -> None:
     """opencode refused answer 1 for its agent's missing permission map alone; the retry shows that answer's design
     and entries, so what it got right (a correct leave path, say) is not lost when the model writes again."""
