@@ -15,6 +15,7 @@ from types import SimpleNamespace
 import pytest
 
 from reef.harness.adapters import get_adapter
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.trajectory import read_terminus_atif
 from reef.harness.runners.terminus import (
     TerminusTreeError,
@@ -203,7 +204,8 @@ def test_a_trial_without_a_reward_names_the_mount_problem_only_for_local_docker(
             return SimpleNamespace(rewards=None, tags={"error": missing})
 
     monkeypatch.setitem(sys.modules, "reef_eval", SimpleNamespace(Lab=Lab))
-    _render(tmp_path / "root", [("config", {"data": {"model_name": "openai/gpt-4o"}})])
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k")
+    _render(tmp_path / "root", binding.compose_nodes(get_adapter("terminus")))
     monkeypatch.setenv(runner.TREE_DIR_ENV, str(tmp_path / "root"))
     monkeypatch.setenv(runner.SESSION_DIR_ENV, str(tmp_path / "sessions"))
     monkeypatch.setenv(runner.TRIALS_DIR_ENV, str(tmp_path / "trials"))
