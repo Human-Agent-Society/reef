@@ -1154,3 +1154,14 @@ token and padding prompt positions with zeros. A ``TinkerCustomLoss`` adds
 ``forward_backward_custom`` so the family computes its loss tensor on the
 Reef host. ``Datum`` objects are constructed only after this shaping. See
 `Train with Tinker <../user-guide/tinker.rst>`__ for supported contracts.
+
+Experimental retained harness evaluation
+----------------------------------------
+
+``reef.scenario.evaluation.RetainedHarnessEvaluation`` compares explicitly
+selected retained harness releases without submitting training records or
+changing the served release. It exports per-task results, coverage and paired
+score changes, with exact-condition resume support. The interface is a local
+prototype for issue #355, not an accepted stable API. See
+`Retained harness release evaluation <../developer-guide/release-evaluation.rst>`_
+for usage, export semantics and current limitations.
