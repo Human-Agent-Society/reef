@@ -258,10 +258,15 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
 
 
 def _served_url(host: str, port: int) -> str:
-    """Where this service reaches itself: loopback for a wildcard bind, an IPv6 literal in brackets."""
+    """Where this service reaches itself: loopback for a wildcard bind, an IPv6 literal in brackets.
+
+    A ``::`` bind is IPv6 only (asyncio sets IPV6_V6ONLY on it), so its loopback is ``::1``.
+    """
     bound = host.strip()
-    if bound in ("", "0.0.0.0", "::"):
+    if bound in ("", "0.0.0.0"):
         return f"http://127.0.0.1:{port}"
+    if bound == "::":
+        return f"http://[::1]:{port}"
     try:
         literal = ipaddress.ip_address(bound)
     except ValueError:
