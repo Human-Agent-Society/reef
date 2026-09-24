@@ -315,7 +315,7 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
         "# fetched from, with the client's own token; written on every run, after the",
         "# checksum, so the served composition stays what the release file records.",
         'if [ -z "${REEF_TOKEN:-}" ]; then',
-        '    echo "reef: REEF_TOKEN is not set; the harness will reach Reef without a token" >&2',
+        '    echo "reef: REEF_TOKEN is not set; the harness will reach Reef without a token (a service that needs one answers 401: run the install again with REEF_TOKEN=<token> in front of bash)" >&2',
         "fi",
     ]
     for relative in sorted(bindings):

@@ -580,7 +580,7 @@ the install works before any step has run:
 
    curl -fsS -H "Authorization: Bearer reef-local" \
      -H "x-reef-scenario: harness-evolve-demo" \
-     'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
+     'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | REEF_TOKEN=reef-local bash
 
    reef-pi -p "fix the failing test in auth.py"
    reef-pi report --score 0 --feedback "missed the empty-token case"
