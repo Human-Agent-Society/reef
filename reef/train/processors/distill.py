@@ -10,16 +10,49 @@ tensors is the mechanism they share.
 
 from __future__ import annotations
 
+import json
 import logging
-from collections.abc import Hashable, Mapping
+from collections.abc import Hashable, Mapping, Sequence
 from typing import Any
 
 from reef.core.reports import TeacherContextReport
-from reef.train.processors.common import recorded_request, recorded_response
+from reef.train.processors.common import flatten_content, recorded_request, recorded_response
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
+
+
+def normalize_messages_for_template(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
+    """Messages as a chat template expects them: text content, chat roles, tool arguments as objects."""
+    normalized: list[dict[str, Any]] = []
+    for message in messages:
+        entry = dict(message)
+        if entry.get("role") == "developer":
+            entry["role"] = "system"
+        content = entry.get("content")
+        if content is not None and not isinstance(content, str):
+            entry["content"] = flatten_content(content)
+        if entry.get("tool_calls"):
+            entry["tool_calls"] = [normalize_tool_call(call) for call in entry["tool_calls"]]
+        normalized.append(entry)
+    return normalized
+
+
+def normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
+    """A tool call with its function arguments as an object, as chat templates render them."""
+    normalized = dict(call)
+    function = normalized.get("function")
+    if isinstance(function, Mapping):
+        function = dict(function)
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                function["arguments"] = json.loads(arguments)
+            except json.JSONDecodeError:
+                function["arguments"] = {}
+        normalized["function"] = function
+    return normalized
 
 
 class DistillProcessor(ReportedFeedbackProcessor):

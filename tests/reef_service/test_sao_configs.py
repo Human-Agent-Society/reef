@@ -133,6 +133,13 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--expert-tensor-parallel-size",
         "--group-query-attention",
         "--hidden-dropout",
+        "--num-layers",
+        "--hidden-size",
+        "--ffn-hidden-size",
+        "--num-attention-heads",
+        "--num-query-groups",
+        "--kv-channels",
+        "--norm-epsilon",
         "--lr-decay-iters",
         "--lr-decay-style",
         "--lr-warmup-iters",
@@ -316,6 +323,10 @@ def _parse_config(config_path: Path):
     # The full parser adds these bootstrap flags before its Slime option provider.
     parser.add_argument("--debug-train-only", action="store_true")
     parser.add_argument("--debug-rollout-only", action="store_true")
+    # SDPO validates these Megatron options because its cached student support
+    # must match the gradient forward. Parse their real values on CPU too.
+    parser.add_argument("--attention-dropout", type=float, default=0.1)
+    parser.add_argument("--hidden-dropout", type=float, default=0.1)
     args, leftover = parser.parse_known_args(tokens, namespace=SlimeArguments())
 
     index = 0
@@ -387,6 +398,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
+        "recipes/sdpo/examples/paper/smoke.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -412,6 +424,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve-30b-multi.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
+        "recipes/sdpo/examples/paper/smoke.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

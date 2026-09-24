@@ -57,6 +57,11 @@ learns from each score before the next task arrives.
      - ``recipes/sao/``
      - `SAO <recipes/sao.rst>`__
      - `SAO on IMOAnswerBench <../../recipes/sao/examples/imo_answerbench/README.md>`__
+   * - SDPO
+     - model weights
+     - ``recipes/sdpo/``
+     - `SDPO <recipes/sdpo.rst>`__
+     - `Paper reference checks <../../recipes/sdpo/examples/paper/README.md>`__
    * - SDFT
      - model weights
      - ``recipes/sdft/``
