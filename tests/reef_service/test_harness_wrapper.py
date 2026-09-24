@@ -1105,7 +1105,7 @@ class _FakeReef:
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if self.path == "/reef/harness/releases":
                     self._answer(200, {"scenario": "ask-scenario", "releases": rows or []})
-                elif self.path == "/reef/scenarios/ask-scenario/records/q-1" and record is not None:
+                elif self.path == "/reef/harness/requests/q-1/progress" and record is not None:
                     self._answer(200, record)
                 else:
                     self._answer(404, {})
@@ -1572,7 +1572,7 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     reef = _FakeReef(
         {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"},
         rows=rows,
-        record={"agent_record_id": "q-1", "compacted_at": None},  # queued the whole wait
+        record={"agent_record_id": "q-1", "state": "queued"},  # queued the whole wait
     )
     compose, captures = _ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
@@ -1593,12 +1593,12 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
 
 @pytest.mark.unit
 def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path, capsys) -> None:
-    """Until a step takes the request its record's compacted_at is null; once it is set the wait says so, once,
+    """Until progress reports a running step the request waits; once it starts the wait says so, once,
     and stops reading the record. A record the service does not answer is no reason to stop waiting."""
     rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
-    record_path = "/reef/scenarios/ask-scenario/records/q-1"
-    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "compacted_at": 1700000000.5})
+    record_path = "/reef/harness/requests/q-1/progress"
+    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "state": "running"})
     compose, captures = _ask_tree(tmp_path, reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
         assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
@@ -1609,8 +1609,8 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     record_reads = [call for call in reef.seen if call["path"] == record_path]
     assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
-    # Queued (compacted_at null): no line, and the record is read again at every poll.
-    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "compacted_at": None})
+    # Queued (explicit progress): no line, and the record is read again at every poll.
+    reef = _FakeReef(answer, rows=rows, record={"agent_record_id": "q-1", "state": "queued"})
     (tmp_path / "queued").mkdir()
     compose, captures = _ask_tree(tmp_path / "queued", reef.port)
     with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
