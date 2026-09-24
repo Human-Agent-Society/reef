@@ -13,7 +13,10 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
      the agent at the proxy instead of Reef directly.
   3. Runs the agent binary as a subprocess.
   4. After the agent exits, persists the captured receipts (the
-     ``x-reef-agent-record-id`` values from each response) to disk.
+     ``x-reef-agent-record-id`` values from each response) to disk. For
+     codex it keeps the folder trust the person answered in the temp
+     ``config.toml`` in ``~/.reef/trust``, outside the install root, and
+     adds it to the next session's copy.
 
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
@@ -493,6 +496,87 @@ def _create_temp_composition(adapter: str, compose_dir: str, proxy_port: int) ->
     return temp_dir
 
 
+#: The trust levels Codex writes for a folder when the person answers its trust prompt.
+CODEX_TRUST_LEVELS = ("trusted", "untrusted")
+
+
+def _codex_trust_path(compose_dir: str) -> Path:
+    """Where reef-codex keeps the folder trust of one install root: ``~/.reef/trust``, outside the install root."""
+    install_root = str(Path(compose_dir).resolve().parent)
+    return Path.home() / ".reef" / "trust" / f"{hashlib.sha256(install_root.encode()).hexdigest()}.json"
+
+
+def _codex_projects(config: Path) -> dict[str, Any]:
+    """The ``projects`` table of a Codex ``config.toml``; empty when the file does not parse."""
+    try:
+        projects = tomllib.loads(config.read_text(encoding="utf-8")).get("projects")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+    return projects if isinstance(projects, dict) else {}
+
+
+def _add_codex_trust(compose_dir: str, config: Path) -> None:
+    """Add the folders the person trusted in earlier sessions to the temp ``config.toml`` Codex reads.
+
+    Codex writes the answer to its trust prompt into ``$CODEX_HOME/config.toml``,
+    the temp copy the wrapper removes after the run, so without this every
+    session asks again. A folder the tree's config already names keeps the
+    tree's entry, and a copy that would not parse is left as it was."""
+    try:
+        stored = json.loads(_codex_trust_path(compose_dir).read_text(encoding="utf-8")).get("projects")
+    except (OSError, ValueError, AttributeError):
+        return
+    if not isinstance(stored, dict):
+        return
+    present = _codex_projects(config)
+    tables = "".join(
+        f"\n[projects.{json.dumps(folder)}]\ntrust_level = {json.dumps(level)}\n"
+        for folder, level in sorted(stored.items())
+        if isinstance(folder, str) and os.path.isabs(folder) and level in CODEX_TRUST_LEVELS and folder not in present
+    )
+    if not tables:
+        return
+    text = config.read_text(encoding="utf-8")
+    try:
+        tomllib.loads(text + tables)
+    except tomllib.TOMLDecodeError:
+        return
+    config.write_text(text + tables, encoding="utf-8")
+
+
+def _keep_codex_trust(compose_dir: str, config: Path, cwd: Path) -> None:
+    """Keep the trust Codex wrote for this session's folder, the working directory or the repository above it.
+
+    Only those folders: a command in the session can write the temp copy,
+    and trust for another folder would load that folder's own Codex config
+    in a later session without the person answering for it."""
+    folders = {str(cwd)}
+    repository = next((folder for folder in (cwd, *cwd.parents) if (folder / ".git").exists()), None)
+    if repository is not None:
+        folders.add(str(repository))
+    answered = {
+        folder: entry["trust_level"]
+        for folder, entry in _codex_projects(config).items()
+        if folder in folders and isinstance(entry, dict) and entry.get("trust_level") in CODEX_TRUST_LEVELS
+    }
+    if not answered:
+        return
+    path = _codex_trust_path(compose_dir)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    stored = record.get("projects") if isinstance(record, dict) else None
+    projects = {**(stored if isinstance(stored, dict) else {}), **answered}
+    if isinstance(stored, dict) and projects == stored:
+        return
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file_descriptor, staging = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-")
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+        json.dump({"install_root": str(Path(compose_dir).resolve().parent), "projects": projects}, handle, indent=2)
+    os.replace(staging, path)
+
+
 def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -842,6 +926,9 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             with contextlib.closing(sqlite3.connect(path)) as database:
                 database.execute("VACUUM")  # writes the database header, so the file is a database
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
+    cwd = Path.cwd().resolve()
+    if adapter == "codex":
+        _add_codex_trust(compose_dir, Path(temp_dir) / "config.toml")
     env = os.environ.copy()
     env[env_var] = temp_dir
     # What an interactive run needs beyond the episode env; the person's own setting wins.
@@ -886,6 +973,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
                 os.close(file_descriptor)
                 shutil.copy2(written, staging)  # with its mode: dsh refuses credentials readable beyond their owner
                 os.replace(staging, destination)
+            if adapter == "codex":
+                _keep_codex_trust(compose_dir, Path(temp_dir) / "config.toml", cwd)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
