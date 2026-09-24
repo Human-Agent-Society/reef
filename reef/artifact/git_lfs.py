@@ -50,6 +50,10 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
+#: The remote tracking ref naming the release a workspace checked out last, a commit the remote already holds.
+CHECKED_OUT_REF = "refs/remotes/origin/reef-checked-out"
+
+
 class _GitWorkspace:
     """Manage one git working tree used by a single scenario backend.
 
@@ -88,6 +92,9 @@ class _GitWorkspace:
 
     def checkout(self, version: str) -> None:
         self.git("fetch", "origin", version)
+        # The remote holds this commit and its history: a remote tracking ref says so, so the LFS pre push check scans
+        # only the commits a later push adds, not the older releases whose objects this clone never fetched.
+        self.git("update-ref", CHECKED_OUT_REF, "FETCH_HEAD")
         self.git("checkout", "--detach", "FETCH_HEAD")
         self.git("reset", "--hard", "FETCH_HEAD")
         self.git("clean", "-fdx")
