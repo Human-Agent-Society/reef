@@ -69,9 +69,14 @@ def create_app(
         app.cleanup_ctx.append(maintain_records)
     if close_dispatcher:
 
+        async def stop_local_cycles(app: web.Application) -> None:
+            # The listening socket is closed by now: a harness cycle's calls through Reef fail from here on.
+            app[request_service_key].dispatcher.stop_local_cycles()
+
         async def cleanup(app: web.Application) -> None:
             await asyncio.to_thread(app[request_service_key].dispatcher.close)
 
+        app.on_shutdown.append(stop_local_cycles)
         app.on_cleanup.append(cleanup)
     return app
 

@@ -123,6 +123,8 @@ class _TrainingState:
 @dataclass
 class _LifecycleState:
     closed: Event = field(default_factory=Event)
+    #: The service is stopping: local cycles start no more and commit nothing (see ``stop_local_cycles``).
+    local_cycles_stopped: Event = field(default_factory=Event)
     preload_thread: Thread | None = None
     metrics_thread: Thread | None = None
 
@@ -836,7 +838,11 @@ class Dispatcher:
     def _drain_local_backend(self, scenario: str, component: str | None) -> None:
         try:
             # A dispatched job waiting for its turn goes before the next cycle; it wakes the workers after.
-            while not self._training.turn_waiting.is_set() and self._process_local_backend_step(scenario, component):
+            while (
+                not self._training.turn_waiting.is_set()
+                and not self._lifecycle.local_cycles_stopped.is_set()
+                and self._process_local_backend_step(scenario, component)
+            ):
                 pass
         except Exception as exc:
             logger.exception("local backend failed to commit for scenario %r", scenario)
@@ -955,6 +961,8 @@ class Dispatcher:
         # each refusal threw away a full candidate evaluation. A dispatched
         # commit still lands meanwhile; the stale policy answers it.
         with self._local_cycle(scenario):
+            if self._lifecycle.local_cycles_stopped.is_set():
+                return False
             loaded = self._registry.get_optional(scenario)
             if loaded is None:
                 # Deleted while this worker waited for its turn.
@@ -981,6 +989,10 @@ class Dispatcher:
             # registry lock. Candidate generation above can take minutes and must
             # not block record acceptance for this scenario.
             with self._registry.lock_for(scenario):
+                if self._lifecycle.local_cycles_stopped.is_set():
+                    # The service stopped under this cycle: its model calls may have failed as the routes went away.
+                    logger.info("scenario %r component %r: the service is stopping; the step waits", scenario, component)
+                    return False
                 loaded = self._registry.get_optional(scenario)
                 if loaded is not current:
                     # Rebuilt under this cycle by a sibling trainer's failure, or deleted: the result belongs to the
@@ -1460,10 +1472,20 @@ class Dispatcher:
 
     # -- Lifecycle -------------------------------------------------------
 
+    def stop_local_cycles(self) -> None:
+        """Local cycles start no more, and one that ends from now on commits nothing; its rows wait for the next start.
+
+        A stopping service takes its routes away before it closes this
+        dispatcher, and a harness cycle's model calls go through them: a
+        call that fails comes back as a skip, which would consume the batch.
+        """
+        self._lifecycle.local_cycles_stopped.set()
+
     def close(self) -> None:
         """Stop all scenario workers, then close this dispatcher's runtime."""
         if self._lifecycle.closed.is_set():
             return
+        self.stop_local_cycles()
         self._lifecycle.closed.set()
         self._training.ready.set()
         with self._training.lock:

@@ -144,6 +144,10 @@ What survives a restart, provided the storage paths are persistent:
      - not recoverable; the last checkpoint is restored
    * - a training step in flight
      - not recoverable; the batch is replayed after the step is settled
+   * - a local cycle's batch (a harness step) when the service stops
+     - kept: once shutdown begins, a local cycle commits nothing and no
+       new one starts, since its model calls go through the stopping
+       service; the rows train after the next start
 
 After a step commits, ``/reef/status`` reports its scenario's
 ``artifact_head_sync`` with the checkpoint ``release_id`` and any ``error``.

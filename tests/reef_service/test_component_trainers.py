@@ -647,6 +647,53 @@ def test_a_reload_after_a_weights_failure_leaves_the_harness_cycle_in_flight_its
 
 
 @pytest.mark.unit
+def test_a_harness_backlog_is_kept_for_the_next_start_when_the_service_stops(tmp_path: Path) -> None:
+    """A stopping service takes its routes away first, so a harness cycle's model calls through them fail and would
+    come back as a skip that consumes the batch: the cycle ending then commits nothing and no further cycle starts."""
+    backends = {
+        WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _SlowBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    slow = backends[HARNESS]
+    assert isinstance(slow, _SlowBackend)
+    closing: threading.Thread | None = None
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for step in (1, 2):
+            for record in _records(step):
+                scenario.records.append(record)
+        dispatcher._start_local_backend_worker("agent", HARNESS)
+        assert slow.evaluating.wait(10)
+        dispatcher.stop_local_cycles()
+        closing = threading.Thread(target=dispatcher.close)
+        closing.start()
+        slow.release.set()
+        closing.join(10)
+        assert not closing.is_alive()
+        assert slow.prepared == 1
+    finally:
+        slow.release.set()
+        if closing is None:
+            dispatcher.close()
+    # The next start finds both batches unread and trains them.
+    restarted, backends = _dispatcher(tmp_path)
+    try:
+        scenario = restarted.get_or_create_scenario("agent")
+        assert scenario is not None
+        assert [row["component"] for row in scenario.releases() if row["operation"] == "training"] == []
+        assert restarted._process_local_backend_step("agent", HARNESS) is True
+        assert restarted._process_local_backend_step("agent", HARNESS) is True
+        assert [row["component"] for row in scenario.releases() if row["operation"] == "training"] == [
+            HARNESS,
+            HARNESS,
+        ]
+    finally:
+        restarted.close()
+
+
+@pytest.mark.unit
 def test_deleting_a_scenario_whose_training_job_is_out_waits_for_the_job(tmp_path: Path) -> None:
     """The job could neither commit nor be acknowledged without its scenario, so the delete answers busy until it lands."""
     dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))
