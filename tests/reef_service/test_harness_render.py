@@ -550,6 +550,8 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
             ClientState("dsh/.credentials.yaml", "file"),
             ClientState("dsh/settings.yaml", "file"),
             ClientState("dsh/.agent-presets", "directory"),
+            ClientState("dsh/sessions", "directory"),
+            ClientState("dsh/storages", "directory"),
         ),
     }
 

@@ -35,13 +35,20 @@ client_env:
 # What a person saves in the web profile, which reef-dsh would otherwise
 # leave in the temp copy it removes: the API keys (.credentials.yaml, owner
 # only), the providers and default model (settings.yaml), both renamed over
-# the link on every save, and the agent presets. Sessions stay per run.
+# the link on every save, the agent presets, the session logs both profiles
+# share, and the storage units the web profile keeps its workspaces in.
+# Episodes keep none of them: the cleanup whitelist below reads a run's
+# sessions and storages as episode state.
 client_state:
   - path: "dsh/.credentials.yaml"
     kind: file
   - path: "dsh/settings.yaml"
     kind: file
   - path: "dsh/.agent-presets"
+    kind: directory
+  - path: "dsh/sessions"
+    kind: directory
+  - path: "dsh/storages"
     kind: directory
 files:
   config:
