@@ -188,6 +188,7 @@ from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
+from reef.harness.episodes.vendor_install import version_probe_env
 
 
 def _captures_dir() -> Path:
@@ -1884,7 +1885,12 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             rows.append((False, "service", f"{upstream} unreachable: {exc}"))
     if Path(binary).is_file():
         try:
-            version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            # The descriptor's env on a scratch root: hermes writes a home skeleton on --version.
+            with tempfile.TemporaryDirectory(prefix="reef-probe-") as probe_root:
+                probe_env = {**os.environ, **version_probe_env(get_adapter(adapter), Path(probe_root))}
+                version = subprocess.run(
+                    [binary, "--version"], capture_output=True, text=True, timeout=20, env=probe_env
+                )
             first = (version.stdout or version.stderr).strip().splitlines()
             rows.append((version.returncode == 0, "binary", f"{binary} ({first[0] if first else 'no output'})"))
         except (OSError, subprocess.TimeoutExpired) as exc:

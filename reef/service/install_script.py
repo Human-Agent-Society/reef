@@ -103,6 +103,15 @@ def _wrapper_quoted(text: str) -> str:
     return quoted.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
 
 
+def _probe_value(value: str) -> str:
+    """A descriptor env value for the version probe in shell: ``{root}`` becomes the scratch ``$PROBE_ROOT``."""
+    head, *rest = value.split("{root}")
+    text = _single_quoted(head) if head else ""
+    for part in rest:
+        text += '"$PROBE_ROOT"' + (_single_quoted(part) if part else "")
+    return text
+
+
 def _single_quoted(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
@@ -247,10 +256,22 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         pin = f"{install.package}@{install.version}"
         steps = [f'        npm install --prefix "$PREFIX" {_single_quoted(pin)}']
         pattern = f'    *" {install.version} "*)'
+    # The probe gets the descriptor's env, each directory it relocates made under a scratch root that is removed
+    # after, so a binary that writes its state on --version (hermes, opencode) leaves the person's home alone.
+    relocated = [value for value in descriptor.env.values() if "{root}" in value]
     probe_env = " ".join(
-        f"{key}={_single_quoted(value)}" for key, value in descriptor.env.items() if "{root}" not in value
+        f"{key}={_probe_value(value)}" if "{root}" in value else f"{key}={_single_quoted(value)}"
+        for key, value in descriptor.env.items()
     )
     probe = f'{probe_env} "$BINARY"'.lstrip()
+    probe_lines = [f'    installed="$({probe} --version 2>/dev/null || true)"']
+    if relocated:
+        probe_lines = [
+            '    PROBE_ROOT="$(mktemp -d)"',
+            "    mkdir -p " + " ".join(_probe_value(value) for value in relocated),
+            *probe_lines,
+            '    rm -rf "$PROBE_ROOT"',
+        ]
     return [
         f"# Ensure the pinned binary ({pin}) via the vendor's channel.",
         *prelude,
@@ -259,7 +280,7 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         "}",
         'installed=""',
         f'if [ -x "$BINARY" ]{pin_check}; then',
-        f'    installed="$({probe} --version 2>/dev/null || true)"',
+        *probe_lines,
         "fi",
         'case " $installed " in',
         pattern,

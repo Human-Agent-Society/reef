@@ -2859,6 +2859,29 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
 
 
 @pytest.mark.unit
+def test_doctor_version_probe_writes_nothing_in_the_home_directory(tmp_path, capsys, monkeypatch) -> None:
+    """The binary row runs --version with the descriptor's directories on a scratch root, never the person's home."""
+    from reef.harness.client.wrapper import doctor
+
+    reef = _DoctorReef(token="dummy", head="rel-3")
+    compose, _ = _ask_tree(tmp_path, reef.port)
+    binary = tmp_path / "fake-pi"
+    binary.write_text(
+        '#!/bin/sh\nstate="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n'
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(scratch))
+    doctor("doc-scenario", "pi", compose, str(binary))
+    assert any(line.startswith("ok  binary") and "0.84.2" in line for line in capsys.readouterr().out.splitlines())
+    assert not (tmp_path / "home" / ".pi").exists()
+    assert list(scratch.iterdir()) == []
+    reef.close()
+
+
+@pytest.mark.unit
 def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, capsys, monkeypatch) -> None:
     """The review row's page link carries the scenario and the token, so it opens from a browser as the wait's."""
     from reef.harness.client.wrapper import doctor
