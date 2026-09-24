@@ -134,24 +134,109 @@ def test_a_reply_the_provider_filtered_says_so_instead_of_naming_no_entry() -> N
 
 
 @pytest.mark.parametrize("adapter", ["claude", "codex", "hermes", "dsh"])
-def test_a_prompt_level_mode_is_named_guidance_and_a_hard_restriction_stays_uncovered(adapter: str) -> None:
+def test_a_prompt_level_mode_keeps_its_state_in_the_conversation_and_a_hard_restriction_is_a_limit(
+    adapter: str,
+) -> None:
     """On a harness whose command cannot take a tool away, the proposer says the mode is followed by the model while
-    every tool stays offered, and the review lists a hard restriction as uncovered rather than calling it delivered."""
+    every tool stays offered, keeps the mode's state in the conversation (a marker file shared every session and
+    made the rules call a tool on every turn), and the review lists a hard restriction under limits."""
     review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
     model = Model(request_reply(CHAT, RULES), review)
     evolution.propose(NODES, (), model, requests=(REQUEST,), adapter=adapter)
     assert "every tool stays in its list" in model.prompt
     assert "never claim the other tools are unavailable" in model.prompt
+    assert "never in a file or a marker a tool writes or reads" in model.prompt
+    assert "the rules make no tool call on any turn" in model.prompt
     (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
-    assert "the review lists that point as uncovered" in text
+    assert "the review lists that point under limits" in text and 'goes in a "limits" list' in text
     assert "it is the behavior itself, not a substitute" not in model.prompt
 
 
-def test_opencode_enforces_a_mode_with_an_agent_and_leaves_it_through_agents() -> None:
+def test_opencode_enforces_a_mode_with_an_agent_and_leaves_it_through_a_command_or_agents() -> None:
+    """The mode's agent carries the restriction in its own prompt; a second command with agent: build leaves it and
+    says every tool is back; Tab from the mode's agent reaches plan first, not build."""
     model = Model(request_reply(RULES))
     evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
     assert "enforces the mode" in model.prompt and "every tool stays in its list" not in model.prompt
-    assert (
-        "/agents, choosing build" in model.prompt and "Put the restriction in the chat agent's prompt" in model.prompt
+    assert "/agents, choosing build" in model.prompt and "Tab from the mode's agent reaches plan first" in model.prompt
+    assert "The restriction's wording lives only in that agent's own prompt, never in rules" in model.prompt
+    assert "with agent: build in its frontmatter and text that says the mode has ended and every tool is back" in (
+        model.prompt
     )
+    assert "Tab cycles the primary agents, build first" not in model.prompt
     assert "Quote a frontmatter value that holds ': '" in model.prompt
+
+
+def _agent(permission: dict | None) -> dict:
+    agent = {"mode": "primary", "prompt": "Only search the web."}
+    if permission is not None:
+        agent["permission"] = permission
+    return {"id": "chat-agent", "name": "config", "config": {"target": "primary", "data": {"agent": {"chat": agent}}}}
+
+
+def test_an_opencode_agent_without_a_permission_map_is_written_again() -> None:
+    """An agent a request's config entry defines with no permission map is offered every tool, so the mode it builds
+    restricts nothing: the answer goes back to the model with that reason, and the answer with a map is kept."""
+    command = {
+        "id": "chat",
+        "name": "agent_command",
+        "config": {"name": "chat", "text": "---\nagent: chat\n---\nChat."},
+    }
+    complete = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    mapped = {"*": "deny", "websearch": "allow"}
+    model = Model(request_reply(_agent(None), command), request_reply(_agent(mapped), command), complete)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
+    assert [m.id for m in proposal.mutations] == ["chat-agent", "chat"]
+    assert proposal.mutations[0].options["config"]["data"]["agent"]["chat"]["permission"] == mapped
+    reason = "agent 'chat' has no permission map, so it is offered every tool"
+    assert proposal.notes["dropped_attempts"] == [f"answer 1: {reason}"]
+    (retry,) = [prompt for prompt in model.prompts if "could not be used" in prompt]
+    assert reason in retry
+    # An agent the tree already gives a map keeps it: the entry may change the prompt alone.
+    tree = [
+        {
+            "id": "chat-agent",
+            "name": "config",
+            "config": {
+                "target": "primary",
+                "data": {"agent": {"chat": {"mode": "primary", "prompt": "Chat.", "permission": mapped}}},
+            },
+        }
+    ]
+    model = Model(request_reply(_agent(None)), complete)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode", entries=tree)
+    assert [m.id for m in proposal.mutations] == ["chat-agent"] and "dropped_attempts" not in proposal.notes
+
+
+def test_a_point_the_harness_notes_put_out_of_reach_is_a_limit_that_starts_no_retry() -> None:
+    """A review whose only open points are limits ends the loop at the first answer and keeps them apart from the
+    uncovered gaps; an uncovered gap still sends the request back."""
+    limited = json.dumps(
+        {"result": "partial", "delivers": True, "covered": ["chat"], "uncovered": [], "limits": ["no tool lockout"]}
+    )
+    model = Model(request_reply(CHAT, RULES), limited)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="hermes")
+    assert model.answered == 2 and "attempts" not in proposal.notes
+    assert proposal.notes["review"]["limits"] == ["no tool lockout"] and proposal.notes["review"]["uncovered"] == []
+    gap = json.dumps(
+        {"result": "partial", "delivers": True, "covered": [], "uncovered": ["no off"], "limits": ["no tool lockout"]}
+    )
+    model = Model(request_reply(CHAT, RULES), gap)
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="hermes")
+    assert proposal.notes["attempts"] == 3
+    (retry, *_) = [prompt for prompt in model.prompts if "An earlier answer to this request" in prompt]
+    assert "- no off" in retry and "no tool lockout" not in retry
+
+
+def test_terminus_gets_its_own_facts_and_no_setup_command() -> None:
+    """terminus has no session and no install: the prompt describes its surface, names no reef-terminus setup, and the
+    review judges commands by the harness rubric, not pi's."""
+    review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
+    model = Model(request_reply(CHAT, RULES), review)
+    evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="terminus")
+    facts = FACTS["terminus"]
+    assert f"This harness is {facts.title}" in model.prompt and facts.tools in model.prompt
+    assert "reef-terminus setup" not in model.prompt and "this harness has no setup command" in model.prompt
+    assert evolution.request_kinds("terminus") == ("skill", "rules", "agent_command")
+    (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
+    assert "This harness is Terminus 2" in text and "pi.registerCommand" not in text

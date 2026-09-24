@@ -210,8 +210,7 @@ REQUEST_PROMPT = (
     "a lowercase name, a rules entry too.\n"
     "When the change needs something only the user can provide or set up on their machine, end the array "
     'with one more object, {{"requires": [...]}}, one item per need. Each item carries a prompt: one '
-    "sentence, under 200 characters, that reef-{wrapper} setup shows when it asks the user for the value or the "
-    "permission, once, at install time; the extension itself never asks. The kinds, each with an example:\n"
+    "sentence, under 200 characters, {setup} The kinds, each with an example:\n"
     "- env, a value the user enters, which the extension reads at run time from process.env.NAME; name is "
     "the variable name, there is no check, and the value is never written into the tree: "
     '{{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}}\n'
@@ -226,6 +225,18 @@ REQUEST_PROMPT = (
     '{{"name": "pdftotext", "kind": "binary", "prompt": "Install pdftotext: brew install poppler on macOS, '
     'apt install poppler-utils on Linux"}}\n'
     "Omit the object when the change needs nothing."
+)
+
+#: Who reads a requires item's prompt: reef-<adapter> setup where Reef installs the harness.
+SETUP_SENTENCE = (
+    "that reef-{wrapper} setup shows when it asks the user for the value or the permission, once, at install time; "
+    "the extension itself never asks."
+)
+
+#: The same on an adapter Reef installs nothing for (terminus), which has no setup command.
+NO_SETUP_SENTENCE = (
+    "that tells whoever runs this harness what to provide before a run; this harness has no setup command, and "
+    "nothing in the change asks for the value."
 )
 
 #: What the prompt says about extensions on pi: when to write one and how it must behave.
@@ -294,7 +305,9 @@ PI_REVIEW_COMMANDS = (
 HARNESS_REVIEW_COMMANDS = (
     "This harness is {title}. {command} {mode} Check each new command against that: it is an agent_command "
     "entry, the person is told the exact text to type, and a name collision visible in the supplied entries is "
-    "uncovered. "
+    "uncovered. A point the request asks for that these harness notes say no answer on this harness can deliver "
+    'goes in a "limits" list in the object below, one item per point, and not in uncovered: a limit makes the '
+    "result neither partial nor undelivered, and uncovered keeps the gaps a better answer could close. "
 )
 
 
@@ -314,6 +327,10 @@ REVIEW_AGAIN = (
 
 #: How many answers a request may get: the first, then one more each time the review finds the last one short.
 REQUEST_ATTEMPTS = 3
+
+#: Why an answer is refused before its review on opencode: an agent it defines without a permission map is offered
+#: every tool, so a mode built on it restricts nothing.
+UNRESTRICTED_AGENT = "agent {name!r} has no permission map, so it is offered every tool"
 
 #: The prompt section a request gets again after a review found the previous answer short.
 RETRY_SECTION = (
@@ -511,6 +528,9 @@ def _answer_request(
             kept = (mutations, added, notes)
         if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
             break
+        if review.get("limits") and not review["uncovered"] and review.get("delivers") is not False:
+            # What remains is what the harness notes say no answer here can deliver: another answer changes nothing.
+            break
         findings = [*review["uncovered"], *notes.get("dropped", ())]
         retry = RETRY_SECTION.format(
             design=notes.get("design", "(none written)"),
@@ -582,6 +602,9 @@ def _answer_once(
         _, refusal = admit_mutations(entries, mutations, get_adapter(adapter))
         if refusal is not None:
             return _Unusable(f"the harness refused the entries: {refusal}", design)
+    unrestricted = _unrestricted_agents(mutations, nodes, entries)
+    if unrestricted:
+        return _Unusable("; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design)
     added, refused = _parse_requires(reply)
     notes: dict[str, Any] = {}
     if design is not None:
@@ -603,6 +626,39 @@ def _answer_once(
     if undeclared:
         notes["undeclared_env"] = undeclared
     return mutations, added, notes
+
+
+def _config_agents(config: Any) -> Mapping[str, Any]:
+    """The agents a config node's data defines under ``agent`` (opencode's key), by name; none for another node."""
+    data = config.get("data") if isinstance(config, Mapping) else None
+    agents = data.get("agent") if isinstance(data, Mapping) else None
+    return agents if isinstance(agents, Mapping) else {}
+
+
+def _unrestricted_agents(
+    mutations: Sequence[Mutation], nodes: Sequence[tuple[str, Any]], entries: Sequence[Mapping[str, Any]]
+) -> list[str]:
+    """The agents the answer's config entries define with no permission map, unless the tree already gives that
+    agent one: opencode offers such an agent every tool. Only a request's answer is held to this; a tree of the
+    person's own may define an agent without a map."""
+    tree = [(str(entry.get("name")), entry.get("config")) for entry in entries] if entries else list(nodes)
+    mapped = {
+        name
+        for kind, config in tree
+        if kind == "config"
+        for name, agent in _config_agents(config).items()
+        if isinstance(agent, Mapping) and isinstance(agent.get("permission"), Mapping) and agent["permission"]
+    }
+    names = []
+    for mutation in mutations:
+        options = mutation.options or {}
+        if options.get("name") != "config":
+            continue
+        for name, agent in _config_agents(options.get("config")).items():
+            permission = agent.get("permission") if isinstance(agent, Mapping) else None
+            if not (isinstance(permission, Mapping) and permission) and name not in mapped:
+                names.append(str(name))
+    return names
 
 
 def _with_dropped(proposal: StepProposal, dropped_attempts: Sequence[str]) -> StepProposal:
@@ -692,7 +748,7 @@ def _request_prompt(
         kinds=kind_lines(adapter),
         extensions=EXTENSIONS_SECTION if extensions else harness_section(adapter),
         platform="branch on process.platform, " if extensions else "",
-        wrapper=adapter,
+        setup=(NO_SETUP_SENTENCE if get_adapter(adapter).install is None else SETUP_SENTENCE.format(wrapper=adapter)),
         failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
         entries=entries_text,
         reserved=", ".join(sorted(RESERVED_ENTRY_IDS)),
@@ -799,6 +855,10 @@ def _parse_review(reply: str) -> dict[str, Any] | None:
         "covered": _strings_of(value.get("covered")),
         "uncovered": _strings_of(value.get("uncovered")),
     }
+    # What the harness notes declare out of reach, kept apart from the gaps a better answer could close.
+    limits = _strings_of(value.get("limits"))
+    if limits:
+        review["limits"] = limits
     # Only an explicit boolean decides delivery; a review that says nothing about it keeps the change.
     if isinstance(value.get("delivers"), bool):
         review["delivers"] = value["delivers"]

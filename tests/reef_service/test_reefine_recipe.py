@@ -126,8 +126,8 @@ assert recipe.model_binding().model == 'test-model'
 
 
 def test_the_profile_seeds_the_shipped_entries_only_on_the_adapter_that_ships_them(caplog) -> None:
-    """dsh and hermes get the /reefine command file and no update notice; terminus, with no command surface, gets
-    neither and takes requests through reef-terminus evolve. The pi entries would refuse them at startup."""
+    """dsh and hermes get the /reefine command file and no update notice; terminus, with no command surface and no
+    install, gets neither and takes requests through POST /reef/train. The pi entries would refuse them at startup."""
     for adapter in ("dsh", "hermes"):
         with caplog.at_level("INFO", logger="reef.recipe.reefine"):
             built = ReefineRecipe.from_environment(
@@ -147,8 +147,9 @@ def test_the_profile_seeds_the_shipped_entries_only_on_the_adapter_that_ships_th
             },
         )
     assert isinstance(built, ReefineRecipe) and built.seed == ()
-    assert "requests come through reef-terminus evolve" in caplog.text
-    assert "reef-terminus update installs a release" in caplog.text
+    # terminus has no wrapper, so the log names the routes, never a reef-terminus command that does not exist.
+    assert caplog.text.count("requests come through POST /reef/train; GET /reef/harness serves a published tree") == 2
+    assert "reef-terminus" not in caplog.text
     pi = ReefineRecipe.from_environment({}, config={"evolution": {"tasks": ["[health] x"]}})
     assert isinstance(pi, ReefineRecipe)
     assert [entry["id"] for entry in pi.seed] == ["reef-version-check", "reef-requests", "reef-pi-extension-api"]

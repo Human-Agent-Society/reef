@@ -36,10 +36,12 @@ _CONVERSATION_MODE = (
     "{title} keeps no mode state of its own and a command cannot take a tool away, so a mode here is guidance the "
     "model follows while every tool stays in its list: the command that turns it on says so in its reply and "
     "names how to leave it, the rules say how the agent behaves while it is on and that every reply shows it is "
-    "on, and the same command with the word off turns it off. The design, the How to use paragraph and the "
-    "command's reply say the model follows the mode and never claim the other tools are unavailable. A request for "
-    "a hard restriction (no other tool or skill may run at all) is only partly met this way: the review lists that "
-    "point as uncovered."
+    "on, and the same command with the word off turns it off. The mode's state lives in the conversation, in the "
+    "command's reply and the header each reply starts with, never in a file or a marker a tool writes or reads, and "
+    "the rules make no tool call on any turn: a rule applies to every turn of every session, the mode's turns or "
+    "not. The design, the How to use paragraph and the command's reply say the model follows the mode and never "
+    "claim the other tools are unavailable. A request for a hard restriction (no other tool or skill may run at "
+    "all) is only partly met this way, and no answer here can do more: the review lists that point under limits."
 )
 
 FACTS = {
@@ -100,10 +102,12 @@ FACTS = {
             "A mode is an agent. A config entry defines it in opencode.json with a permission map, which limits the "
             "tools the model gets and so enforces the mode, and a prompt, which replaces opencode's own system "
             "prompt while the agent runs; an agent_command with agent: <name> in its frontmatter switches the "
-            "session to it. Write both in the same reply. Put the restriction in the chat agent's prompt, not in rules "
-            "or the command text, so it ends when the session leaves the agent. The person leaves the mode with "
-            "/agents, choosing build (Tab cycles the primary agents, build first); say so in the command's reply and "
-            "in How to use."
+            "session to it. Write both in the same reply. The restriction's wording lives only in that agent's own "
+            "prompt, never in rules or in a command's text, so it ends when the session leaves the agent. Write a "
+            "second agent_command that leaves the mode, with agent: build in its frontmatter and text that says the "
+            "mode has ended and every tool is back. The person leaves with that command or with /agents, choosing "
+            "build; Tab from the mode's agent reaches plan first, since Tab cycles build and then the other primary "
+            "agents by name. Say so in the command's reply and in How to use."
         ),
         config_keys=("agent",),
         config_example=(
@@ -126,6 +130,25 @@ FACTS = {
             "(searches the web; no key needed)"
         ),
         mode=_CONVERSATION_MODE.format(title="Hermes"),
+    ),
+    "terminus": HarnessFacts(
+        title="Terminus 2",
+        command=(
+            "Terminus 2 has no session a person types in: a person's words reach the model only as a Harbor task's "
+            "instruction, and each run is one task. An agent_command renders as a skill, listed in "
+            "available_skills beside the others, which the model may open while it works on a task; nothing marks "
+            "it as a command and nobody types it."
+        ),
+        tools=(
+            "keystrokes into a tmux shell in the task's Linux container, where curl reaches the web when the task "
+            "allows network access; no web search tool of its own"
+        ),
+        mode=(
+            "No state outlives a trial: the container, its files and the conversation end with the task, so a mode "
+            "can only be rules and skills the model reads during one task, and nothing can turn one on or off. A "
+            "request for a mode a person enters and leaves cannot be met on this harness: the review lists that "
+            "point under limits."
+        ),
     ),
     "dsh": HarnessFacts(
         title="DeepSeek Harness (dsh)",

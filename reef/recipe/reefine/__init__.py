@@ -14,6 +14,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.requests import ships_requests
 from reef.harness.episodes.version_check import ships_version_check
 from reef.recipe.config_fields import config_field
@@ -93,20 +95,26 @@ class ReefineRecipe(CordisRecipe):
         merged = {**defaults, **evolution}
         # The /reefine command and the update notice are entries the adapter ships; on an adapter that ships
         # one of them not, the profile runs without it: a request still arrives through reef-<adapter> evolve,
-        # and reef-<adapter> update installs a release.
+        # and reef-<adapter> update installs a release. An adapter Reef installs nothing for (terminus) has no
+        # wrapper: a request comes through POST /reef/train and the published tree through GET /reef/harness.
+        try:
+            installs = get_adapter(adapter).install is not None
+        except DescriptorError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+        channel = "requests come through POST /reef/train; GET /reef/harness serves a published tree"
         if merged.get("requests") is True and not ships_requests(adapter):
             merged["requests"] = False
             logger.info(
-                "adapter %r ships no /reefine command (requests off); requests come through reef-%s evolve",
+                "adapter %r ships no /reefine command (requests off); %s",
                 adapter,
-                adapter,
+                f"requests come through reef-{adapter} evolve" if installs else channel,
             )
         if merged.get("version_check") is True and not ships_version_check(adapter):
             merged["version_check"] = False
             logger.info(
-                "adapter %r ships no update notice (version_check off); reef-%s update installs a release",
+                "adapter %r ships no update notice (version_check off); %s",
                 adapter,
-                adapter,
+                f"reef-{adapter} update installs a release" if installs else channel,
             )
         kwargs = super()._recipe_kwargs({**settings, "evolution": merged}, values)
         try:
