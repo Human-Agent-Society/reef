@@ -38,7 +38,7 @@ from reef.recipe.base import Recipe
 from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.runtime.interfaces import RuntimeContractError, TrainingRuntime
 from reef.runtime.recovery import marker_in_flight
-from reef.scenario.registry import ScenarioRegistry
+from reef.scenario.registry import ReplacedScenarioCloser, ScenarioRegistry
 from reef.scenario.scenario import Scenario, SettledTrainingResultError, StaleTrainingResultError
 from reef.storage.records import RecordConflict, RecordRetention
 from reef.storage.scenario import ScenarioStorage
@@ -113,7 +113,7 @@ class _TrainingState:
     stood_aside: set[tuple[str, str | None]] = field(default_factory=set)
     #: Scenarios whose local cycle failed under a dispatched job: the training thread reloads them once it lands.
     deferred_reloads: set[str] = field(default_factory=set)
-    #: Instances the training thread's reload replaced while a local cycle ran on them: closed when it ends.
+    #: Instances a reload replaced while a local cycle of their scenario ran: closed when that cycle ends.
     replaced: dict[str, list[Scenario]] = field(default_factory=dict)
     #: Results refused because another trainer's commit replaced their base, per (scenario, component).
     stale_refusals_in_a_row: dict[tuple[str, str | None], int] = field(default_factory=dict)
@@ -147,6 +147,16 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
             if directive_shaped(value):
                 return "a requires item carries an instruction override phrasing or a chat template control token"
     return None
+
+
+class _ReplacedAfterItsCycle(ReplacedScenarioCloser):
+    """The dispatcher's closer: a replaced instance a local cycle still runs on closes when that cycle ends."""
+
+    def __init__(self, dispatcher: Dispatcher) -> None:
+        self.dispatcher = dispatcher
+
+    def close_replaced(self, instance: Scenario) -> None:
+        self.dispatcher.retire_replaced(instance)
 
 
 class Dispatcher:
@@ -203,6 +213,7 @@ class Dispatcher:
             experiment_tracker=self._experiment_tracker,
         )
         self._registry.set_training_scenario_callback(self._start_training)
+        self._registry.set_replaced_closer(_ReplacedAfterItsCycle(self))
         self._publication = _PublicationState()
         self._training = _TrainingState()
         self._lifecycle = _LifecycleState()
@@ -794,11 +805,18 @@ class Dispatcher:
         finally:
             self._close_replaced(scenario)
 
+    def retire_replaced(self, instance: Scenario) -> None:
+        """A reload replaced ``instance``: close it now, or when the local cycle running on it ends."""
+        with self._training.lock:
+            self._training.replaced.setdefault(instance.name, []).append(instance)
+        self._close_replaced(instance.name)
+
     def _close_replaced(self, scenario: str) -> None:
-        """Close the instances the training thread's reload replaced, unless a local cycle still runs on one.
+        """Close the instances reloads replaced, unless a local cycle of the scenario still runs.
 
         That cycle closes them when it ends: closing an instance waits for
-        the evaluation in flight on it, and the training thread must not.
+        the evaluation in flight on it, and the training thread, whose
+        reload after a failed commit may land during one, must not.
         """
         lock = self._local_cycle_lock(scenario)
         if not lock.acquire(blocking=False):
@@ -906,24 +924,10 @@ class Dispatcher:
             if self._registry.get_optional(current.name) is current:
                 self._wake_training(current)
 
-    def _reload_with_instruction_failures(
-        self, scenario: str, current: Scenario, *, beside_local_cycles: bool = False
-    ) -> Scenario:
-        """Rebuild from durable state; the failed instructions still queued keep their skip rows coming.
-
-        ``beside_local_cycles``: the training thread rebuilds while a local
-        cycle may evaluate on the instance it replaces, so that instance
-        stays open until the cycle ends (see :meth:`_close_replaced`).
-        """
+    def _reload_with_instruction_failures(self, scenario: str, current: Scenario) -> Scenario:
+        """Rebuild from durable state; the failed instructions still queued keep their skip rows coming."""
         failures = {bound.component: bound.trainer.instruction_failures() for bound in current.component_trainers}
-        if beside_local_cycles:
-            recovered, dropped = self._registry.rebuild(scenario)
-            if dropped is not None:
-                with self._training.lock:
-                    self._training.replaced.setdefault(scenario, []).append(dropped)
-                self._close_replaced(scenario)
-        else:
-            recovered = self._registry.reload(scenario)
+        recovered = self._registry.reload(scenario)
         for component, failed in failures.items():
             if failed:
                 recovered.trainer_for(component).set_instruction_failures(failed)
@@ -941,7 +945,7 @@ class Dispatcher:
             self._registry.reload(scenario)
             return
         self._fail_instruction(current, cause, current.dispatched_component)
-        self._reload_with_instruction_failures(scenario, current, beside_local_cycles=True)
+        self._reload_with_instruction_failures(scenario, current)
         # The rebuilt instance holds the local components' rows unread; their workers look again.
         self.wake_local_workers()
 

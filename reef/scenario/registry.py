@@ -9,6 +9,7 @@ resolution and uses the registry for lookups.
 
 from __future__ import annotations
 
+from abc import ABC, abstractmethod
 from collections.abc import Callable
 from pathlib import Path
 from threading import Lock, RLock
@@ -27,6 +28,20 @@ from reef.scenario.factory import ScenarioFactory
 from reef.scenario.scenario import Scenario
 from reef.storage.model_config import archive_model_config, read_model_config, write_model_config
 from reef.storage.scenario import ScenarioStorage
+
+
+class ReplacedScenarioCloser(ABC):
+    """Closes the instance a reload replaced, now or once nothing runs on it any more."""
+
+    @abstractmethod
+    def close_replaced(self, instance: Scenario) -> None: ...
+
+
+class CloseReplacedAtOnce(ReplacedScenarioCloser):
+    """The registry's own closer: the replaced instance closes as the reload returns."""
+
+    def close_replaced(self, instance: Scenario) -> None:
+        instance.close()
 
 
 class ScenarioRegistry:
@@ -70,6 +85,7 @@ class ScenarioRegistry:
         # The mode a person selected per scenario; a reload in this process applies it again, a restart does not.
         self._training_modes: dict[str, str] = {}
         self._preload_errors: dict[str, str] = {}
+        self._replaced_closer: ReplacedScenarioCloser = CloseReplacedAtOnce()
         self._allow_implicit_creation = allow_implicit_creation
         self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
 
@@ -110,6 +126,10 @@ class ScenarioRegistry:
 
     def set_training_scenario_callback(self, callback: Callable[[Scenario], None]) -> None:
         self._on_training_scenario_resolved = callback
+
+    def set_replaced_closer(self, closer: ReplacedScenarioCloser) -> None:
+        """Who closes the instance a reload replaced: a local cycle may still evaluate on it."""
+        self._replaced_closer = closer
 
     def has(self, scenario: str) -> bool:
         """True when the scenario exists in memory or in durable registration."""
@@ -230,21 +250,10 @@ class ScenarioRegistry:
             return self._resolve(scenario, release_id)
 
     def reload(self, scenario: str) -> Scenario:
-        """Rebuild a scenario from durable state after a training failure."""
-        with self.lock_for(scenario):
-            recovered, dropped = self.rebuild(scenario)
-            if dropped is not None:
-                # Close outside the state lock: teardown may join processor
-                # worker threads. The per-scenario lock still excludes accepts,
-                # so nothing observes the dropped instance mid-close.
-                dropped.close()
-            return recovered
+        """Rebuild a scenario from durable state after a training failure.
 
-    def rebuild(self, scenario: str) -> tuple[Scenario, Scenario | None]:
-        """Rebuild a scenario from durable state and serve the new instance; the one it replaced, left open.
-
-        Accepts and inference reach the new instance at once; the caller
-        closes the old one when nothing runs on it any more.
+        Accepts and inference reach the new instance at once; the replaced
+        instance goes to the registry's closer (see ``set_replaced_closer``).
         """
         with self.lock_for(scenario):
             recovered = self._scenario_factory.load_or_create(
@@ -261,7 +270,12 @@ class ScenarioRegistry:
             with self._lock:
                 dropped = self._scenarios.get(scenario)
                 self._scenarios[scenario] = recovered
-            return recovered, dropped
+            if dropped is not None:
+                # Close outside the state lock: teardown may join processor
+                # worker threads. Accepts reach the recovered instance, so
+                # nothing observes the dropped instance mid-close.
+                self._replaced_closer.close_replaced(dropped)
+            return recovered
 
     def remove(self, scenario: str) -> Scenario | None:
         """Drop every in-memory hold on the scenario; the instance, for the caller to close outside the state lock.
