@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import heapq
+import logging
 import math
 import shutil
 import time
@@ -13,29 +14,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from threading import RLock
 
-from alembic.migration import MigrationContext
-from alembic.operations import Operations
-from sqlalchemy import (
-    REAL,
-    URL,
-    Column,
-    Index,
-    Integer,
-    LargeBinary,
-    MetaData,
-    Table,
-    Text,
-    cast,
-    create_engine,
-    func,
-    inspect,
-)
+from sqlalchemy import REAL, URL, Column, Index, Integer, MetaData, Table, Text, create_engine, inspect
 from sqlalchemy.engine import Connection
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.pool import NullPool
 
 from reef.core.errors import ReefError
 from reef.storage.commit_log import CommitLog, CommitLogScenarioStore
+from reef.storage.migrations import migrate_record_storage
 from reef.storage.records import RecordRetention
 from reef.storage.scenario import ScenarioStorage
 from reef.storage.sql_records import RecordTables, SQLRecordRetention, SQLRecordStore
@@ -52,7 +38,6 @@ _AGENT_RECORD = Table(
     Column("created_at", REAL, nullable=False),
     Column("references_json", Text, nullable=False),
     Column("artifact_json", Text),
-    Column("compacted_at", REAL),
     Column("body_bytes", Integer, nullable=False, server_default="0"),
     # A purged sequence must never be reused by a later append.
     sqlite_autoincrement=True,
@@ -63,12 +48,13 @@ _CONSUMED_RECORD = Table(
     Column("agent_record_id", Text, primary_key=True, nullable=True),
     Column("content_sha256", Text, nullable=False),
 )
-_COMPACTION_RECEIPTS = Table(
-    "compaction_receipts",
+CONSUMPTION_RECEIPTS = Table(
+    "record_consumption",
     _METADATA,
     Column("scenario", Text, primary_key=True),
     Column("receipt_id", Text, primary_key=True),
-    Column("compacted_ids_json", Text, primary_key=True),
+    Column("consumed_ids_json", Text, nullable=False),
+    Column("consumed_ids_sha256", Text, primary_key=True),
     Column("metadata_json", Text, nullable=False),
     Column("recorded_at", REAL, nullable=False),
 )
@@ -79,35 +65,19 @@ Index(
     _AGENT_RECORD.c.request_type,
     _AGENT_RECORD.c.sequence,
 )
-Index(
-    "agent_record_active_sequence",
-    _AGENT_RECORD.c.scenario,
-    _AGENT_RECORD.c.sequence,
-    sqlite_where=_AGENT_RECORD.c.compacted_at.is_(None),
+RECORD_EVICTION = Table(
+    "record_eviction",
+    _METADATA,
+    Column("scenario", Text, primary_key=True),
+    Column("record_count", Integer, nullable=False),
+    Column("body_bytes", Integer, nullable=False),
+    Column("first_sequence", Integer, nullable=False),
+    Column("last_sequence", Integer, nullable=False),
 )
-Index(
-    "agent_record_active_type_sequence",
-    _AGENT_RECORD.c.scenario,
-    _AGENT_RECORD.c.request_type,
-    _AGENT_RECORD.c.sequence,
-    sqlite_where=_AGENT_RECORD.c.compacted_at.is_(None),
-)
-Index(
-    "agent_record_compacted_at",
-    _AGENT_RECORD.c.scenario,
-    _AGENT_RECORD.c.compacted_at,
-    _AGENT_RECORD.c.sequence,
-    sqlite_where=_AGENT_RECORD.c.compacted_at.is_not(None),
-)
-Index(
-    "agent_record_retention",
-    _AGENT_RECORD.c.compacted_at,
-    _AGENT_RECORD.c.sequence,
-    _AGENT_RECORD.c.body_bytes,
-    sqlite_where=_AGENT_RECORD.c.compacted_at.is_not(None),
-)
+Index("agent_record_capacity", _AGENT_RECORD.c.created_at, _AGENT_RECORD.c.sequence)
+logger = logging.getLogger(__name__)
 
-_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, _COMPACTION_RECEIPTS)
+_TABLES = RecordTables(_AGENT_RECORD, _CONSUMED_RECORD, CONSUMPTION_RECEIPTS, RECORD_EVICTION)
 
 
 class SQLiteRecordStore(SQLRecordStore):
@@ -121,11 +91,10 @@ class SQLiteRecordStore(SQLRecordStore):
     database keeps standalone/test construction lightweight; production callers
     should always pass a path.
 
-    Training reads hide compacted rows. Explicit audit reads retain access to
-    their bodies until :meth:`purge_compacted` physically removes them.
+    Consumption does not change visibility. Capacity eviction is the only
+    operation that deletes record bodies.
     """
 
-    _SQLITE_ID_CHUNK_SIZE = 900
     _WAL_SWITCH_TIMEOUT = 30.0
     _WAL_RETRY_INTERVAL = 0.01
 
@@ -134,7 +103,7 @@ class SQLiteRecordStore(SQLRecordStore):
         if self._database != ":memory:":
             Path(self._database).parent.mkdir(parents=True, exist_ok=True)
         self._lock = RLock()
-        super().__init__(_TABLES, id_chunk_size=self._SQLITE_ID_CHUNK_SIZE)
+        super().__init__(_TABLES)
         self._engine = create_engine(
             URL.create("sqlite+pysqlite", database=self._database),
             connect_args={"timeout": 30, "check_same_thread": False},
@@ -196,24 +165,8 @@ class SQLiteRecordStore(SQLRecordStore):
                 # Keep Alembic's column upgrades and the Core backfill in one
                 # SQLite transaction, serialized across concurrent openers.
                 self._connection.exec_driver_sql("BEGIN IMMEDIATE")
-                if inspect(self._connection).has_table(_AGENT_RECORD.name):
-                    columns = {column["name"] for column in inspect(self._connection).get_columns(_AGENT_RECORD.name)}
-                    if not {"compacted_at", "body_bytes"} <= columns:
-                        operations = Operations(MigrationContext.configure(self._connection))
-                        if "compacted_at" not in columns:
-                            operations.add_column(_AGENT_RECORD.name, Column("compacted_at", REAL))
-                        if "body_bytes" not in columns:
-                            operations.add_column(
-                                _AGENT_RECORD.name, Column("body_bytes", Integer, nullable=False, server_default="0")
-                            )
-                            self._connection.execute(
-                                _AGENT_RECORD.update().values(
-                                    body_bytes=func.length(cast(_AGENT_RECORD.c.payload_json, LargeBinary))
-                                    + func.length(cast(_AGENT_RECORD.c.references_json, LargeBinary))
-                                    + func.coalesce(func.length(cast(_AGENT_RECORD.c.artifact_json, LargeBinary)), 0)
-                                )
-                            )
                 _METADATA.create_all(self._connection)
+                migrate_record_storage(self._connection, _AGENT_RECORD, CONSUMPTION_RECEIPTS)
                 # create_all skips indexes on tables that already existed.
                 for index in _AGENT_RECORD.indexes:
                     index.create(self._connection, checkfirst=True)
@@ -257,13 +210,12 @@ class SQLiteRecordRetention:
         self._queries = SQLRecordRetention(_TABLES)
 
     def prune(self, directory: Path) -> int:
-        """Purge expired bodies, then the oldest bodies across this directory to meet the budget.
+        """Evict oldest bodies under capacity pressure, regardless of training state.
 
-        The caller must serialize this sweep with scenario file moves. Deletes
-        commit in batches of 256 and never touch active records or retry metadata.
-        Concurrent compaction may exceed the budget until the next sweep.
+        Deletes commit in bounded batches. Concurrent appends can exceed the
+        configured body budget until the next sweep. Freed database pages are
+        reusable; the budget does not measure filesystem allocation.
         """
-        cutoff = time.time() - self._retention.days * 86400
         paths = sorted((*directory.glob("*.sqlite3"), *(directory / "archived").rglob("*.sqlite3")))
         purged = 0
         total = 0
@@ -277,17 +229,13 @@ class SQLiteRecordRetention:
                         if inspector.has_table(_AGENT_RECORD.name)
                         else set()
                     )
-                if not {"compacted_at", "body_bytes"} <= columns:
-                    # Old stores have no retained compacted bodies; migration belongs to SQLiteRecordStore.
+                if "body_bytes" not in columns:
+                    # Incomplete stores must be upgraded by SQLiteRecordStore before maintenance.
                     continue
                 retained_paths.append(str(database_path))
-                while True:
-                    with connection.begin():
-                        count = self._queries.purge_expired(connection, before=cutoff)
-                    purged += count
-                    if count < 256:
-                        break
-
+                with connection.begin():
+                    connection.exec_driver_sql("BEGIN IMMEDIATE")
+                    RECORD_EVICTION.create(connection, checkfirst=True)
                 with connection.begin():
                     total += self._queries.retained_bytes(connection)
         if total <= self._retention.max_bytes:
@@ -331,13 +279,25 @@ class SQLiteRecordRetention:
                 rows = self._queries.page(connection, after_time=after_time, after_sequence=after_sequence)
             if not rows:
                 return
-            for compacted_at, sequence, size in rows:
-                yield compacted_at, path, sequence, size
+            for created_at, sequence, size in rows:
+                yield created_at, path, sequence, size
             after_time, after_sequence = rows[-1][:2]
 
     def _delete(self, path: str, sequences: list[int]) -> int:
         with self._connect(path) as connection, connection.begin():
-            return self._queries.delete(connection, sequences)
+            connection.exec_driver_sql("BEGIN IMMEDIATE")
+            losses = self._queries.evict(connection, sequences)
+        for scenario, loss in losses:
+            logger.warning(
+                "Record capacity exceeded: evicted %d records (%d body bytes), scenario=%s, sequence=%d..%d; "
+                "training data may be incomplete",
+                loss.record_count,
+                loss.body_bytes,
+                scenario,
+                loss.first_sequence,
+                loss.last_sequence,
+            )
+        return sum(loss.record_count for _, loss in losses)
 
 
 class SQLiteScenarioStorage(ScenarioStorage):

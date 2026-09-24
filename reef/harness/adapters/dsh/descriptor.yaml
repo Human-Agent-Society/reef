@@ -104,7 +104,7 @@ files:
   code_extension: "dsh/profiles/headless/extensions/{name}.mjs"
 trajectory:
   # One session per episode under sessions/<cwd slug>/session-<id>/session.jsonl,
-  # the {type, seq, time, data} envelope, read by the deepseek-session-jsonl reader.
+  # the {type, seq, time, data} envelope; the deepseek-session-jsonl reader lifts data beside the other three.
   format: deepseek-session-jsonl
   path: "dsh/sessions"
 cleanup_whitelist:

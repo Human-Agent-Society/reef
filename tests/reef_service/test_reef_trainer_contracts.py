@@ -13,7 +13,6 @@ from reef.train import (
     DataProcessor,
     PreparedStep,
     ProcessorContext,
-    RetentionDecision,
     Trainer,
     TrainingBatch,
     TrainStepResult,
@@ -105,7 +104,7 @@ def test_data_processor_is_the_no_update_default() -> None:
     assert processor.ready() is False
     record = AgentRecord.create(scenario="math", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
     processor.ingest(record)
-    assert processor.retention_decision() == RetentionDecision(protected_agent_record_ids=frozenset({"r1"}))
+    assert processor.releasable_record_ids() == frozenset()
     # The default holds no batch-ready units, so it never becomes ready and
     # build_batch refuses on that ground — the same refusal every engine gives.
     with pytest.raises(RuntimeError, match="not ready"):
@@ -136,7 +135,7 @@ def test_prepared_step_enforces_its_single_outcome() -> None:
 def test_custom_processors_default_to_releasing_no_records() -> None:
     processor = ExampleProcessor(ProcessorContext("math"), [])
 
-    assert processor.retention_decision() == RetentionDecision()
+    assert processor.releasable_record_ids() == frozenset()
 
 
 @pytest.mark.unit
@@ -199,7 +198,6 @@ def test_trainer_waits_for_commit_before_acknowledging_batch() -> None:
     events.append(f"commit:math:{result.state['version']}")
     prepared = trainer.prepare_commit(result)
     trainer.commit(prepared)
-    trainer.apply_compaction(prepared.compacted_ids)
     assert events == [
         "initialize:math",
         "ingest:report",
@@ -299,7 +297,6 @@ def test_trainer_reads_only_new_records() -> None:
     assert first is not None
     prepared = trainer.prepare_commit(first)
     trainer.commit(prepared)
-    trainer.apply_compaction(prepared.compacted_ids)
     records.append(report)
     trainer.run_once()
 

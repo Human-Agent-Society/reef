@@ -1163,12 +1163,11 @@ def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
 
 
 def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
-    """Where the request stands by its record: ``started`` once a step took it (``compacted_at`` set), ``gone``
-    when the service answers 404 (its scenario was reset), else ``waiting``.
+    """Read the request's explicit progress: started, gone, or waiting.
 
     A read that fails for any other reason is no reason to stop waiting, so
     it reads as waiting and the next poll asks again."""
-    path = f"/reef/scenarios/{urllib.parse.quote(scenario, safe='')}/records/{urllib.parse.quote(record_id, safe='')}"
+    path = f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/progress"
     req = urllib.request.Request(f"{upstream}{path}", headers=_reef_headers(scenario, token))
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
@@ -1177,7 +1176,7 @@ def _request_state(upstream: str, scenario: str, token: str | None, record_id: s
         return "gone" if exc.code == 404 else "waiting"
     except (OSError, ValueError):
         return "waiting"
-    if isinstance(record, Mapping) and record.get("compacted_at") is not None:
+    if isinstance(record, Mapping) and isinstance(record.get("state"), str) and record["state"] != "queued":
         return "started"
     return "waiting"
 

@@ -1181,7 +1181,7 @@ FAILURE = (
     "may have spent the reply budget on its reasoning, raise REEF_PROPOSER_MAX_TOKENS"
 )
 SKIPPED_FAILED_ROW = {**SKIPPED_ROW, "metrics": {**SKIPPED_ROW["metrics"], "proposal_notes": {"failure": FAILURE}}}
-# The request's record route: compacted_at is null while the request is queued and a time once a step took it.
+# The record route detects requests removed from storage.
 RECORD_PATH = "/reef/scenarios/code-repair/records/q-1"
 CREATION_ROW = RELEASES["releases"][0]
 
@@ -1455,17 +1455,16 @@ def test_the_watch_gives_up_after_its_cap_and_says_where_the_result_will_show(tm
     assert _notices(silent) == [{"kind": "notify", "message": ACCEPTED_NOTICE, "type": "info"}]
 
 
-def test_the_footer_says_queued_until_the_record_shows_a_step_took_the_request_then_counts(tmp_path: Path) -> None:
-    """Beside the catalog the watch reads the request's record until a step has taken it: the footer says queued
-    while compacted_at is null (a failed read keeps it), then running with the time since the poll that saw it,
-    after which the record is not read again."""
+def test_the_footer_says_queued_until_progress_reports_a_running_step_then_counts(tmp_path: Path) -> None:
+    """The footer follows explicit progress, then counts elapsed time; record reads only detect disappearance."""
     other = {**SELECTED_ROW, "metrics": {"selected": True, "training_request": {"id": "q-other", "text": "x"}}}
     answers = {
         **_catalog_with(other),
-        f"GET {RECORD_PATH}": [
+        f"GET {RECORD_PATH}": {"status": 200, "body": {}},
+        f"GET {PROGRESS_PATH}": [
             {"status": 404, "body": {"error": "not retained"}},
-            {"status": 200, "body": {"agent_record_id": "q-1", "compacted_at": None}},
-            {"status": 200, "body": {"agent_record_id": "q-1", "compacted_at": 1700000000.5}},
+            {"status": 200, "body": {"agent_record_id": "q-1", "state": "queued"}},
+            {"status": 200, "body": {"agent_record_id": "q-1", "state": "running"}},
         ],
     }
     out = _ask(
@@ -1487,7 +1486,7 @@ def test_the_footer_says_queued_until_the_record_shows_a_step_took_the_request_t
         "reef: step for request q-1 running for 1m 05s",
     ]
     reads = [event for event in _fetches(out) if event["url"] == f"http://reef:8900{RECORD_PATH}"]
-    assert len(reads) == 3  # one per poll until the step was seen running, none after
+    assert len(reads) == 2  # one per poll until the step was seen running, none after
     assert reads[0]["method"] == "GET"
     assert reads[0]["headers"] == {"x-reef-scenario": "code-repair", "authorization": "Bearer tok"}
     assert len([event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]) > 3

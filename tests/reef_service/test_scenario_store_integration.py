@@ -206,15 +206,13 @@ def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_pa
         model_content = model_path.read_bytes()
         math.records.append(trace("first"))
         code.records.append(trace("other", "code"))
-        math.records.compact("math", frozenset({"first"}))
         retention = RecordRetention(days=7, max_bytes=1)
-        assert dispatcher.prune_record_archives(retention) == 1
+        assert dispatcher.prune_record_archives(retention) == 2
         assert factory.prune_calls == [(retention.days, retention.max_bytes)]
         assert dispatcher.read_record("math", "first") is None
-        assert dispatcher.read_record("code", "other") is not None
+        assert dispatcher.read_record("code", "other") is None
 
         math.records.append(trace("archived"))
-        math.records.compact("math", frozenset({"archived"}))
         result = dispatcher.delete_scenario("math")
         assert "archive://math" in result["archived"]
         assert not model_path.exists()
@@ -223,12 +221,13 @@ def test_injected_storage_owns_retention_archive_and_same_name_recreation(tmp_pa
         assert str(archived_model) in result["archived"]
         assert factory.events.index(("close", "math")) < factory.events.index(("archive", "math"))
         assert dispatcher.prune_record_archives(retention) == 1
+        code.records.append(trace("survivor", "code"))
         replacement = dispatcher.get_or_create_scenario("math")
         assert replacement is not None
         assert replacement is not math
         assert replacement.records.count("math") == 0
         assert replacement.store.history() == ()
-        assert dispatcher.read_record("code", "other") is not None
+        assert dispatcher.read_record("code", "survivor") is not None
     finally:
         dispatcher.close()
     assert all(session.close_count == 1 for session in factory.sessions)
