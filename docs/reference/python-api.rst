@@ -540,7 +540,10 @@ argument but does not expire data. Store factories apply capacity limits through
 Training commits persist consumption progress without changing record
 visibility or deleting bodies. Processors expose ``releasable_record_ids()``
 and ``release_records(ids)`` for memory management. Storage controls capacity
-independently of these buffers.
+independently of these buffers. With several trainers in one scenario, a
+stale drop's consumption receipt carries ``component`` in its metadata and a
+``<component>:<batch id>`` receipt id, and each trainer skips on recovery only
+the rows its own commits and receipts consumed.
 
 ``get``, ``replay``, ``replay_page``, and ``count`` read all retained records.
 A one-time upgrade converts older retirement markers and receipts into

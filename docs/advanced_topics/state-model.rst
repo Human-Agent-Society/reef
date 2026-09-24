@@ -155,18 +155,13 @@ merged: the backend published its weights
 before the result arrived and its job can only be finished, so the step
 lands on the release served now and the record's ``base_release_id`` shows
 what the batch was reserved against. A lone trainer is never refused: only
-its own retried attempt can have moved the head. Rows every trainer
-consumes are retired only once every trainer has released them, and on
-restart each trainer recovers its state and read cursor from its own
-commits, which needs durable commit storage. A trainer's release counts for
-the others only once it is durable: named by one of its commit records, or,
-when it releases rows with no batch to commit (a retry it retired, a group it
-discarded, a row it judged unusable), by a settlement receipt it writes to the
-compaction log before another trainer commits. A receipt names those rows and
-moves no read cursor. A trainer rebuilt after a restart settles them again
-when it reads them, instead of deciding them anew without the rows another
-trainer has since retired, so a restarted run trains and keeps the same rows
-as one that never stopped.
+its own retried attempt can have moved the head. A commit retires no row,
+so the trainers share every stored row and each keeps its own consumption:
+a row one trainer consumed is still there for the others. A batch a trainer
+drops as stale goes on a consumption receipt that names its component. On
+restart each trainer recovers its state and read cursor from its own commits
+and skips the rows its own commits and receipts name, which needs durable
+commit storage.
 
 Without a durable store, live and local saved releases advance the serving
 head before settling the in-memory commit. A conflicting head therefore
