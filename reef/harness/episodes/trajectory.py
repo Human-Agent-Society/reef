@@ -334,9 +334,12 @@ class NativeSessionReader(TrajectoryReader):
 
 def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
     """The final assistant text in a session log, tolerant of both flat
-    role/content events and pi's wrapped message events with text parts."""
+    role/content events and pi's wrapped message events with text parts. A
+    ``message`` that is not a mapping (a terminus ATIF step's text) is no
+    wrapped message; such an event carries no assistant reply."""
     for event in reversed(trajectory):
-        message = event.get("message") or event
+        nested = event.get("message")
+        message = nested if isinstance(nested, Mapping) else event
         if message.get("role") != "assistant":
             continue
         content = message.get("content")

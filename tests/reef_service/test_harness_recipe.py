@@ -748,6 +748,33 @@ def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run(
     assert scored.score == 0.0 and scored.failure is not None and scored.failure.stage == "exit"
 
 
+def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Path) -> None:
+    """A terminus trial's ATIF steps carry their text as a plain string ``message``: scoring reads the verifier's
+    reward and finds no assistant reply, instead of taking the step's text for a wrapped message."""
+    from reef.harness.episodes.trajectory import read_terminus_atif
+    from reef.train.cordis_backend.strategies import verifier_reward
+
+    episode_worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("terminus"),
+        scorer=resolve_episode_scorer(verifier_reward),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+    steps = [
+        {"step_id": 1, "source": "user", "message": "Write the output of `echo reef-ok` to health.txt."},
+        {"step_id": 2, "source": "agent", "model_name": "m", "message": "Analysis: fresh terminal.\nPlan: run it."},
+    ]
+    trial = {"task": "health", "rewards": {"reward": 1.0}, "reward": 1.0, "failed": False, "error": "", "steps": steps}
+    (tmp_path / "health.json").write_text(json.dumps(trial), encoding="utf-8")
+    trajectory = read_terminus_atif(tmp_path)
+    scored = episode_worker._score_result(
+        EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()), "health"
+    )
+    assert scored.score == 1.0 and scored.failure is None and scored.reply is None
+
+
 def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run(episode_worker) -> None:
     """A subagent's model error aborts the whole run with no root turn/end; the episode could not run either."""
     error = {"code": "MODEL_ERROR", "message": "the endpoint answered 500"}
