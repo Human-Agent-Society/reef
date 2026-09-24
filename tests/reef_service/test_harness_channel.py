@@ -1049,6 +1049,30 @@ echo "harness: $DEST"
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("adapter", "usage"),
+    [
+        ("pi", 'reef-pi -p "fix the bug"'),
+        ("claude", 'reef-claude -p "fix the bug"'),
+        ("codex", 'reef-codex exec "fix the bug"'),
+        ("opencode", 'reef-opencode run "fix the bug"'),
+        ("hermes", 'reef-hermes chat --oneshot -q "fix the bug"'),
+        ("dsh", 'reef-dsh --profile headless -- -- "fix the bug"'),
+    ],
+)
+def test_the_wrapper_header_shows_the_one_shot_run_each_binary_takes(adapter: str, usage: str) -> None:
+    """Codex refuses pi's -p (its profile flag): each wrapper's usage line names the binary's own one task form."""
+    script = render_install_script(
+        descriptor=get_adapter(adapter),
+        files={"AGENTS.md": "hello\n"},
+        release_id="v1",
+        content_id="content-v1",
+        scenario="code-repair",
+    )
+    assert f"# Usage: {usage}     # run the agent (receipts captured)" in script
+
+
+@pytest.mark.unit
 def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_exact(tmp_path) -> None:
     """Pinned binary present: npm never runs, every file lands byte exact,
     the release file matches the client pull's shape, and a rerun is a no-op."""
