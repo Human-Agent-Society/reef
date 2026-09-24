@@ -586,6 +586,67 @@ def test_a_reload_after_a_training_failure_wakes_the_local_workers(tmp_path: Pat
 
 
 @pytest.mark.unit
+def test_a_reload_after_a_weights_failure_leaves_the_harness_cycle_in_flight_its_instance(
+    tmp_path: Path, monkeypatch: Any
+) -> None:
+    """The training thread rebuilds the scenario at once; the instance a harness cycle evaluates on stays open until
+    the cycle ends, and the cycle then looks again on the rebuilt instance instead of failing."""
+    backends = {
+        WEIGHTS: _DispatchedBackend(WEIGHTS, tmp_path / "candidates", "job-1"),
+        HARNESS: _SlowBackend(HARNESS, tmp_path / "candidates"),
+    }
+    dispatcher, _ = _dispatcher(tmp_path, backends=backends)
+    slow = backends[HARNESS]
+    assert isinstance(slow, _SlowBackend)
+    try:
+        scenario = dispatcher.get_or_create_scenario("agent")
+        assert scenario is not None
+        for record in _records(1):
+            scenario.records.append(record)
+        closed_under_the_cycle: list[bool] = []
+        close = scenario.close
+
+        def observed_close() -> None:
+            closed_under_the_cycle.append(not slow.release.is_set())
+            close()
+
+        monkeypatch.setattr(scenario, "close", observed_close)
+        outcome: list[bool] = []
+        errors: list[BaseException] = []
+
+        def cycle() -> None:
+            try:
+                outcome.append(dispatcher._process_local_backend_step("agent", HARNESS))
+            except Exception as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=cycle)
+        worker.start()
+        assert slow.evaluating.wait(10)
+        reloading = threading.Thread(
+            target=lambda: dispatcher._reload_after_training_failure("agent", RuntimeError("weights commit refused"))
+        )
+        reloading.start()
+        reloading.join(5)
+        # The training thread does not wait for the cycle: its next turn needs the rebuilt instance.
+        assert not reloading.is_alive()
+        rebuilt = dispatcher._registry.get_optional("agent")
+        assert rebuilt is not None and rebuilt is not scenario
+        slow.release.set()
+        worker.join(10)
+        assert not worker.is_alive()
+        assert errors == [] and outcome == [True]
+        assert closed_under_the_cycle == [False]
+        assert dispatcher.build_training_status()["error"] is None
+        # The rows the cycle held train on the rebuilt instance.
+        assert dispatcher._process_local_backend_step("agent", HARNESS) is True
+        assert [row["component"] for row in rebuilt.releases() if row["operation"] == "training"] == [HARNESS]
+    finally:
+        slow.release.set()
+        dispatcher.close()
+
+
+@pytest.mark.unit
 def test_deleting_a_scenario_whose_training_job_is_out_waits_for_the_job(tmp_path: Path) -> None:
     """The job could neither commit nor be acknowledged without its scenario, so the delete answers busy until it lands."""
     dispatcher, backends = _dispatcher(tmp_path, backends=_dispatched_pair(tmp_path, "job-1"))

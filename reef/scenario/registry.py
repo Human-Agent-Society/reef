@@ -232,6 +232,21 @@ class ScenarioRegistry:
     def reload(self, scenario: str) -> Scenario:
         """Rebuild a scenario from durable state after a training failure."""
         with self.lock_for(scenario):
+            recovered, dropped = self.rebuild(scenario)
+            if dropped is not None:
+                # Close outside the state lock: teardown may join processor
+                # worker threads. The per-scenario lock still excludes accepts,
+                # so nothing observes the dropped instance mid-close.
+                dropped.close()
+            return recovered
+
+    def rebuild(self, scenario: str) -> tuple[Scenario, Scenario | None]:
+        """Rebuild a scenario from durable state and serve the new instance; the one it replaced, left open.
+
+        Accepts and inference reach the new instance at once; the caller
+        closes the old one when nothing runs on it any more.
+        """
+        with self.lock_for(scenario):
             recovered = self._scenario_factory.load_or_create(
                 scenario, None, model_config=self._model_config(scenario)
             )
@@ -246,12 +261,7 @@ class ScenarioRegistry:
             with self._lock:
                 dropped = self._scenarios.get(scenario)
                 self._scenarios[scenario] = recovered
-            if dropped is not None:
-                # Close outside the state lock: teardown may join processor
-                # worker threads. The per-scenario lock still excludes accepts,
-                # so nothing observes the dropped instance mid-close.
-                dropped.close()
-            return recovered
+            return recovered, dropped
 
     def remove(self, scenario: str) -> Scenario | None:
         """Drop every in-memory hold on the scenario; the instance, for the caller to close outside the state lock.

@@ -12,8 +12,8 @@ import logging
 import shutil
 import tempfile
 import time
-from collections.abc import Mapping, Sequence
-from contextlib import ExitStack
+from collections.abc import Iterator, Mapping, Sequence
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from threading import Event, Lock, Thread
@@ -113,6 +113,8 @@ class _TrainingState:
     stood_aside: set[tuple[str, str | None]] = field(default_factory=set)
     #: Scenarios whose local cycle failed under a dispatched job: the training thread reloads them once it lands.
     deferred_reloads: set[str] = field(default_factory=set)
+    #: Instances the training thread's reload replaced while a local cycle ran on them: closed when it ends.
+    replaced: dict[str, list[Scenario]] = field(default_factory=dict)
     #: Results refused because another trainer's commit replaced their base, per (scenario, component).
     stale_refusals_in_a_row: dict[tuple[str, str | None], int] = field(default_factory=dict)
     stale_refusals_total: dict[tuple[str, str | None], int] = field(default_factory=dict)
@@ -315,6 +317,7 @@ class Dispatcher:
                     if backend is not None:
                         backend.retire_scenario(scenario)
                 dropped.close()
+            self._close_replaced(scenario)
             archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
         self._registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}
@@ -774,6 +777,32 @@ class Dispatcher:
         with self._training.lock:
             return self._training.local_cycle_locks.setdefault(scenario, Lock())
 
+    @contextmanager
+    def _local_cycle(self, scenario: str) -> Iterator[None]:
+        """One local cycle's turn; at its end, the instances a reload replaced under it close."""
+        try:
+            with self._local_cycle_lock(scenario):
+                yield
+        finally:
+            self._close_replaced(scenario)
+
+    def _close_replaced(self, scenario: str) -> None:
+        """Close the instances the training thread's reload replaced, unless a local cycle still runs on one.
+
+        That cycle closes them when it ends: closing an instance waits for
+        the evaluation in flight on it, and the training thread must not.
+        """
+        lock = self._local_cycle_lock(scenario)
+        if not lock.acquire(blocking=False):
+            return
+        try:
+            with self._training.lock:
+                replaced = self._training.replaced.pop(scenario, [])
+            for instance in replaced:
+                instance.close()
+        finally:
+            lock.release()
+
     def _stale_refusals_total(self, scenario: str, component: str | None) -> int:
         with self._training.lock:
             return self._training.stale_refusals_total.get((scenario, component), 0)
@@ -865,10 +894,24 @@ class Dispatcher:
             if self._registry.get_optional(current.name) is current:
                 self._wake_training(current)
 
-    def _reload_with_instruction_failures(self, scenario: str, current: Scenario) -> Scenario:
-        """Rebuild from durable state; the failed instructions still queued keep their skip rows coming."""
+    def _reload_with_instruction_failures(
+        self, scenario: str, current: Scenario, *, beside_local_cycles: bool = False
+    ) -> Scenario:
+        """Rebuild from durable state; the failed instructions still queued keep their skip rows coming.
+
+        ``beside_local_cycles``: the training thread rebuilds while a local
+        cycle may evaluate on the instance it replaces, so that instance
+        stays open until the cycle ends (see :meth:`_close_replaced`).
+        """
         failures = {bound.component: bound.trainer.instruction_failures() for bound in current.component_trainers}
-        recovered = self._registry.reload(scenario)
+        if beside_local_cycles:
+            recovered, dropped = self._registry.rebuild(scenario)
+            if dropped is not None:
+                with self._training.lock:
+                    self._training.replaced.setdefault(scenario, []).append(dropped)
+                self._close_replaced(scenario)
+        else:
+            recovered = self._registry.reload(scenario)
         for component, failed in failures.items():
             if failed:
                 recovered.trainer_for(component).set_instruction_failures(failed)
@@ -886,7 +929,7 @@ class Dispatcher:
             self._registry.reload(scenario)
             return
         self._fail_instruction(current, cause, current.dispatched_component)
-        self._reload_with_instruction_failures(scenario, current)
+        self._reload_with_instruction_failures(scenario, current, beside_local_cycles=True)
         # The rebuilt instance holds the local components' rows unread; their workers look again.
         self.wake_local_workers()
 
@@ -911,7 +954,7 @@ class Dispatcher:
         # race only had the slower worker refused as stale on every cycle, and
         # each refusal threw away a full candidate evaluation. A dispatched
         # commit still lands meanwhile; the stale policy answers it.
-        with self._local_cycle_lock(scenario):
+        with self._local_cycle(scenario):
             loaded = self._registry.get_optional(scenario)
             if loaded is None:
                 # Deleted while this worker waited for its turn.
@@ -938,8 +981,12 @@ class Dispatcher:
             # registry lock. Candidate generation above can take minutes and must
             # not block record acceptance for this scenario.
             with self._registry.lock_for(scenario):
-                if self._registry.get_optional(scenario) is not current:
-                    raise RuntimeContractError(f"local backend scenario {scenario!r} changed before commit")
+                loaded = self._registry.get_optional(scenario)
+                if loaded is not current:
+                    # Rebuilt under this cycle by a sibling trainer's failure, or deleted: the result belongs to the
+                    # instance that prepared it, and the step ends without a commit. A rebuilt instance holds these
+                    # rows unread: look again on it.
+                    return loaded is not None
                 try:
                     self._commit_result(scenario, result, component)
                 except StaleTrainingResultError as stale:
@@ -1433,7 +1480,10 @@ class Dispatcher:
             self._lifecycle.metrics_thread.join()
             self.record_operational_metrics()
         errors: list[BaseException] = []
-        for scenario in self._registry.loaded_scenarios():
+        with self._training.lock:
+            replaced = [instance for instances in self._training.replaced.values() for instance in instances]
+            self._training.replaced.clear()
+        for scenario in (*replaced, *self._registry.loaded_scenarios()):
             # scenario.close(), not records.close(): processor teardown has to
             # precede the store closing, or a processor worker still in flight
             # observes a closed store.

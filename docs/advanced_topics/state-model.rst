@@ -138,7 +138,12 @@ recipe builds one trainer per component runs those trainers as separate
 workers that meet at this commit boundary, where the scenario lock
 serializes their commits. Local workers of one scenario take turns for a
 whole cycle, prepare and commit together, so they never overtake each
-other. A local result whose base a dispatched commit has replaced goes
+other. When a dispatched commit fails, the training thread rebuilds the
+scenario from durable state at once; a local cycle still running on the
+old instance keeps that instance open until it ends, then commits nothing
+and looks again on the rebuilt instance, which holds its rows unread. A
+local cycle whose scenario is deleted under it ends without a commit too.
+A local result whose base a dispatched commit has replaced goes
 the way its backend's ``stale_result_policy`` says: ``merge`` commits it
 onto the release served now (the harness backend's default, since each
 of its episode pairings compared candidate and current under the same
