@@ -81,6 +81,7 @@ cleanup_whitelist:
   # temporary discovery state observed by the real-binary smoke test.
   - "codex/.sandbox_migration"
   - "codex/.tmp/**"
+  - "codex/tmp/arg0/**"
   - "codex/goals_1.sqlite*"
   - "codex/installation_id"
   - "codex/logs_2.sqlite*"

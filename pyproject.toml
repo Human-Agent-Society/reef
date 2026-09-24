@@ -43,7 +43,7 @@ tinker = [
     "jinja2>=3.1.0",
 ]
 postgres = ["psycopg[binary]>=3.1,<4"]
-# The agent proposer's E2B cloud sandbox (evolution.proposer_agent.sandbox: e2b).
+# E2B cloud sandboxes for evaluation episodes and the agent proposer.
 e2b = ["e2b>=2.46", "connectrpc>=0.11.1,<0.12"]
 # Provider-neutral experiment tracking. Non-Slime training backends can opt in
 # without installing the Slime/GPU dependency stack.

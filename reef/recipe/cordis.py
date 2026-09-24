@@ -104,12 +104,12 @@ def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[E
         )
         return LocalExecutor(), timeouts[0], timeouts[1]
     if sandbox == "e2b":
-        remote = E2BExecutor(
-            api_key=str(section.get("e2b_api_key") or environ.get("E2B_API_KEY") or "").strip(),
-            template=str(section.get("e2b_template") or "").strip(),
-            timeout_s=timeouts[0],
-        )
         try:
+            remote = E2BExecutor.from_config(
+                {key: section[key] for key in ("e2b_api_key", "e2b_api_key_env", "e2b_template") if key in section},
+                environ,
+            )
+            remote = replace(remote, timeout_s=timeouts[0])
             remote.preflight()
         except SandboxUnavailable as exc:
             raise RecipeConfigError(f"evolution.proposer_agent.sandbox is e2b, but {exc}") from exc

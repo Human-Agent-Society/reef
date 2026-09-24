@@ -355,18 +355,18 @@ def test_a_root_crosses_as_it_is_and_the_command_names_its_sandbox_path(tmp_path
     assert not (tmp_path / "escape").exists()
 
     command, env = remote_command(
-        ["/opt/reef/pi/node_modules/.bin/pi", "--mode", "json", "-p", "it's here"],
+        ["/opt/agents/pi", "--mode", "json", "-p", "it's here"],
         {"HOME": str(root), "PI_CODING_AGENT_DIR": f"{root}/pi-agent", "PATH": "/host/bin", "REEF_TOKEN": "t"},
         root,
     )
     assert remote_root(root) == "/home/user/reef/reef-proposer-abc"
-    assert command == "pi --mode json -p 'it'\"'\"'s here'"
+    assert command == "/opt/agents/pi --mode json -p 'it'\"'\"'s here'"
     assert env == {
         "HOME": "/home/user/reef/reef-proposer-abc",
         "PI_CODING_AGENT_DIR": "/home/user/reef/reef-proposer-abc/pi-agent",
         "REEF_TOKEN": "t",
     }
-    assert template_alias("pi", "0.84.2") == "reef-pi-0-84-2"
+    assert template_alias("pi", "0.84.2") == "reef-pi-0-84-2-episodes-v1"
 
 
 @pytest.mark.unit

@@ -92,6 +92,9 @@ def _keep_trajectory(source: Path, target: Path) -> None:
     if not source.is_dir():
         return
     try:
+        # Executors may create the writable session directory before the harness starts.
+        if not any(source.iterdir()):
+            return
         # Links are copied as links so an evolved tool cannot pull an outside file into the record,
         # and an existing target is refused so a kept record is never merged over.
         shutil.copytree(source, target, symlinks=True)

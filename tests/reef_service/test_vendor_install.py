@@ -258,6 +258,18 @@ def test_an_explicit_binary_never_reaches_the_vendor_resolution(monkeypatch, tmp
     assert calls == []
 
 
+def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch) -> None:
+    from reef.harness.episodes.e2b import E2BExecutor
+
+    calls = _counting_resolver(monkeypatch, VendorInstallError("must not install locally"))
+    monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)
+    backend = _backend(None, _propose, executor=E2BExecutor(api_key="test-key"))
+    try:
+        assert calls == []
+    finally:
+        backend.close()
+
+
 @pytest.mark.unit
 def test_a_vendor_install_failure_refuses_construction(monkeypatch) -> None:
     calls = _counting_resolver(monkeypatch, VendorInstallError("npm exited 1: ERR! 404 not found"))

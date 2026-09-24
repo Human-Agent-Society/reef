@@ -206,9 +206,11 @@ Isolation (``evolution.proposer_agent.sandbox``, or ``REEF_PROPOSER_SANDBOX``):
   agent's files are copied in, refreshed for each check and trial, and copied
   back when it stops. It needs ``pip install 'reef-infra[e2b]'`` and an E2B
   key (``e2b_api_key``, else ``E2B_API_KEY``); ``e2b_template`` names the
-  sandbox image, else Reef builds ``reef-pi-<version>`` (the pinned pi on
-  Node 22) on first use, in about a minute. The sandbox's own user can reach
-  root in it; nothing there holds a key.
+  sandbox image, else Reef builds ``reef-pi-<version>-episodes-v1`` (the pinned
+  pi and bubblewrap on Node 22) on first use. A custom template must include
+  bubblewrap. The agent runs with rendered inputs read-only and only its
+  workspace and declared state writable; it cannot use sudo to remove that
+  restriction. Model credentials remain in Reef's gateway.
 
   If the command connection drops, Reef attempts to reconnect to the same
   process twice within the original time limit; it does not rerun the command.
