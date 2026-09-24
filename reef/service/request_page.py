@@ -160,16 +160,12 @@ def activity_html(progress: StepProgress, now: float) -> str:
 
 
 def request_state(record: Mapping[str, object], progress: StepProgress | None, consumed: bool) -> str:
-    """The unsettled request's state: the backend's phase for it, the trainer's hold on it, else the record's.
-
-    A record that is not compacted waits for its step; a compacted one was
-    consumed by a commit whose row is about to show, since the row that
-    names the request lands in the same commit as the compaction."""
+    """Read the backend phase or reserved batch; an unreserved request is queued."""
     if progress is not None and progress.request_id == record["agent_record_id"]:
         return "evaluating" if progress.phase == "gating" else progress.phase
     if consumed:
         return "running"
-    return "queued" if record.get("compacted_at") is None else "settling"
+    return "queued"
 
 
 def request_html(record: Mapping[str, object]) -> str:
@@ -416,7 +412,7 @@ def build_request_page(
     """The page for the request stored as ``record``, against the catalog ``rows`` oldest first.
 
     ``record`` is the agent record as ``Dispatcher.read_record`` answers it
-    (``agent_record_id``, ``created_at``, ``compacted_at`` and the
+    (``agent_record_id``, ``created_at`` and the
     ``POST /reef/train`` payload). ``progress`` is the training backend's
     running step, counted only when it names this request; ``consumed`` says
     whether the trainer's reserved batch carries the request. ``link_query``

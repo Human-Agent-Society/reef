@@ -1150,8 +1150,8 @@ def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
 
 def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
     """Where the request stands by its progress (``GET /reef/harness/requests/<id>/progress``, the request page's
-    reading): ``started`` once a step took it (any state past ``queued``, or settled), ``gone`` when the service
-    answers 404 (its scenario was reset), else ``waiting``.
+    reading): ``started`` once its state is past ``queued`` (a settled request's state is its result), ``gone``
+    when the service answers 404 (its scenario was reset), else ``waiting``.
 
     A read that fails for any other reason is no reason to stop waiting, so
     it reads as waiting and the next poll asks again."""
@@ -1164,7 +1164,7 @@ def _request_state(upstream: str, scenario: str, token: str | None, record_id: s
         return "gone" if exc.code == 404 else "waiting"
     except (OSError, ValueError):
         return "waiting"
-    if isinstance(progress, Mapping) and (progress.get("settled") or progress.get("state") not in (None, "queued")):
+    if isinstance(progress, Mapping) and isinstance(progress.get("state"), str) and progress["state"] != "queued":
         return "started"
     return "waiting"
 

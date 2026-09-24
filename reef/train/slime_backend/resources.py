@@ -57,6 +57,11 @@ class SlimeDeploymentResources(InferenceResources):
     def inference_placement(self) -> Any:
         return self.placement_groups.get("rollout")
 
+    @property
+    def training_node_id(self) -> str | None:
+        """Ray node of the trainer's first bundle; None before reservation or for a hosted trainer."""
+        return None if self._reservation is None else self._reservation.training_node_id
+
     def start(self) -> None:
         if self._started or self._closed:
             raise RuntimeError("deployment resources can only be started once")

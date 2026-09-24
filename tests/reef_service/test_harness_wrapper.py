@@ -1654,23 +1654,25 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
 
 @pytest.mark.unit
 def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path, capsys) -> None:
-    """Until a step takes the request its progress reads queued; once a step works on it (the request page's
-    reading, not the record's compacted_at, which a commit sets only as the step ends) the wait says so, once, and
-    stops reading it. A progress the service does not answer is no reason to stop waiting."""
+    """Until a step takes the request its progress reads queued; once a step works on it (a backend phase such as
+    proposing, or the trainer's reserved batch, running) the wait says so, once, and stops reading it. A progress
+    the service does not answer is no reason to stop waiting."""
     rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     record_path = "/reef/harness/requests/q-1/progress"
-    reef = _FakeReef(answer, rows=rows, progress={"state": "proposing", "settled": False})
-    compose, captures = _ask_tree(tmp_path, reef.port)
-    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
-        assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
-    reef.close()
-    out = capsys.readouterr().out.splitlines()
-    assert out[3] == "reef-pi: the step started; usually one to three minutes"
-    assert out[4].startswith("reef-pi: no result yet for 'text me' after 0.1 s") and len(out) == 5
-    record_reads = [call for call in reef.seen if call["path"] == record_path]
-    assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
-    assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
+    for state in ("proposing", "running"):
+        reef = _FakeReef(answer, rows=rows, progress={"state": state, "settled": False})
+        (tmp_path / state).mkdir()
+        compose, captures = _ask_tree(tmp_path / state, reef.port)
+        with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+            assert harness("ask-scenario", "pi", compose, "text me", wait=True, timeout_s=0.1, poll_s=0.01) == 2
+        reef.close()
+        out = capsys.readouterr().out.splitlines()
+        assert out[3] == "reef-pi: the step started; usually one to three minutes"
+        assert out[4].startswith("reef-pi: no result yet for 'text me' after 0.1 s") and len(out) == 5
+        record_reads = [call for call in reef.seen if call["path"] == record_path]
+        assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
+        assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
     # Queued: no line, and the progress is read again at every poll.
     reef = _FakeReef(answer, rows=rows, progress={"state": "queued", "settled": False})
     (tmp_path / "queued").mkdir()

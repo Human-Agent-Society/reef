@@ -483,8 +483,7 @@ export default function requests(pi) {
     return await response.json();
   };
 
-  // The request's own record: its compacted_at is null while the request is queued and a time once a step
-  // took it, which is when the wait a person sees starts.
+  // Read the record only to detect a request removed from storage.
   const requestRecord = async (recordId) => {
     const path = `/reef/scenarios/${encodeURIComponent(scenario)}/records/${encodeURIComponent(recordId)}`;
     const response = await fetchWithTimeout(`${serviceUrl}${path}`, { headers: reefHeaders() });
@@ -845,6 +844,7 @@ export default function requests(pi) {
         mine.activity = Array.isArray(progress.activity) ? progress.activity : [];
         // The step's own clock beats the watch's: a reconnecting session counts from when the step began.
         if (typeof progress.started_at === "number") mine.startedAt = progress.started_at * 1000;
+        else if (progress.state && progress.state !== "queued" && mine.startedAt === null) mine.startedAt = Date.now();
       }
       if (mine.startedAt === null) {
         let record;
@@ -862,7 +862,6 @@ export default function requests(pi) {
           ctx.ui.notify(goneText(id8), "warning");
           return;
         }
-        if (record && typeof record.compacted_at === "number") mine.startedAt = Date.now();
       }
       if (mine.startedAt !== null) {
         show(`reef: step for request ${id8} running for ${elapsedText(Date.now() - mine.startedAt)}`);
