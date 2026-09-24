@@ -760,7 +760,9 @@ def test_the_evaluation_route_names_the_scenario_in_its_path(tmp_path: Path) -> 
 class _ClosingBackend(_FileBackend):
     """A backend whose close waits for the episode call in flight, as a worker pool's close waits for its batch."""
 
-    def __init__(self, label: str, artifact_dir: Path, closing: threading.Event, episode_done: threading.Event) -> None:
+    def __init__(
+        self, label: str, artifact_dir: Path, closing: threading.Event, episode_done: threading.Event
+    ) -> None:
         super().__init__(label, artifact_dir)
         self.closing = closing
         self.episode_done = episode_done

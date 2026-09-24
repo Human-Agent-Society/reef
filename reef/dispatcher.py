@@ -1001,7 +1001,9 @@ class Dispatcher:
             with self._registry.lock_for(scenario):
                 if self._lifecycle.local_cycles_stopped.is_set():
                     # The service stopped under this cycle: its model calls may have failed as the routes went away.
-                    logger.info("scenario %r component %r: the service is stopping; the step waits", scenario, component)
+                    logger.info(
+                        "scenario %r component %r: the service is stopping; the step waits", scenario, component
+                    )
                     return False
                 loaded = self._registry.get_optional(scenario)
                 if loaded is not current:
