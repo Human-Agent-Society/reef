@@ -131,7 +131,8 @@ class ClientState:
     there is lost; a path that already exists in the installed tree is
     linked, and what the binary writes through the link stays. The wrapper
     refuses a session when a file the install wrote has changed, and skips
-    these paths, which are the binary's to write.
+    these paths, which are the binary's to write; a link at one of them is
+    removed before the run, so the binary's writes stay in the tree.
     """
 
     path: str

@@ -219,7 +219,7 @@ curl -fsS -H "x-reef-scenario: my-harness" \
 reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-最后一个参数是安装根目录（不指定时为 `./reef-harness`）。请把它放在 agent 工作的项目之外：会话可以写入其项目中的文件，安装根目录若在项目内，会话就可能改变下一个会话运行的内容。
+最后一个参数是安装根目录（不指定时为 `./reef-harness`）。请把它放在 agent 工作的项目之外：会话可以写入其项目中的文件，安装根目录若在项目内，会话就可能改变下一个会话运行的内容。对 codex 和 dsh，也不要把它放在 `/tmp` 或 `$TMPDIR` 下：它们的沙箱同样允许命令写入这些目录。
 
 在 `reef-pi` 会话内，`/reefine <text>` 提交同样的请求。所服务的模型把修改写成一个 skill、一条 rules 条目、一个 agent 命令或一个 pi extension。主机能隔离它时（Linux，装有 `bwrap` 和 `pasta`，以非 root 用户运行），或在你信任的机器上设置 `REEF_PROPOSER_SANDBOX=none` 时，它以 coding agent 的方式工作，先真实运行改过的 harness 再交回修改。下一个会话启动时的更新提示会提供安装；若某个步骤在你两轮对话之间完成，会立即询问是否安装。用 `/versions` 查看各版本（会打开该步骤的页面），用 `/versions <version> install` 安装。要更换模型，用另一个 `--inference.upstream-model` 重启 `reef serve` 并重新执行安装命令：安装过程会将模型 ID 写入本地 harness 配置。脚本化的 bug 修复与研究演示见 [Reefine 教程](tutorials/reefine/README.md)，配置说明见 [Reefine 指南](docs/user-guide/recipes/reefine.rst)。
 

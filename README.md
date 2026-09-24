@@ -238,7 +238,8 @@ reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test fi
 The last argument is the install root (`./reef-harness` when you name none).
 Keep it outside the project the agent works in: a session can write files in
 its project, so with the install root there it could change what the next
-session runs.
+session runs. For codex and dsh, keep it out of `/tmp` and `$TMPDIR` too:
+their sandboxes let a command write there as well.
 
 Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi

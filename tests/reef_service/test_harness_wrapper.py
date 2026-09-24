@@ -39,6 +39,14 @@ from reef.harness.client.wrapper import (
 )
 
 
+@pytest.fixture(autouse=True)
+def cache_home(tmp_path, monkeypatch) -> Path:
+    """The test's own cache directory, where ``run_agent`` makes its temp copies, so no test writes the developer's."""
+    cache = tmp_path / "cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    return cache
+
+
 class _Response:
     def __enter__(self):
         return self
@@ -1128,10 +1136,12 @@ def _start_wrapper(tmp_path: Path, binary: Path, compose: str, captures: Path, p
 
 @pytest.mark.unit
 @pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGTERM])
-def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cleans_up(tmp_path, signum) -> None:
+def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cleans_up(
+    tmp_path, cache_home, signum
+) -> None:
     """SIGHUP (the terminal closed) or SIGTERM at the wrapper goes on to the agent; once the agent exits the
-    wrapper removes the temp copy, whose binding holds the token, spools the receipts, and exits 128 plus the
-    signal number."""
+    wrapper removes the temp copy in the cache directory, whose binding holds the token, spools the receipts, and
+    exits 128 plus the signal number."""
     reef = _FakeReef({})
     compose = _make_compose(tmp_path, reef.port)
     captures = tmp_path / "captures"
@@ -1139,6 +1149,7 @@ def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cle
     wrapper = _start_wrapper(tmp_path, _make_waiting_pi(tmp_path), compose, captures)
     temp = Path(json.loads((tmp_path / "agent.json").read_text())["dir"])
     assert temp.is_dir() and temp.name.startswith("reef-harness-")
+    assert temp.parent == cache_home / "reef-harness" / "sessions"
     os.kill(wrapper.pid, signum)
     assert wrapper.wait(timeout=30) == 128 + signum
     reef.close()
@@ -1146,6 +1157,89 @@ def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cle
     assert not temp.exists()
     (spooled,) = captures.glob("*.pending.json")
     assert [turn["receipt"] for turn in json.loads(spooled.read_text())["turns"]] == ["ask-receipt"]
+
+
+def _make_recording_pi(tmp_path: Path, body: str) -> Path:
+    """A fake pi that runs ``body`` with ``agent``, its agent directory, and ``seen``, a file beside it, defined."""
+    binary = tmp_path / "fake-pi"
+    binary.write_text(
+        "#!/usr/bin/env python3\nimport json, os\nfrom pathlib import Path\n"
+        f'agent = Path(os.environ["PI_CODING_AGENT_DIR"])\nseen = Path({str(tmp_path / "seen.json")!r})\n'
+        + textwrap.dedent(body)
+    )
+    binary.chmod(0o755)
+    return binary
+
+
+@pytest.mark.unit
+def test_the_temp_copy_is_made_in_the_cache_directory_for_the_person_alone(tmp_path, cache_home) -> None:
+    """Codex's workspace-write sandbox and the dsh sandbox let a command write TMPDIR and /tmp, and the agent reads
+    its temp copy again during the session, so the copy is made in ``$XDG_CACHE_HOME/reef-harness/sessions``
+    (``~/.cache`` without the variable), mode 0700 like the directory holding it, and removed after the run."""
+    compose = _make_compose(tmp_path, 1)
+    binary = _make_recording_pi(
+        tmp_path,
+        """\
+        modes = [agent.stat().st_mode & 0o777, agent.parent.stat().st_mode & 0o777]
+        seen.write_text(json.dumps({"copy": str(agent), "modes": modes}))
+        """,
+    )
+    home = tmp_path / "home"
+    for cache, environment in (
+        (cache_home, {**os.environ}),
+        (home / ".cache", {key: value for key, value in os.environ.items() if key != "XDG_CACHE_HOME"}),
+    ):
+        environment.update({"HOME": str(home), "REEF_HARNESS_CAPTURES_DIR": str(tmp_path / "captures")})
+        with patch.dict(os.environ, environment, clear=True), contextlib.suppress(SystemExit):
+            run_agent(str(binary), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+        recorded = json.loads((tmp_path / "seen.json").read_text())
+        copy = Path(recorded["copy"])
+        assert copy.parent == cache / "reef-harness" / "sessions" and copy.name.startswith("reef-harness-")
+        assert recorded["modes"] == [0o700, 0o700]
+        assert not copy.exists() and list(copy.parent.iterdir()) == []
+
+
+@pytest.mark.unit
+def test_a_link_at_a_client_state_path_is_removed_before_the_run_so_the_state_stays_in_the_tree(
+    tmp_path, capsys
+) -> None:
+    """The install never writes client state, so a link a session put at pi's ``sessions`` or ``settings.json``
+    would take the next session's writes wherever it points, outside the tree too. The wrapper removes such a link
+    before the run and says so, and the agent keeps its state in the tree; what the links pointed at stays as it
+    was."""
+    compose = Path(_make_compose(tmp_path, 1))
+    outside = tmp_path / "outside"
+    (outside / "sessions").mkdir(parents=True)
+    (outside / "sessions" / "mine.txt").write_text("the person's own\n", encoding="utf-8")
+    (outside / "settings.json").write_text('{"mine": true}\n', encoding="utf-8")
+    (compose / "sessions").symlink_to(outside / "sessions")
+    (compose / "settings.json").symlink_to(outside / "settings.json")
+    binary = _make_recording_pi(
+        tmp_path,
+        """\
+        (agent / "sessions" / "1.jsonl").write_text("{}\\n")
+        (agent / "settings.json").write_text('{"lastChangelogVersion": "0.84.2"}\\n')
+        """,
+    )
+    with (
+        patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path / "captures")}),
+        contextlib.suppress(SystemExit),
+    ):
+        run_agent(str(binary), str(compose), "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
+    root = compose.resolve().parent
+    notices = [line for line in capsys.readouterr().err.splitlines() if "was a link" in line]
+    assert notices == [
+        f"reef-pi: compose/{name} in {root} was a link to {outside / name}; removed the link, and the session keeps "
+        "this state in the tree"
+        for name in ("sessions", "settings.json")
+    ]
+    assert not (compose / "sessions").is_symlink() and [path.name for path in (compose / "sessions").iterdir()] == [
+        "1.jsonl"
+    ]
+    assert not (compose / "settings.json").is_symlink()
+    assert (compose / "settings.json").read_text(encoding="utf-8") == '{"lastChangelogVersion": "0.84.2"}\n'
+    assert [path.name for path in (outside / "sessions").iterdir()] == ["mine.txt"]
+    assert (outside / "settings.json").read_text(encoding="utf-8") == '{"mine": true}\n'
 
 
 @pytest.mark.unit
@@ -2595,6 +2689,39 @@ def test_update_installs_into_the_install_root_when_the_composition_directory_is
     reef.close()
     assert (tmp_path / "dest-seen").read_text().strip() == str(tmp_path.resolve())
     assert not (elsewhere / "dest-seen").exists()
+
+
+@pytest.mark.unit
+def test_update_runs_the_install_script_from_bashs_standard_input_so_no_copy_of_it_is_written(tmp_path) -> None:
+    """bash reads a script file while it runs, and a copy in TMPDIR is one a sandboxed command could rewrite
+    first, so the fetched script reaches bash on its standard input and no file of it exists while it runs."""
+    tmpdir = tempfile.gettempdir()
+    reef = _ReleasesReef([_row("v1")], install=f'#!/bin/sh\nls "{tmpdir}" > "$1/tmpdir-seen"\n')
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose, REEF_TOKEN="tok"), clear=True):
+        assert update("setup-scenario", "pi", compose) == 0
+    reef.close()
+    seen = (tmp_path / "tmpdir-seen").read_text().splitlines()
+    assert not [name for name in seen if name.startswith("reef-harness-install-")]
+
+
+@pytest.mark.unit
+def test_setup_never_writes_the_release_file_through_a_link_a_session_put_in_the_tree(tmp_path) -> None:
+    """The release file is written beside itself and renamed over; a link a session put at that staging name is
+    removed, never written through, so the file it points at keeps its bytes."""
+    reef = _ReleasesReef([_row("v1"), _row("v2", [{"name": "REEF_AWAY_PHONE", "kind": "env"}])])
+    compose, release_file = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    outside = tmp_path / "outside.txt"
+    outside.write_text("the person's own\n", encoding="utf-8")
+    (tmp_path / f".{release_file.name}.part").symlink_to(outside)
+    with patch.dict(os.environ, _ask_env(tmp_path / "captures", compose), clear=True):
+        assert setup_set("setup-scenario", "pi", compose, "REEF_AWAY_PHONE=+15550100") == 0
+    reef.close()
+    assert outside.read_text(encoding="utf-8") == "the person's own\n"
+    assert not release_file.is_symlink()
+    assert [item["name"] for item in json.loads(release_file.read_text(encoding="utf-8"))["setup"]] == [
+        "REEF_AWAY_PHONE"
+    ]
 
 
 @pytest.mark.parametrize("operation", ["update", "setup-set"])
