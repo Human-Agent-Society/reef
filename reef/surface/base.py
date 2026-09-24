@@ -138,8 +138,6 @@ class HarnessInfo:
     served_api: str = "openai"
     #: Further models the installed client may pick from; the served one stays the default.
     client_models: tuple[str, ...] = ()
-    #: The adapter the tree is rendered for, such as ``pi`` or ``claude``; a client installs ``reef-<adapter>``.
-    adapter: str | None = None
 
 
 @dataclass(frozen=True)

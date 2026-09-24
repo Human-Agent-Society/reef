@@ -104,9 +104,10 @@ def test_harness_surface_ignores_repository_bookkeeping(tmp_path) -> None:
     assert surface.files.read_files(Artifact.local(root)) == {"skills/SKILL.md": "rule"}
 
 
-class _ClaudeHarnessRecipe(Recipe):
-    def build_surface(self, scenario: str) -> Surface:
-        return create_harness_surface(adapter="claude")
+class _ClaudeHarnessRecipe(_HarnessRecipe):
+    @property
+    def harness_adapter(self) -> str | None:
+        return "claude"
 
 
 def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
@@ -116,9 +117,16 @@ def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     weights = _service(tmp_path / "weights", recipe=Recipe(), skill_text="x").dispatcher
     assert [(row["scenario"], row["adapter"]) for row in harness.list_scenarios()] == [("delivery", "claude")]
     assert all("adapter" not in row for row in weights.list_scenarios())
+    # A registered scenario that is not in memory, as while it loads or after its preload failed, names it too.
+    harness.get_or_create_scenario("waiting")
+    harness._registry.remove("waiting")
+    assert [(row["scenario"], row["loaded"], row["adapter"]) for row in harness.list_scenarios()] == [
+        ("delivery", True, "claude"),
+        ("waiting", False, "claude"),
+    ]
 
 
-def test_harness_recipe_surface_carries_its_adapter(tmp_path, monkeypatch) -> None:
+def test_harness_recipes_name_their_adapter(tmp_path, monkeypatch) -> None:
     (tmp_path / "demo_adapter_surface.py").write_text(
         "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
     )
@@ -135,4 +143,5 @@ def test_harness_recipe_surface_carries_its_adapter(tmp_path, monkeypatch) -> No
     built = CordisRecipe.from_environment(
         {}, config=config, runtime=InferenceProxyRuntime(model_path="small", base_url="http://up")
     )
-    assert built.build_surface("s").harness.adapter == "claude"
+    assert built.harness_adapter == "claude"
+    assert Recipe().harness_adapter is None

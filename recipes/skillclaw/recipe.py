@@ -8,6 +8,7 @@ the stock ``CordisRecipe`` implementation:
   every ``/v1`` request the service proxies carries the served pool's
   catalog section - the sealed campaign's design, where the published pool
   reaches the day's traffic through the proxy, not just through client pull.
+  No harness tree is installed, so ``harness_adapter`` names none.
 - ``build_artifact_validator`` separately binds the catalog tree's admission
   rules; validation is scenario commit policy, not a serving capability.
 - ``evolution.seed_skills`` (optional) names a directory of
@@ -73,6 +74,10 @@ class SkillClawRecipe(CordisRecipe):
 
     def build_surface(self, scenario: str) -> Surface:
         return create_skill_surface([SkillCatalogModule(public_root=PUBLIC_SKILL_ROOT)])
+
+    @property
+    def harness_adapter(self) -> str | None:
+        return None
 
     def build_artifact_validator(self) -> SkillValidator:
         return SkillValidator((SkillCatalogModule(public_root=PUBLIC_SKILL_ROOT),))

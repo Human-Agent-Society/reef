@@ -250,8 +250,9 @@ def release_summary(row: Any) -> dict[str, Any]:
     """Only publish catalog identifiers, numeric evaluation results and short codes.
 
     Never artifact files, request text, entry bodies or prompts: a request
-    keeps its id and the names and kinds of what it requires, a mutation its
-    op, id and kind, and a selection its outcome, policy, evaluator and counts.
+    keeps its id and the names and kinds of what it requires, an agent's
+    proposal its id, a recheck its reason code, a mutation its op, id and
+    kind, and a selection its outcome, policy, evaluator and counts.
     ``result`` is the release page's result for a step (``selected``,
     ``rejected``, ``skipped``, ``failed`` or ``pending``).
     """
@@ -284,6 +285,14 @@ def release_summary(row: Any) -> dict[str, Any]:
                     and isinstance(item.get("kind"), str)
                 ],
             }
+        # An agent's proposal keeps its id; its reason is text and stays.
+        proposal = metrics.get("proposal")
+        if isinstance(proposal, dict) and isinstance(proposal.get("id"), str):
+            summary["proposal"] = {"id": proposal["id"][:180]}
+        if metrics.get("recheck") is True:
+            summary["recheck"] = True
+            if isinstance(metrics.get("recheck_reason"), str):
+                summary["recheck_reason"] = metrics["recheck_reason"][:40]
         mutations = mutations_of(metrics)
         if mutations:
             summary["mutation_count"] = len(mutations)

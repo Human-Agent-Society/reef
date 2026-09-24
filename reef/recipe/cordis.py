@@ -322,6 +322,10 @@ class CordisRecipe(Recipe):
     def report_type(self) -> type[ScoredRolloutReport]:
         return ScoredRolloutReport
 
+    @property
+    def harness_adapter(self) -> str | None:
+        return self.adapter
+
     def __post_init__(self) -> None:
         super().__post_init__()
         if not isinstance(self.propose, Proposer):
@@ -659,7 +663,6 @@ class CordisRecipe(Recipe):
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
             client_models=client_models,
-            adapter=self.adapter,
         )
 
     def base_artifact_files(self) -> Mapping[str, str] | None:

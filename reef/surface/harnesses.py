@@ -14,7 +14,6 @@ def create_harness_surface(
     served_model: str | None = None,
     client_models: tuple[str, ...] = (),
     served_api: str = "openai",
-    adapter: str | None = None,
 ) -> Surface:
     """Build a surface exposing every text file in a harness tree.
 
@@ -25,8 +24,7 @@ def create_harness_surface(
     carries the recipe's seed, the composition behind the base release no
     step published, the model the recipe serves and its API dialect, which the
     install route binds an installed tree with when a release has no gate of its
-    own, the further models an installed client may switch to, and the adapter
-    the tree is rendered for.
+    own, and the further models an installed client may switch to.
     """
     return Surface(
         files=TextFileTree(),
@@ -35,7 +33,6 @@ def create_harness_surface(
             served_model=served_model,
             served_api=served_api,
             client_models=tuple(client_models),
-            adapter=adapter,
         ),
     )
 

@@ -173,6 +173,16 @@ class Recipe:
         """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
         return None
 
+    @property
+    def harness_adapter(self) -> str | None:
+        """The adapter a client installs this recipe's harness tree with (``reef-<adapter>``).
+
+        ``None`` for a recipe that serves no harness tree. Every scenario of
+        the process shares it, so the scenario list names it before a
+        scenario loads.
+        """
+        return None
+
     def serving_status(self) -> Mapping[str, Any] | None:
         """Runtime-wide serving state this recipe owns, for ``/reef/status``.
 

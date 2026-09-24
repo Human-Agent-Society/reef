@@ -163,9 +163,13 @@ is starting, running or exited. For each release step it also receives the
 step's result (such as ``selected``, ``rejected``, ``skipped`` or ``failed``),
 the selection outcome, policy, evaluator and pass and fail counts, the ID of
 the request the step answered with the names and kinds of what it requires,
-and each change's operation, entry ID and kind. For each harness request it
-receives the ID, the state and the time it was filed. It can create a scenario,
-request training, change training mode, promote or roll back a release.
+the ID of the agent proposal it applied, whether it was a recheck and why
+(``drift`` or ``cadence``), and each change's operation, entry ID and kind.
+The release list holds the newest 100 steps, or fewer when their summaries
+exceed the 192 KiB result limit; it is then marked truncated. For each harness
+request it receives the ID, the state and the time it was filed. It can create
+a scenario, request training, change training mode, promote or roll back a
+release.
 Local provider credentials, artifact files, entry contents, request text and
 recorded prompts are not uploaded. Instructions you submit through the
 dashboard are stored on the platform as commands. Inference continues to use
@@ -200,9 +204,11 @@ ones filed on the machine, through the ``requests`` command. The connector
 reads the scenario's training instructions from
 ``GET /reef/scenarios/{scenario}/records?request_type=train`` and each state
 from ``GET /reef/harness/requests/{record_id}/progress``, and sends the newest
-100. Older connectors reject this command and send no adapter, so the console
-cannot list their requests or name their adapter until you update Reef and
-restart the connector.
+100. Reef names the adapter for every scenario of a harness recipe, also one
+that is still loading or whose preload failed; a recipe with no harness tree
+names none. Older connectors reject this command and send no adapter, so the
+console cannot list their requests or name their adapter until you update Reef
+and restart the connector.
 
 The connector reconnects after network failures. It does not install an OS
 startup service; use ``--foreground`` with your process supervisor for restart

@@ -16,7 +16,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.cli import main
-from reef.service.connector import Connector, _running, authorize
+from reef.service.connector import BODY_LIMIT, Connector, _running, authorize
 from reef.service.connector.runtime import HTTPFailure, JSONClient, ReefRuntime, endpoint_url, release_summary
 from reef.service.connector.service import ReefService, serve_address
 from reef.service.connector.state import ConnectorState
@@ -216,6 +216,70 @@ def test_release_summary_keeps_request_mutation_and_selection_codes_without_text
     )
     assert failed == {"operation": "training", "metrics": {"skipped": True}, "result": "failed"}
     assert "result" not in release_summary({"operation": "creation", "metrics": {}})
+
+
+def test_release_summary_names_proposal_and_recheck_steps_without_text():
+    """A step from an agent's proposal keeps the proposal id; a recheck keeps its reason code."""
+    proposal = release_summary(
+        {
+            "operation": "training",
+            "metrics": {
+                "selected": False,
+                "proposal": {
+                    "id": "proposal-7",
+                    "session": "private-session",
+                    "release_id": "seed",
+                    "reason": "private reason text",
+                },
+                "mutation": {"op": "create", "id": "x", "options": {"name": "skill", "config": {"text": "private"}}},
+            },
+        }
+    )
+    assert proposal == {
+        "operation": "training",
+        "metrics": {
+            "selected": False,
+            "proposal": {"id": "proposal-7"},
+            "mutation_count": 1,
+            "mutations": [{"op": "create", "id": "x", "options": {"name": "skill"}}],
+        },
+        "result": "rejected",
+    }
+    recheck = release_summary(
+        {"operation": "training", "metrics": {"selected": True, "recheck": True, "recheck_reason": "drift"}}
+    )
+    assert recheck["metrics"] == {"selected": True, "recheck": True, "recheck_reason": "drift"}
+    assert "private" not in json.dumps([proposal, recheck])
+
+
+def test_releases_over_the_size_limit_keep_the_newest_rows_that_fit(tmp_path):
+    """A long catalog drops its oldest rows to fit the result limit instead of failing the whole read."""
+
+    def result_for(rows):
+        async def run():
+            state = ConnectorState(tmp_path)
+            runtime = AsyncMock()
+            runtime.execute.return_value = {"releases": rows, "truncated": False}
+            command = {"id": str(uuid.uuid4()), "action": "releases", "scenario": "chat"}
+            try:
+                await Connector(AsyncMock(), runtime, state).execute(command)
+                return dict(state.pending())[command["id"]]
+            finally:
+                state.close()
+
+        return asyncio.run(run())
+
+    # Rows come newest first; the oldest one pads the result to the limit exactly.
+    rows = [{"release_id": f"step-{index:03d}", "metrics": {"mutation_count": 20}} for index in range(100)]
+    size = len(json.dumps({"state": "succeeded", "value": {"releases": rows, "truncated": False}}).encode())
+    rows[-1]["release_id"] += "x" * (BODY_LIMIT - size)
+    exact = result_for(rows)
+    assert exact == {"state": "succeeded", "value": {"releases": rows, "truncated": False}}
+    assert len(json.dumps(exact).encode()) == BODY_LIMIT
+    rows[-1]["release_id"] += "x"
+    over = result_for(rows)
+    assert over == {"state": "succeeded", "value": {"releases": rows[:-1], "truncated": True}}
+    assert len(json.dumps(over).encode()) <= BODY_LIMIT
 
 
 def test_requests_lists_ids_states_and_times_without_text(tmp_path):
