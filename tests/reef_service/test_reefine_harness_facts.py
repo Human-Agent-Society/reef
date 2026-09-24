@@ -251,6 +251,8 @@ def test_opencode_enters_a_mode_by_selecting_its_agent_and_leaves_it_through_age
     assert "/agents, choosing build" in model.prompt and "Tab from the mode's agent reaches plan first" in model.prompt
     assert "together with a leave command, an agent_command with agent: build" in model.prompt
     assert "opencode tells the model nothing when the agent changes" in model.prompt
+    # The leave command alone runs one build turn; only /agents switches the session back.
+    assert "The leave command alone runs one build turn and leaves the chat agent selected" in model.prompt
     assert "a !command the person runs still run in any agent" in model.prompt
     assert "the review lists those person paths under limits" in model.prompt
     assert "the entering command states no restriction" in model.prompt
