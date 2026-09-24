@@ -383,6 +383,14 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
         render_composition([("config", {"data": {"env": {"DISABLE_AUTOUPDATER": "0"}}})], get_adapter("claude"))
 
 
+@pytest.mark.parametrize("value", ["0", "false", ""])
+def test_claude_quirk_keeps_the_update_commands_off(value: str) -> None:
+    """Claude Code copies settings.env over its environment, so a tree must not undo reef-claude's DISABLE_UPDATES."""
+    render_composition([("config", {"data": {"env": {"DISABLE_UPDATES": "1"}}})], get_adapter("claude"))
+    with pytest.raises(RenderError, match="DISABLE_UPDATES"):
+        render_composition([("config", {"data": {"env": {"DISABLE_UPDATES": value}}})], get_adapter("claude"))
+
+
 @pytest.mark.parametrize("value", [None, "enable", False])
 def test_claude_quirk_keeps_deep_link_registration_off(value: object) -> None:
     """An interactive reef-claude run must not register the pinned binary as the person's claude-cli:// handler."""
@@ -410,15 +418,15 @@ def test_claude_descriptor_turns_deep_link_registration_off_on_the_command_line(
     assert get_adapter("claude").client_args == ("--settings", '{"disableDeepLinkRegistration":"disable"}')
 
 
-def test_claude_descriptor_names_its_version_flags_and_its_own_updater() -> None:
-    """A version flag gets nothing ahead of it, and Claude Code's own updater is answered by reef-claude."""
+def test_claude_descriptor_names_its_version_flags_and_turns_its_own_updater_off() -> None:
+    """A version flag gets nothing ahead of it. Claude Code's own update and install commands, and its background
+    updater, would install the latest release over the person's claude, so a reef-claude run turns them off."""
     descriptor = get_adapter("claude")
     assert descriptor.client_version_args == ("--version", "-v", "-V")
-    assert descriptor.client_updater_args == ("upgrade", "--update", "--upgrade")
-    assert get_adapter("pi").client_updater_args == ()
+    assert descriptor.client_env == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
 
 
-@pytest.mark.parametrize("key", ["client_args", "client_version_args", "client_updater_args"])
+@pytest.mark.parametrize("key", ["client_args", "client_version_args"])
 @pytest.mark.parametrize("value", ["--settings", [1], [""]])
 def test_descriptor_client_argument_lists_are_lists_of_strings(tmp_path, key: str, value: object) -> None:
     data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "claude" / "descriptor.yaml").read_text())

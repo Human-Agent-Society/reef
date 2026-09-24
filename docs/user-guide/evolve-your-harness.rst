@@ -603,9 +603,12 @@ review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
 ``evolve``, ``page``, ``doctor``, ``setup``, ``update``; anything else
 runs pi) before pi's help. Reef pins Claude Code's version, so
-``reef-claude`` does not run Claude Code's own updater:
-``reef-claude upgrade``, ``--update`` and ``--upgrade`` say so and point
-at ``reef-claude update``, which installs the served release. Pinning,
+``reef-claude`` runs Claude Code with ``DISABLE_UPDATES=1`` unless your
+shell sets it:
+``reef-claude upgrade`` and ``reef-claude install`` reach Claude Code's own
+update and install commands, which print that updates are disabled, and
+``reef-claude update`` is Reef's own command, which installs the served
+release. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 

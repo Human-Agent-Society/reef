@@ -17,11 +17,6 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
   4. After the agent exits, persists the captured receipts (the
      ``x-reef-agent-record-id`` values from each response) to disk.
 
-  A first argument among the adapter's ``client_updater_args`` (for claude
-  ``upgrade``, ``--update`` and ``--upgrade``, which run Claude Code's own
-  updater) runs nothing: the wrapper says that reef pins the binary and that
-  ``update`` installs the served release, and exits 1.
-
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
   1. Claims the oldest pending run's persisted receipts.
@@ -1941,13 +1936,6 @@ def _waiting_for_review(rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Ma
     ]
 
 
-def pinned_version_line(adapter: str) -> str:
-    """What the wrapper says instead of running the binary's own updater."""
-    install = get_adapter(adapter).install
-    pinned = f"{adapter} {install.version}" if install is not None else adapter
-    return f"reef pins {pinned} and does not run {adapter}'s own updater; reef-{adapter} update installs the served release"
-
-
 def _usage(adapter: str) -> str:
     """The wrapper's own subcommands, printed before the agent's help."""
     prog = f"reef-{adapter}"
@@ -1962,8 +1950,6 @@ def _usage(adapter: str) -> str:
         f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
         f"  {prog} update [--release ID]                                       install the served release here",
     ]
-    if descriptor.client_updater_args:
-        lines.append(f"{prog} {' | '.join(descriptor.client_updater_args)}: {pinned_version_line(adapter)}.")
     if descriptor.client_args:
         version_flags = ", ".join(descriptor.client_version_args)
         exception = f", unless the first is one of {version_flags}" if version_flags else ""
@@ -2060,9 +2046,6 @@ def main() -> None:
         ns = parser.parse_args(args[1:])
         chosen = {"release": ns.release} if ns.release is not None else {}
         sys.exit(update(scenario, adapter, compose, **chosen))
-    elif args and args[0] in get_adapter(adapter).client_updater_args:
-        # The binary's own updater installs a version reef did not pin, so it never runs from here.
-        sys.exit(f"reef-{adapter}: {pinned_version_line(adapter)}")
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)
 

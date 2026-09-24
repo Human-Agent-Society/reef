@@ -11,8 +11,11 @@ reopen. The descriptor keeps a benchmark episode hermetic through
 environment variables (auto-update, telemetry, and non-essential traffic all
 off); a composition that sets ``settings.env`` to turn any of them back on,
 or that flips ``includeCoAuthoredBy`` on, is rejected at render — the same
-gate that rejects an invalid node. A composition that drops
-``disableDeepLinkRegistration: "disable"`` is rejected too. ``reef-claude``
+gate that rejects an invalid node. Claude Code copies ``settings.env`` over
+its own environment, so a composition that turns off ``DISABLE_UPDATES`` is
+rejected too: ``reef-claude`` sets it so that Claude Code's own ``update``
+and ``install`` refuse to replace the pinned version. A composition that
+drops ``disableDeepLinkRegistration: "disable"`` is rejected as well. ``reef-claude``
 passes the same setting as ``--settings`` so that no tree can point the
 person's ``claude-cli://`` link handler at the pinned binary; the default here
 covers a run where the person passes their own ``--settings``.
@@ -54,4 +57,7 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
         for key in _HERMETIC_ENV:
             if key in env and str(env[key]).strip().lower() in _FALSEY:
                 raise RenderError(f"claude composition must not re-enable {key} for benchmark episodes")
+        # reef-claude sets it so Claude Code's own update and install commands refuse to run.
+        if "DISABLE_UPDATES" in env and str(env["DISABLE_UPDATES"]).strip().lower() in _FALSEY:
+            raise RenderError("claude composition must keep DISABLE_UPDATES on so reef-claude keeps the pinned claude")
     return files

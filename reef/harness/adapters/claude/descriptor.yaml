@@ -26,11 +26,21 @@ env:
   DISABLE_TELEMETRY: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
 # An interactive run through reef-claude gets only CLAUDE_CONFIG_DIR from the
-# env above. reef pins Claude Code's version, and the updater would otherwise
-# run `npm install --global` of the latest release, which replaces the
-# person's own claude.
+# env above. reef pins Claude Code's version, and Claude Code's own updater
+# would otherwise install the latest release over the person's own claude:
+# the background updater and `update` (alias `upgrade`) run
+# `npm install --global`, and `install` links a native build at
+# ~/.local/bin/claude. DISABLE_AUTOUPDATER stops only the background updater.
+# DISABLE_UPDATES stops all three, wherever the command sits on the command
+# line (`--verbose upgrade`) and in the session's own shell commands too:
+# update and install print "Updates are disabled by your administrator" and
+# exit 0. A lone --update or --upgrade, which Claude Code reads as `update`
+# only with nothing else on the command line, stops at "unknown option" after
+# the --settings below. reef-claude update is reef's own install of the
+# served release.
 client_env:
   DISABLE_AUTOUPDATER: "1"
+  DISABLE_UPDATES: "1"
 # An interactive run otherwise registers the claude-cli:// link handler, and
 # unless $HOME/.local/bin/claude exists it points the handler at the pinned
 # binary, which replaces the handler of the person's own claude: on macOS the
@@ -46,12 +56,6 @@ client_args: ["--settings", '{"disableDeepLinkRegistration":"disable"}']
 # --settings, -V is an unknown option. A command line that starts with one of
 # them starts no session, so the wrapper runs it without client_args.
 client_version_args: ["--version", "-v", "-V"]
-# Claude Code's own updater: the update command, its alias upgrade, and a lone
-# --update or --upgrade. DISABLE_AUTOUPDATER stops only the background
-# updater, and a manual update runs the same `npm install --global` of the
-# latest release, so reef-claude answers these itself. reef-claude update is
-# reef's own install of the served release.
-client_updater_args: ["upgrade", "--update", "--upgrade"]
 # --resume and --continue read the transcripts under projects/, which
 # reef-claude would otherwise leave in the temp copy it removes. .claude.json
 # records the finished onboarding, the approved API key and the trusted
