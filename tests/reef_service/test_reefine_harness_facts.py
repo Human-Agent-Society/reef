@@ -237,6 +237,8 @@ def test_terminus_gets_its_own_facts_and_no_setup_command() -> None:
     facts = FACTS["terminus"]
     assert f"This harness is {facts.title}" in model.prompt and facts.tools in model.prompt
     assert "reef-terminus setup" not in model.prompt and "this harness has no setup command" in model.prompt
+    # Its runs happen in a task's Linux container: the prompt says so instead of the person's platforms.
+    assert facts.machine in model.prompt and "macOS, Linux or Windows under WSL 2" not in model.prompt
     assert evolution.request_kinds("terminus") == ("skill", "rules", "agent_command")
     (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
     assert "This harness is Terminus 2" in text and "pi.registerCommand" not in text

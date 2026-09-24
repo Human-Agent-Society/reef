@@ -166,6 +166,13 @@ _SESSION_ENV = frozenset(
     {"PI_OFFLINE", "PI_CODING_AGENT_DIR", "HOME", "PATH", "USER", "SHELL", "TMPDIR", "LANG", "TERM"}
 )
 
+#: The platforms a change serves on a harness that runs on the person's machine.
+PLATFORMS_SENTENCE = (
+    "The user may be on macOS, Linux or Windows under WSL 2: {platform}"
+    "prefer commands that exist on all three, and name anything platform specific the user "
+    "must set up in requires. "
+)
+
 #: The prompt that answers a person's request. Braces doubled where the JSON shapes need them literally.
 REQUEST_PROMPT = (
     "You are changing your own coding agent harness because its user asked for a change. "
@@ -195,9 +202,7 @@ REQUEST_PROMPT = (
     "You may write entries of these kinds, with exactly these config fields:\n"
     "{kinds}"
     "{extensions}"
-    "The user may be on macOS, Linux or Windows under WSL 2: {platform}"
-    "prefer commands that exist on all three, and name anything platform specific the user "
-    "must set up in requires. "
+    "{platforms}"
     "Never touch these reserved entries: {reserved}.\n\n"
     "{plan}"
     "{api}"
@@ -744,10 +749,15 @@ def _request_prompt(
     steps = "\n".join(f"- {step}" for step in tool_steps)
     return REQUEST_PROMPT.format(
         request=request_text,
-        machine=client_text(request),
+        # A harness that runs away from the person's machine says where; the client's report is not that place.
+        machine="" if facts is not None and facts.machine else client_text(request),
         kinds=kind_lines(adapter),
         extensions=EXTENSIONS_SECTION if extensions else harness_section(adapter),
-        platform="branch on process.platform, " if extensions else "",
+        platforms=(
+            facts.machine
+            if facts is not None and facts.machine
+            else PLATFORMS_SENTENCE.format(platform="branch on process.platform, " if extensions else "")
+        ),
         setup=(NO_SETUP_SENTENCE if get_adapter(adapter).install is None else SETUP_SENTENCE.format(wrapper=adapter)),
         failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
         entries=entries_text,

@@ -22,7 +22,9 @@ class HarnessFacts:
     holds; ``tools`` names the harness's own tools; ``mode`` says how a mode
     is turned on, shown and turned off there. ``config_keys`` are the top
     level keys a request's config entry may set in the primary config file,
-    and ``config_example`` shows one."""
+    and ``config_example`` shows one. ``machine``, when set, says where the
+    change runs, for a harness that runs somewhere other than the person's
+    machine; the prompt then gives it in place of the client's report."""
 
     title: str
     command: str
@@ -30,6 +32,7 @@ class HarnessFacts:
     mode: str
     config_keys: tuple[str, ...] = ()
     config_example: str = ""
+    machine: str = ""
 
 
 _CONVERSATION_MODE = (
@@ -148,6 +151,10 @@ FACTS = {
             "can only be rules and skills the model reads during one task, and nothing can turn one on or off. A "
             "request for a mode a person enters and leaves cannot be met on this harness: the review lists that "
             "point under limits."
+        ),
+        machine=(
+            "Every run happens inside a Harbor task's Linux container, not on the user's machine: build for Linux, "
+            "and rely only on a shell and what the task's image has. "
         ),
     ),
     "dsh": HarnessFacts(
