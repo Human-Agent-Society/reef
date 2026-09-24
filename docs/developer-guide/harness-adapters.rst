@@ -104,7 +104,9 @@ flips any of them is refused at render. The quirks also write the
 ``.no-bundled-skills`` marker, so an episode carries the tree's skills and not
 hermes's bundled catalog. Rules render to ``SOUL.md``, the one home level
 rules file hermes reads (``AGENTS.md`` is project scoped, read from the
-working directory chain); skills to ``skills/<name>/SKILL.md`` with the
+working directory chain), after hermes's own default identity: hermes treats
+``SOUL.md`` as the agent's identity and writes its default there only while
+the file is absent, so rules written alone would replace it; skills to ``skills/<name>/SKILL.md`` with the
 ``name`` and ``description`` frontmatter hermes requires synthesized when the
 node text has none; an ``agent_command`` to a second skill root,
 ``hermes-commands``, that ``skills.external_dirs`` lists, since every hermes

@@ -12,6 +12,7 @@ import yaml
 import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
+from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.render import RenderError, render_composition
 
@@ -304,7 +305,11 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], descriptor)["hermes/skills/own/SKILL.md"] == own[1]["text"]
-    assert files["hermes/SOUL.md"] == "Answer briefly.\n\nPrefer the standard library.\n"
+    # The rules follow hermes's own identity, which hermes writes only to a SOUL.md that does not exist yet; a tree
+    # that already starts with it is left as it is.
+    assert files["hermes/SOUL.md"] == f"{DEFAULT_IDENTITY}\n\nAnswer briefly.\n\nPrefer the standard library.\n"
+    kept = render_composition([("rules", {"text": f"{DEFAULT_IDENTITY}\n\nMine."})], descriptor)["hermes/SOUL.md"]
+    assert kept.count(DEFAULT_IDENTITY) == 1
 
 
 def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:

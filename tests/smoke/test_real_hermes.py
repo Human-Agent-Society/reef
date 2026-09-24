@@ -12,8 +12,10 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -114,3 +116,18 @@ def test_real_hermes_episode_renders_runs_and_cleans_up() -> None:
     assert result.trajectory[2]["content"] == "READY"
     # (c) The cleanup audit found nothing outside the declared whitelist.
     assert result.residue == ()
+
+
+def test_the_identity_the_rules_follow_is_the_one_the_real_hermes_seeds() -> None:
+    """The hermes quirks put hermes's own first run identity ahead of the rules; it must stay the text the pinned
+    hermes writes, read here with the interpreter the real binary runs on."""
+    from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
+
+    interpreter = Path(REAL_HERMES).read_text(encoding="utf-8").splitlines()[0].removeprefix("#!").strip()
+    seeded = subprocess.run(
+        [interpreter, "-c", "from hermes_cli.default_soul import DEFAULT_SOUL_MD; print(DEFAULT_SOUL_MD, end='')"],
+        capture_output=True,
+        text=True,
+        check=True,
+    ).stdout
+    assert seeded == DEFAULT_IDENTITY
