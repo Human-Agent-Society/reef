@@ -218,6 +218,45 @@ def test_a_trial_without_a_reward_names_the_mount_problem_only_for_local_docker(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("names_its_trial", [True, False])
+def test_a_run_records_only_its_own_trials_steps_in_a_reused_trials_dir(
+    tmp_path: Path, monkeypatch, names_its_trial: bool
+) -> None:
+    """An earlier trial of the same task stays in a reused trials directory: the record holds this run's steps alone,
+    from the trial Harbor's URI names, or, with no URI, the one trial directory the run made."""
+
+    def dump(trial: Path, message: str) -> None:
+        (trial / "agent").mkdir(parents=True)
+        steps = [{"step_id": 1, "source": "agent", "message": message}]
+        (trial / "agent" / "trajectory.json").write_text(json.dumps({"steps": steps}))
+
+    trials = tmp_path / "trials"
+    dump(trials / "hello-world__old", "from the earlier trial")
+
+    class Lab:
+        def __init__(self, trials_dir: Path) -> None:
+            self.trials_dir = trials_dir
+
+        async def run(self, task: str, agent: dict, **options: object) -> SimpleNamespace:
+            trial = self.trials_dir / f"{task}__new"
+            dump(trial, "from this run")
+            uri = trial.resolve().as_uri() if names_its_trial else None
+            return SimpleNamespace(rewards={"reward": 1.0}, tags={}, uri=uri)
+
+    monkeypatch.setitem(sys.modules, "reef_eval", SimpleNamespace(Lab=Lab))
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k")
+    _render(tmp_path / "root", binding.compose_nodes(get_adapter("terminus")))
+    monkeypatch.setenv(runner.TREE_DIR_ENV, str(tmp_path / "root"))
+    monkeypatch.setenv(runner.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    monkeypatch.setenv(runner.TRIALS_DIR_ENV, str(trials))
+    monkeypatch.setenv(ENVIRONMENT_ENV, "docker")
+
+    assert runner.run("hello-world") == 0
+    record = json.loads((tmp_path / "sessions" / "hello-world.json").read_text())
+    assert [step["message"] for step in record["steps"]] == ["from this run"]
+
+
+@pytest.mark.unit
 def test_a_trial_record_carries_the_verifier_rewards(tmp_path: Path) -> None:
     record = runner.trial_record("hello-world", {"accuracy": 1.0}, tmp_path)
     assert record["reward"] == 1.0 and record["failed"] is False
