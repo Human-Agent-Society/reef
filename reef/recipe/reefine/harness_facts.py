@@ -93,8 +93,9 @@ FACTS = {
         title="opencode",
         command=(
             "A person types an agent_command as /<id>. Its text is an opencode command file: YAML frontmatter with "
-            "description, and agent: <name> to run the command with that agent and switch the session to it, then "
-            "the prompt, where $ARGUMENTS stands for what the person typed after /<id>. Quote a frontmatter value "
+            "description, and agent: <name> to run that command's own turn with that agent, then the prompt, where "
+            "$ARGUMENTS stands for what the person typed after /<id>. The session keeps its selected agent for the "
+            "turns after the command, except that a new session's first message sets it. Quote a frontmatter value "
             "that holds ': ' (description: \"Chat: web search only\")."
         ),
         tools=(
@@ -104,13 +105,15 @@ FACTS = {
         mode=(
             "A mode is an agent. A config entry defines it in opencode.json with a permission map, which limits the "
             "tools the model gets and so enforces the mode, and a prompt, which replaces opencode's own system "
-            "prompt while the agent runs; an agent_command with agent: <name> in its frontmatter switches the "
-            "session to it. Write both in the same reply. The restriction's wording lives only in that agent's own "
-            "prompt, never in rules or in a command's text, so it ends when the session leaves the agent. Write a "
-            "second agent_command that leaves the mode, with agent: build in its frontmatter and text that says the "
-            "mode has ended and every tool is back. The person leaves with that command or with /agents, choosing "
-            "build; Tab from the mode's agent reaches plan first, since Tab cycles build and then the other primary "
-            "agents by name. Say so in the command's reply and in How to use."
+            "prompt while the agent runs. The person enters the mode by selecting the agent: with /agents (or Tab), "
+            "or by typing an agent_command with agent: <name> in its frontmatter as the first message of a new "
+            "session, which starts the session in that agent; the same command typed later in a session runs only "
+            "its own turn with the agent, and the next message is back in the selected one. The person leaves with "
+            "/agents, choosing build; Tab from the mode's agent reaches plan first, since Tab cycles build and then "
+            "the other primary agents by name. A command with agent: build does not leave the mode, so write no "
+            "leave command. Write the agent and its entering command in the same reply. The restriction's wording "
+            "lives only in that agent's own prompt, never in rules or in a command's text, so it ends when the "
+            "session leaves the agent. Say how to enter and leave in the command's reply and in How to use."
         ),
         config_keys=("agent",),
         config_example=(

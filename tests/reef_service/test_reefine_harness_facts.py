@@ -152,17 +152,19 @@ def test_a_prompt_level_mode_keeps_its_state_in_the_conversation_and_a_hard_rest
     assert "it is the behavior itself, not a substitute" not in model.prompt
 
 
-def test_opencode_enforces_a_mode_with_an_agent_and_leaves_it_through_a_command_or_agents() -> None:
-    """The mode's agent carries the restriction in its own prompt; a second command with agent: build leaves it and
-    says every tool is back; Tab from the mode's agent reaches plan first, not build."""
+def test_opencode_enters_a_mode_by_selecting_its_agent_and_leaves_it_through_agents() -> None:
+    """A command's agent: runs only that command's turn, and a new session's first message sets the session's agent:
+    so the mode is entered with /agents or with its command as a new session's first message, and left with
+    /agents (Tab reaches plan first); a leave command with agent: build does not leave, so none is written."""
     model = Model(request_reply(RULES))
     evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="opencode")
     assert "enforces the mode" in model.prompt and "every tool stays in its list" not in model.prompt
+    assert "agent: <name> to run that command's own turn with that agent" in model.prompt
+    assert "as the first message of a new session, which starts the session in that agent" in model.prompt
     assert "/agents, choosing build" in model.prompt and "Tab from the mode's agent reaches plan first" in model.prompt
+    assert "A command with agent: build does not leave the mode, so write no leave command" in model.prompt
     assert "The restriction's wording lives only in that agent's own prompt, never in rules" in model.prompt
-    assert "with agent: build in its frontmatter and text that says the mode has ended and every tool is back" in (
-        model.prompt
-    )
+    assert "switch the session to it" not in model.prompt and "second agent_command that leaves" not in model.prompt
     assert "Tab cycles the primary agents, build first" not in model.prompt
     assert "Quote a frontmatter value that holds ': '" in model.prompt
 

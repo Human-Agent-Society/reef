@@ -190,8 +190,10 @@ the header on each reply) and never in a file a tool writes or reads, and
 the review lists a request for a hard restriction under limits. On
 ``opencode`` an agent with a permission map is the mode, and the model gets
 only the tools it allows: an answer whose agent has no permission map is
-written again, since that agent is offered every tool, and a second command
-with ``agent: build`` leaves the mode.
+written again, since that agent is offered every tool. A command's
+``agent:`` runs only that command's turn, so the person enters the mode with
+``/agents`` (or with its command as a new session's first message) and
+leaves it with ``/agents``, choosing build.
 
 An answer whose form slipped is written again while attempts remain: JSON
 that does not parse, entries every one of which was dropped, or entries the
