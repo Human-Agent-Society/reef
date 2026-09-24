@@ -421,9 +421,13 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
         elif path.startswith(SKILL_DIR) and path.endswith("/SKILL.md"):
             skill = path[len(SKILL_DIR) : -len("/SKILL.md")]
             # The file is read as it came first, so a form the check refuses stays refused.
-            if not read_frontmatter(f"skill {skill!r}", text) and (
-                not text.startswith("---") or text.startswith("----")
-            ):
+            frontmatter = read_frontmatter(f"skill {skill!r}", text)
+            has_block = text.startswith("---") and not text.startswith("----")
+            listed = [frontmatter.get("name"), frontmatter.get("description")]
+            if has_block and not all(isinstance(value, str) and value.strip() for value in listed):
+                # opencode lists a skill only with both, so one without them would never reach the model.
+                raise RenderError(f"opencode skill {skill!r} must set name and description in its frontmatter")
+            if not has_block:
                 first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
                 header = {"name": skill, "description": first[:200] or skill}
                 files[path] = (

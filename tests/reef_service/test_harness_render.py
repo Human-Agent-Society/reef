@@ -534,6 +534,10 @@ def test_opencode_gives_a_skill_without_frontmatter_the_name_and_description_it_
         render_composition([("skill", {"name": "notes", "text": own})], descriptor)["opencode/skill/notes/SKILL.md"]
         == own
     )
+    # A block of its own without both keys would never be listed: render refuses it rather than ship it unseen.
+    for text in ("---\ndescription: Notes.\n---\n", "---\nname: notes\n---\n", "---\n---\nBe brief.\n"):
+        with pytest.raises(RenderError, match="must set name and description"):
+            render_composition([("skill", {"name": "notes", "text": text})], descriptor)
 
 
 def test_opencode_reads_frontmatter_again_as_opencode_rewrites_it() -> None:

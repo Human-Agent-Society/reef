@@ -153,7 +153,7 @@ js-yaml, so ``1e5`` is a number and ``yes`` a string, as opencode reads them,
 and it refuses a date that does not exist, such as ``2001-13-45``. opencode
 lists only a skill whose ``SKILL.md`` carries ``name`` and ``description``, so
 a skill file with no frontmatter gets both, the name of its directory and its
-first line, as quoted strings. A command
+first line, as quoted strings, and a block of its own without both is refused. A command
 file's frontmatter ``name``, when set, must be its file name: opencode files
 the command under that name, in place of the command already named so,
 ``/reefine`` included. A command's ``agent`` must name an agent the tree
