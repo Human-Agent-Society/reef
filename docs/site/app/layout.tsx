@@ -1,5 +1,5 @@
 import type { Metadata } from "next";
-import { DM_Mono, DM_Sans, Source_Serif_4 } from "next/font/google";
+import localFont from "next/font/local";
 import { Header } from "@/components/header";
 import { RouteFocus } from "@/components/route-focus";
 import { ThemeSync } from "@/components/theme-sync";
@@ -7,24 +7,32 @@ import { getSearchDocuments, navigation } from "@/lib/docs";
 import { siteConfig } from "@/lib/site";
 import "./globals.css";
 
-const dmSans = DM_Sans({
-  weight: ["400", "500", "600", "800"],
-  subsets: ["latin"],
+// Load pinned font files so builds do not depend on Google Fonts responses.
+const dmSans = localFont({
+  src: "../node_modules/@fontsource-variable/dm-sans/files/dm-sans-latin-wght-normal.woff2",
+  weight: "100 1000",
+  style: "normal",
   display: "swap",
   variable: "--font-dm-sans",
 });
 
-const sourceSerif = Source_Serif_4({
+const sourceSerif = localFont({
   // Keep optical sizing available across the site's heading sizes.
-  axes: ["opsz"],
-  subsets: ["latin"],
+  src: "../node_modules/@fontsource-variable/source-serif-4/files/source-serif-4-latin-standard-normal.woff2",
+  weight: "200 900",
+  style: "normal",
+  adjustFontFallback: "Times New Roman",
   display: "swap",
   variable: "--font-source-serif",
 });
 
-const dmMono = DM_Mono({
-  weight: ["400", "500"],
-  subsets: ["latin"],
+const dmMono = localFont({
+  src: [
+    { path: "../node_modules/@fontsource/dm-mono/files/dm-mono-latin-400-normal.woff2", weight: "400" },
+    { path: "../node_modules/@fontsource/dm-mono/files/dm-mono-latin-500-normal.woff2", weight: "500" },
+  ],
+  style: "normal",
+  adjustFontFallback: false,
   display: "swap",
   variable: "--font-dm-mono",
 });
