@@ -74,6 +74,25 @@ def test_local_executor_does_not_forward_parent_stdin(tmp_path: Path) -> None:
     assert result.stdout == "\n"
 
 
+def test_local_executor_finds_a_runner_beside_the_interpreter_after_path(tmp_path: Path, monkeypatch) -> None:
+    """reef serve started from a venv off PATH still launches reef-terminus; a name PATH finds keeps its binary."""
+    root = tmp_path / "root"
+    (root / "workspace").mkdir(parents=True)
+    scripts = tmp_path / "venv" / "bin"
+    scripts.mkdir(parents=True)
+    _script(scripts, "print('beside the interpreter')", "reef-runner")
+    monkeypatch.setattr(sys, "executable", str(scripts / "python"))
+    monkeypatch.setenv("PATH", os.pathsep.join(["/usr/bin", "/bin"]))
+    outcome = LocalExecutor().launch(["reef-runner"], root=root, workspace=root / "workspace", env={}, timeout=10.0)
+    assert (outcome.exit_code, outcome.stdout.strip()) == (0, "beside the interpreter")
+    first = tmp_path / "first"
+    first.mkdir()
+    _script(first, "print('on PATH')", "reef-runner")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(first), "/usr/bin", "/bin"]))
+    outcome = LocalExecutor().launch(["reef-runner"], root=root, workspace=root / "workspace", env={}, timeout=10.0)
+    assert outcome.stdout.strip() == "on PATH"
+
+
 def test_local_executor_maps_a_missing_binary(tmp_path: Path) -> None:
     root = tmp_path / "root"
     (root / "workspace").mkdir(parents=True)

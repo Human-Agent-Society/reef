@@ -150,12 +150,22 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
 
 
 def _inherited_env() -> dict[str, str]:
-    """The minimal parent environment an episode keeps: how to find binaries."""
-    return {
+    """The minimal parent environment an episode keeps: how to find binaries.
+
+    The running interpreter's scripts directory comes last on PATH, so a
+    runner that ships with reef (reef-terminus, reef-native) is found when
+    ``reef serve`` runs from a venv that is not on PATH; every name PATH
+    already finds resolves as before."""
+    env = {
         key: value
         for key, value in os.environ.items()
         if key in ("PATH", "SYSTEMROOT", "TMPDIR", "CUDA_VISIBLE_DEVICES")
     }
+    scripts = str(Path(sys.executable).parent)
+    path = env.get("PATH", "")
+    if scripts not in path.split(os.pathsep):
+        env["PATH"] = os.pathsep.join([path, scripts]) if path else scripts
+    return env
 
 
 @dataclass(frozen=True)

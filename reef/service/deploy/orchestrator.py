@@ -25,6 +25,7 @@ from typing import Any
 
 import yaml
 
+from reef.harness.adapters import get_adapter
 from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
@@ -359,10 +360,11 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
 
     Printed when the stack is up so nobody copies it from a README: the
     address the service listens on (loopback when it binds every interface),
-    the adapter the deployment evolves, and the token the config holds."""
+    the adapter the deployment evolves, and the token the config holds. An
+    adapter Reef installs nothing for (terminus) gets no line."""
     evolution = config.get("evolution")
     adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
-    if not isinstance(adapter, str) or not adapter:
+    if not isinstance(adapter, str) or not adapter or get_adapter(adapter).install is None:
         return None
     host = str(config_value(config, "reef", "host", default="127.0.0.1"))
     if host in ("0.0.0.0", "::", ""):
