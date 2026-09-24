@@ -25,7 +25,12 @@ method, and a ``model`` in the frontmatter of a command or a skill are the
 tree choosing where calls go, and are refused. Claude Code merges the JSON
 object in ``CLAUDE_CODE_EXTRA_BODY`` into every request body, over the bound
 model, so that object may not name a model (``model``, or OpenRouter's
-fallback ``models``): the bound key only serves the bound model.
+fallback ``models``).
+
+These checks cover the config the tree renders. Reef's proxy forwards the
+``model`` and ``models`` a request sends as they are, so a request that other
+code builds with the rendered key, such as a tool the model runs, can still
+name another model.
 """
 
 from __future__ import annotations

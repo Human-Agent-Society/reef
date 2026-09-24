@@ -157,6 +157,9 @@ HERMES_REFUSED = [
     pytest.param(
         {"delegation": {"request_overrides": {"extra_body": {"models": ["m"]}}}}, True, id="delegation-body-models"
     ),
+    pytest.param({"model": {"openai_runtime": "codex_app_server"}}, True, id="model-codex-runtime"),
+    pytest.param({"auxiliary": {"compression": {"api_mode": "anthropic_messages"}}}, True, id="auxiliary-api-mode"),
+    pytest.param({"delegation": {"api_mode": "codex_responses"}}, True, id="delegation-api-mode"),
 ]
 
 
@@ -164,6 +167,30 @@ HERMES_REFUSED = [
 def test_hermes_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
     with pytest.raises(RenderError, match="Reef's model binding"):
         render("hermes", [config(data)], bound=bound)
+
+
+#: Each api mode hermes 0.21.0 takes for model.api_mode, and spellings its alias map reads as one. For the binding's
+#: custom provider bedrock_converse calls AWS Bedrock and codex_app_server runs a codex subprocess, off the bound
+#: endpoint; the binding sets no api mode, so every one is refused.
+HERMES_API_MODES = [
+    "chat_completions",
+    "codex_responses",
+    "anthropic_messages",
+    "bedrock_converse",
+    "codex_app_server",
+    "bedrock",
+    "Bedrock",
+    " bedrock-converse ",
+    "CODEX_APP_SERVER",
+    "openai",
+]
+
+
+@pytest.mark.parametrize("api_mode", HERMES_API_MODES)
+@pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
+def test_hermes_refuses_an_api_mode_the_binding_does_not_set(api_mode: str, bound: bool) -> None:
+    with pytest.raises(RenderError, match=r"must not set model\.api_mode: Reef's model binding"):
+        render("hermes", [config({"model": {"api_mode": api_mode}})], bound=bound)
 
 
 def test_hermes_keeps_the_settings_a_tree_tunes() -> None:
@@ -315,6 +342,7 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
         ("hermes", {"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER}}),
         ("hermes", {"auxiliary": {"compression": {"fallback_chain": [{"provider": "custom", "model": "m"}]}}}),
         ("hermes", {"delegation": {"request_overrides": {"model": "m"}}}),
+        ("hermes", {"model": {"api_mode": "bedrock_converse"}}),
         ("dsh", {"llm-pi-ai": {"config": {"providers": {"evil": DSH_ROUTE}}}}),
         ("pi", {"enabledModels": ["evil/m"]}),
         ("terminus", {"llm_call_kwargs": {"base_url": OTHER}}),

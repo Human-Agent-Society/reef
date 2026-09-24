@@ -22,8 +22,12 @@ the binding's values, so a key there that litellm reads as the endpoint, the
 provider, a credential, the model, a fallback model or a logging callback
 that sends the call elsewhere is refused. litellm sends a key it does not
 read, and ``extra_body``, in the request body to the bound endpoint, so
-neither may name a model (``model``, or OpenRouter's fallback ``models``):
-the bound key only serves the bound model.
+neither may name a model (``model``, or OpenRouter's fallback ``models``).
+
+These checks cover the config the tree renders. Reef's proxy forwards the
+``model`` and ``models`` a request sends as they are, so a request that other
+code builds with the rendered key, such as a tool the model runs, can still
+name another model.
 
 One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
 Rendering only checks its syntax. Execution requires Reef's sandbox around

@@ -149,11 +149,15 @@ the model:
   hermes reads for the model, the endpoint or the key (``model.model``,
   ``model.name``, ``model.api_base``, the key names such as
   ``model.key_env``, and a top level ``provider``, ``base_url`` or
-  ``api_base``, which hermes moves into ``model``); and a provider, an
-  endpoint, a credential, a model, a ``fallback_chain`` or
-  ``prefer_fast_model`` for an auxiliary task, for delegation, for cron or
-  for the curator (``curator.auxiliary``). An auxiliary task may keep the
-  provider ``auto`` or ``main``, which run it on the main model.
+  ``api_base``, which hermes moves into ``model``); ``model.api_mode`` and
+  ``model.openai_runtime``, which choose the transport the binding does not
+  set (for its ``custom`` provider, ``bedrock_converse`` calls AWS Bedrock
+  and ``codex_app_server`` hands the turn to a ``codex app-server``
+  subprocess); and a provider, an endpoint, a credential, an ``api_mode``,
+  a model, a ``fallback_chain`` or ``prefer_fast_model`` for an auxiliary
+  task, for delegation, for cron or for the curator
+  (``curator.auxiliary``). An auxiliary task may keep the provider ``auto``
+  or ``main``, which run it on the main model.
 - ``dsh``: a route in ``llm-pi-ai`` other than the binding's ``reef``, a key
   on that route the binding does not write, ``agent-default-model``,
   ``llm-deepseek`` (DeepSeek's own endpoint), the web search endpoint and
@@ -180,6 +184,11 @@ and ``delegation.request_overrides`` with its ``extra_body``, and the
 terminus ``llm_call_kwargs`` (litellm sends a key it does not read in the
 body) with its ``extra_body``. Other body fields, such as OpenRouter's
 ``provider`` preferences, stay admitted.
+
+These checks cover the config the tree renders. Reef's proxy forwards the
+``model`` and ``models`` a request sends as they are, so a request that
+other code builds with the rendered key, such as a tool the model runs, can
+still name another model.
 
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which

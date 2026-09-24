@@ -27,9 +27,18 @@ agents presets, and a provider, an endpoint, a credential, a model or a
 fallback chain set for an auxiliary task, for delegation, for cron or for
 the curator, are the tree choosing where calls go, and are refused. An
 auxiliary task may keep ``auto`` or ``main``, which run it on the main
-model. A request body a tree passes to the bound endpoint (``extra_body``,
-``delegation.request_overrides``) may not name a model either, so the bound
-key only serves the bound model.
+model. The binding sets no transport, so a tree's ``api_mode`` (in
+``model`` or in any of those sections) and ``model.openai_runtime`` are
+refused too: for the ``custom`` provider two api modes leave the bound
+endpoint, ``bedrock_converse`` for AWS Bedrock and ``codex_app_server`` for
+a ``codex app-server`` subprocess. A request body a tree passes to the
+bound endpoint (``extra_body``, ``delegation.request_overrides``) may not
+name a model either.
+
+These checks cover the config the tree renders. Reef's proxy forwards the
+``model`` and ``models`` a request sends as they are, so a request that other
+code builds with the rendered key, such as a tool the model runs, can still
+name another model.
 """
 
 from __future__ import annotations
@@ -51,6 +60,8 @@ BINDING_MODEL_KEYS = ("api_key", "base_url", "default", "provider")
 BINDING_CREDENTIAL = "api_key"
 #: Other ``model`` keys hermes reads for the model, the endpoint or the key, and the model aliases a switch resolves.
 MODEL_ALIAS_KEYS = ("aliases", "api_base", "api_key_env", "key_cmd", "key_env", "model", "name")
+#: The ``model`` keys hermes reads for the transport; the binding writes neither.
+TRANSPORT_KEYS = ("api_mode", "openai_runtime")
 #: Top-level keys hermes moves into ``model`` (the provider and the endpoint), and the model aliases with their routes.
 ROOT_ROUTE_KEYS = ("api_base", "base_url", "model_aliases", "provider")
 #: Sections that name other providers, their endpoints and credential commands, or the fallback models.
@@ -58,10 +69,11 @@ PROVIDER_SECTIONS = ("custom_providers", "fallback_model", "fallback_providers",
 #: The mixture of agents keys that name its models: the presets, and the older flat form of one preset.
 MOA_KEYS = ("aggregator", "presets", "reference_models")
 #: The keys of an auxiliary task, of delegation, of cron and of the curator that choose its provider, endpoint,
-#: credential or model, or a fallback chain of those.
+#: credential, transport or model, or a fallback chain of those.
 ROUTE_KEYS = (
     "api_key",
     "api_key_env",
+    "api_mode",
     "base_url",
     "fallback_chain",
     "key_cmd",
@@ -146,6 +158,12 @@ def check_model_route(config: dict[str, Any]) -> None:
     # hermes reads model.model and model.name as the model (one reader prefers model.model to model.default),
     # model.api_base as the endpoint and the key names as the key; the binding writes none of them.
     for key in MODEL_ALIAS_KEYS:
+        if is_set(model.get(key)):
+            raise RenderError(f"hermes composition must not set model.{key}: {refusal}")
+    # The binding binds the chat completions API. For its custom provider hermes takes model.api_mode in any
+    # spelling it knows, and bedrock_converse (an AWS Bedrock client) and codex_app_server (a codex subprocess)
+    # leave the bound endpoint; openai_runtime picks the codex subprocess for the openai providers.
+    for key in TRANSPORT_KEYS:
         if is_set(model.get(key)):
             raise RenderError(f"hermes composition must not set model.{key}: {refusal}")
     for name in (*ROOT_ROUTE_KEYS, *PROVIDER_SECTIONS):
