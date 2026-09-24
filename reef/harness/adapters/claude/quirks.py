@@ -22,7 +22,10 @@ Any other env name Claude Code reads to choose the endpoint (another
 provider such as Bedrock or Vertex, a proxy), the credential or the model,
 a settings key that chooses the model, a credential helper or a login
 method, and a ``model`` in the frontmatter of a command or a skill are the
-tree choosing where calls go, and are refused.
+tree choosing where calls go, and are refused. Claude Code merges the JSON
+object in ``CLAUDE_CODE_EXTRA_BODY`` into every request body, over the bound
+model, so that object may not name a model (``model``, or OpenRouter's
+fallback ``models``): the bound key only serves the bound model.
 """
 
 from __future__ import annotations
@@ -55,6 +58,11 @@ MODEL_ROUTE_ENV = re.compile(
     r"|PROXY|BASE_URL|ENDPOINT|SOCKET|API_KEY|AUTH_|CREDS|CREDENTIAL|HELPER|FILE_DESCRIPTOR",
     re.IGNORECASE,
 )
+#: The env name whose JSON object Claude Code merges into every request body, after the bound model.
+EXTRA_BODY_ENV = "CLAUDE_CODE_EXTRA_BODY"
+#: Request body fields that name the model: ``model`` replaces the bound one, and OpenRouter reads ``models`` as
+#: fallback models.
+BODY_MODEL_KEYS = ("model", "models")
 #: settings.json keys that choose the model, a credential helper or a login method.
 MODEL_ROUTE_SETTINGS = (
     "advisorModel",
@@ -136,6 +144,20 @@ def frontmatter_chooses_model(text: str) -> bool:
     return "model" in block or "\\" in block
 
 
+def extra_body_names_model(value: object) -> bool:
+    """Whether a ``CLAUDE_CODE_EXTRA_BODY`` value can name a model; a value render cannot read as an object counts.
+
+    Claude Code strips a byte order mark and reads the value with JSON.parse.
+    """
+    if not isinstance(value, str):
+        return True
+    try:
+        body = json.loads(value.removeprefix("\ufeff"))
+    except (ValueError, RecursionError):
+        return True
+    return not isinstance(body, dict) or any(key in body for key in BODY_MODEL_KEYS)
+
+
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     config = json.loads(files[_CONFIG_PATH])
     if config.get("includeCoAuthoredBy") is True:
@@ -154,6 +176,11 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
                 raise RenderError(
                     f"claude composition must not set env {name}: Reef's model binding chooses the endpoint, "
                     "the credential and the model"
+                )
+            if name.upper() == EXTRA_BODY_ENV and extra_body_names_model(env[name]):
+                raise RenderError(
+                    f"claude composition env {name} must be a JSON object without model or models: "
+                    "Reef's model binding chooses the model"
                 )
     for key in MODEL_ROUTE_SETTINGS:
         if key in config:

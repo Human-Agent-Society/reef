@@ -20,7 +20,10 @@ pass only beside it, and ``llm_kwargs`` only with the keys the binding
 writes. Terminus 2 passes ``llm_call_kwargs`` to litellm on every call, over
 the binding's values, so a key there that litellm reads as the endpoint, the
 provider, a credential, the model, a fallback model or a logging callback
-that sends the call elsewhere is refused.
+that sends the call elsewhere is refused. litellm sends a key it does not
+read, and ``extra_body``, in the request body to the bound endpoint, so
+neither may name a model (``model``, or OpenRouter's fallback ``models``):
+the bound key only serves the bound model.
 
 One ``code_extension`` can define an Agent subclass of Harbor's Terminus2.
 Rendering only checks its syntax. Execution requires Reef's sandbox around
@@ -63,15 +66,19 @@ _ALLOWED_KNOBS = {
 _BINDING_KNOBS = {"api_base", "llm_kwargs", "model_name"}
 BINDING_LLM_KWARGS = frozenset({"api_key"})
 #: litellm call arguments (read from litellm 1.102.1) that choose the endpoint, the provider, a credential, the model or a
-#: fallback model, or add a logging callback that sends the call to another host.
+#: fallback model, or add a logging callback that sends the call to another host. litellm sends an argument it does
+#: not read, such as OpenRouter's fallback ``models``, in the request body.
 MODEL_ROUTE_KWARGS = re.compile(
     r"^(?:api_base|api_key|api_version|azure|base_url|callbacks|client|client_id|client_secret"
     r"|context_window_fallback_dict|custom_llm_provider|deployment_id|failure_callback|fallbacks"
-    r"|litellm_credential_name|mock_response|mock_timeout|model|model_alias_map|model_list|region_name"
+    r"|litellm_credential_name|mock_response|mock_timeout|model|model_alias_map|model_list|models|region_name"
     r"|success_callback|tenant_id|use_litellm_proxy)$"
     r"|^(?:arize|aws|azure|dd|gcs|humanloop|langfuse|langsmith|newrelic|posthog|s3|vertex|wandb|watsonx|weave)_"
     r"|^(?:adaptive|auto|complexity|quality)_router_"
 )
+#: Request body fields that name the model: ``model`` replaces the bound one, and OpenRouter reads ``models`` as
+#: fallback models.
+BODY_MODEL_KEYS = frozenset({"model", "models"})
 
 
 def _with_frontmatter(path: str, text: str) -> str:
@@ -103,6 +110,12 @@ def _validate_config(config: dict[str, Any]) -> None:
     routed = sorted(key for key in call_kwargs or {} if MODEL_ROUTE_KWARGS.search(key))
     if routed:
         raise RenderError(f"terminus config must not set llm_call_kwargs {', '.join(routed)}: {refusal}")
+    body = (call_kwargs or {}).get("extra_body")
+    if body is not None and not isinstance(body, dict):
+        raise RenderError("terminus config llm_call_kwargs extra_body must be an object")
+    named = sorted(set(body or {}) & BODY_MODEL_KEYS)
+    if named:
+        raise RenderError(f"terminus config must not set llm_call_kwargs extra_body {', '.join(named)}: {refusal}")
     turns = config.get("max_turns")
     if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
         raise RenderError("terminus config max_turns must be a positive integer")

@@ -18,13 +18,18 @@ Every model call stays on Reef's model binding. The binding writes the
 literal key), renders after the tree and wins every key it writes. Its key
 is a credential, which a tree cannot hold because admission refuses an
 inline credential, so those keys pass only beside the binding's key. The
-sections that name other providers, their endpoints and credential commands
-(``providers``, ``custom_providers``), the fallback models
-(``fallback_model``, ``fallback_providers``) and the mixture of agents
-presets, and a provider, an endpoint, a credential or a model set for an
-auxiliary task, for delegation or for cron, are the tree choosing where
-calls go, and are refused. An auxiliary task may keep ``auto`` or ``main``,
-which run it on the main model.
+other names hermes reads for the model, the endpoint or the key (in
+``model``, and at the top level, which hermes moves into ``model``), the
+model aliases, the sections that name other providers, their endpoints and
+credential commands (``providers``, ``custom_providers``), the fallback
+models (``fallback_model``, ``fallback_providers``) and the mixture of
+agents presets, and a provider, an endpoint, a credential, a model or a
+fallback chain set for an auxiliary task, for delegation, for cron or for
+the curator, are the tree choosing where calls go, and are refused. An
+auxiliary task may keep ``auto`` or ``main``, which run it on the main
+model. A request body a tree passes to the bound endpoint (``extra_body``,
+``delegation.request_overrides``) may not name a model either, so the bound
+key only serves the bound model.
 """
 
 from __future__ import annotations
@@ -44,10 +49,30 @@ _SKILL_ROOTS = ("hermes/skills/", "hermes-commands/")
 #: The model keys Reef's binding writes, and among them its credential.
 BINDING_MODEL_KEYS = ("api_key", "base_url", "default", "provider")
 BINDING_CREDENTIAL = "api_key"
+#: Other ``model`` keys hermes reads for the model, the endpoint or the key, and the model aliases a switch resolves.
+MODEL_ALIAS_KEYS = ("aliases", "api_base", "api_key_env", "key_cmd", "key_env", "model", "name")
+#: Top-level keys hermes moves into ``model`` (the provider and the endpoint), and the model aliases with their routes.
+ROOT_ROUTE_KEYS = ("api_base", "base_url", "model_aliases", "provider")
 #: Sections that name other providers, their endpoints and credential commands, or the fallback models.
 PROVIDER_SECTIONS = ("custom_providers", "fallback_model", "fallback_providers", "providers")
-#: The keys of an auxiliary task, of delegation and of cron that choose its provider, endpoint, credential or model.
-ROUTE_KEYS = ("api_key", "base_url", "key_cmd", "key_env", "model", "model_provider", "provider")
+#: The mixture of agents keys that name its models: the presets, and the older flat form of one preset.
+MOA_KEYS = ("aggregator", "presets", "reference_models")
+#: The keys of an auxiliary task, of delegation, of cron and of the curator that choose its provider, endpoint,
+#: credential or model, or a fallback chain of those.
+ROUTE_KEYS = (
+    "api_key",
+    "api_key_env",
+    "base_url",
+    "fallback_chain",
+    "key_cmd",
+    "key_env",
+    "model",
+    "model_provider",
+    "provider",
+)
+#: Request body fields that name the model: ``model`` replaces the bound one, and OpenRouter reads ``models`` as
+#: fallback models.
+BODY_MODEL_KEYS = ("model", "models")
 #: The providers an auxiliary task may keep: hermes runs both on the main model.
 MAIN_MODEL_PROVIDERS = ("auto", "main")
 
@@ -96,13 +121,13 @@ def is_set(value: object) -> bool:
     return value is not None and value != "" and value != [] and value != {}
 
 
-def section_of(config: dict[str, Any], name: str) -> dict[str, Any]:
-    """The config section ``name``, empty when absent; hermes reads each one as an object."""
+def section_of(config: dict[str, Any], name: str, where: str = "") -> dict[str, Any]:
+    """The config section ``name`` (``where`` names it in a refusal), empty when absent; hermes reads it as an object."""
     section = config.get(name)
     if section is None:
         return {}
     if not isinstance(section, dict):
-        raise RenderError(f"hermes {name} must be an object, got {type(section).__name__}")
+        raise RenderError(f"hermes {where or name} must be an object, got {type(section).__name__}")
     return section
 
 
@@ -115,20 +140,28 @@ def check_model_route(config: dict[str, Any]) -> None:
     model = model or {}
     credential = model.get(BINDING_CREDENTIAL)
     bound = isinstance(credential, str) and bool(credential.strip())
-    # model.model names the model where model.default is empty; the binding always writes model.default.
-    for key in (*BINDING_MODEL_KEYS, "model"):
-        if key in model and (key == "model" or not bound):
+    for key in BINDING_MODEL_KEYS:
+        if key in model and not bound:
             raise RenderError(f"hermes composition must not set model.{key}: {refusal}")
-    for name in PROVIDER_SECTIONS:
+    # hermes reads model.model and model.name as the model (one reader prefers model.model to model.default),
+    # model.api_base as the endpoint and the key names as the key; the binding writes none of them.
+    for key in MODEL_ALIAS_KEYS:
+        if is_set(model.get(key)):
+            raise RenderError(f"hermes composition must not set model.{key}: {refusal}")
+    for name in (*ROOT_ROUTE_KEYS, *PROVIDER_SECTIONS):
         if is_set(config.get(name)):
             raise RenderError(f"hermes composition must not set {name}: {refusal}")
-    if is_set(section_of(config, "moa").get("presets")):
-        raise RenderError(f"hermes composition must not set moa.presets: {refusal}")
+    moa = section_of(config, "moa")
+    for key in MOA_KEYS:
+        if is_set(moa.get(key)):
+            raise RenderError(f"hermes composition must not set moa.{key}: {refusal}")
     auxiliary = section_of(config, "auxiliary")
     if is_set(auxiliary.get("openrouter_model")):
         raise RenderError(f"hermes composition must not set auxiliary.openrouter_model: {refusal}")
     routed = [(f"auxiliary.{task}", settings) for task, settings in auxiliary.items() if isinstance(settings, dict)]
     routed += [(name, section_of(config, name)) for name in ("delegation", "cron")]
+    # The curator still reads its older per task section, curator.auxiliary.
+    routed.append(("curator.auxiliary", section_of(section_of(config, "curator"), "auxiliary", "curator.auxiliary")))
     for where, settings in routed:
         for key in ROUTE_KEYS:
             value = settings.get(key)
@@ -137,6 +170,22 @@ def check_model_route(config: dict[str, Any]) -> None:
                 raise RenderError(f"hermes composition must not set {where}.{key}: {refusal}")
         if settings.get("prefer_fast_model") is True:
             raise RenderError(f"hermes composition must not set {where}.prefer_fast_model: {refusal}")
+        check_body(settings.get("extra_body"), f"{where}.extra_body", refusal)
+    # Delegation sends request_overrides with each child call: its keys are call arguments, and its extra_body
+    # joins the request body.
+    overrides = section_of(config, "delegation").get("request_overrides")
+    check_body(overrides, "delegation.request_overrides", refusal)
+    if isinstance(overrides, dict):
+        check_body(overrides.get("extra_body"), "delegation.request_overrides.extra_body", refusal)
+
+
+def check_body(body: object, where: str, refusal: str) -> None:
+    """Refuse a request body that names a model; hermes skips a body that is not an object."""
+    if not isinstance(body, dict):
+        return
+    for key in BODY_MODEL_KEYS:
+        if key in body:
+            raise RenderError(f"hermes composition must not set {where}.{key}: {refusal}")
 
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:

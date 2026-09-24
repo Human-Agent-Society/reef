@@ -125,8 +125,9 @@ A tree does not choose where model calls go. Reef's model binding writes the
 endpoint, the key and the model when it renders an episode or an install,
 and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
 adapters, render refuses a ``config`` entry, a command or a skill that sets
-them or names another provider, a proxy, a credential helper or another
-model. The adapter guide lists the keys for each adapter.
+them or names another provider, a proxy, a credential helper, a fallback or
+another model, also inside a request body the tree passes to the endpoint.
+The adapter guide lists the keys for each adapter.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 

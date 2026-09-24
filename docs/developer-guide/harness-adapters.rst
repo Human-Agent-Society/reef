@@ -143,10 +143,17 @@ the model:
   render cannot read the way Claude Code does counts when it holds the word
   ``model`` or an escape.
 - ``hermes``: ``providers``, ``custom_providers``, ``fallback_model``,
-  ``fallback_providers``, ``moa.presets`` and ``auxiliary.openrouter_model``;
-  and a provider, an endpoint, a credential, a model or ``prefer_fast_model``
-  for an auxiliary task, for delegation or for cron. An auxiliary task may
-  keep the provider ``auto`` or ``main``, which run it on the main model.
+  ``fallback_providers``, the ``moa`` presets (``presets``, and the older
+  ``reference_models`` and ``aggregator``), ``auxiliary.openrouter_model``,
+  the model aliases (``model_aliases``, ``model.aliases``), the other names
+  hermes reads for the model, the endpoint or the key (``model.model``,
+  ``model.name``, ``model.api_base``, the key names such as
+  ``model.key_env``, and a top level ``provider``, ``base_url`` or
+  ``api_base``, which hermes moves into ``model``); and a provider, an
+  endpoint, a credential, a model, a ``fallback_chain`` or
+  ``prefer_fast_model`` for an auxiliary task, for delegation, for cron or
+  for the curator (``curator.auxiliary``). An auxiliary task may keep the
+  provider ``auto`` or ``main``, which run it on the main model.
 - ``dsh``: a route in ``llm-pi-ai`` other than the binding's ``reef``, a key
   on that route the binding does not write, ``agent-default-model``,
   ``llm-deepseek`` (DeepSeek's own endpoint), the web search endpoint and
@@ -164,8 +171,15 @@ the model:
   (``base_url``, ``api_base``, ``custom_llm_provider``, ``model``,
   ``fallbacks`` and the others the quirk lists).
 
-A request body field a tree passes to the bound endpoint, such as
-``extra_body``, is not read by the harness and stays admitted.
+A request body a tree passes to the bound endpoint reaches the provider
+with the bound key, so render refuses one that names a model: ``model``, or
+``models``, which OpenRouter reads as fallback models. These bodies are the
+``claude`` ``CLAUDE_CODE_EXTRA_BODY`` env value (which must be a JSON
+object), the hermes ``extra_body`` of an auxiliary task or of the curator
+and ``delegation.request_overrides`` with its ``extra_body``, and the
+terminus ``llm_call_kwargs`` (litellm sends a key it does not read in the
+body) with its ``extra_body``. Other body fields, such as OpenRouter's
+``provider`` preferences, stay admitted.
 
 The native adapter also renders the optional ``native_tool`` kind to
 ``native/tools/{name}.py``: a module holding the node's ``code``, which
