@@ -106,7 +106,11 @@ def test_the_agent_spec_names_harbors_own_agent_and_carries_the_tree(tmp_path: P
     # Harbor's terminus-2, not a Reef subclass: no Reef code runs in the agent.
     assert spec["name"] == "terminus-2"
     assert spec["model_name"] == "openai/gpt-4o"
-    assert spec["kwargs"] == {"max_turns": 12, "api_base": "http://127.0.0.1:9/v1", "llm_kwargs": {"api_key": "k"}}
+    assert spec["kwargs"] == {
+        "max_turns": 12,
+        "api_base": "http://127.0.0.1:9/v1",
+        "llm_kwargs": {"api_key": "k", "custom_llm_provider": "litellm_proxy"},
+    }
     assert spec["skills"] == [str(tmp_path / "terminus/skills")]
 
 

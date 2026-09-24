@@ -68,7 +68,7 @@ _ALLOWED_KNOBS = {
 #: Set by Reef's model binding, which renders after the tree and therefore
 #: wins the merge. Admitted only beside the binding's key, in llm_kwargs.
 _BINDING_KNOBS = {"api_base", "llm_kwargs", "model_name"}
-BINDING_LLM_KWARGS = frozenset({"api_key"})
+BINDING_LLM_KWARGS = frozenset({"api_key", "custom_llm_provider"})
 #: litellm call arguments (read from litellm 1.102.1) that choose the endpoint, the provider, a credential, the model or a
 #: fallback model, or add a logging callback that sends the call to another host. litellm sends an argument it does
 #: not read, such as OpenRouter's fallback ``models``, in the request body.

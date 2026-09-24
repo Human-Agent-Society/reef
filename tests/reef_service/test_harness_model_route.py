@@ -335,7 +335,8 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
     tuned = {"max_turns": 12, "llm_call_kwargs": {"top_k": 20, "extra_body": {"provider": {"sort": "price"}}}}
     rendered = json.loads(render("terminus", [config(tuned)], bound=True)["terminus/config.json"])
     assert rendered["llm_call_kwargs"] == tuned["llm_call_kwargs"]
-    assert rendered["llm_kwargs"] == {"api_key": "k-bound"} and rendered["model_name"] == "served"
+    assert rendered["llm_kwargs"] == {"api_key": "k-bound", "custom_llm_provider": "litellm_proxy"}
+    assert rendered["model_name"] == "served"
     render("terminus", [config(tuned)], bound=False)
 
 

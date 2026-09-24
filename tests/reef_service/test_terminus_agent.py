@@ -118,7 +118,7 @@ def test_harbor_validates_the_trial_the_runner_builds(tmp_path: Path) -> None:
     assert config.agent.kwargs == {
         "max_turns": 12,
         "api_base": "http://127.0.0.1:9/v1",
-        "llm_kwargs": {"api_key": "k"},
+        "llm_kwargs": {"api_key": "k", "custom_llm_provider": "litellm_proxy"},
     }
     assert config.extra_instruction_paths == [tmp_path / "root" / "terminus/AGENTS.md"]
 
@@ -146,12 +146,12 @@ def test_every_admitted_knob_is_a_real_terminus_2_argument() -> None:
     assert unknown == [], f"the quirk admits arguments Terminus 2 does not take: {unknown}"
 
 
-#: Provider fields a tree may pass through llm_call_kwargs, for example OpenRouter's routing and sampling fields.
+#: Provider fields a tree may pass through llm_call_kwargs, for example OpenRouter's routing and sampling fields; its
+#: fallback ``models`` names another model, which the quirk refuses.
 CALL_KWARGS = {
     "provider": {"sort": "price"},
     "reasoning": {"effort": "low"},
     "transforms": ["middle-out"],
-    "models": ["qwen/qwen3-coder"],
     "top_k": 5,
     "min_p": 0.1,
     "repetition_penalty": 1.1,
