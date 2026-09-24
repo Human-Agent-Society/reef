@@ -198,7 +198,13 @@ from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_han
 
 from reef.core.page_key import page_key
 from reef.core.requirements import required_by
-from reef.core.training_request import CLIENT_COMMANDS, missed_episode_text, missed_episodes, unscored_failures
+from reef.core.training_request import (
+    CLIENT_COMMANDS,
+    design_sections,
+    missed_episode_text,
+    missed_episodes,
+    unscored_failures,
+)
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 from reef.harness.episodes.version_check import ships_version_check
@@ -1019,6 +1025,10 @@ def _spooled_session(scenario: str) -> str | None:
     return None
 
 
+#: How much of a release's How to use a result line carries: its first paragraph, cut short.
+USAGE_CHARS = 300
+
+
 def _clip(text: str, limit: int) -> str:
     """The first ``limit`` characters of a text, the cut marked."""
     return text if len(text) <= limit else f"{text[: limit - 3]}..."
@@ -1089,6 +1099,22 @@ def _uncovered(row: Mapping[str, Any], key: str = "uncovered") -> list[str]:
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
 
+def _declined_of(row: Mapping[str, Any]) -> str:
+    """Why the proposer wrote no entry on purpose, when its design said no entry can deliver the request."""
+    notes = _metrics_of(row).get("proposal_notes")
+    reason = notes.get("declined") if isinstance(notes, Mapping) else None
+    return reason.strip() if isinstance(reason, str) else ""
+
+
+def _usage_of(row: Mapping[str, Any]) -> str:
+    """The first paragraph of the release's How to use, on one line and cut short: the form a person types, from
+    the release itself, never from the request's wording. Empty when the design has none."""
+    notes = _metrics_of(row).get("proposal_notes")
+    _, usage = design_sections(notes if isinstance(notes, Mapping) else {})
+    first = " ".join(usage.split("\n\n", 1)[0].split())
+    return _clip(first, USAGE_CHARS)
+
+
 def _failure_of(row: Mapping[str, Any]) -> str:
     """Why the proposer produced nothing, when the step recorded it under ``proposal_notes.failure``."""
     notes = _metrics_of(row).get("proposal_notes")
@@ -1152,6 +1178,11 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
         )
         return (
             f"'{ask}' did not pass the checks ({reason}): {missed_episode_text(missed[0])}. Nothing changed; {advice}."
+        )
+    if selection_result == "skipped" and _declined_of(row):
+        return (
+            f"'{ask}' was answered with no change: {_declined_of(row)}. The design and what is out of reach are on "
+            f"the page: {page}"
         )
     if selection_result == "skipped":
         # The proposer's own reason, when the step recorded one: a failed model call, a reply with no entry.
@@ -1481,13 +1512,20 @@ def _report_request(
     print(f"reef-{adapter}: {result_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
     uncovered = _uncovered(rows[step])
     selection_result = result_of(rows[step], rows)
+    usage = _usage_of(rows[step])
+    if usage and selection_result in ("selected", "pending"):
+        # The form the release is used by, so nobody guesses it from the request (codex takes $chat, not /chat).
+        print(f"reef-{adapter}: how to use: {usage}")
     if uncovered:
         # After a rejection the checks decided; the review's points are notes on the change, not the cause.
         label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
         print(f"reef-{adapter}: {label}: {_joined(uncovered)}")
     limits = _uncovered(rows[step], "limits")
     if limits:
-        print(f"reef-{adapter}: out of reach on this harness: {_joined(limits)}")
+        # One point per line: a point may hold a '; ' of its own.
+        print(f"reef-{adapter}: out of reach on this harness:")
+        for point in limits:
+            print(f"  - {point}")
     if selection_result in ("rejected", "skipped"):
         return 1
     release = str(rows[step].get("release_id") or "")
@@ -1496,8 +1534,13 @@ def _report_request(
 
 
 def _joined(points: Sequence[str]) -> str:
-    """Review points on one line: each point's own final period dropped, so no '.;' sits between them."""
-    return "; ".join(point.rstrip().rstrip(".") for point in points)
+    """Review points on one line: each point's own final period dropped, so no '.;' sits between them, and a
+    point after the first starting in lower case unless its first word is an acronym or a name in capitals."""
+    cleaned = [point.rstrip().rstrip(".") for point in points]
+    return "; ".join(
+        point if index == 0 or point[1:2].isupper() else point[:1].lower() + point[1:]
+        for index, point in enumerate(cleaned)
+    )
 
 
 def _page_cache_dir() -> Path:
@@ -2006,6 +2049,9 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
         print(f"reef-{adapter} update: the install script exited {status}", file=sys.stderr)
         return 1
     print(f"reef-{adapter} update: installed release {_installed_release(compose_dir) or state.release_id}")
+    usage = _usage_of(state.row)
+    if usage:
+        print(f"reef-{adapter} update: how to use: {usage}")
     return 0
 
 

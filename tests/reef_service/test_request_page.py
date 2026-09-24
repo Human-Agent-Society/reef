@@ -10,6 +10,7 @@ its step open until the test has read the page mid-step.
 from __future__ import annotations
 
 import asyncio
+import html
 import re
 from dataclasses import replace
 from pathlib import Path
@@ -327,7 +328,9 @@ def test_off_pi_the_next_action_is_the_wrappers_command_in_a_terminal_not_a_pi_s
     # The install refuses a release whose items are not set up: the request page names setup first.
     page = build_request_page(_record(), [CREATION, step], now=1_100.0, adapter="dsh")
     result = _section(page, "Result")
-    assert "<code>reef-dsh setup, then reef-dsh update</code>" in result and "DEEPSEEK_API_KEY" in result
+    # Each command in its own box, as a person can paste it; the order and the reason stay in the prose under them.
+    assert "<code>reef-dsh setup</code><code>reef-dsh update</code>" in result and "DEEPSEEK_API_KEY" in result
+    assert "in this order" in result
 
 
 def test_on_terminus_the_pages_name_no_wrapper_command() -> None:
@@ -659,3 +662,41 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
     finally:
         release.set()
         dispatcher.close()
+
+
+def test_a_step_that_declined_on_purpose_reads_as_answered_with_no_change_on_both_pages() -> None:
+    """A design that says no entry this harness takes can deliver the request is an answer: both pages say so, show
+    what is out of reach, and tell nobody to retry as they do after a failure."""
+    notes = {
+        "design": "Terminus has no session, so a mode cannot be entered.\n\nHow to use: nothing to use.",
+        "declined": "the design says no entry this harness takes can deliver the request",
+        "review": {"result": "complete", "covered": [], "uncovered": [], "limits": ["a mode a person enters"]},
+    }
+    step = _row(_answered(skipped="no proposal", proposal_notes=notes))
+    page = build_request_page(_record(), [CREATION, step], now=1_100.0, adapter="terminus")
+    result = _section(page, "Result")
+    assert "answered with a design and no entry" in result and "before retrying" not in result
+    assert "Proposer failure" not in result
+    version = build_release_page(1, [CREATION, step], adapter="terminus")
+    assert "answered with a design and no entry" in version and "a mode a person enters" in version
+    assert "before retrying" not in version
+
+
+def test_a_config_entry_reads_as_text_and_how_to_use_starts_with_a_capital() -> None:
+    """An opencode agent's prompt spans lines and holds non ASCII text: the step page shows it as text under the
+    JSON, not as escapes; and a usage written after 'How to use:' in lower case starts with a capital."""
+    prompt = "You are the chat agent.\n\nOnly search the web \u2014 nothing else."
+    agent = {"agent": {"chat": {"mode": "primary", "prompt": prompt}}}
+    mutation = {
+        "op": "create",
+        "id": "chat-agent",
+        "options": {"name": "config", "config": {"target": "primary", "data": agent}},
+    }
+    notes = {"design": "A chat agent.\n\nHow to use: open a new session and type /chat."}
+    step = _row(_answered(selected=True, published=True, mutation=mutation, proposal_notes=notes))
+    version = build_release_page(1, [CREATION, step], adapter="opencode")
+    assert "(text below: config.data.agent.chat.prompt)" in version
+    # The page writes non ASCII as character references, which a browser shows as the text itself.
+    shown = html.unescape(version.split("<script", 1)[0])
+    assert "Only search the web \u2014 nothing else." in shown and "\\u2014" not in shown and "\\n" not in shown
+    assert "Open a new session and type /chat." in version

@@ -21,13 +21,18 @@ from __future__ import annotations
 
 import difflib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from typing import Any
 from urllib.parse import quote, urlencode
 
 from reef.core.requirements import required_by
-from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
+from reef.core.training_request import (
+    design_sections,
+    floor_tasks_note,
+    missed_episode_text,
+    missed_episodes,
+    unscored_failures,
+)
 from reef.harness.adapters import get_adapter
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
@@ -77,6 +82,19 @@ RESULT_WORDS = {
     "rollback": "A person moved the head back to an earlier release.",
     "recovery": "The head this process recovered at boot.",
 }
+
+
+#: What a skipped step means when its design said no entry this harness takes can deliver the request.
+DECLINED_WORDS = (
+    "The proposer answered with a design and no entry: the design says why no entry this harness takes can "
+    "deliver the request, and what is out of reach. Nothing changed."
+)
+
+
+def declined(metrics: Mapping[str, Any]) -> bool:
+    """Whether the step's proposer answered with a design that writes no entry, on purpose."""
+    notes = metrics.get("proposal_notes")
+    return isinstance(notes, Mapping) and isinstance(notes.get("declined"), str) and bool(notes["declined"].strip())
 
 
 def failed_words(metrics: Mapping[str, Any]) -> str:
@@ -265,23 +283,6 @@ def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
     return "<p>A failure in the batch; no request asked for this step.</p>"
 
 
-#: The heading that ends a design and starts its How to use section: a markdown heading or a labelled line.
-#: The How to use heading: a line of its own, or ``How to use:`` with the usage after it on the same line.
-USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use(?:\s*:[ \t]*|\s*$)", re.IGNORECASE | re.MULTILINE)
-
-
-def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:
-    """The design the method recorded as ``proposal_notes.design`` and its How to use section, each stripped;
-    empty where the record has none. The proposer writes the usage under a ``How to use`` heading at the end."""
-    design = notes.get("design")
-    if not isinstance(design, str) or not design.strip():
-        return "", ""
-    match = USAGE_HEADING.search(design)
-    if match is None:
-        return design.strip(), ""
-    return design[: match.start()].strip(), design[match.end() :].strip()
-
-
 def _design(metrics: Mapping[str, Any]) -> str:
     """The Design section and, when the design ends with one, the How to use section, when the method recorded
     ``proposal_notes.design``."""
@@ -360,7 +361,25 @@ def _mutation_block(
         rest.update({key: value for key, value in config.items() if key != "text"})
         note = f'<p class="note">{escape(json.dumps(rest, sort_keys=True))}</p>' if rest else ""
         return head + note + f"<pre>{escape(config['text'])}</pre></div>"
-    return head + f"<pre>{escape(json.dumps(options, indent=2, sort_keys=True))}</pre></div>"
+    # A config entry's text values (an opencode agent's prompt, say) read as text under the JSON, not as escapes.
+    texts: list[tuple[str, str]] = []
+    shown = texts_set_apart(options, "", texts)
+    below = "".join(f'<p class="note">{escape(path)}</p><pre>{escape(text)}</pre>' for path, text in texts)
+    return head + f"<pre>{escape(json.dumps(shown, indent=2, sort_keys=True, ensure_ascii=False))}</pre>{below}</div>"
+
+
+def texts_set_apart(value: Any, path: str, texts: list[tuple[str, str]]) -> Any:
+    """``value`` with each string that spans lines put in ``texts`` by its key path, a pointer in its place."""
+    if isinstance(value, str) and "\n" in value:
+        texts.append((path, value))
+        return f"(text below: {path})"
+    if isinstance(value, Mapping):
+        return {
+            key: texts_set_apart(item, f"{path}.{key}" if path else str(key), texts) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [texts_set_apart(item, f"{path}[{index}]", texts) for index, item in enumerate(value)]
+    return value
 
 
 def _what_changed(
@@ -453,6 +472,8 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     """The Result section: the headline and what it means, then the evaluation's numbers and the step's record."""
     selection_result = result_of(row, rows)
     words = {**RESULT_WORDS, "failed": failed_words(metrics)}
+    if declined(metrics):
+        words["skipped"] = DECLINED_WORDS
     if tone(selection_result) == "promoted":
         words[selection_result] = (
             f"Passed the checks and was {selection_result}; the release that step published serves it."
@@ -765,12 +786,14 @@ VERDICT_FIELDS = RESULT_FIELDS
 verdict_of = result_of
 
 __all__ = [
+    "DECLINED_WORDS",
     "RESULT_FIELDS",
     "RESULT_LABELS",
     "VERDICT_FIELDS",
     "before_release_id",
     "build_release_page",
     "build_running_step_page",
+    "declined",
     "failed_words",
     "mutations_of",
     "result_of",

@@ -195,3 +195,22 @@ def missed_episode_text(episode: Mapping[str, Any]) -> str:
     reply = episode.get("reply")
     graded = f"the reply graded was '{str(reply).strip()}'" if reply else "no reply was graded"
     return f"the task '{task}' scored {episode.get('score')}; {graded}"
+
+
+#: The How to use heading that ends a design: a markdown heading or a line of its own, or ``How to use:`` with the
+#: usage after it on the same line.
+USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use(?:\s*:[ \t]*|\s*$)", re.IGNORECASE | re.MULTILINE)
+
+
+def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:
+    """The design a step recorded as ``proposal_notes.design`` and its How to use section, each stripped, the
+    usage starting with a capital; empty where the record has none. The proposer writes the usage under a
+    ``How to use`` heading at the end, which the pages and the wrapper's result lines read."""
+    design = notes.get("design")
+    if not isinstance(design, str) or not design.strip():
+        return "", ""
+    match = USAGE_HEADING.search(design)
+    if match is None:
+        return design.strip(), ""
+    usage = design[match.end() :].strip()
+    return design[: match.start()].strip(), usage[:1].upper() + usage[1:]

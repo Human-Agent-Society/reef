@@ -150,6 +150,9 @@ def test_an_adapter_without_an_extension_seeds_one_reefine_command_the_wrapper_a
     assert f"copying the text after {typed} exactly, character for character" in text
     # A Chinese request gets its answer in Chinese; the wrapper's own lines stay as printed.
     assert "Talk to the person in the language their request is written in" in text
+    # The release's own How to use line names the form to type, and a step with no change gets no guessed cause.
+    assert "in the words of that line, never in a form taken from the request" in text
+    assert "quote the reason it gives" in text and "Do not guess another cause" in text
     assert "While it prints `no result yet` the step still runs" in text and "status 2" not in text
     assert timeout in text and "Its --timeout counts seconds." in text
     assert f"reef-{adapter} setup" in text and "{" not in text

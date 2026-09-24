@@ -1762,8 +1762,12 @@ def test_a_step_that_could_not_be_evaluated_and_a_limit_are_said_as_such(tmp_pat
         "reef-claude: 'text me when you are blocked' could not be evaluated: harness binary reef-terminus not found. "
         "Nothing judged the change and nothing was published; fix that and ask again."
     )
-    # Each point's own final period is dropped, so none sits before the separator.
-    assert out[2] == "reef-claude: out of reach on this harness: no tool lockout; a typed skill still loads"
+    # One point per line under the heading: a point may hold a '; ' of its own.
+    assert out[2:5] == [
+        "reef-claude: out of reach on this harness:",
+        "  - no tool lockout.",
+        "  - a typed skill still loads.",
+    ]
 
 
 def _claude_ask_tree(tmp_path: Path, port: int) -> tuple[str, Path]:
@@ -1812,6 +1816,41 @@ def test_wait_reports_a_filed_request_and_off_pi_names_the_wrapper_commands(tmp_
         "reef-claude: next: reef-claude update",
     ]
     assert [call["path"] for call in reef.seen] == ["/reef/harness/releases"]
+
+
+@pytest.mark.unit
+def test_wait_names_the_release_how_to_use_and_a_declined_step_is_answered_with_no_change(tmp_path, capsys) -> None:
+    """The result carries the release's own How to use, so the session model tells the person the form the release
+    takes ($chat on codex), not one from the request; a step whose design declined on purpose says it was answered
+    with no change; and joined review points after the first start in lower case."""
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    design = "A chat skill.\n\nHow to use: type $chat in the session.\n\nTwo more sentences nobody needs here."
+    review = {"result": "partial", "covered": [], "uncovered": ["no idle check.", "Two way replies."]}
+    notes = {"design": design, "review": review}
+    reef = _FakeReef(
+        answer, rows=[CREATION_ROW, _step_row("rel-1111-selected", {"selected": True, "proposal_notes": notes})]
+    )
+    compose, captures = _claude_ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=5, poll_s=0.01) == 0
+    reef.close()
+    out = capsys.readouterr().out.splitlines()
+    assert out[2] == "reef-claude: how to use: Type $chat in the session."
+    assert out[3] == "reef-claude: not covered: no idle check; two way replies"
+    declined = {"declined": "the design says no entry this harness takes can deliver the request", "design": design}
+    row = _step_row("rel-0", {"skipped": "no proposal", "proposal_notes": declined})
+    reef = _FakeReef(answer, rows=[CREATION_ROW, row])
+    (tmp_path / "declined").mkdir()
+    compose, captures = _claude_ask_tree(tmp_path / "declined", reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=5, poll_s=0.01) == 1
+    reef.close()
+    line = capsys.readouterr().out.splitlines()[1]
+    assert line.startswith(
+        "reef-claude: 'text me when you are blocked' was answered with no change: the design says no entry this "
+        "harness takes can deliver the request. The design and what is out of reach are on the page: http"
+    )
+    assert "how to use" not in line
 
 
 @pytest.mark.unit
@@ -2603,6 +2642,29 @@ INSTALL_SCRIPT = textwrap.dedent(
     echo "reef: done"
     """
 )
+
+
+@pytest.mark.unit
+def test_update_names_how_to_use_the_release_it_installed(tmp_path, capsys) -> None:
+    """After the install, update prints the first paragraph of the release's How to use, as wait does."""
+    served = _row("v2")
+    served["metrics"] = {"proposal_notes": {"design": "A mode.\n\nHow to use: type /chat, then /chat off."}}
+    reef = _ReleasesReef([_row("v1"), served], install=INSTALL_SCRIPT)
+    compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
+    env = _ask_env(
+        tmp_path / "captures",
+        compose,
+        REEF_TOKEN="tok",
+        REEF_HARNESS_DEST=str(Path(compose).resolve().parent),
+        REEF_SERVICE_URL=f"http://127.0.0.1:{reef.port}/",
+        REEF_SCENARIO="setup-scenario",
+    )
+    with patch.dict(os.environ, env, clear=True):
+        assert update("setup-scenario", "pi", compose) == 0
+    assert capsys.readouterr().out.splitlines()[-2:] == [
+        "reef-pi update: installed release v2",
+        "reef-pi update: how to use: Type /chat, then /chat off.",
+    ]
 
 
 @pytest.mark.unit

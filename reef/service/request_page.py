@@ -25,11 +25,18 @@ import time
 from collections.abc import Mapping, Sequence
 
 from reef.core.requirements import required_by
-from reef.core.training_request import floor_tasks_note, missed_episode_text, missed_episodes, unscored_failures
+from reef.core.training_request import (
+    design_sections,
+    floor_tasks_note,
+    missed_episode_text,
+    missed_episodes,
+    unscored_failures,
+)
 from reef.harness.episodes.version_check import ships_version_check
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import (
-    design_sections,
+    DECLINED_WORDS,
+    declined,
     failed_words,
     kept_answer,
     mutations_of,
@@ -72,7 +79,7 @@ line-height:1.7;letter-spacing:-.3px;margin:0 0 30px;padding-left:20px;border-le
 .version-link{display:flex;align-items:center;justify-content:space-between;margin-top:22px;border-radius:7px;
 padding:11px 14px;background:var(--ink);color:var(--card);font-size:12px;font-weight:550;gap:12px}
 .next-action{margin-top:24px;padding-top:22px;border-top:1px solid var(--line)}
-.next-action h3{margin-bottom:10px}.next-action code{display:block;background:var(--code);border:1px solid var(--line);
+.next-action h3{margin-bottom:10px}.next-action code+code{margin-top:6px}.next-action code{display:block;background:var(--code);border:1px solid var(--line);
 border-radius:7px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace}
 .next-action p{font-size:12px;color:var(--mute);margin:10px 0 0}
 .version-link:hover{opacity:.88;text-decoration:none}
@@ -271,6 +278,8 @@ def meaning(
             f"did not pass the checks ({reason or 'the checks failed'}): {missed_episode_text(missed[0])}; "
             f"nothing changed: {advice}"
         )
+    if selection_result == "skipped" and declined(metrics):
+        return DECLINED_WORDS
     if selection_result == "skipped":
         return f"produced no change ({metrics.get('skipped')}); nothing changed"
     if selection_result == "failed":
@@ -281,10 +290,11 @@ def meaning(
 def next_action(
     adapter: str, step: int, selection_result: str, record_id: str, requires: Sequence[str] = ()
 ) -> tuple[str, str, str] | None:
-    """The next action a settled step offers: its heading, the command and where to run it; ``None`` when a
-    rejected or skipped step offers none. pi installs from its own session (``/versions``); another adapter's
-    person runs its wrapper in a terminal, setup first when the release's chain requires items (``requires``,
-    their names): the install refuses a release whose items are not set up."""
+    """The next action a settled step offers: its heading, the commands (one per line, each one a person can run
+    as it stands) and where to run them; ``None`` when a rejected or skipped step offers none. pi installs from
+    its own session (``/versions``); another adapter's person runs its wrapper in a terminal, setup first when
+    the release's chain requires items (``requires``, their names): the install refuses a release whose items
+    are not set up."""
     if selection_result not in ("pending", "selected"):
         return None
     if not reef_installs(adapter):
@@ -312,8 +322,8 @@ def next_action(
     if requires:
         return (
             "Set up, then install",
-            f"reef-{adapter} setup, then reef-{adapter} update",
-            f"Run these in a terminal: setup asks for what this release needs ({', '.join(requires)}), update "
+            f"reef-{adapter} setup\nreef-{adapter} update",
+            f"Run these in a terminal, in this order: setup asks for what this release needs ({', '.join(requires)}), update "
             f"installs it; then start reef-{adapter} again to use the new version.",
         )
     return (
@@ -358,10 +368,8 @@ def result_html(
     offered = next_action(adapter, step, selection_result, record_id, requires)
     if offered is not None:
         action, command, where = offered
-        parts.append(
-            f'<div class="next-action"><h3>{escape(action)}</h3><code>{escape(command)}</code>'
-            f"<p>{escape(where)}</p></div>"
-        )
+        commands = "".join(f"<code>{escape(line)}</code>" for line in command.splitlines())
+        parts.append(f'<div class="next-action"><h3>{escape(action)}</h3>{commands}<p>{escape(where)}</p></div>')
     parts.append(
         f'<a class="version-link" href="{escape(href)}">View v{step}<span aria-hidden="true">&#8599;</span></a>'
     )
