@@ -4,16 +4,19 @@ Config nodes write ``config.yaml`` as a JSON object and ``finalize_render``
 emits it as YAML. It also writes the ``.no-bundled-skills`` marker, so an
 episode carries only the tree's skills instead of hermes's bundled catalog;
 synthesizes the ``name`` and ``description`` frontmatter hermes requires on a
-SKILL.md the node text left bare, under both skill roots; and, for every
-rendered plugin, writes the ``plugin.yaml`` manifest and grants the plugin
-in ``config.yaml`` (``plugins.enabled`` and the ``tools.override``
+SKILL.md the node text left bare, under both skill roots; adds the commands
+root to ``skills.external_dirs`` after the tree's own entries, so a tree
+that sets the list still has its commands; and, for every rendered plugin,
+writes the ``plugin.yaml`` manifest and grants the plugin in
+``config.yaml`` (``plugins.enabled`` and the ``tools.override``
 capability), since hermes discovers plugins but loads none without consent.
 
 The traps a mutated config could reopen: the scanner download, the session
 title call, the background review and the curator that write skills into the
 tree, and the snapshot the reader parses. A composition that flips any of
-them, or puts a value that is not an object where a section holding one
-belongs, is rejected at render, the same gate that rejects an invalid node.
+them, puts a value that is not an object where a section holding one
+belongs, or puts a value that is not a list of strings where Reef adds a
+name, is rejected at render, the same gate that rejects an invalid node.
 """
 
 from __future__ import annotations
@@ -29,6 +32,11 @@ _CONFIG = "hermes/config.yaml"
 _MARKER = "hermes/.no-bundled-skills"
 _PLUGINS = "hermes/plugins/"
 _SKILL_ROOTS = ("hermes/skills/", "hermes-commands/")
+# The commands root beside the home: HERMES_HOME/.. in an episode, and REEF_HARNESS_DEST, the install root, in a
+# reef-hermes session, whose home is a temp copy. hermes skips an entry that names no directory, such as the second
+# one where REEF_HARNESS_DEST is unset. A config node's list replaces the one below it, so both follow the tree's own
+# skills.external_dirs, which hermes reads as one entry when it is a string.
+_COMMAND_ROOTS = ("${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands")
 
 # hermes's boot scaffolds the home on every start: state directories, the
 # runtime and cache files, lock files beside the state store, and the seed
@@ -64,25 +72,34 @@ def _setting(config: dict[str, Any], *keys: str) -> object:
     return value
 
 
+def _strings(value: object, key: str) -> list[str]:
+    """The strings at ``key``, empty when it is absent; a string or any other value is refused, not read."""
+    if value is None:
+        return []
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise RenderError(f"hermes composition must keep {key} a list of strings")
+    return value
+
+
 def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
-    section = config.get("plugins") or {}
-    entries = _setting(config, "plugins", "entries") or {}
+    section = config.get("plugins")
+    entries = section.get("entries") if isinstance(section, dict) else None
     if (
-        not isinstance(section, dict)
-        or not isinstance(entries, dict)
-        or any(not isinstance(entries.get(name) or {}, dict) for name in plugins)
+        not isinstance(section, dict | None)
+        or not isinstance(entries, dict | None)
+        or any(not isinstance((entries or {}).get(name), dict | None) for name in plugins)
     ):
         raise RenderError(
             "hermes composition must keep plugins, plugins.entries and each rendered plugin's entry objects, "
             "so the plugin can be granted"
         )
-    section = dict(section)
-    enabled = [name for name in section.get("enabled") or [] if isinstance(name, str)]
+    section = dict(section or {})
+    enabled = _strings(section.get("enabled"), "plugins.enabled")
     section["enabled"] = enabled + [name for name in plugins if name not in enabled]
-    entries = dict(entries)
+    entries = dict(entries or {})
     for name in plugins:
         entry = dict(entries.get(name) or {})
-        granted = [item for item in entry.get("granted_capabilities") or [] if isinstance(item, str)]
+        granted = _strings(entry.get("granted_capabilities"), f"plugins.entries.{name}.granted_capabilities")
         entry["granted_capabilities"] = granted + ["tools.override"] * ("tools.override" not in granted)
         entries[name] = entry
     section["entries"] = entries
@@ -110,6 +127,10 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
         raise RenderError(
             "hermes composition must keep sessions.write_json_snapshots true so Reef can read the trajectory"
         )
+    # skills is an object here: the nudge check above read skills.creation_nudge_interval from it.
+    tree_dirs = _setting(config, "skills", "external_dirs")
+    external_dirs = _strings([tree_dirs] if isinstance(tree_dirs, str) else tree_dirs, "skills.external_dirs")
+    config["skills"]["external_dirs"] = external_dirs + [root for root in _COMMAND_ROOTS if root not in external_dirs]
     plugins = sorted(
         path[len(_PLUGINS) :].split("/")[0]
         for path in files

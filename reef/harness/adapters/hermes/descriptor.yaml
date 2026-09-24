@@ -59,21 +59,16 @@ files:
           tirith_enabled: false
         sessions:
           write_json_snapshots: true
-        # The commands root beside the home: HERMES_HOME/.. in an episode,
-        # and REEF_HARNESS_DEST, the install root, in a reef-hermes session,
-        # whose home is a temp copy. hermes skips an entry that names no
-        # directory, such as the second one where REEF_HARNESS_DEST is unset.
         skills:
           creation_nudge_interval: 0
-          external_dirs:
-            - "${HERMES_HOME}/../hermes-commands"
-            - "${REEF_HARNESS_DEST}/hermes-commands"
   # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
   # scoped and read from the working directory chain, never from the home.
   rules: "hermes/SOUL.md"
   # Every skill is also a /name slash command in the interactive CLI, and
-  # hermes has no other command surface, so a command is a skill under the
-  # second root skills.external_dirs lists.
+  # hermes has no other command surface, so a command is a skill under a
+  # second root. The quirks module adds it to skills.external_dirs twice,
+  # beside the home for an episode and at the install root for a
+  # reef-hermes session, after any entries the tree lists.
   agent_command: "hermes-commands/{name}/SKILL.md"
   skill: "hermes/skills/{name}/SKILL.md"
   # A hermes plugin: register(ctx) in the package init, the manifest and

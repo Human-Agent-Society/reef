@@ -357,6 +357,53 @@ def test_hermes_admission_refuses_a_config_section_that_is_not_an_object() -> No
         assert entries == [] and refusal is not None and "each rendered plugin's entry objects" in refusal, plugins
 
 
+def test_hermes_admission_refuses_plugin_names_that_are_not_a_list_of_strings() -> None:
+    """The grant adds the rendered plugin to plugins.enabled and tools.override to its granted_capabilities. A value
+    there that is not a list of strings is a refused proposal: not an error raised out of the admission, and not a
+    string or an object read one character or key at a time. The tree's own names stay ahead of the grant's."""
+    descriptor = get_adapter("hermes")
+    extension = ("code_extension", {"name": "tracer", "code": "def register(ctx):\n    pass\n"})
+    tracer = Mutation("create", "e1", {"name": "code_extension", "config": extension[1]})
+    for value in (1, True, 1.5, "", "tracer", {"tracer": True}, ["tracer", 2]):
+        for key, plugins in (
+            ("plugins.enabled", {"enabled": value}),
+            ("plugins.entries.tracer.granted_capabilities", {"entries": {"tracer": {"granted_capabilities": value}}}),
+        ):
+            config = Mutation("create", "c1", {"name": "config", "config": {"data": {"plugins": plugins}}})
+            entries, refusal = admit_mutations([], [config, tracer], descriptor)
+            assert entries == [] and refusal == f"hermes composition must keep {key} a list of strings", (key, value)
+    own = {"enabled": ["other"], "entries": {"tracer": {"granted_capabilities": ["llm.model_override"]}}}
+    files = render_composition([("config", {"data": {"plugins": own}}), extension], descriptor)
+    assert yaml.safe_load(files[HERMES_CONFIG])["plugins"] == {
+        "enabled": ["other", "tracer"],
+        "entries": {"tracer": {"granted_capabilities": ["llm.model_override", "tools.override"]}},
+    }
+
+
+def test_hermes_quirks_add_both_commands_roots_after_the_external_dirs_a_tree_sets() -> None:
+    """A config node's list replaces the one below it, so a tree that sets skills.external_dirs would drop the
+    commands roots and every agent command would be unknown to hermes; the roots follow the tree's own entries, and
+    a string is one entry, as hermes reads it. A value hermes cannot read as entries is a refused proposal."""
+    descriptor = get_adapter("hermes")
+    roots = ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"]
+    for listed, expected in (
+        ([], roots),
+        (None, roots),
+        ("extra", ["extra", *roots]),
+        (["extra"], ["extra", *roots]),
+        ([roots[1], "extra"], [roots[1], "extra", roots[0]]),
+    ):
+        files = render_composition([("config", {"data": {"skills": {"external_dirs": listed}}})], descriptor)
+        assert yaml.safe_load(files[HERMES_CONFIG])["skills"]["external_dirs"] == expected, listed
+    refused = "hermes composition must keep skills.external_dirs a list of strings"
+    for listed in (1, True, 1.5, {"extra": True}, ["extra", 2]):
+        config = Mutation(
+            "create", "c1", {"name": "config", "config": {"data": {"skills": {"external_dirs": listed}}}}
+        )
+        entries, refusal = admit_mutations([], [config], descriptor)
+        assert entries == [] and refusal == refused, listed
+
+
 NATIVE_TOOL = (
     "native_tool",
     {

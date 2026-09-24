@@ -115,17 +115,23 @@ rules file hermes reads (``AGENTS.md`` is project scoped, read from the
 working directory chain); skills to ``skills/<name>/SKILL.md`` with the
 ``name`` and ``description`` frontmatter hermes requires synthesized when the
 node text has none; an ``agent_command`` to a second skill root,
-``hermes-commands``, that ``skills.external_dirs`` lists, since every hermes
-skill is also a ``/name`` slash command in the interactive CLI and hermes has
-no other command surface; a ``code_extension`` to a plugin package
-(``plugins/<name>/__init__.py`` defining ``register(ctx)``) whose manifest,
-``plugins.enabled`` entry, and ``tools.override`` grant the quirks write,
-because hermes loads no plugin without that consent; a plugin tool then sits
-behind hermes's ``tool_search`` and ``tool_call`` discovery surface.
-``skills.external_dirs`` names the commands root twice: beside the home
-(``${HERMES_HOME}/../hermes-commands``) for an episode, and under the install
-root (``${REEF_HARNESS_DEST}/hermes-commands``) for a ``reef-hermes`` session,
-whose home is a temp copy; hermes skips an entry that names no directory.
+``hermes-commands``, that the quirks add to ``skills.external_dirs``, since
+every hermes skill is also a ``/name`` slash command in the interactive CLI
+and hermes has no other command surface; a ``code_extension`` to a plugin
+package (``plugins/<name>/__init__.py`` defining ``register(ctx)``) whose
+manifest, ``plugins.enabled`` entry, and ``tools.override`` grant the quirks
+write, because hermes loads no plugin without that consent; a plugin tool
+then sits behind hermes's ``tool_search`` and ``tool_call`` discovery
+surface. The quirks add the commands root to ``skills.external_dirs`` twice:
+beside the home (``${HERMES_HOME}/../hermes-commands``) for an episode, and
+under the install root (``${REEF_HARNESS_DEST}/hermes-commands``) for a
+``reef-hermes`` session, whose home is a temp copy; hermes skips an entry
+that names no directory. The tree's own entries in ``skills.external_dirs``,
+``plugins.enabled`` and a rendered plugin's ``granted_capabilities`` stay
+ahead of the ones the quirks add, because a config node's list replaces the
+list below it; a string in ``skills.external_dirs`` is one entry, as hermes
+reads it, and any other value that is not a list of strings in these three
+settings is refused at render.
 A ``reef-hermes`` session keeps ``state.db``, the session snapshots under
 ``sessions/`` and the logs under ``logs/`` in the installed tree, so a later
 session finds what an earlier one wrote. hermes also writes files of its own

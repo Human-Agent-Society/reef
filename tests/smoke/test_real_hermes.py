@@ -137,14 +137,11 @@ def test_real_hermes_episode_renders_runs_and_cleans_up() -> None:
 def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_in_an_episode_and_a_session(tmp_path) -> None:
     """hermes's own config readers, run in its venv on the rendered home: the tirith scanner is off (it would download
     at boot and block "$REEF_HARNESS_WRAPPER" commands), and the commands root is found beside an episode home and,
-    through REEF_HARNESS_DEST, beside the temp copy a reef-hermes session runs in."""
+    through REEF_HARNESS_DEST, beside the temp copy a reef-hermes session runs in. It is still found when the tree
+    sets skills.external_dirs itself, empty or to a directory of its own."""
     descriptor = get_adapter("hermes")
     binding = ModelBinding(base_url="http://127.0.0.1:9", model=MODEL, api_key="smoke-key-1234")
     command = ("agent_command", {"name": "probe", "text": "Reply with PROBE."})
-    root = tmp_path / "reef-harness"
-    for relative, text in render_composition([command, *binding.compose_nodes(descriptor)], descriptor).items():
-        (root / relative).parent.mkdir(parents=True, exist_ok=True)
-        (root / relative).write_text(text, encoding="utf-8")
     probe = (
         "import json\n"
         "from agent.skill_utils import get_external_skills_dirs\n"
@@ -152,26 +149,35 @@ def test_real_hermes_reads_the_scanner_off_and_finds_the_commands_in_an_episode_
         "print(json.dumps([_load_security_config()['tirith_enabled'], [str(p) for p in get_external_skills_dirs()]]))\n"
     )
     env = {name: value for name, value in os.environ.items() if name not in ("REEF_HARNESS_DEST", "TIRITH_ENABLED")}
-    commands_root = [str((root / "hermes-commands").resolve())]
-    session_home = _create_temp_composition("hermes", str(root / "hermes"), 9)
-    try:
-        layouts = {
-            "episode": {**env, "HERMES_HOME": str(root / "hermes")},
-            "session": {**env, "HERMES_HOME": session_home, "REEF_HARNESS_DEST": str(root)},
-        }
-        for layout, layout_env in layouts.items():
-            result = subprocess.run(
-                [str(Path(REAL_HERMES).parent / "python"), "-c", probe],
-                env=layout_env,
-                cwd=tmp_path,
-                capture_output=True,
-                text=True,
-                timeout=120,
-            )
-            assert result.returncode == 0, (layout, result.stderr)
-            assert json.loads(result.stdout.splitlines()[-1]) == [False, commands_root], layout
-    finally:
-        shutil.rmtree(session_home)
+    extra = tmp_path / "extra-skills"
+    extra.mkdir()
+    for tree, listed in (("default", None), ("empty", []), ("own", [str(extra.resolve())])):
+        config = [] if listed is None else [("config", {"data": {"skills": {"external_dirs": listed}}})]
+        root = tmp_path / tree / "reef-harness"
+        nodes = [*config, command, *binding.compose_nodes(descriptor)]
+        for relative, text in render_composition(nodes, descriptor).items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text, encoding="utf-8")
+        found = [*(listed or []), str((root / "hermes-commands").resolve())]
+        session_home = _create_temp_composition("hermes", str(root / "hermes"), 9)
+        try:
+            layouts = {
+                "episode": {**env, "HERMES_HOME": str(root / "hermes")},
+                "session": {**env, "HERMES_HOME": session_home, "REEF_HARNESS_DEST": str(root)},
+            }
+            for layout, layout_env in layouts.items():
+                result = subprocess.run(
+                    [str(Path(REAL_HERMES).parent / "python"), "-c", probe],
+                    env=layout_env,
+                    cwd=tmp_path,
+                    capture_output=True,
+                    text=True,
+                    timeout=120,
+                )
+                assert result.returncode == 0, (tree, layout, result.stderr)
+                assert json.loads(result.stdout.splitlines()[-1]) == [False, found], (tree, layout)
+        finally:
+            shutil.rmtree(session_home)
 
 
 def test_real_hermes_episode_makes_no_background_review_call_after_ten_tool_calls() -> None:
