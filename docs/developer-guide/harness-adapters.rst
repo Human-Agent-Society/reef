@@ -55,6 +55,71 @@ into the prompt. One ``code_extension`` may define ``Agent(Terminus2)``;
 rendering checks syntax without executing it, and the runner uses Harbor's
 native ``AgentConfig.import_path`` contract. No extension means stock Terminus 2.
 
+Terminus is a batch runner, not a session. ``reef-terminus`` takes only
+``--task`` and plays one Harbor task, so the adapter declares no install
+section: ``GET /reef/harness/install?adapter=terminus`` answers HTTP 400,
+there is no ``reef-terminus`` client wrapper (``reef-terminus evolve`` does
+not exist), and there is no session to type ``/reefine`` into. A request
+reaches a deployment through ``POST /reef/train``. ``GET /reef/harness``
+serves the tree, and each evaluation episode renders it with the model
+binding.
+
+Terminus 2 calls the model through litellm. The model binding keeps the
+served name in ``model_name`` and sets ``llm_kwargs.custom_llm_provider`` to
+``litellm_proxy``, litellm's route to an OpenAI compatible proxy. litellm
+then sends that name unchanged to ``api_base`` whatever vendor prefix it
+carries, and puts the tree's call arguments into the request body:
+``reasoning_effort``, the ``thinking`` budget Harbor sends for a Claude
+model under ``max_thinking_tokens``, and ``llm_call_kwargs`` fields such as
+``provider`` or ``top_k``. Without
+the provider, a vendor prefix litellm does not know, such as
+``qwen/qwen3-coder``, fails with ``LLM Provider NOT provided``, and one it
+knows, such as ``deepseek/``, goes to that vendor's own client without its
+vendor prefix. ``custom_openai`` also keeps the name, but it drops
+``reasoning_effort`` and ``thinking``, and a call with an
+``llm_call_kwargs`` field the OpenAI SDK does not take fails. Harbor looks
+up the context limit that Terminus 2 summarizes against under
+``model_name``, so a served name that litellm lists, such as
+``openai/gpt-4o-mini``, keeps its limit; a name litellm does not list gets
+Harbor's fallback of 1,000,000 tokens.
+
+Evaluation episodes call the upstream directly. A tree that you run through
+Reef yourself also needs the scenario header in ``llm_kwargs.extra_headers``,
+or Reef answers HTTP 400 ``missing or empty x-reef-scenario``. Write this in
+``terminus/config.json`` under the tree root, with the service's
+``REEF_TOKEN`` as the key (any text when the service has no token):
+
+.. code:: json
+
+   {
+     "model_name": "<served model>",
+     "api_base": "http://127.0.0.1:8901/v1",
+     "llm_kwargs": {
+       "api_key": "<REEF_TOKEN>",
+       "custom_llm_provider": "litellm_proxy",
+       "extra_headers": {"x-reef-scenario": "<scenario>"}
+     }
+   }
+
+Then run ``REEF_TERMINUS_DIR=<root> REEF_TERMINUS_SESSION_DIR=<root>/terminus/sessions
+REEF_TERMINUS_TRIALS_DIR=<trials> reef-terminus --task <task directory>``. Harbor
+mounts the trial directories under ``<trials>`` into the task container as bind
+mounts, so ``<trials>`` must be on a path your Docker shares with its VM: colima does
+not share ``$TMPDIR``, and container writes there never reach the host.
+When a trial has neither a reward nor the verifier's output, its error names
+this mount problem.
+
+Reef prepares an evaluation episode for Docker itself. On macOS its root is
+made under ``~/.reef/episodes`` (``is_root_bind_mounted``), which colima and
+Docker Desktop share with their VM by default. On Linux, WSL and Windows the
+root stays in the temp directory, so the service needs no writable home;
+where Docker there runs in a VM that does not share the temp directory, set
+``TMPDIR`` for the service to a path it shares. The episode keeps the service's
+``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (``host_env``;
+``DOCKER_CONFIG`` defaults to ``~/.docker``), because ``HOME`` points into
+the episode and the docker CLI reads its current context (colima, Docker
+Desktop) and the compose plugin from that directory.
+
 Extensions require ``evolution.executor: sandbox`` to isolate the Python
 runner. Harbor then runs the terminal
 task remotely. Network access must be enabled with ``sandbox.egress_hosts``;
@@ -568,6 +633,8 @@ agent.
    files | where each node kind renders, like ``skills/{name}/SKILL.md``; ``rules`` and ``skill`` are required, every other kind is optional and a mutation of a kind left out is refused; ``tree`` names the file the entries list travels in, for a binary that reconciles the tree live
    trajectory | the format and path of the session log Reef reads back
    env | variables pointing the agent's state under the episode root; ``{root}`` is substituted. The install script and the ``reef-<adapter>`` wrapper need one entry that relocates a directory above the primary config target with a ``{root}/<dir>`` value, the composition they write and point the binary at; ``terminus`` relocates the root itself and gets neither
+   host_env | optional service variables an episode under the local executor keeps, each with a default for when the service has none (``{home}`` is the service's home directory; an empty default leaves it unset), for a host tool the relocated ``HOME`` would hide; otherwise the local executor passes only ``PATH``, ``SYSTEMROOT``, ``TMPDIR`` and ``CUDA_VISIBLE_DEVICES`` from the service
+   is_root_bind_mounted | optional; ``true`` when the binary bind-mounts paths below the episode root into a container. On macOS, where Docker runs in a VM that shares the home directory, the local executor then makes the root under ``~/.reef/episodes`` rather than the temp directory; on other platforms the root stays in the temp directory
    install | the one-command install pin: ``kind`` (``npm``, or ``git`` for a checkout installed editable into a venv, which adds ``repository`` and ``ref``), ``package``, ``version`` (what ``--version`` must report), and ``binary_path`` under the install prefix
    model_binding | per API dialect (``openai``, ``responses``, ``anthropic``), the config nodes Reef appends at evaluation time; ``{base_url}``, ``{api_key}``, and ``{model}`` substitute into string values
    writable_paths | state directories made writable by the hosted sandbox; rendered inputs within them remain read-only

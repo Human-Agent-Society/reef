@@ -7,6 +7,8 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -40,7 +42,12 @@ session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 session_dir.mkdir(parents=True, exist_ok=True)
 rules_path = agent_dir / "AGENTS.md"
 events = [
-    {"type": "session", "root": str(agent_dir.parent), "offline": os.environ.get("PI_OFFLINE")},
+    {
+        "type": "session",
+        "root": str(agent_dir.parent),
+        "offline": os.environ.get("PI_OFFLINE"),
+        "docker_host": os.environ.get("DOCKER_HOST"),
+    },
     {"type": "agent_end", "prompt": prompt, "rules": rules_path.read_text() if rules_path.exists() else ""},
 ]
 (session_dir / "session.jsonl").write_text("".join(json.dumps(event) + "\\n" for event in events))
@@ -132,6 +139,18 @@ def test_episode_root_is_removed_after_the_run(tmp_path: Path) -> None:
     result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
     root = Path(result.trajectory[0]["root"])
     assert not root.exists()
+
+
+def test_an_adapter_without_host_env_keeps_no_service_variable_and_roots_in_the_temp_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only terminus declares host_env and is_root_bind_mounted; every other episode stays hermetic, on macOS too."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
+    session = result.trajectory[0]
+    assert session["docker_host"] is None
+    assert Path(session["root"]).parent == Path(tempfile.gettempdir())
 
 
 def test_episode_cleanup_repairs_permissions(tmp_path: Path) -> None:

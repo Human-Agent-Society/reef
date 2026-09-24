@@ -10,9 +10,12 @@ from pathlib import Path
 
 import pytest
 
+from reef.harness.episodes.run import EpisodeResult
+from reef.harness.runners.terminus.runner import trial_record
 from reef.recipe.config_fields import recipe_config_fields
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine import ReefineRecipe
+from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY, evaluate
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
@@ -122,3 +125,40 @@ assert recipe.model_binding().model == 'test-model'
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_on_terminus_the_health_task_runs_as_the_shipped_task_directory(tmp_path: Path) -> None:
+    """reef-terminus plays a Harbor task directory, not a prompt: the profile's health prompt becomes the same check
+    as the directory beside the recipe, and the bundled scorer reads that directory's verifier reward."""
+    evolution = {
+        "adapter": "terminus",
+        "tasks": ["[health] Run `echo reef-ok` and reply with its output.", "/tasks/own-task"],
+        "requests": False,
+        "version_check": False,
+    }
+    built = ReefineRecipe.from_environment({}, config={"evolution": evolution})
+    assert isinstance(built, ReefineRecipe)
+    assert built.tasks == (HEALTH_TASK_DIRECTORY, "/tasks/own-task")
+    health = Path(HEALTH_TASK_DIRECTORY)
+    for name in ("instruction.md", "task.toml", "tests/test.sh", "environment/Dockerfile"):
+        assert (health / name).is_file(), name
+    assert "reef-ok" in (health / "tests/test.sh").read_text()
+    # A prompt adapter keeps the prompt.
+    pi = ReefineRecipe.from_environment({}, config={"evolution": {**evolution, "adapter": "pi"}})
+    assert isinstance(pi, ReefineRecipe) and pi.tasks[0].startswith("[health] ")
+
+    def played(rewards: dict[str, float], error: str = "") -> EpisodeResult:
+        row = trial_record(HEALTH_TASK_DIRECTORY, rewards, tmp_path, error)
+        events = ({"type": "verifier", **{key: value for key, value in row.items() if key != "steps"}},)
+        return EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=events, residue=())
+
+    assert evaluate(HEALTH_TASK_DIRECTORY, played({"reward": 1.0})) == 1.0
+    assert evaluate(HEALTH_TASK_DIRECTORY, played({"reward": 0.0})) == 0.0
+    assert evaluate(HEALTH_TASK_DIRECTORY, played({}, "the container never built")) == 0.0
+    # The reply's last line is not the score of a task directory: a Harbor episode has no assistant reply.
+    assert evaluate("[health] x", played({"reward": 1.0})) == 0.0
+
+
+def test_an_unknown_adapter_is_a_config_error() -> None:
+    with pytest.raises(RecipeConfigError, match="acme"):
+        ReefineRecipe.from_environment({}, config={"evolution": {"adapter": "acme", "tasks": ["[health] x"]}})

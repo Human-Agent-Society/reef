@@ -20,8 +20,10 @@ finding.
 
 from __future__ import annotations
 
+import os
 import shutil
 import stat
+import sys
 import tempfile
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -128,9 +130,12 @@ def run_episode(
     ``binary`` overrides the descriptor's binary name (the seam hermetic
     tests drive a fake harness through); ``prompt`` substitutes into the
     descriptor's argv template. ``executor`` decides how the process runs
-    (the default local subprocess, or a sandbox); the root preparation,
-    environment, trajectory read, and residue collection are the same for
-    every executor. The episode root is removed before this returns, success
+    (the default local subprocess, or a sandbox); the rendered files,
+    relocation environment, trajectory read, and residue collection are the
+    same for every executor. Only the local executor keeps the descriptor's
+    ``host_env`` from the service and, on macOS, makes the root of an adapter
+    with ``is_root_bind_mounted`` under ``~/.reef/episodes`` rather than the
+    temp directory. The episode root is removed before this returns, success
     or failure; ``keep_dir`` receives a copy of the trajectory directory
     first, so a step record can hold what the root held, and a copy that
     fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
@@ -150,7 +155,18 @@ def run_episode(
             "evolution.executor: sandbox; use 'local' and let the adapter's container be the boundary"
         )
     reader = reader_for(descriptor.trajectory_format)  # fail before any disk work
-    root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-"))
+    # Docker on macOS runs in a VM that shares the home directory with the host, and colima does not share the temp
+    # directory, so a root the binary bind-mounts from lives under the home there. Linux Docker shares every path,
+    # and a sandbox or a remote executor runs no local container.
+    if descriptor.is_root_bind_mounted and isinstance(executor, LocalExecutor) and sys.platform == "darwin":
+        parent = Path.home() / ".reef" / "episodes"
+        try:
+            parent.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise EpisodeError(f"cannot create the episode root directory {parent}: {exc}") from exc
+    else:
+        parent = None
+    root = Path(tempfile.mkdtemp(prefix=f"reef-episode-{descriptor.name}-", dir=parent))
     try:
         written = set()
         for relative, text in files.items():
@@ -177,6 +193,13 @@ def run_episode(
         # config discovery that ignores the relocation vars still lands inside
         # the episode instead of in the operator's real home.
         env.setdefault("HOME", str(root))
+        if isinstance(executor, LocalExecutor):
+            # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
+            # its explicit env_from.
+            for key, default in descriptor.host_env.items():
+                value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
+                if value:
+                    env[key] = value
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:
             outcome = executor.launch(

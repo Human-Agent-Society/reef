@@ -9,8 +9,8 @@ of silently dropping a knob.
 Skills carry the ``name`` and ``description`` frontmatter the instruction
 builder reads, synthesized when an evolved node ships bare text, under both
 skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
-renders under the second root and the runner names those skills as
-user-invocable when it joins them.
+renders under the second root, and Harbor lists those skills beside the
+others, with nothing that marks them as commands.
 
 Every model call stays on Reef's model binding. The binding writes
 ``model_name``, ``api_base`` and ``llm_kwargs`` with the key, renders after

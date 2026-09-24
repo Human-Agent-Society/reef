@@ -8,7 +8,9 @@ checked without the benchmark.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -23,6 +25,7 @@ from reef.harness.runners.terminus import (
     skill_roots,
     terminus_kwargs,
 )
+from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV
 from reef.harness.tree.render import render_composition
 
 
@@ -171,6 +174,51 @@ def test_a_torn_trajectory_costs_its_steps_not_the_trial(tmp_path: Path) -> None
     (tmp_path / "trajectory.json").write_text(_trajectory([{"n": 1}]))
     (tmp_path / "trajectory.cont-1.json").write_text("{ truncated")
     assert runner.atif_steps(tmp_path) == [{"n": 1}]
+
+
+@pytest.mark.unit
+def test_a_missing_reward_with_no_verifier_output_names_the_mount_problem(tmp_path: Path) -> None:
+    missing = "No reward file found at /t/verifier/reward.txt or /t/verifier/reward.json"
+    verifier = tmp_path / "trials" / "hello-world__a1" / "verifier"
+    verifier.mkdir(parents=True)
+    # Harbor made the directory on the host, and the container's writes never reached it.
+    assert "the Docker VM does not share that path" in runner.mount_error(missing, tmp_path)
+    # The verifier's own output reached the host: it ran and wrote no reward, which is the task's result.
+    (verifier / "test-stdout.txt").write_text("1 failed\n")
+    assert runner.mount_error(missing, tmp_path) == missing
+    assert runner.mount_error("docker compose build failed", tmp_path) == "docker compose build failed"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("environment", "names_the_mount"), [("docker", True), ("e2b", False)])
+def test_a_trial_without_a_reward_names_the_mount_problem_only_for_local_docker(
+    tmp_path: Path, monkeypatch, environment: str, names_the_mount: bool
+) -> None:
+    # reef-eval stands in: its trial made the verifier directory on the host
+    # and got no reward. Only a local Docker container bind-mounts that
+    # directory; a remote E2B sandbox's missing reward is the task's result.
+    missing = "No reward file found at /t/verifier/reward.txt or /t/verifier/reward.json"
+
+    class Lab:
+        def __init__(self, trials_dir: Path) -> None:
+            self.trials_dir = trials_dir
+
+        async def run(self, task: str, agent: dict, **options: object) -> SimpleNamespace:
+            (self.trials_dir / f"{task}__a1" / "verifier").mkdir(parents=True)
+            return SimpleNamespace(rewards=None, tags={"error": missing})
+
+    monkeypatch.setitem(sys.modules, "reef_eval", SimpleNamespace(Lab=Lab))
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="openai/gpt-4o", api_key="k")
+    _render(tmp_path / "root", binding.compose_nodes(get_adapter("terminus")))
+    monkeypatch.setenv(runner.TREE_DIR_ENV, str(tmp_path / "root"))
+    monkeypatch.setenv(runner.SESSION_DIR_ENV, str(tmp_path / "sessions"))
+    monkeypatch.setenv(runner.TRIALS_DIR_ENV, str(tmp_path / "trials"))
+    monkeypatch.setenv(ENVIRONMENT_ENV, environment)
+
+    assert runner.run("hello-world") == 1
+    error = json.loads((tmp_path / "sessions" / "hello-world.json").read_text())["error"]
+    assert error.startswith(missing)
+    assert ("the Docker VM does not share that path" in error) == names_the_mount
 
 
 @pytest.mark.unit

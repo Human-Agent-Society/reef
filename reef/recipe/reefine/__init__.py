@@ -4,19 +4,24 @@
 It accepts the same ``evolution`` settings as ``CordisRecipe``; the shipped
 ``reefine`` profile supplies the health task and seed. Custom tasks should
 also supply their own ``evolution.evaluate`` scorer. The bundled scorer only
-recognizes the profile's health task.
+recognizes the profile's health task: the prompt, or on an adapter that plays
+a Harbor task directory (terminus) the ``health`` task directory beside this
+module, which the recipe runs in the prompt's place.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.descriptor import DescriptorError
 from reef.recipe.config_fields import config_field
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine.agent import AgentProposer
+from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY
 from reef.recipe.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
 from reef.runtime.interfaces import MultimodalRelay
 
@@ -83,6 +88,16 @@ class ReefineRecipe(CordisRecipe):
             "review_kinds": ["code_extension"],
             "selection": "floor",
         }
+        try:
+            plays_task_directory = get_adapter(str(evolution.get("adapter", "pi"))).is_prompt_task_directory
+        except DescriptorError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+        tasks = evolution.get("tasks")
+        if plays_task_directory and isinstance(tasks, Sequence) and not isinstance(tasks, str):
+            # The adapter's prompt is a Harbor task directory, so the health prompt runs as the same check in
+            # that form, scored by its verifier.
+            tasks = [HEALTH_TASK_DIRECTORY if str(task).startswith("[health]") else task for task in tasks]
+            evolution = {**evolution, "tasks": tasks}
         kwargs = super()._recipe_kwargs({**settings, "evolution": {**defaults, **evolution}}, values)
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(evolution.get("multimodal"), values)

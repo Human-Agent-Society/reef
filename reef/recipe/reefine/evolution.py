@@ -19,6 +19,7 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
+from pathlib import Path
 from typing import Any
 
 from reef.core.requirements import parse_requires
@@ -27,6 +28,7 @@ from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
+from reef.train.cordis_backend.strategies import verifier_reward
 from reef.train.types import TrajectoryItem
 
 Proposal = tuple[str, str, dict[str, str]]
@@ -36,6 +38,10 @@ Proposal = tuple[str, str, dict[str, str]]
 ANSWERS = {
     "[health]": "reef-ok",
 }
+
+#: The health task as a Harbor task directory, for an adapter that plays a task directory rather than a prompt
+#: (terminus): the same check, scored by its verifier's reward instead of the reply's last line.
+HEALTH_TASK_DIRECTORY = str(Path(__file__).with_name("health"))
 
 #: Entry ids and skill names become path segments in the rendered tree
 #: (skills/<name>/SKILL.md), so a proposal must fit the node name pattern.
@@ -736,7 +742,10 @@ def _entry_view(kind: str, config: Any, entry_id: Any = None) -> dict[str, Any]:
 
 
 def evaluate(task: str, result: EpisodeResult) -> float:
-    """Grade the last line of the episode's final assistant text, 1.0 exact."""
+    """Grade the last line of the episode's final assistant text, 1.0 exact; the health task directory scores
+    its verifier's reward."""
+    if task == HEALTH_TASK_DIRECTORY:
+        return verifier_reward(task, result)
     return grade_text(task, final_assistant_text(result.trajectory))
 
 
