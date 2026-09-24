@@ -602,7 +602,7 @@ def render_install_script(
         'mkdir -p "$DEST"',
         *(f'mkdir -p "$DEST/{_double_quoted(directory)}"' for directory in directories),
         "",
-        "# A rerun on a current machine writes nothing at all, not even the release file.",
+        "# A rerun of the same release on a current tree writes nothing here, not even the release file.",
         'current=""',
         'current_release_checksum=""',
         "if "
