@@ -311,11 +311,27 @@ def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
         ("---\nname: chat\ndescription: !!binary aGk=\n---\nBody\n", "not valid YAML: a value has the tag"),
         ("---\n- chat\n---\nBody\n", "not a YAML mapping"),
         ("---\nname: chat\nx: " + "[" * 3000 + "]" * 3000 + "\n---\nBody\n", "nested too deeply"),
+        # An integer past Python's digit limit fails its conversion; the proposal is refused, the step goes on.
+        ("---\nname: chat\nx: " + "9" * 4301 + "\n---\nBody\n", "cannot read"),
         ("---\nname: chat\ndescription: Chat\nBody\n", "never closes"),
         ("---\r\nname: chat\r\ndescription: Chat\r\nBody\r\n", "never closes"),
     ):
         with pytest.raises(RenderError, match=f"{path} .*{reason}"):
             command(broken)
+
+
+def test_dsh_command_frontmatter_that_cannot_be_written_again_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A header that loaded can still fail to be written again (nesting the writer recurses on); that is a refusal
+    of the proposal, never an exception out of render."""
+    import reef.harness.adapters.dsh.quirks as dsh_quirks
+
+    def deep(*args: object, **kwargs: object) -> str:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(dsh_quirks.yaml, "dump", deep)
+    text = "---\nname: chat\ndescription: Chat\n---\nBody\n"
+    with pytest.raises(RenderError, match="cannot write again"):
+        dsh_quirks._with_frontmatter("dsh-agents/skills/chat/SKILL.md", text, True)
 
 
 @pytest.mark.parametrize(

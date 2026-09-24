@@ -176,8 +176,11 @@ def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
         except yaml.YAMLError as exc:
             raise RenderError(f"dsh command {path} has frontmatter that is not valid YAML: {exc}") from exc
         except RecursionError as exc:
-            # PyYAML reads a nested value by recursion; the dump of a header that loads recurses less.
             raise RenderError(f"dsh command {path} has frontmatter nested too deeply to read") from exc
+        except Exception as exc:
+            # The model writes this text: any other failure to read it (an integer past Python's digit limit, say)
+            # is a refusal of the proposal, never a crash of the step.
+            raise RenderError(f"dsh command {path} has frontmatter Reef cannot read: {exc}") from exc
         if own is not None and not isinstance(own, dict):
             raise RenderError(f"dsh command {path} has frontmatter that is not a YAML mapping")
         header, body = own or {}, "\n".join(lines[close + 1 :])
@@ -196,7 +199,12 @@ def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
         header["disable-model-invocation"] = True
         for key in COMMAND_DROPPED_KEYS:
             header.pop(key, None)
-    dumped = yaml.dump(header, Dumper=_Dumper, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    try:
+        dumped = yaml.dump(header, Dumper=_Dumper, sort_keys=False, default_flow_style=False, allow_unicode=True)
+    except (RecursionError, ValueError, yaml.YAMLError) as exc:
+        # A header that loaded can still nest too deeply to write again (a duplicate key keeps its first place but
+        # takes its last, deeper value).
+        raise RenderError(f"dsh command {path} has frontmatter Reef cannot write again: {exc}") from exc
     return "---\n" + dumped + "---\n" + body
 
 
