@@ -222,3 +222,6 @@ recipes/basic/work/
 
 # The GEPA AIME example writes its run state here.
 recipes/gepa/examples/aime/work*/
+
+# Documentation images copied for local and preview builds.
+docs/site/public/doc-assets/
