@@ -474,3 +474,65 @@ def test_operation_measurements_remain_readable_and_preserve_failures() -> None:
     assert recovered["weight_sync/failed_total"] == 1
     assert recovered["weight_sync/completed_total"] == 1
     assert recovered["weight_sync/duration_seconds_total"] >= failed["weight_sync/duration_seconds_total"]
+
+
+@pytest.mark.unit
+def test_a_component_trainers_metrics_keep_their_own_names() -> None:
+    """Two trainers of one scenario log into one run; a step says whose it is and its metrics carry the name."""
+    client = _StubClient()
+    tracker = _tracker(client)
+    event = _event()
+    event = dataclasses.replace(event, context=dataclasses.replace(event.context, component="harness"))
+    tracker.record(event)
+    run = client.runs[0]
+    logged, _ = run.logged[0]
+    assert logged["harness/train/loss"] == pytest.approx(0.25)
+    assert "train/loss" not in logged
+    assert logged["reef/component"] == "harness"
+    assert logged["train/step"] == 0 and logged["reef/step"] == 7
+    # The component's metrics sit on the run's train/step axis, and the config names each trainer's backend.
+    assert (("harness/*",), {"step_metric": "train/step"}) in run.defined
+    assert run.config["reef"]["backend"] is None
+    assert run.config["reef"]["components"] == {"harness": {"backend": "ExampleTrainingBackend"}}
+    assert run.config["backend"] == {"harness": {"runtime": "custom", "optimizer": "adamw"}}
+    weights = dataclasses.replace(
+        event,
+        context=dataclasses.replace(event.context, component="weights", backend="WeightsBackend", backend_config={}),
+    )
+    tracker.record(weights)
+    tracker.record(weights)
+    assert run.defined.count((("harness/*",), {"step_metric": "train/step"})) == 1
+    assert run.defined.count((("weights/*",), {"step_metric": "train/step"})) == 1
+    assert run.config["reef"]["components"] == {
+        "harness": {"backend": "ExampleTrainingBackend"},
+        "weights": {"backend": "WeightsBackend"},
+    }
+    assert run.config["backend"] == {"harness": {"runtime": "custom", "optimizer": "adamw"}, "weights": {}}
+    # Optimizer step rows keep the component too, on the component's own counter.
+    stepped = dataclasses.replace(weights, metrics={**weights.metrics, "train_steps": [{"train/loss": 0.9}]})
+    tracker.record(stepped)
+    step_rows = [row for row, _ in run.logged if "weights/step/loss" in row]
+    assert step_rows == [{"weights/step/loss": 0.9, "weights/step/step": 0, "reef/step": 7}]
+    assert run.summary["reef/weights/optimizer_steps"] == 1 and "reef/optimizer_steps" not in run.summary
+    # The step key is bound exactly, once: a second glob under the prefix would overlap weights/* in W&B.
+    assert (("weights/step/step",), {}) in run.defined
+    assert run.defined.count((("weights/step/loss",), {"step_metric": "weights/step/step"})) == 1
+    assert not any(args == ("weights/step/*",) for args, _ in run.defined)
+    tracker.record(stepped)
+    assert run.defined.count((("weights/step/loss",), {"step_metric": "weights/step/step"})) == 1
+    # A definition the client refuses is tried once, and the rows are logged anyway.
+    refused = dataclasses.replace(stepped, metrics={**weights.metrics, "train_steps": [{"train/reward": 0.5}]})
+    original = run.define_metric
+
+    def refuse(*args, **kwargs):
+        if args == ("weights/step/reward",):
+            raise ValueError("refused")
+        original(*args, **kwargs)
+
+    run.define_metric = refuse
+    tracker.record(refused)
+    tracker.record(refused)
+    reward_rows = [row for row, _ in run.logged if "weights/step/reward" in row]
+    assert [row["weights/step/step"] for row in reward_rows] == [2, 3]
+    assert run.summary["reef/weights/optimizer_steps"] == 4
+    tracker.close()
