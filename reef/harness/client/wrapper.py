@@ -11,9 +11,12 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
      needs to know about Reef headers.
   2. Rewrites the provider config in a temp copy of the composition to point
      the agent at the proxy instead of Reef directly.
-  3. Runs the agent binary as a subprocess.
+  3. Runs the agent binary as a subprocess. Ctrl-C reaches the agent too,
+     so the wrapper waits for it to exit and prints no traceback.
   4. After the agent exits, persists the captured receipts (the
-     ``x-reef-agent-record-id`` values from each response) to disk.
+     ``x-reef-agent-record-id`` values from each response) to disk, removes
+     the temp copy, and exits with the agent's status (128 plus the signal
+     number when a signal ended the agent, 130 for Ctrl-C).
 
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
@@ -149,7 +152,9 @@ wrapper gets each variable unless the shell already sets it (the shell
 wins); the values never enter the tree and are never sent anywhere. The
 wrapper also exports ``REEF_HARNESS_WRAPPER``, the path of the ``reef-<adapter>``
 script at the install root, so an extension in the agent can run ``update``
-and ``setup`` from the session.
+and ``setup`` from the session, and the descriptor's ``client_env``
+variables, ``{root}`` in a value naming the install root, unless the shell
+already sets them.
 """
 
 from __future__ import annotations
@@ -287,31 +292,75 @@ class WrapperError(Exception):
 
 @dataclass(frozen=True)
 class _Binding:
-    """One place the adapter's model binding writes ``{base_url}``: the target file, the key path, the template."""
+    """One place the adapter's model binding writes a placeholder: the target file, the key path, and per API
+    dialect the template there with the plain values the dialect writes beside it (pi and dsh name the API there)."""
 
     target: str
     path: tuple[str, ...]
-    template: str
-
-    @property
-    def suffix(self) -> str:
-        return self.template.split("{base_url}", 1)[1]
+    dialects: tuple[tuple[str, Mapping[str, str]], ...]
 
 
 def _bindings(descriptor: AdapterDescriptor, placeholder: str = "{base_url}") -> list[_Binding]:
     """The places the adapter's model binding renders ``placeholder``: Reef's address, or with ``{api_key}`` its token."""
-    found: dict[tuple[str, tuple[str, ...]], _Binding] = {}
+    found: dict[tuple[str, tuple[str, ...]], list[tuple[str, Mapping[str, str]]]] = {}
     for templates in descriptor.model_binding.values():
         for node in templates:
             target = str(node.get("target", "primary"))
             stack: list[tuple[tuple[str, ...], Any]] = [((), node.get("data", {}))]
             while stack:
                 path, value = stack.pop()
-                if isinstance(value, Mapping):
-                    stack.extend(((*path, str(key)), item) for key, item in value.items())
-                elif isinstance(value, str) and placeholder in value:
-                    found.setdefault((target, path), _Binding(target, path, value))
-    return list(found.values())
+                if not isinstance(value, Mapping):
+                    continue
+                for key, item in value.items():
+                    if isinstance(item, str) and placeholder in item:
+                        plain = {
+                            str(name): text
+                            for name, text in value.items()
+                            if isinstance(text, str) and "{" not in text
+                        }
+                        found.setdefault((target, (*path, str(key))), []).append((item, plain))
+                    else:
+                        stack.append(((*path, str(key)), item))
+    return [_Binding(target, path, tuple(dialects)) for (target, path), dialects in found.items()]
+
+
+def installed_url_suffix(binding: _Binding, file: Path, url: str) -> str:
+    """What the binding's template writes after ``{base_url}`` in the dialect the tree was installed with.
+
+    Dialects may share a key path but not the suffix: pi and dsh reach
+    anthropic at Reef's bare address and openai under ``/v1``. The installed
+    dialect is the one whose own plain values (the API name, which no other
+    dialect writes the same) sit beside ``url`` in the Reef entry: the
+    mapping under the binding's parent key, wherever the adapter's quirks
+    nested it (the items of a list sit under the list's key), so a second
+    provider at any address never decides it. A tree that shows none of
+    them gets the first dialect's suffix."""
+    suffixes = [template.split("{base_url}", 1)[1] for template, _ in binding.dialects]
+    if len(set(suffixes)) == 1:
+        return suffixes[0]
+    markers = [
+        (
+            suffix,
+            {key: text for key, text in plain.items() if any(other.get(key) != text for _, other in binding.dialects)},
+        )
+        for suffix, (_, plain) in zip(suffixes, binding.dialects, strict=True)
+    ]
+    parent = binding.path[-2] if len(binding.path) > 1 else None
+    try:
+        stack: list[tuple[str | None, Any]] = [(None, _parse_binding_file(file))]
+    except (WrapperError, ValueError, yaml.YAMLError):
+        return suffixes[0]
+    while stack:
+        under, value = stack.pop()
+        if isinstance(value, list):
+            stack.extend((under, item) for item in value)
+        elif isinstance(value, Mapping):
+            stack.extend((str(name), item) for name, item in value.items())
+            if under == parent and value.get(binding.path[-1]) == url:
+                for suffix, own in markers:
+                    if own and all(value.get(key) == text for key, text in own.items()):
+                        return suffix
+    return suffixes[0]
 
 
 def _binding_file(descriptor: AdapterDescriptor, compose_dir: Path, binding: _Binding) -> Path:
@@ -366,9 +415,16 @@ def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
         if match is None:
             continue
         url = match.group("url").rstrip("/")
-        suffix = binding.suffix.rstrip("/")
+        suffix = installed_url_suffix(binding, file, match.group("url")).rstrip("/")
         return url[: -len(suffix)] if suffix and url.endswith(suffix) else url
     return None
+
+
+class BindingLoader(yaml.SafeLoader):
+    """Safe YAML that reads a tag a harness defines for itself (dsh's ``!!js`` expressions) as its plain scalar."""
+
+
+BindingLoader.add_constructor(None, lambda loader, node: loader.construct_scalar(node))
 
 
 def _parse_binding_file(file: Path) -> Any:
@@ -380,7 +436,7 @@ def _parse_binding_file(file: Path) -> Any:
     if suffix == ".toml":
         return tomllib.loads(text)
     if suffix in {".yaml", ".yml"}:
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=BindingLoader)
     if file.name == ".env" or suffix == ".env":
         pairs = (line.split("=", 1) for line in text.splitlines() if "=" in line and not line.lstrip().startswith("#"))
         return {key.strip(): value.strip().strip("\"'") for key, value in pairs}
@@ -456,9 +512,10 @@ def _materialize(temp: Path, compose: Path, relative: PurePosixPath) -> Path:
 def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port: int) -> None:
     """Copy each binding file into the temp copy with the binding's URL, and only it, pointed at the proxy.
 
-    The rewritten value is the proxy plus the template's own suffix (``/v1``
-    where the adapter expects it), whatever the tree spelled, so the agent's
-    request paths land where the proxy captures them."""
+    The rewritten value is the proxy plus the template's suffix in the dialect
+    the tree was installed with (``/v1`` where that dialect expects it),
+    whatever the tree spelled, so the agent's request paths land where the
+    proxy captures them."""
     descriptor = get_adapter(adapter)
     proxy = f"http://127.0.0.1:{proxy_port}"
     for binding in _bindings(descriptor):
@@ -470,7 +527,7 @@ def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port:
         if match is None:
             continue
         span = match.span("url")
-        text = text[: span[0]] + proxy + binding.suffix + text[span[1] :]
+        text = text[: span[0]] + proxy + installed_url_suffix(binding, src, match.group("url")) + text[span[1] :]
         dst = _materialize(temp_dir, compose_dir, PurePosixPath(src.relative_to(compose_dir).as_posix()))
         if dst.is_symlink() or dst.exists():
             dst.unlink()
@@ -842,18 +899,19 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             with contextlib.closing(sqlite3.connect(path)) as database:
                 database.execute("VACUUM")  # writes the database header, so the file is a database
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
+    install_root = Path(compose_dir).resolve().parent
     env = os.environ.copy()
     env[env_var] = temp_dir
-    # What an interactive run needs beyond the episode env; the person's own setting wins.
+    # What an interactive run needs beyond the episode env, {root} naming the install root (a directory
+    # outside the relocated composition is read in place); the person's own setting wins.
     for key, value in descriptor.client_env.items():
-        env.setdefault(key, value)
+        env.setdefault(key, value.replace("{root}", str(install_root)))
     # The values the person gave setup, for the extensions that read them; a variable the shell sets wins.
     for key, value in stored.items():
         if not env.get(key):
             env[key] = value
     # The update notice extension needs the service address, the scenario,
     # and the true install root; the relocated temp copy carries none of them.
-    install_root = Path(compose_dir).resolve().parent
     env["REEF_SERVICE_URL"] = upstream
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(install_root)
@@ -869,8 +927,13 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
+    returncode: int | None = None
     try:
-        result = subprocess.run([binary, *args], env=env)
+        agent = subprocess.Popen([binary, *args], env=env)
+        # Ctrl-C reaches the agent too, in the same process group: wait for it to end on its own.
+        while returncode is None:
+            with contextlib.suppress(KeyboardInterrupt):
+                returncode = agent.wait()
     finally:
         proxy.publish_turn()
         proxy.stop()
@@ -889,7 +952,8 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
-    sys.exit(result.returncode)
+    # An agent a signal ended exits as a shell reports it: 128 plus the signal, 130 after Ctrl-C.
+    sys.exit(128 - returncode if returncode < 0 else returncode)
 
 
 def _reportable(turn: Mapping[str, Any]) -> bool:

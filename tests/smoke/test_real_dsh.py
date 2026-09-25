@@ -107,3 +107,52 @@ def test_real_dsh_episode_renders_runs_and_cleans_up() -> None:
     assert kinds and kinds[0] == "session" and "assistant/message" in kinds and kinds[-1] == "turn/end", kinds
     # (c) The cleanup audit found nothing outside the declared whitelist.
     assert result.residue == ()
+
+
+def test_real_dsh_runs_a_command_that_the_model_cannot_list() -> None:
+    """A command whose text carries its own frontmatter stays a command dsh lists, whatever that frontmatter
+    holds: the model's skill catalog lists the skill and not the commands, and a task that types each command gets
+    its text."""
+    server = StubOpenAI()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    descriptor = get_adapter("dsh")
+    # Each header after the first is one the adapter must repair or must not break: dsh ignores a camelCase
+    # invocation key and a name or description that is not a string, reads Yes and 1:30 as strings where YAML 1.1
+    # does not, reads a value tagged ! as a string, and allows \r\n after a fence.
+    headers = {
+        "marker": "---\nname: marker\ndescription: Reply with the reef marker\n---\n",
+        "legacy": "---\nname: legacy\ndescription: Legacy keys\nuserInvocable: true\nmodelInvocable: false\n---\n",
+        "yes": "---\nname: yes\ndescription: Yes\n---\n",
+        "clock": "---\nname: clock\ndescription: 1:30\n---\n",
+        "blank": "---\nname: 123\ndescription: ''\n---\n",
+        "bang": '---\nname: ! bang\ndescription: ! "true\\n"\n---\n',
+        "crlf": "---\r\nname: crlf\r\ndescription: Windows line ends\r\n---\r\n",
+    }
+    try:
+        binding = ModelBinding(
+            base_url=f"http://127.0.0.1:{server.server_address[1]}", model=MODEL, api_key="smoke-key"
+        )
+        skill = "---\nname: notes\ndescription: Keep short notes\n---\nKeep short notes.\n"
+        nodes = [
+            ("skill", {"name": "notes", "text": skill}),
+            *(
+                ("agent_command", {"name": name, "text": f"{header}Start with {name}-63.\n"})
+                for name, header in headers.items()
+            ),
+            *binding.compose_nodes(descriptor),
+        ]
+        files = render_composition(nodes, descriptor)
+        task = " ".join(f"/{name}" for name in headers) + " say hi"
+        result = run_episode(descriptor, files, task, binary=REAL_DSH, timeout=180.0)
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert any("- `notes`: Keep short notes" in body for body in server.bodies), server.bodies
+    for name in headers:
+        assert not any(f"- `{name}`:" in body for body in server.bodies), (name, server.bodies)
+        assert any(f'<skill_content name=\\"{name}\\">' in body for body in server.bodies), (name, server.bodies)
+        assert any(f"Start with {name}-63." in body for body in server.bodies), (name, server.bodies)
+        # dsh read the header as frontmatter, so it is not part of the text the command sends.
+        assert not any(f"name: {name}" in body for body in server.bodies), (name, server.bodies)

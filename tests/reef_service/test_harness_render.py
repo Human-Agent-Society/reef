@@ -190,6 +190,7 @@ def test_terminus_binding_renders_the_litellm_provider() -> None:
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
+DSH_WEB_PATCH = "dsh/profiles/web/cordis.patch.yml"
 
 
 def _dsh_nodes():
@@ -236,6 +237,127 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
+    own = ("skill", {"name": "own", "text": "---\r\nname: own\r\ndescription: mine\r\n---\r\nBody.\r\n"})
+    assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
+    # The web profile reef-dsh web boots: the same defaults and binding (the config node targets the headless
+    # patch alone), the headless profile's extension by relative path, and a manifest that reads the patch once.
+    web = yaml.safe_load(files[DSH_WEB_PATCH].replace("!!js ", ""))
+    assert web[:-1] == [row for row in patch[:-1] if row["id"] != "agent-loop"]
+    assert web[-1] == {"insert": [{"id": "extension-tracer", "name": "../headless/extensions/tracer.mjs"}]}
+    assert json.loads(files["dsh/profiles/web/package.json"]) == {
+        "name": "dsh-profile-web",
+        "private": True,
+        "dependencies": {},
+        "dsh": {
+            "profile": {"bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"], "patchReload": "startup"}
+        },
+    }
+
+
+def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
+    """A command's frontmatter, read the way dsh reads it, keeps the node's keys, but only the person can run it,
+    and a name or description dsh would not accept is filled in; frontmatter that does not parse is refused."""
+    descriptor = get_adapter("dsh")
+    path = "dsh-agents/skills/chat/SKILL.md"
+    user_only = "---\nname: chat\ndescription: Chat\ndisable-model-invocation: true\n---\n"
+
+    def command(text: str) -> str:
+        return render_composition([("agent_command", {"name": "chat", "text": text})], descriptor)[path]
+
+    own = "---\nname: chat\ndescription: Enter chat mode\nwhenToUse: on request\n---\n# Chat\n\nSearch only.\n"
+    assert command(own) == (
+        "---\nname: chat\ndescription: Enter chat mode\nwhenToUse: on request\ndisable-model-invocation: true\n"
+        "---\n# Chat\n\nSearch only.\n"
+    )
+    # The node cannot make its command model invocable or hide it from the person, and dsh ignores a skill that
+    # holds a camelCase invocation key.
+    flipped = "---\nname: chat\ndescription: Chat\ndisable-model-invocation: false\nuser-invocable: false\n---\nBody\n"
+    assert command(flipped) == user_only + "Body\n"
+    legacy = "---\nname: chat\ndescription: Chat\nuserInvocable: true\ndisableModelInvocation: false\nmodelInvocable: true\n"
+    assert command(legacy + "---\nBody\n") == user_only + "Body\n"
+    # dsh ignores a skill whose name is not a skill name or whose description is empty or not a string, so a header
+    # that lacks either, or holds another value, gets the one a header without frontmatter gets.
+    for header in (
+        "description: Chat",
+        "name:\ndescription: ''",
+        "name: 123\ndescription: [a]",
+        "name: Chat Mode",
+        "description: 09",
+    ):
+        assert command(f"---\n{header}\n---\n# Chat\n") == user_only + "# Chat\n"
+    for empty in ("---\n---\n# Chat\n", "---\n~\n---\n# Chat\n"):
+        assert command(empty) == user_only + "# Chat\n"
+    # dsh reads YAML 1.2, where Yes and 1:30 are strings, so the header does too, and every header is written so
+    # that YAML 1.2 reads a string back where YAML 1.1 or 1.2 would read another type.
+    for written in ("Yes", "off", "1:30", "=", "'09'", "'0o17'"):
+        value = written.strip("'")
+        assert command(f"---\nname: chat\ndescription: {written}\n---\nBody\n") == (
+            f"---\nname: chat\ndescription: '{value}'\ndisable-model-invocation: true\n---\nBody\n"
+        )
+    assert command("1e3\n") == "---\nname: chat\ndescription: '1e3'\ndisable-model-invocation: true\n---\n1e3\n"
+    # A scalar tagged ! is a string to dsh, so the name true and the description 123 are kept, a list tagged ! is
+    # a list, and a quoted true with a newline is written quoted again.
+    assert command("---\nname: ! true\ndescription: ! 123\nx: ! [a]\n---\nBody\n") == (
+        "---\nname: 'true'\ndescription: '123'\nx:\n- a\ndisable-model-invocation: true\n---\nBody\n"
+    )
+    assert command('---\nname: chat\ndescription: ! "true\\n"\n---\nBody\n') == (
+        "---\nname: chat\ndescription: 'true\n\n  '\ndisable-model-invocation: true\n---\nBody\n"
+    )
+    # dsh takes a fence line less one trailing carriage return, and a close at the end of the file.
+    assert command("---\r\nname: chat\r\ndescription: Chat\r\n---\r\nBody\r\n") == user_only + "Body\r\n"
+    assert command("---\nname: chat\ndescription: Chat\n---") == user_only
+    for broken, reason in (
+        ("---\nname: [chat\n---\nBody\n", "not valid YAML"),
+        ("---\nname: chat\ndescription: !!binary aGk=\n---\nBody\n", "not valid YAML: a value has the tag"),
+        ("---\n- chat\n---\nBody\n", "not a YAML mapping"),
+        ("---\nname: chat\nx: " + "[" * 3000 + "]" * 3000 + "\n---\nBody\n", "nested too deeply"),
+        # An integer past Python's digit limit fails its conversion; the proposal is refused, the step goes on.
+        ("---\nname: chat\nx: " + "9" * 4301 + "\n---\nBody\n", "cannot read"),
+        ("---\nname: chat\ndescription: Chat\nBody\n", "never closes"),
+        ("---\r\nname: chat\r\ndescription: Chat\r\nBody\r\n", "never closes"),
+    ):
+        with pytest.raises(RenderError, match=f"{path} .*{reason}"):
+            command(broken)
+
+
+def test_dsh_command_frontmatter_that_cannot_be_written_again_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A header that loaded can still fail to be written again (nesting the writer recurses on); that is a refusal
+    of the proposal, never an exception out of render."""
+    import reef.harness.adapters.dsh.quirks as dsh_quirks
+
+    def deep(*args: object, **kwargs: object) -> str:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(dsh_quirks.yaml, "dump", deep)
+    text = "---\nname: chat\ndescription: Chat\n---\nBody\n"
+    with pytest.raises(RenderError, match="cannot write again"):
+        dsh_quirks._with_frontmatter("dsh-agents/skills/chat/SKILL.md", text, True)
+
+
+@pytest.mark.parametrize(
+    ("api", "route_api", "base_url"),
+    [
+        ("openai", "openai-completions", "http://127.0.0.1:9/v1"),
+        ("anthropic", "anthropic-messages", "http://127.0.0.1:9"),
+    ],
+)
+def test_dsh_binds_both_profiles_in_every_dialect(api, route_api, base_url) -> None:
+    """The headless and the web patch each carry the same Reef route and default model, in the dialect bound."""
+    descriptor = get_adapter("dsh")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1", api=api)
+    files = render_composition([*_dsh_nodes(), *binding.compose_nodes(descriptor)], descriptor)
+    route = {
+        "displayName": "Reef",
+        "apiKeyEnv": "REEF_API_KEY",
+        "api": route_api,
+        "baseURL": base_url,
+        "models": [{"id": "m1"}],
+    }
+    for patch_path in (DSH_PATCH, DSH_WEB_PATCH):
+        by_id = {row["id"]: row for row in yaml.safe_load(files[patch_path].replace("!!js ", "")) if "id" in row}
+        assert by_id["llm-pi-ai"]["config"] == {"providers": {"reef": route}}, patch_path
+        assert by_id["agent-default-model"]["config"] == {"provider": "reef", "model": "m1"}, patch_path
+    assert files["dsh/.env"] == "REEF_API_KEY=k-1\n"
 
 
 def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
@@ -248,6 +370,27 @@ def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
         render_composition([("config", {"data": {"session-telemetry-otel": {"disabled": False}}})], descriptor)
     with pytest.raises(RenderError, match="must be an object"):
         render_composition([("config", {"data": {"agent-loop": "nope"}})], descriptor)
+    with pytest.raises(RenderError, match="must be an object"):
+        render_composition([("config", {"data": {"session-persistence-jsonl": "zstd"}})], descriptor)
+    # The web profile's patch is held to the same checks: a compressed web profile refuses the shared sessions root.
+    with pytest.raises(RenderError, match=f"uncompressed .* in {DSH_WEB_PATCH}"):
+        render_composition(
+            [
+                (
+                    "config",
+                    {"target": "web", "data": {"session-persistence-jsonl": {"config": {"compression": "zstd"}}}},
+                )
+            ],
+            descriptor,
+        )
+    with pytest.raises(RenderError, match=f"session-title-llm disabled in {DSH_WEB_PATCH}"):
+        render_composition(
+            [("config", {"target": "web", "data": {"session-title-llm": {"disabled": False}}})], descriptor
+        )
+    # And its manifest keeps the patch read once at start: with live reload dsh web exits at start.
+    live = {"dsh": {"profile": {"patchReload": "live"}}}
+    with pytest.raises(RenderError, match="patchReload startup"):
+        render_composition([("config", {"target": "web_manifest", "data": live})], descriptor)
 
 
 HERMES_CONFIG = "hermes/config.yaml"
@@ -407,6 +550,8 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
             ClientState("dsh/.credentials.yaml", "file"),
             ClientState("dsh/settings.yaml", "file"),
             ClientState("dsh/.agent-presets", "directory"),
+            ClientState("dsh/sessions", "directory"),
+            ClientState("dsh/storages", "directory"),
         ),
     }
 
