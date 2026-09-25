@@ -21,12 +21,19 @@ from __future__ import annotations
 
 import difflib
 import json
-import re
 from collections.abc import Mapping, Sequence
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from reef.core.requirements import required_by
+from reef.harness.step_result import (
+    design_sections,
+    floor_tasks_note,
+    missed_episode_text,
+    missed_episodes,
+    reef_installs,
+    unscored_failures,
+)
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
@@ -75,6 +82,31 @@ RESULT_WORDS = {
     "rollback": "A person moved the head back to an earlier release.",
     "recovery": "The head this process recovered at boot.",
 }
+
+
+#: What a skipped step means when its design said no entry this harness takes can deliver the request.
+DECLINED_WORDS = (
+    "The proposer answered with a design and no entry: the design says why no entry this harness takes can "
+    "deliver the request, and what is out of reach. Nothing changed."
+)
+
+
+def declined(metrics: Mapping[str, Any]) -> bool:
+    """Whether the step's proposer answered with a design that writes no entry, on purpose."""
+    notes = metrics.get("proposal_notes")
+    return isinstance(notes, Mapping) and isinstance(notes.get("declined"), str) and bool(notes["declined"].strip())
+
+
+def failed_words(metrics: Mapping[str, Any]) -> str:
+    """What a failed step means, by the phase it failed in: a step whose candidate reached its evaluation failed
+    there, not before it."""
+    if metrics.get("failed_stage") == "evaluating":
+        return (
+            "The step failed during its evaluation: the change was proposed and its episodes ran, but the "
+            "evaluation raised. Nothing was published; see the error below before retrying."
+        )
+    return RESULT_WORDS["failed"]
+
 
 #: Node kinds whose config carries the change as ``text``; the page shows that text instead of the config JSON.
 TEXT_KINDS = ("rules", "skill", "agent_command")
@@ -210,7 +242,8 @@ def before_release_id(row: Mapping[str, Any]) -> str | None:
 
 
 def step_href(step: int, link_query: Mapping[str, str] | None) -> str:
-    """The page of another step, opened the way this one was: the scenario and the token travel in the query."""
+    """The page of another step, opened the way this one was: the scenario and the page key travel in the
+    query."""
     href = f"/reef/harness/releases/{step}/page"
     if link_query:
         href += "?" + urlencode(dict(link_query))
@@ -248,22 +281,6 @@ def _why(row: Mapping[str, Any], metrics: Mapping[str, Any]) -> str:
             f'</span><span>Session <span class="id">{escape(proposal.get("session"))}</span></span></p>'
         )
     return "<p>A failure in the batch; no request asked for this step.</p>"
-
-
-#: The heading that ends a design and starts its How to use section: a markdown heading or a labelled line.
-USAGE_HEADING = re.compile(r"^(?:#{1,6}\s*)?how to use\s*:?\s*$", re.IGNORECASE | re.MULTILINE)
-
-
-def design_sections(notes: Mapping[str, Any]) -> tuple[str, str]:
-    """The design the method recorded as ``proposal_notes.design`` and its How to use section, each stripped;
-    empty where the record has none. The proposer writes the usage under a ``How to use`` heading at the end."""
-    design = notes.get("design")
-    if not isinstance(design, str) or not design.strip():
-        return "", ""
-    match = USAGE_HEADING.search(design)
-    if match is None:
-        return design.strip(), ""
-    return design[: match.start()].strip(), design[match.end() :].strip()
 
 
 def _design(metrics: Mapping[str, Any]) -> str:
@@ -344,7 +361,25 @@ def _mutation_block(
         rest.update({key: value for key, value in config.items() if key != "text"})
         note = f'<p class="note">{escape(json.dumps(rest, sort_keys=True))}</p>' if rest else ""
         return head + note + f"<pre>{escape(config['text'])}</pre></div>"
-    return head + f"<pre>{escape(json.dumps(options, indent=2, sort_keys=True))}</pre></div>"
+    # A config entry's text values (an opencode agent's prompt, say) read as text under the JSON, not as escapes.
+    texts: list[tuple[str, str]] = []
+    shown = texts_set_apart(options, "", texts)
+    below = "".join(f'<p class="note">{escape(path)}</p><pre>{escape(text)}</pre>' for path, text in texts)
+    return head + f"<pre>{escape(json.dumps(shown, indent=2, sort_keys=True, ensure_ascii=False))}</pre>{below}</div>"
+
+
+def texts_set_apart(value: Any, path: str, texts: list[tuple[str, str]]) -> Any:
+    """``value`` with each string that spans lines put in ``texts`` by its key path, a pointer in its place."""
+    if isinstance(value, str) and "\n" in value:
+        texts.append((path, value))
+        return f"(text below: {path})"
+    if isinstance(value, Mapping):
+        return {
+            key: texts_set_apart(item, f"{path}.{key}" if path else str(key), texts) for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [texts_set_apart(item, f"{path}[{index}]", texts) for index, item in enumerate(value)]
+    return value
 
 
 def _what_changed(
@@ -357,6 +392,8 @@ def _what_changed(
     mutations = mutations_of(metrics)
     if mutations:
         return "".join(_mutation_block(m, row, before_entries, before_files, node_paths) for m in mutations)
+    if declined(metrics):
+        return '<p class="empty">nothing: the step answered with no change</p>'
     if metrics.get("skipped"):
         return f'<p class="empty">nothing: the step skipped ({escape(metrics["skipped"])})</p>'
     if metrics.get("recheck"):
@@ -386,14 +423,22 @@ def _review(metrics: Mapping[str, Any]) -> str:
     review = notes.get("review")
     failure = notes.get("review_failure")
     undeclared = _strings(notes.get("undeclared_env"))
-    if not isinstance(review, Mapping) and not isinstance(failure, str) and not undeclared:
+    dropped = _strings(notes.get("dropped_attempts"))
+    if not isinstance(review, Mapping) and not isinstance(failure, str) and not undeclared and not dropped:
         return ""
     parts = []
     if isinstance(review, Mapping):
         review_result = status_span(str(review.get("result", review.get("verdict")) or "unknown"))
         parts.append(f"<p>The proposer's review of its entries against the request: {review_result}</p>")
+        kept = kept_answer(notes)
+        if kept is not None:
+            parts.append(f"<p>{escape(kept)}; the others are in the step record</p>")
         parts.append("<h3>Covered</h3>" + _listed(_strings(review.get("covered")), "nothing listed as covered"))
         parts.append("<h3>Uncovered</h3>" + _listed(_strings(review.get("uncovered")), "nothing left uncovered"))
+        limits = _strings(review.get("limits"))
+        if limits:
+            # What the harness's notes say no answer can deliver there: not a gap in this change.
+            parts.append("<h3>Out of reach on this harness</h3>" + _listed(limits, ""))
     elif isinstance(failure, str) and failure.strip():
         parts.append(
             "<p>The proposer's review of its entries against the request did not run, so nothing checked "
@@ -406,6 +451,8 @@ def _review(metrics: Mapping[str, Any]) -> str:
             '<div class="failure"><h3>Undeclared variables</h3><p>The extension reads these and no requires item '
             f'names them: <span class="id">{escape(", ".join(undeclared))}</span></p></div>'
         )
+    if dropped:
+        parts.append("<h3>Answers written again</h3>" + _listed(dropped, ""))
     return _card("Review", "".join(parts) + "\n")
 
 
@@ -426,10 +473,19 @@ def evaluation_token_counts(metrics: Mapping[str, Any]) -> tuple[int, int] | Non
 def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
     """The Result section: the headline and what it means, then the evaluation's numbers and the step's record."""
     selection_result = result_of(row, rows)
-    words = dict(RESULT_WORDS)
+    words = {**RESULT_WORDS, "failed": failed_words(metrics)}
+    if declined(metrics):
+        words["skipped"] = DECLINED_WORDS
     if tone(selection_result) == "promoted":
         words[selection_result] = (
             f"Passed the checks and was {selection_result}; the release that step published serves it."
+        )
+    # Every candidate episode failed before a score: the checks judged nothing, so no score stands for the change.
+    unscored = unscored_failures(metrics) if selection_result == "rejected" else []
+    if unscored:
+        words["rejected"] = (
+            "The evaluation could not run: every candidate episode failed before it was scored, so nothing judged "
+            "the change. The head stayed where it was."
         )
     summary = (
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
@@ -438,6 +494,8 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     numbers = []
     for field in RESULT_FIELDS:
         legacy_field = "gate_sides" if field == "evaluation_sides" else field
+        if unscored and field == "candidate_score":
+            continue
         if field in metrics or legacy_field in metrics:
             value = metrics.get(field, metrics.get(legacy_field))
             if isinstance(value, Sequence) and not isinstance(value, str):
@@ -452,14 +510,27 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
         )
     grid = f'<dl class="metrics">{"".join(numbers)}</dl>' if numbers else ""
     details = []
-    if metrics.get("skipped"):
+    if declined(metrics):
+        details.append("<div><dt>Answered</dt><dd>with no change</dd></div>")
+    elif metrics.get("skipped"):
         details.append(f"<div><dt>Skipped</dt><dd>{escape(metrics['skipped'])}</dd></div>")
     selection = metrics.get("selection")
     if isinstance(selection, Mapping) and selection.get("reason"):
         details.append(f"<div><dt>Reason</dt><dd>{escape(selection['reason'])}</dd></div>")
+    if unscored:
+        details.extend(f"<div><dt>Could not run</dt><dd>{escape(cause)}</dd></div>" for cause in unscored)
+    elif selection_result == "rejected":
+        # What the checks saw: each missed episode's task, and why it failed or the reply that was graded.
+        details.extend(
+            f"<div><dt>Missed</dt><dd>{escape(missed_episode_text(episode))}</dd></div>"
+            for episode in missed_episodes(metrics)
+        )
     if metrics.get("step_record"):
         details.append(f'<div><dt>Step record</dt><dd class="id">{escape(metrics["step_record"])}</dd></div>')
     listed = f'<dl class="details">{"".join(details)}</dl>' if details else ""
+    note = floor_tasks_note(metrics)
+    if note is not None:
+        listed += f'<p class="note">{escape(note)}</p>'
     failure = _notes(metrics).get("failure")
     if isinstance(failure, str) and failure.strip():
         # Why the proposer produced nothing: a failed model call, a reply with no entry.
@@ -492,7 +563,19 @@ def _refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
     )
 
 
-def _setup(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]]) -> str:
+def kept_answer(notes: Mapping[str, Any]) -> str | None:
+    """Which of the proposer's answers the step kept, when it wrote more than one and kept one: ``kept_attempt``,
+    or the last answer when the notes name none; nothing for a step whose answers all failed."""
+    attempts = notes.get("attempts")
+    if not isinstance(attempts, int) or attempts < 2 or notes.get("failure"):
+        return None
+    kept = notes.get("kept_attempt", attempts)
+    return f"Kept answer {kept} of {attempts}" if isinstance(kept, int) and 1 <= kept <= attempts else None
+
+
+def _setup(
+    row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Mapping[str, Any]], adapter: str = "pi"
+) -> str:
     """The step's own ``training_request.requires`` items, then what its release carries from earlier steps.
 
     The install script, ``reef-<adapter> setup`` and the update notice read
@@ -533,7 +616,11 @@ def _setup(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequence[Ma
         parts.append(
             f'<h3>Carried from earlier steps</h3>{_scrolled(requires_table(carried), "Inherited requirements")}'
         )
-    parts.append('<p class="note">reef-pi setup lists these and runs a check only after you confirm it</p>')
+    parts.append(
+        f'<p class="note">reef-{escape(adapter)} setup lists these and runs a check only after you confirm it</p>'
+        if reef_installs(adapter)
+        else '<p class="note">these must hold in the Harbor task a run uses; nothing checks them</p>'
+    )
     return "".join(parts) + tail
 
 
@@ -598,6 +685,37 @@ def _steps_nav(step: int, rows: Sequence[Mapping[str, Any]], link_query: Mapping
     return f'<nav class="steps" aria-label="Catalog steps">{"".join(parts)}</nav>\n'
 
 
+def build_running_step_page(
+    step: int, request_id: str, link_query: Mapping[str, str] | None = None, *, refresh_seconds: int = 5
+) -> str:
+    """The page of step ``step`` while the request ``request_id`` runs it: the catalog has no row for it yet, so the
+    page says the step is running, links the request's page, which follows it live, and reloads until the row lands."""
+    href = f"/reef/harness/requests/{quote(request_id, safe='')}/page"
+    if link_query:
+        href += "?" + urlencode(dict(link_query))
+    body = (
+        '<div class="stack">\n'
+        + _card(
+            "Running",
+            "<p>This step is running: the catalog records it when it settles, and this page then shows it.</p>"
+            f'<p><a class="version-link" href="{escape(href)}">Follow the request</a></p>\n',
+        )
+        + "</div>\n"
+    )
+    return document(
+        title=f"Harness v{step}",
+        style=STYLE,
+        breadcrumb="Versions",
+        context=link_query.get("scenario", "") if link_query else "",
+        state="running",
+        eyebrow="Harness evolution",
+        heading=f"Harness v{step}",
+        subtitle="Running",
+        body=body,
+        head=f'<meta http-equiv="refresh" content="{refresh_seconds}">\n',
+    )
+
+
 def build_release_page(
     step: int,
     rows: Sequence[Mapping[str, Any]],
@@ -606,6 +724,7 @@ def build_release_page(
     before_files: Mapping[str, str] | None = None,
     node_paths: Mapping[str, str] | None = None,
     link_query: Mapping[str, str] | None = None,
+    adapter: str = "pi",
 ) -> str:
     """The page for ``rows[step]``, the rows oldest first as ``GET /reef/harness/releases`` lists them.
 
@@ -615,7 +734,8 @@ def build_release_page(
     extension update shows its new text instead of a diff. ``link_query`` is
     carried to the Chain's links, so a page opened through query parameters
     links pages that open the same way. Design and Review appear only when the
-    row's ``proposal_notes`` carry them.
+    row's ``proposal_notes`` carry them. ``adapter`` names the wrapper the
+    Setup section's commands run.
     """
     row = rows[step]
     metrics = row.get("metrics")
@@ -652,7 +772,7 @@ def build_release_page(
         + _card("What changed", f"{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n")
         + _review(metrics)
         + _card("Result", f"{result_html(row, metrics, rows)}\n")
-        + _card("Setup", f"{_setup(row, metrics, rows)}\n")
+        + _card("Setup", f"{_setup(row, metrics, rows, adapter)}\n")
         + _card("Chain", f"{_chain(step, row, rows, link_query)}\n")
         + "</div>\n",
         tail=f'<script id="data" type="application/json">{data}</script>\n',
@@ -664,11 +784,15 @@ VERDICT_FIELDS = RESULT_FIELDS
 verdict_of = result_of
 
 __all__ = [
+    "DECLINED_WORDS",
     "RESULT_FIELDS",
     "RESULT_LABELS",
     "VERDICT_FIELDS",
     "before_release_id",
     "build_release_page",
+    "build_running_step_page",
+    "declined",
+    "failed_words",
     "mutations_of",
     "result_of",
     "served_step",

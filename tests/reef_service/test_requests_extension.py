@@ -39,7 +39,25 @@ SKILL = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "pi
 
 pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not installed")
 
-ACCEPTED = {"agent_record_id": "q-1", "scenario": "code-repair", "request_type": "train"}
+#: The page key the service hands out with a filed request and the catalog, in place of the token.
+PAGE_KEY = "k3y-from-the-service"
+ACCEPTED = {
+    "agent_record_id": "q-1",
+    "scenario": "code-repair",
+    "request_type": "train",
+    "page_path": f"/reef/harness/requests/q-1/page?scenario=code-repair&key={PAGE_KEY}",
+}
+
+
+def _listed(catalog: dict) -> dict:
+    """``catalog`` as the service answers it: each row with its step page's path, the page key in its query."""
+    rows = [
+        {**row, "page_path": f"/reef/harness/releases/{step}/page?scenario=code-repair&key={PAGE_KEY}"}
+        for step, row in enumerate(catalog["releases"])
+    ]
+    return {**catalog, "releases": rows}
+
+
 # One runner for every case: it loads the asset with a stub pi, a stub ctx and a stub fetch, runs the command,
 # tool or event TEST_STEP names (TEST_REPEAT times), waits TEST_WAIT_MS for the watch, and prints what the
 # extension registered and every call it made. TEST_ARGS_2 is what a second TEST_REPEAT run passes instead of
@@ -271,11 +289,13 @@ def _of_kind(out: dict[str, Any], kind: str) -> list[dict[str, Any]]:
     return [event for event in out["events"] if event["kind"] == kind]
 
 
-# What a filing says: the accepted notice ends with the request's page link, which carries the scenario and,
-# when the shell has one, the token as query parameters, since a browser sends no header.
+# What a filing says: the accepted notice ends with the request's page link, which carries the scenario and the
+# page key the service handed out as query parameters, since a browser sends no header.
 REQUEST_PAGE = "http://reef:8900/reef/harness/requests/q-1/page?scenario=code-repair"
+#: What the links carry in place of the token: the page key the service handed out.
+KEY = f"&key={PAGE_KEY}"
 ACCEPTED_NOTICE = (
-    f"Training request q-1 accepted; the step usually takes one to three minutes. Watch it here: {REQUEST_PAGE}"
+    f"Training request q-1 accepted; the step usually takes a few minutes. Watch it here: {REQUEST_PAGE}{KEY}"
 )
 REQUESTS_FILE = ".reef-harness-requests.json"
 
@@ -372,7 +392,7 @@ def test_the_command_submits_native_training_without_touching_receipts(tmp_path:
     assert list(client["commands"]) == list(CLIENT_COMMANDS)
     assert client["commands"]["node"] is True  # the test runs the extension under node, which is on the PATH
     assert TrainingRequest.from_dict({**request["body"], "client": client}).client == client
-    assert _notices(out) == [{"kind": "notify", "message": f"{ACCEPTED_NOTICE}&token=tok", "type": "info"}]
+    assert _notices(out) == [{"kind": "notify", "message": ACCEPTED_NOTICE, "type": "info"}]
     # The watch starts once the request is filed: the footer names the record until the step settles.
     assert _of_kind(out, "status") == [{"kind": "status", "key": "reef", "text": "reef: request q-1 queued"}]
     assert _of_kind(out, "user_message") == []
@@ -485,6 +505,7 @@ RELEASES = {
         },
     ],
 }
+RELEASES = _listed(RELEASES)
 CATALOG = {"GET /reef/harness/releases": {"status": 200, "body": RELEASES}}
 PROMOTED = {"POST /reef/scenarios/code-repair/promote": {"status": 200, "body": {"release_id": "rel-4444-promote"}}}
 
@@ -529,7 +550,7 @@ def test_versions_lists_aligned_columns_with_requests_below_each_row(tmp_path: P
 def test_versions_keeps_multiline_requests_out_of_columns(tmp_path: Path, headless: str) -> None:
     rows = [{"release_id": f"release-{step}", "operation": "creation"} for step in range(11)]
     rows[9]["metrics"] = {"training_request": {"text": "  支持复制图片\n\n Clarification...\t完成  "}}
-    catalog = {"GET /reef/harness/releases": {"status": 200, "body": {"releases": rows}}}
+    catalog = {"GET /reef/harness/releases": {"status": 200, "body": _listed({"releases": rows})}}
     out = _versions(tmp_path, _install_root(tmp_path), catalog, TEST_HEADLESS=headless)
     (notice,) = _notices(out)
     assert notice["message"].splitlines()[-7:-4] == [
@@ -550,28 +571,26 @@ def test_versions_with_a_step_offers_its_page_and_opens_it(tmp_path: Path) -> No
     prompt = opened["events"][1]
     assert prompt["title"] == "Open harness v3?"
     assert prompt["message"] == "rel-3333-pending (pending)"
-    # The page a browser opens carries the scenario and the token as query parameters, and is one argument.
-    page = "http://reef:8900/reef/harness/releases/3/page?scenario=code-repair&token=tok"
+    # The page a browser opens carries the scenario and the page key as query parameters, and is one argument.
+    page = f"http://reef:8900/reef/harness/releases/3/page?scenario=code-repair{KEY}"
     assert opened["events"][2]["args"] == [page]
     # Declining opens nothing and leaves the URL to open by hand.
     declined = _versions(tmp_path, agent_dir, CATALOG, args="3", REEF_TOKEN="tok")
     assert [event["kind"] for event in declined["events"]] == ["fetch", "confirm", "notify"]
     assert declined["events"][2] == {"kind": "notify", "message": f"page: {page}", "type": "info"}
     # A launcher that is not there leaves the URL too, never an error.
-    page1 = "http://reef:8900/reef/harness/releases/1/page?scenario=code-repair"
+    page1 = f"http://reef:8900/reef/harness/releases/1/page?scenario=code-repair{KEY}"
     missing = _versions(
         tmp_path, agent_dir, CATALOG, args="1", TEST_CONFIRM="1", TEST_EXEC=json.dumps({page1: {"code": 1}})
     )
     assert missing["error"] is None
-    assert _notices(missing)[0]["message"] == (
-        "reef: open it yourself: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair"
-    )
+    assert _notices(missing)[0]["message"] == f"reef: open it yourself: {page1}"
     # Headless has no dialog to open: the summary and the URL are printed instead.
     headless = _versions(tmp_path, agent_dir, CATALOG, args="1", TEST_HEADLESS="1")
     assert [event["kind"] for event in headless["events"]] == ["fetch", "notify"]
     assert headless["events"][1]["message"].splitlines() == [
         "Harness v1: rel-1111-selected (selected, current)",
-        "page: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair",
+        f"page: {page1}",
     ]
 
 
@@ -588,7 +607,8 @@ def test_versions_install_serves_a_pending_release_before_installing_it(tmp_path
     assert prompt["title"] == "Install release rel-3333 now?"
     # The confirmation says what makes this release different and where to read it before answering.
     assert "runs in pi with your privileges" in prompt["message"]
-    assert "http://reef:8900/reef/harness/releases/3/page?scenario=code-repair&token=tok" in prompt["message"]
+    assert f"http://reef:8900/reef/harness/releases/3/page?scenario=code-repair{KEY}" in prompt["message"]
+    assert "token=" not in prompt["message"]
     promote = confirmed["events"][2]
     assert promote["method"] == "POST" and promote["url"] == "http://reef:8900/reef/scenarios/code-repair/promote"
     assert promote["headers"] == {
@@ -693,6 +713,7 @@ NEWEST_PENDING = {
         },
     ],
 }
+NEWEST_PENDING = _listed(NEWEST_PENDING)
 # The same catalog after a person promoted the pending win: the promote row names it as its target.
 PROMOTE_ROW = {
     "release_id": "rel-5555-promote",
@@ -706,6 +727,7 @@ AFTER_PROMOTE = {
     "scenario": "code-repair",
     "releases": [*NEWEST_PENDING["releases"][:4], {**NEWEST_PENDING["releases"][4], "current": False}, PROMOTE_ROW],
 }
+AFTER_PROMOTE = _listed(AFTER_PROMOTE)
 
 
 def test_versions_marks_the_served_head_current_and_never_the_pending_row(tmp_path: Path) -> None:
@@ -815,8 +837,8 @@ QUESTIONS = {
 OTHER = "Other (type an answer)"
 CANCEL = "Cancel this request"
 FILED = (
-    "filed request q-1; reef is running the step, which usually takes one to three minutes, and will report here "
-    f"when it settles. Watch it here: {REQUEST_PAGE}&token=tok"
+    "filed request q-1; reef is running the step, which usually takes a few minutes, and will report here "
+    f"when it settles. Watch it here: {REQUEST_PAGE}{KEY}"
 )
 
 
@@ -903,7 +925,7 @@ def test_the_command_with_a_ui_clarifies_in_the_background_and_keeps_one_entry(t
     assert entry["customType"] == "reef-harness-clarify"
     data = entry["data"]
     assert data["outcome"] == "filed" and data["request"] == "text me when you are blocked"
-    assert data["summary"].startswith(f"filed request q-1; watch it at {REQUEST_PAGE}&token=tok (")
+    assert data["summary"].startswith(f"filed request q-1; watch it at {REQUEST_PAGE}{KEY} (")
     kinds = [item["kind"] for item in data["transcript"]]
     assert kinds == ["thinking", "reef_ask_user", "result", "reef_file_request", "result"]
     assert data["transcript"][-1]["text"] == FILED
@@ -1191,7 +1213,7 @@ def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
         "POST /reef/train": {"status": 200, "body": ACCEPTED},
         "GET /reef/harness/releases": {
             "status": 200,
-            "body": {"scenario": "code-repair", "releases": [CREATION_ROW, row]},
+            "body": _listed({"scenario": "code-repair", "releases": [CREATION_ROW, row]}),
         },
     }
 
@@ -1200,7 +1222,10 @@ PROGRESS_PATH = "/reef/harness/requests/q-1/progress"
 #: A catalog that never carries the request, so the watch keeps polling and the spinner keeps drawing.
 WAITING = {
     "POST /reef/train": {"status": 200, "body": ACCEPTED},
-    "GET /reef/harness/releases": {"status": 200, "body": {"scenario": "code-repair", "releases": [CREATION_ROW]}},
+    "GET /reef/harness/releases": {
+        "status": 200,
+        "body": _listed({"scenario": "code-repair", "releases": [CREATION_ROW]}),
+    },
 }
 
 
@@ -1245,7 +1270,7 @@ def test_the_spinner_sits_above_the_input_and_names_the_phase_the_service_report
     assert any("checking the harness" in content[0] for content in drawn)
     assert all("ctrl+q or /reefine to look in" in content[0] for content in drawn)
     # The line carries the request's page as a terminal hyperlink, so a click opens it where the terminal offers one.
-    assert all(f"\x1b]8;;{REQUEST_PAGE}\x1b\\open the page\x1b]8;;\x1b\\" in content[0] for content in drawn)
+    assert all(f"\x1b]8;;{REQUEST_PAGE}{KEY}\x1b\\open the page\x1b]8;;\x1b\\" in content[0] for content in drawn)
     # The frames turn, so the person sees the step is alive between the polls.
     assert len({content[0][0] for content in drawn}) > 1
     # The phase is the service's own, read from the route the page reads.
@@ -1490,7 +1515,7 @@ def test_the_footer_says_queued_until_progress_reports_a_running_step_then_count
     assert reads[0]["method"] == "GET"
     assert reads[0]["headers"] == {"x-reef-scenario": "code-repair", "authorization": "Bearer tok"}
     assert len([event for event in _fetches(out) if event["url"].endswith("/reef/harness/releases")]) > 3
-    assert _notices(out) == [{"kind": "notify", "message": f"{ACCEPTED_NOTICE}&token=tok", "type": "info"}]
+    assert _notices(out) == [{"kind": "notify", "message": ACCEPTED_NOTICE, "type": "info"}]
 
 
 def test_session_shutdown_clears_the_watch(tmp_path: Path) -> None:
@@ -1688,7 +1713,7 @@ def test_a_hung_read_ends_at_the_fetch_deadline_so_the_watch_goes_on_and_a_filin
 
 # -- the next step after a result: the install through the wrapper, and for a pending release the promote first --
 
-INSTALL_REASON = "Read the change first: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair"
+INSTALL_REASON = f"Read the change first: http://reef:8900/reef/harness/releases/1/page?scenario=code-repair{KEY}"
 INSTALLED_LINE = "Installed release rel-1111. Type /reload to load it now."
 CHECK = "osascript -e 'display notification \"reef\"'"
 # What the wrapper lists for the selected release: an env item with a prompt, a permission item with a check, and
@@ -2066,7 +2091,10 @@ def test_session_start_drops_a_stored_request_the_service_no_longer_knows(tmp_pa
         json.dumps([{"id": "q-9", "text": "log when blocked", "filed_at": time.time() - 60}]), encoding="utf-8"
     )
     answers = {
-        "GET /reef/harness/releases": {"status": 200, "body": {"scenario": "code-repair", "releases": [CREATION_ROW]}},
+        "GET /reef/harness/releases": {
+            "status": 200,
+            "body": _listed({"scenario": "code-repair", "releases": [CREATION_ROW]}),
+        },
         "GET /reef/scenarios/code-repair/records/q-9": {"status": 404, "body": {"error": "no record"}},
     }
     out = _run(tmp_path, agent_dir, TEST_STEP="session_start", TEST_ANSWERS=json.dumps(answers), TEST_WAIT_MS="60")

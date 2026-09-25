@@ -149,6 +149,11 @@ class CandidateBackend(CandidateEvaluator, ABC):
         return None
 
     @property
+    def harness_adapter(self) -> str | None:
+        """The name of the harness adapter the backend evolves; ``None`` for a backend that evolves no harness."""
+        return None
+
+    @property
     def stale_result_policy(self) -> StaleResultPolicy:
         """What a result prepared against a release another trainer has since replaced becomes.
 

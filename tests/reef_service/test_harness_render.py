@@ -130,7 +130,11 @@ def test_codex_accepts_admitted_model_tuning() -> None:
 
 
 def test_codex_requires_the_responses_dialect() -> None:
-    with pytest.raises(ModelBindingError, match="declares no model_binding for the 'openai' api"):
+    # The error names the serve flag that picks the dialect the adapter declares.
+    with pytest.raises(
+        ModelBindingError,
+        match=r"declares no model_binding for the .openai. api .*serve with --inference.upstream-api responses",
+    ):
         ModelBinding("http://up", "m").compose_nodes(get_adapter("codex"))
 
 
