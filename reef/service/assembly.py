@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import secrets
 from collections.abc import Mapping
 from contextlib import suppress
 from dataclasses import asdict
@@ -280,15 +281,20 @@ def build_dispatcher(
     environ: Mapping[str, str] | None = None,
     connector: Any = None,
     hold_local_cycles: bool = False,
+    evaluation_token: str | None = None,
 ) -> Dispatcher:
+    """Build the dispatcher of a service.
+
+    ``evaluation_token`` is the token the recipe's evaluation calls present:
+    one the app accepts on the evaluation routes alone, since those calls run
+    candidate code. ``None`` sends none.
+    """
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     # A recipe's own evaluation calls come back to this Reef, so they sample the release it serves.
     served_url = settings.served_url or default_served_url(settings.host, settings.port)
-    recipe = recipe.with_served_endpoint(
-        ServedEndpoint(url=served_url, token=settings.tokens[0] if settings.tokens else None)
-    )
+    recipe = recipe.with_served_endpoint(ServedEndpoint(url=served_url, token=evaluation_token))
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
     try:
@@ -352,13 +358,23 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
     )
     # A recipe's model calls come back to this service, which answers only once the app listens: its local
     # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
-    dispatcher = build_dispatcher(settings, environ=environ, connector=connector, hold_local_cycles=True)
+    # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
+    # never a service token; a restart issues a new one with the recipe it rebuilds.
+    evaluation_token = secrets.token_urlsafe(32) if settings.tokens else None
+    dispatcher = build_dispatcher(
+        settings,
+        environ=environ,
+        connector=connector,
+        hold_local_cycles=True,
+        evaluation_token=evaluation_token,
+    )
     # No tokens (e.g. REEF_TOKEN="" in the environment) means no auth,
     # not auth with the empty string.
     try:
         return create_app(
             dispatcher,
             tokens=settings.tokens,
+            evaluation_tokens=evaluation_token,
             console_origins=settings.console_origins,
             inference_retry_policy=retry_policy,
             close_dispatcher=True,

@@ -39,6 +39,7 @@ def create_app(
     dispatcher: Dispatcher,
     *,
     tokens: str | Iterable[str] | None = None,
+    evaluation_tokens: str | Iterable[str] | None = None,
     console_origins: Iterable[str] = (),
     inference_handler: InferenceHandler | None = None,
     inference_retry_policy: InferenceRetryPolicy | None = None,
@@ -50,11 +51,14 @@ def create_app(
 
     ``open_local_cycles_at``: the address this app answers at; once it accepts
     a connection, the dispatcher's held local cycles open (see
-    ``Dispatcher(hold_local_cycles=True)``).
+    ``Dispatcher(hold_local_cycles=True)``). ``evaluation_tokens`` open the
+    evaluation routes only (see ``create_authentication_middleware``).
     """
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     request_service_key = web.AppKey("reef_request_service", RequestService)
-    app = web.Application(middlewares=[create_authentication_middleware(tokens), translate_errors])
+    app = web.Application(
+        middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens), translate_errors]
+    )
     configure_browser_access(app, console_origins)
     app[request_service_key] = request_service
     register_routes(

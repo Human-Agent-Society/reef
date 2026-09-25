@@ -36,8 +36,14 @@ def _digest(token: str) -> bytes:
 #: The harness pages a person opens by a link: the only routes that read the token from the query string.
 PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|releases/\d{1,9})/page$")
 
+#: The routes a recipe's own evaluation calls reach, matched on the raw path so an escaped scenario name stays one
+#: segment: the only routes an evaluation token opens.
+EVALUATION_ROUTES = re.compile(r"^/reef/scenarios/[^/]+(/components/[^/]+)?/evaluation/v1/.+$")
 
-def create_authentication_middleware(tokens: str | Iterable[str] | None):
+
+def create_authentication_middleware(
+    tokens: str | Iterable[str] | None, *, evaluation_tokens: str | Iterable[str] | None = None
+):
     """Bearer-token authentication against the accepted token set.
 
     The token is the service boundary: whoever presents an accepted token is
@@ -55,11 +61,18 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
     carries the header, is judged by the header alone. A request with no
     Authorization header may present the token in ``x-api-key`` instead, the
     header the Anthropic dialect's clients send.
+
+    ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
+    only, on POST. The service hands one to the recipe for its evaluation
+    episodes and proposer, which run candidate code: that code can sample the
+    served release, and nothing else of the service. With no ``tokens``,
+    authentication is off and these tokens change nothing.
     """
 
     # Compare digests in constant time so the response time leaks nothing
     # about how much of a token matched, and keep no plaintext tokens around.
     accepted = tuple(_digest(token) for token in normalize_tokens(tokens))
+    evaluation_accepted = tuple(_digest(token) for token in normalize_tokens(evaluation_tokens))
 
     def _presented(request: web.Request) -> str | None:
         """The credential to judge: the Bearer header's, else the Anthropic dialect's ``x-api-key``, else ``?token=`` on a page route a browser opens."""
@@ -88,6 +101,9 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
         matched = False
         for digest in accepted:
             matched |= secrets.compare_digest(presented, digest)
+        if request.method == "POST" and EVALUATION_ROUTES.match(request.rel_url.raw_path):
+            for digest in evaluation_accepted:
+                matched |= secrets.compare_digest(presented, digest)
         return matched
 
     @web.middleware
@@ -101,4 +117,4 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
     return authenticate
 
 
-__all__ = ["PAGE_ROUTES", "create_authentication_middleware", "normalize_tokens"]
+__all__ = ["EVALUATION_ROUTES", "PAGE_ROUTES", "create_authentication_middleware", "normalize_tokens"]

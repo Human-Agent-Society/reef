@@ -55,3 +55,34 @@ def test_the_served_url_answers_for_a_real_bind(host: str) -> None:
             await runner.cleanup()
 
     asyncio.run(bind_and_connect())
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("tokens", [("admin",), ()])
+def test_the_recipe_evaluation_token_is_its_own_and_opens_the_evaluation_routes_alone(
+    monkeypatch: pytest.MonkeyPatch, tmp_path, tokens: tuple[str, ...]
+) -> None:
+    """The recipe's evaluation calls run candidate code: the service hands them a token of their own, which the app
+    accepts on the evaluation routes alone, never a service token. With auth off there is none."""
+    from reef.service import assembly
+    from reef.service.deploy.service_config import ServiceConfig
+
+    seen: dict[str, object] = {}
+
+    def build_dispatcher(settings, **kwargs):
+        seen["recipe_token"] = kwargs["evaluation_token"]
+        return object()
+
+    def create_app(dispatcher, **kwargs):
+        seen["tokens"] = kwargs["tokens"]
+        seen["evaluation_tokens"] = kwargs["evaluation_tokens"]
+        return object()
+
+    monkeypatch.setattr(assembly, "build_dispatcher", build_dispatcher)
+    monkeypatch.setattr(assembly, "create_app", create_app)
+    assembly.build_app(ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), tokens=tokens))
+    if tokens:
+        assert isinstance(seen["recipe_token"], str) and seen["recipe_token"] not in tokens
+        assert seen["evaluation_tokens"] == seen["recipe_token"] and seen["tokens"] == tokens
+    else:
+        assert seen["recipe_token"] is None and seen["evaluation_tokens"] is None
