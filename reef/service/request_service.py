@@ -67,6 +67,19 @@ def _random_harness_scenario_name() -> str:
     return f"harness-{uuid.uuid4().hex[:12]}"
 
 
+def install_service_url(headers: Mapping[str, str]) -> str | None:
+    """The address an install request reached Reef at, from its Host; None without one.
+
+    A gateway in front of Reef names the address the client reached in the
+    forwarded headers; the binding goes there, so the installed harness
+    calls back through it."""
+    normalized = {key.lower(): value.strip() for key, value in headers.items()}
+    host = normalized.get("x-forwarded-host") or normalized.get("host")
+    if not host:
+        return None
+    return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
+
+
 def _inference_aborted(response: Mapping[str, Any]) -> bool:
     def aborted(value: Any) -> bool:
         return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
@@ -1040,13 +1053,16 @@ class RequestService:
         )
         manifest = self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
         descriptor = get_adapter(adapter)
+        binding_files = self._install_binding(scenario, manifest, descriptor, headers)
         return render_install_script(
             descriptor=descriptor,
             files=manifest["files"],
             release_id=manifest["release_id"],
             content_id=manifest["content_id"],
             scenario=scenario.name,
-            binding_files=self._install_binding(scenario, manifest, descriptor, headers),
+            binding_files=binding_files,
+            # The install record keeps the address the binding names, for a wrapper whose binding a session changed.
+            service_url=install_service_url(headers) if binding_files else None,
             requires=manifest["requires"],
             # The release the script names for a first install must be one the catalog lists.
             fallback_release_id=ancestor_requiring_nothing(
@@ -1069,10 +1085,7 @@ class RequestService:
         when any of those is unknown, and the script then installs the
         composition as before.
         """
-        normalized = {key.lower(): value.strip() for key, value in headers.items()}
-        # A gateway in front of Reef names the address the client reached in the forwarded
-        # headers; the binding goes there, so the installed harness calls back through it.
-        host = normalized.get("x-forwarded-host") or normalized.get("host")
+        service_url = install_service_url(headers)
         evaluation_metrics = manifest.get("evaluation", manifest.get("gate")) or {}
         model = (
             (evaluation_metrics.get("evaluation_context", evaluation_metrics.get("gated_against")) or {}).get("model")
@@ -1085,9 +1098,8 @@ class RequestService:
         entries = scenario.entries_for_version(manifest["release_id"])
         if entries is None and info is not None:
             entries = info.seed_entries
-        if not host or not model or not entries:
+        if not service_url or not model or not entries:
             return {}
-        scheme = normalized.get("x-forwarded-proto") or "http"
         api = "openai" if info is None else info.served_api
         client_models = () if info is None else info.client_models
         override = scenario.model_config.runtime
@@ -1095,7 +1107,7 @@ class RequestService:
             selected = ModelBinding.from_runtime(override)
             model, api = selected.model, selected.api
             client_models = ()
-        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER, api=api)
+        binding = ModelBinding(base_url=service_url, model=model, api_key=TOKEN_PLACEHOLDER, api=api)
         nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
         try:
             bound = binding.compose_nodes(descriptor, models=client_models)

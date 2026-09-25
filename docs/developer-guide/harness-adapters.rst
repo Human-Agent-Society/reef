@@ -643,11 +643,23 @@ Descriptor fields
   writable. Rendered inputs within them stay read-only.
 - ``client_state`` lists ``{path, kind}`` entries for sessions and settings
   that a ``reef-<adapter>`` wrapper keeps under the relocated composition.
-  The wrapper uses a temporary copy of links, then removes it. ``directory``
-  and ``sqlite`` entries are created and linked before the run; ``file``
-  entries are copied back with their mode if the binary created the file
-  or replaced its link. Other state created only in the temporary copy is
-  lost.
+  The wrapper runs the binary on a temporary copy of the tree, then removes
+  it. The copy is made in ``$XDG_CACHE_HOME/reef-harness/sessions``
+  (``~/.cache`` by default), never in ``$TMPDIR``, which the Codex and dsh
+  sandboxes can write. A link at a ``client_state`` path is removed before
+  the run, with a notice, so the binary's writes never follow it out of the
+  tree. ``directory`` and ``sqlite`` entries are created and linked before
+  the run; ``file`` entries are copied back with their mode if the binary
+  created the file or replaced its link. Other state created only in the
+  temporary copy is lost.
+
+  When ``~/.reef/installs`` records the tree's install, the temporary copy
+  holds a copy of each file the install wrote, with its mode, and a link to
+  each ``client_state`` path, one by one. Codex skips a linked ``SKILL.md``,
+  and what a session writes over a copied file stays in the temporary copy.
+  The session starts only while the files the install wrote are unchanged,
+  ``client_state`` excepted, so a file the binary rewrites in place during a
+  session, such as pi's ``settings.json``, belongs in ``client_state``.
 - ``cleanup_whitelist`` lists agent-written paths allowed after boot or a
   run, rather than reported as drift.
 - ``quirks`` names an optional module for adapter-specific render checks

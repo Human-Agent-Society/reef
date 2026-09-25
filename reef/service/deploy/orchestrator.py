@@ -268,7 +268,10 @@ class _Stack:
         _log(f"stack up. logs: {self.run_dir}/*.log")
         hint = install_hint(self.config)
         if hint is not None:
-            _log(f"install the harness in another terminal: {hint}")
+            _log(
+                "install the harness in another terminal; keep its install root, the last argument, outside the "
+                f"project the agent works in: {hint}"
+            )
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -359,9 +362,13 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
 
     Printed when the stack is up so nobody copies it from a README: the
     address the service listens on (loopback when it binds every interface),
-    the adapter the deployment evolves, and the token the config holds."""
-    evolution = config.get("evolution")
-    adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
+    the adapter the deployment evolves, the token the config holds, and an
+    install root under the home directory. The script's own default is
+    ``./reef-harness`` in the directory it runs from, often the project the
+    agent works in, where a session could change what the next one runs."""
+    # A schema-version 2 file (the shipped profiles) resolves the recipe's evolution section under reef; an
+    # unversioned file keeps it at the top level.
+    adapter = config_value(config, "reef", "evolution", "adapter") or config_value(config, "evolution", "adapter")
     if not isinstance(adapter, str) or not adapter:
         return None
     host = str(config_value(config, "reef", "host", default="127.0.0.1"))
@@ -374,7 +381,7 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
         if isinstance(tokens, list) and tokens:
             token = str(tokens[0])
     header = f"-H 'Authorization: Bearer {token}' " if token else ""
-    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash"
+    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash -s -- ~/reef-harness/{adapter}"
 
 
 def _component_selection(

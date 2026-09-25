@@ -23,7 +23,8 @@ everything the shared engines need to drive one harness binary:
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
 - ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
-  keeps in the installed tree, so a later run finds them.
+  keeps in the installed tree, so a later run finds them; the check of the
+  installed files at a session start skips them.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
@@ -128,7 +129,10 @@ class ClientState:
     The wrapper runs the binary on a temp copy of links to the installed
     composition and removes the copy afterwards, so what the binary creates
     there is lost; a path that already exists in the installed tree is
-    linked, and what the binary writes through the link stays.
+    linked, and what the binary writes through the link stays. The wrapper
+    refuses a session when a file the install wrote has changed, and skips
+    these paths, which are the binary's to write; a link at one of them is
+    removed before the run, so the binary's writes stay in the tree.
     """
 
     path: str

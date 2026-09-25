@@ -580,10 +580,22 @@ the install works before any step has run:
 
    curl -fsS -H "Authorization: Bearer reef-local" \
      -H "x-reef-scenario: harness-evolve-demo" \
-     'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
+     'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash -s -- ~/reef-harness/harness-evolve-demo
 
    reef-pi -p "fix the failing test in auth.py"
    reef-pi report --score 0 --feedback "missed the empty-token case"
+
+The script's argument is the install root, ``./reef-harness`` when you name
+none. Put it outside the project the agent works in. An agent can write
+files in its project, also from a sandbox such as Codex's
+``workspace-write``, so with the install root there a session can change
+the files the next session runs, for example rewrite the agent's config so
+that the next session runs without approvals. For ``reef-codex`` and
+``reef-dsh``, also keep it out of ``/tmp`` and ``$TMPDIR``: the Codex and
+dsh sandboxes let a command write there too, so an install root there is
+as open to a session as one in the project. A home directory path such as
+``~/reef-harness/<adapter>`` is outside all of these, unless the agent's
+project is your home directory itself.
 
 The script installs the pinned agent, writes the tree, writes the agent's
 model binding pointed at the address the script came from, which behind a
@@ -597,7 +609,66 @@ when set, otherwise ``python3`` on PATH). Wrapper updates pass their own
 interpreter as ``REEF_PYTHON``. The wrapper reads the
 token back from the binding, so the shell that runs it later needs neither
 on its own. The wrapper keeps
-the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor`` prints one line per thing the install needs
+the receipts from a run, so ``report`` only needs the result. Each session
+runs the agent on a temp copy of the tree whose model binding points at the
+wrapper's capture proxy and holds the token. The wrapper makes that copy in
+``$XDG_CACHE_HOME/reef-harness/sessions`` (``~/.cache/reef-harness/sessions``
+by default on Linux and macOS; on Windows the wrapper runs under WSL, where
+the same path applies), readable by you alone, and never in
+``$TMPDIR`` or ``/tmp``: a command in the Codex or dsh sandbox can write
+there, and Codex reads its config and rules from that copy again when you
+start a new thread with ``/new``. When the terminal closes (SIGHUP) or the
+wrapper gets SIGTERM, it passes the signal to the agent, waits for the
+agent to exit, removes the temp copy, keeps the receipts, and exits with
+128 plus the signal number. ``reef-pi update`` passes the install script to
+``bash`` on its standard input, as ``curl ... | bash`` does, so no copy of
+the script sits in ``$TMPDIR`` while it runs.
+
+The script also records what it wrote in ``~/.reef/installs``, outside the
+install root: the sha256 of every file, of the release file without the
+check offs ``setup`` adds, and the address the script came from. A
+``reef-pi`` session starts only while those files are as the install wrote
+them. A file counts as changed also when a link reaches it: a link at the
+file or at a directory above it, or a second hard link to it; so does
+anything at its path that is not a regular file, such as a FIFO. When one
+differs, ``reef-pi`` prints ``cannot start agent; these files in <install
+root> changed since the install wrote them:``, the file names (a link is
+named after its file, for example ``pi-agent/models.json (a link)``, and
+a FIFO as ``pi-agent/models.json (not a regular file)``) and ``run reef-pi
+update to restore them``, and exits 3 without starting the agent;
+``reef-pi update`` writes them again. The install never writes through a
+link: it replaces a link inside the install root with a regular file (a
+copy of what the link reads, so a linked release file keeps its check
+offs), or removes a link to a directory and writes the directory again,
+and it refuses a link that leads outside the install root, naming the link
+and its target, and writes nothing until you remove that link. It also
+refuses, naming it, anything that is not a regular file at a path it
+writes, and writes nothing until you remove it. When it removes the files
+an earlier release listed and this one lacks, it removes nothing through a
+link: a path under a linked directory is left as it is, and the install
+prints ``did not remove <path>: <directory> is a link``. ``setup`` and
+``update`` never write the release file through a link either. The
+sessions and settings the adapter keeps (``client_state`` in its
+descriptor, such as pi's ``settings.json``) are the agent's own to write
+and are not checked. A link at one of those paths would send the agent's
+writes wherever it points, so before each session the wrapper removes such
+a link, prints ``<path> in <install root> was a link to <target>; removed
+the link, and the session keeps this state in the tree``, and the agent
+starts that state again in the tree; what the link pointed at is left as
+it was.
+A session gets the files the install wrote and that client state, so a
+file added to the tree later is not used, and it gets only the env file
+values the release's ``env`` items name. ``update``, ``setup``,
+``doctor``, ``evolve`` and ``page`` reach Reef at the recorded address,
+not at the one in the model binding. The check cannot cover ``reef-pi``
+itself, which runs before it, so a changed ``reef-pi`` runs as changed:
+one more reason for an install root outside the project. An install made
+before Reef kept this record has none: its sessions start without the
+check, and each such start prints ``<install root> has no install record``
+and that ``reef-pi update`` records the files, until the update writes the
+record.
+
+``reef-pi doctor`` prints one line per thing the install needs
 (the interpreter and its imports, the service and its token, the binary,
 the tools on PATH, the installed release against the served head) and exits
 0 when they all hold; it also lists every release that waits for your
@@ -768,8 +839,10 @@ setup`` shows the prompt and asks you for the value (without echo when the
 name contains TOKEN, KEY, SECRET or PASSWORD; ``--yes`` asks nothing) and
 stores it there: ``NAME=VALUE`` lines, readable by you alone (mode 0600),
 written by ``setup`` only, never in the tree and never sent anywhere. Every
-``reef-pi`` session gets each stored variable in its environment unless
-your shell already sets it (the shell wins), so an evolved extension reads
+``reef-pi`` session gets each stored variable an ``env`` item of the
+installed release names (every stored variable on an install with no
+record in ``~/.reef/installs``) in its environment unless your shell
+already sets it (the shell wins), so an evolved extension reads
 ``process.env.NAME`` and keeps no file of its own. Three more forms take
 one item at a time, for scripts and for the session's extensions:
 ``reef-pi setup --json`` prints the release to set up and its items as one
@@ -871,7 +944,7 @@ the head), and name it to the promote route yourself. Both
 calls name the scenario your install used: the ``x-reef-scenario`` header
 you gave the install command or, without one, the generated name the script
 baked into ``reef-pi`` as ``REEF_HARNESS_SCENARIO``;
-``grep REEF_HARNESS_SCENARIO ./reef-harness/reef-pi`` prints it. The
+``grep REEF_HARNESS_SCENARIO ~/.local/bin/reef-pi`` prints it. The
 deployment listens on port 8901.
 
 .. code:: bash
