@@ -679,6 +679,29 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not
     assert crashed.path == {"stages": [], "reason": "completed"}
 
 
+def test_an_episode_whose_log_the_reader_found_empty_says_no_transcript_was_read() -> None:
+    """A reader that found no session log leaves a text grader nothing to read: the score stands and the episode is
+    no failure (a grader that reads files judged the run), but it says no transcript was read, so a step rejected
+    on it does not blame the request. The reply a grader reads rides the result."""
+    episode_worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("pi"),
+        scorer=resolve_episode_scorer(lambda task, result: 0.0),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+    empty = EpisodeResult(exit_code=0, stdout="reef-ok", stderr="", trajectory=(), residue=())
+    scored = episode_worker._score_result(empty, "task one")
+    assert scored.score == 0.0 and scored.reply is None
+    assert scored.failure is None and scored.transcript_read is False
+    answered = ({"role": "assistant", "content": "reef-ok"},)
+    scored = episode_worker._score_result(
+        EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=answered, residue=()), "task one"
+    )
+    assert scored.failure is None and scored.reply == "reef-ok"
+
+
 def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run() -> None:
     """The runner records a trial whose image did not build or whose agent could not start as a failed
     verifier row with the error; it ranks below every real score and the error reaches the manifest."""
@@ -704,6 +727,33 @@ def test_a_terminus_trial_that_never_ran_ranks_as_an_episode_that_could_not_run(
     wrote_nothing = EpisodeResult(exit_code=1, stdout="", stderr="", trajectory=(row(""),), residue=())
     scored = episode_worker._score_result(wrote_nothing, "task one")
     assert scored.score == 0.0 and scored.failure is not None and scored.failure.stage == "exit"
+
+
+def test_a_terminus_episode_with_agent_steps_scores_by_its_verifier(tmp_path: Path) -> None:
+    """A terminus trial's ATIF steps carry their text as a plain string ``message``: scoring reads the verifier's
+    reward and finds no assistant reply, instead of taking the step's text for a wrapped message."""
+    from reef.harness.episodes.trajectory import read_terminus_atif
+    from reef.train.cordis_backend.strategies import verifier_reward
+
+    episode_worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("terminus"),
+        scorer=resolve_episode_scorer(verifier_reward),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+    steps = [
+        {"step_id": 1, "source": "user", "message": "Write the output of `echo reef-ok` to health.txt."},
+        {"step_id": 2, "source": "agent", "model_name": "m", "message": "Analysis: fresh terminal.\nPlan: run it."},
+    ]
+    trial = {"task": "health", "rewards": {"reward": 1.0}, "reward": 1.0, "failed": False, "error": "", "steps": steps}
+    (tmp_path / "health.json").write_text(json.dumps(trial), encoding="utf-8")
+    trajectory = read_terminus_atif(tmp_path)
+    scored = episode_worker._score_result(
+        EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=()), "health"
+    )
+    assert scored.score == 1.0 and scored.failure is None and scored.reply is None
 
 
 def test_an_agents_error_that_ended_the_run_ranks_the_episode_as_one_that_could_not_run(episode_worker) -> None:

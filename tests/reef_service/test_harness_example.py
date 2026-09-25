@@ -112,6 +112,12 @@ class Model:
             raise reply
         return reply
 
+    def last_response(self) -> None:
+        return None
+
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """The step activity a ModelBinding keeps; the stand-in keeps none."""
+
 
 def canned(reply: str) -> Model:
     return Model(reply)
@@ -1526,3 +1532,24 @@ def test_the_kept_answer_is_the_delivering_one_with_the_fewest_uncovered_points(
     model = Model(designed(skill("first")), json.dumps(two_gaps), ModelBindingError("endpoint down"))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
     assert [m.id for m in proposal.mutations] == ["first"] and proposal.notes["attempts"] == 2
+
+
+def test_a_request_on_another_adapter_asks_for_no_code_extension_and_takes_none(evolution) -> None:
+    """The proposer knows pi's extension API alone: on dsh the prompt offers rules, skills and commands, names
+    the harness and its wrapper, and an extension in the reply is not an entry."""
+    skill = {"name": "test-first", "text": "---\nname: test-first\ndescription: run tests first\n---\n# test-first\n"}
+    model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
+    mutations = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="dsh").mutations
+    prompt = model.prompt
+    for kind in ("skill", "rules", "agent_command"):
+        assert f"- {kind}:" in prompt
+    assert "- code_extension:" not in prompt and "pi.registerCommand" not in prompt
+    assert "This harness is DeepSeek Harness (dsh)" in prompt and "reef-dsh setup" in prompt
+    assert [(m.op, m.id) for m in mutations] == [("create", "test-first")]
+    extension = {"name": "chat-mode", "code": "export default function (pi) {}\n"}
+    model = canned(request_reply({"id": "chat-mode", "name": "code_extension", "config": extension}))
+    assert failure_of(evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="dsh")) == NO_ENTRY
+    # pi keeps every kind and its own wording.
+    model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert "- code_extension:" in model.prompt and "reef-pi setup" in model.prompt
