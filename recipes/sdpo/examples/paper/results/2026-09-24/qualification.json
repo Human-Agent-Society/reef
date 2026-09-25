@@ -1,0 +1,68 @@
+{
+  "kind": "synthetic_gpu_qualification",
+  "date": "2026-09-24",
+  "paper_result": false,
+  "hardware": {
+    "gpu": "NVIDIA H100 80GB HBM3",
+    "count": 4,
+    "architecture": "x86_64"
+  },
+  "source": {
+    "reef_base_commit": "54cf72b6230cd8d0db819ef1cd9fa5865497b745",
+    "slime_commit": "41014d1f29e201137fdffce737bb8bac65bc5219",
+    "sglang_commit": "f7ea06e1e519c569c1d6cb7e1c7b1128cbdbc39f",
+    "container": "slimerl/slime@sha256:0589e3b6415e79bc43f14ab5bb5fb8a0b89f50b1d31efb2ea76856498ffcbbeb",
+    "model": {
+      "model": "Qwen/Qwen3-0.6B",
+      "revision": "c1899de289a04d12100db370d81485cdf75e47ca"
+    }
+  },
+  "cuda_parity": {
+    "reference_commit": "7c457fc1b1f636ae794eb0362ba37d4743b06fbc",
+    "source_sha256": "4f949c323f005b4945f1983bdf89a9ddbd53865d0d7511993c37fbe7c47d6903",
+    "torch": "2.11.0+cu129",
+    "cases": 24,
+    "max_loss_abs_error": 5.960464477539063e-08,
+    "max_gradient_abs_error": 3.2014213502407074e-09
+  },
+  "grid": {
+    "prompts": 2,
+    "responses_per_prompt": 2,
+    "environment_feedback": true
+  },
+  "steps": [
+    {
+      "step": 0,
+      "sampling_seconds": 7.15119455405511,
+      "report_to_release_seconds": 28.053315124940127,
+      "loss": 0.059262167662382126,
+      "gradient_norm": 13.620769438890811,
+      "teacher_forward_seconds": 3.907256841659546,
+      "actor_train_seconds": 2.4124436378479004,
+      "mean_response_tokens": 13.0,
+      "samples": 4,
+      "optimizer_steps": 1,
+      "published_live_weights": true
+    },
+    {
+      "step": 1,
+      "sampling_seconds": 0.12554641207680106,
+      "report_to_release_seconds": 20.0502702658996,
+      "loss": 0.34964680671691895,
+      "gradient_norm": 66.55723644094795,
+      "teacher_forward_seconds": 1.1227869987487793,
+      "actor_train_seconds": 0.7434749603271484,
+      "mean_response_tokens": 2.0,
+      "samples": 4,
+      "optimizer_steps": 1,
+      "published_live_weights": true
+    }
+  ],
+  "limitations": [
+    "Synthetic arithmetic/formatting qualification, not a paper benchmark or an accuracy improvement claim.",
+    "All synthetic task scores were zero; formatting feedback supplied the active teacher targets.",
+    "Gradient norms are measured before clipping at 1.",
+    "Report-to-release times include scheduling and weight publication; they are not 7B/8B throughput estimates.",
+    "The second step consumed a different published runtime load than the first."
+  ]
+}

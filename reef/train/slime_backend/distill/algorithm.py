@@ -59,9 +59,12 @@ class DistillSettings:
     teacher: str = "self"
     divergence: str = "forward"
     top_k: int = 0
+    top_k_source: str = "teacher"
+    top_k_distribution: str = "renormalized"
     teacher_update_rate: float = 0.01
     teacher_checkpoint: str = ""
     importance_sampling_cap: float = 2.0
+    importance_sampling_level: str = "sequence"
     skip_response_tokens: int = 0
     jsd_beta: float = 0.5
 
@@ -72,6 +75,12 @@ class DistillSettings:
             raise ValueError(f"distill divergence must be one of: {', '.join(DIVERGENCES)}")
         if not _is_integer(self.top_k) or self.top_k < 0:
             raise ValueError("distill top_k must be a non-negative integer (0 keeps the whole distribution)")
+        if self.top_k_source not in ("teacher", "student"):
+            raise ValueError("distill top_k_source must be teacher or student")
+        if self.top_k_distribution not in ("renormalized", "tail"):
+            raise ValueError("distill top_k_distribution must be renormalized or tail")
+        if self.importance_sampling_level not in ("sequence", "token"):
+            raise ValueError("distill importance_sampling_level must be sequence or token")
         if not _is_finite(self.teacher_update_rate) or not 0 <= self.teacher_update_rate <= 1:
             raise ValueError("distill teacher_update_rate must be a number in [0, 1]")
         if not isinstance(self.teacher_checkpoint, str):
@@ -270,6 +279,24 @@ class DistillAlgorithm(SlimeAlgorithm):
             type=float,
             help=f"For 'jsd': the teacher's weight in the mixture. Default {defaults.jsd_beta}.",
         )
+        parser.add_argument(
+            f"{prefix}top-k-source",
+            dest="top_k_source",
+            choices=("teacher", "student"),
+            help="Select top-K ids using the teacher or the current student before the optimizer step.",
+        )
+        parser.add_argument(
+            f"{prefix}top-k-distribution",
+            dest="top_k_distribution",
+            choices=("renormalized", "tail"),
+            help="Renormalize the selected K entries, or retain the remaining vocabulary mass as a tail bucket.",
+        )
+        parser.add_argument(
+            f"{prefix}importance-sampling-level",
+            dest="importance_sampling_level",
+            choices=("sequence", "token"),
+            help="Average correction weights per sequence, or apply them independently at each token.",
+        )
         options, remaining = parser.parse_known_args(list(arguments))
         return self.settings_type(**vars(options)), remaining
 
@@ -279,9 +306,12 @@ class DistillAlgorithm(SlimeAlgorithm):
         args.distill_teacher = settings.teacher
         args.distill_divergence = settings.divergence
         args.distill_top_k = settings.top_k
+        args.distill_top_k_source = settings.top_k_source
+        args.distill_top_k_distribution = settings.top_k_distribution
         args.distill_teacher_update_rate = settings.teacher_update_rate
         args.distill_teacher_checkpoint = settings.teacher_checkpoint
         args.distill_importance_sampling_cap = settings.importance_sampling_cap
+        args.distill_importance_sampling_level = settings.importance_sampling_level
         args.distill_skip_response_tokens = settings.skip_response_tokens
         args.distill_jsd_beta = settings.jsd_beta
 
@@ -308,9 +338,12 @@ def settings_from_args(args: Namespace) -> DistillSettings:
         teacher=args.distill_teacher,
         divergence=args.distill_divergence,
         top_k=args.distill_top_k,
+        top_k_source=args.distill_top_k_source,
+        top_k_distribution=args.distill_top_k_distribution,
         teacher_update_rate=args.distill_teacher_update_rate,
         teacher_checkpoint=args.distill_teacher_checkpoint,
         importance_sampling_cap=args.distill_importance_sampling_cap,
+        importance_sampling_level=args.distill_importance_sampling_level,
         skip_response_tokens=args.distill_skip_response_tokens,
         jsd_beta=args.distill_jsd_beta,
     )

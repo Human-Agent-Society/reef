@@ -1,0 +1,97 @@
+[
+  {
+    "path": "recipes/sdpo/__init__.py",
+    "bytes": 456,
+    "sha256": "92ab356a90f319762920d1a55b205abcb5fbfc0b873e74c671d1f1eb0f8e9f7c"
+  },
+  {
+    "path": "recipes/sdpo/objective.py",
+    "bytes": 874,
+    "sha256": "7564ad90de181573213872c05214c46373afe2a9a714d8a104358814a7bc3280"
+  },
+  {
+    "path": "recipes/sdpo/processor.py",
+    "bytes": 10017,
+    "sha256": "33f21a7482ee8489c2916cb89ff836cac62c053d1d4fd39aafa860bff6897336"
+  },
+  {
+    "path": "recipes/sdpo/recipe.py",
+    "bytes": 2269,
+    "sha256": "aa27410dfb0449ade6cba98d20daf44ddb4e17ab7a5fc98d7e035b8224b85e02"
+  },
+  {
+    "path": "recipes/sdpo/report.py",
+    "bytes": 623,
+    "sha256": "d22532f3f6fa018625c8f5ce167abb5696bee936fb9ef12ce9faab0ddedc9a50"
+  },
+  {
+    "path": "recipes/sdpo/slime/__init__.py",
+    "bytes": 3140,
+    "sha256": "4d453e805a51f7b32e19ebdcfcdfdfbd76e78bf56e8ce250e91dfd51effab9b1"
+  },
+  {
+    "path": "recipes/sdpo/slime/objective.py",
+    "bytes": 1318,
+    "sha256": "83fb1b3c16c1972026dfbc9b1f2ae5e279fe29bfd8879ec2d1ea20c7d6e94858"
+  },
+  {
+    "path": "reef/train/slime_backend/distill/algorithm.py",
+    "bytes": 16972,
+    "sha256": "30164101817de8a9a84a0b0fb4862be36547ca0ed9c726a63b24ef249cd2059f"
+  },
+  {
+    "path": "reef/train/slime_backend/distill/objective.py",
+    "bytes": 26374,
+    "sha256": "d1270dac78bc17256deca62c2228120989a7b9a57475e0d4b07ddd082410157a"
+  },
+  {
+    "path": "reef/train/slime_backend/distill/teacher.py",
+    "bytes": 18001,
+    "sha256": "8d8850f3f4f559c07ec58f2af1f0255288b5795763dea1750a5e0792edb3afa9"
+  },
+  {
+    "path": "reef/train/processors/distill.py",
+    "bytes": 7825,
+    "sha256": "3483d2951918ea4d4abceccb8cd726f70ecbbe5bd3996807c8b8c4891b1c627d"
+  },
+  {
+    "path": "recipes/sdft/processor.py",
+    "bytes": 2552,
+    "sha256": "5cb4601006542c4d4088408d4af9ca81bf9a5aac4797d88765d49a474ba4e3a7"
+  },
+  {
+    "path": "tests/conftest.py",
+    "bytes": 3142,
+    "sha256": "ef0e77ec0e673cfbda3ba10de13c9926face431378c819b145f5a025a219d6ee"
+  },
+  {
+    "path": "tests/reef_service/test_sdpo_pipeline.py",
+    "bytes": 8548,
+    "sha256": "7ebdb2307d61102e3fec4c01bab2f55e4911fd6fa713a806773b768166f9c7a0"
+  },
+  {
+    "path": "tests/reef_service/test_sdpo_parity.py",
+    "bytes": 2756,
+    "sha256": "9ebe4c6a8c2ff5b3b6cd9f073d11235bbcd32264148fe886d4c94d4a851cb99e"
+  },
+  {
+    "path": "recipes/sdpo/examples/paper/check_reference.py",
+    "bytes": 6723,
+    "sha256": "de8ed8842f0c9fb65551ef82d3820994e71432680a14c28fd1764aa968134542"
+  },
+  {
+    "path": "recipes/sdpo/examples/paper/harness/__init__.py",
+    "bytes": 43,
+    "sha256": "1e1da8210f5b58b48c7729736d103f8f0f8cba107d2907bdace49f087cb4462b"
+  },
+  {
+    "path": "recipes/sdpo/examples/paper/harness/smoke.py",
+    "bytes": 4711,
+    "sha256": "dbdfdeeeb45349277ee2fc106e1a50abcaca6d546eac110db3a7cc17a3718ad0"
+  },
+  {
+    "path": "recipes/sdpo/examples/paper/smoke.yaml",
+    "bytes": 3069,
+    "sha256": "7920d7460409a54cd961885be2d6272b07202b76700497a450bf62ad423edd4e"
+  }
+]

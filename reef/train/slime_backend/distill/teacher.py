@@ -21,8 +21,9 @@ what the loss needs at every response position:
   this rank's vocab shard, ``[R, V_local]`` rows normalized over the full
   vocabulary, in float16 on the host until the loss moves a micro-batch's
   rows back to the device;
-- the top-K representation: the teacher's own top-K ids and its log-probs
-  at them, ``[R, K]``, plus its log-prob at the sampled token, ``[R]``.
+- the top-K representation: ids selected by the teacher or current student,
+  and the teacher's log-probs at them, ``[R, K]``, plus its log-prob at the
+  sampled token, ``[R]``.
 
 Indexing mirrors ``get_log_probs_and_entropy``'s cp1 branch: the packed
 stream concatenates samples by ``total_length``, and the logits row
@@ -251,8 +252,9 @@ def gather_teacher_topk(
     total_lengths: list[int],
     response_lengths: list[int],
     with_entropy: bool = False,
+    topk_indices: list[torch.Tensor] | None = None,
 ) -> tuple[torch.Tensor, dict[str, list[torch.Tensor]]]:
-    """``forward_only`` callback of the top-K representation: the teacher's top-K and its sampled-token log-prob."""
+    """Score teacher-selected or supplied top-K ids and the sampled response token."""
     from megatron.core import mpu
 
     tp_group = mpu.get_tensor_model_parallel_group()
@@ -263,13 +265,20 @@ def gather_teacher_topk(
     topk_log_probs: list[torch.Tensor] = []
     sampled_log_probs: list[torch.Tensor] = []
     with torch.no_grad():
-        for rows, tokens, response_length in zip(
-            _response_rows(logits, args, total_lengths, response_lengths),
-            unconcat_tokens,
-            response_lengths,
-            strict=True,
+        for index, (rows, tokens, response_length) in enumerate(
+            zip(
+                _response_rows(logits, args, total_lengths, response_lengths),
+                unconcat_tokens,
+                response_lengths,
+                strict=True,
+            )
         ):
-            ids = native_topk_ids(rows, top_k, tp_group, tp_world, tp_rank)
+            if topk_indices is None:
+                ids = native_topk_ids(rows, top_k, tp_group, tp_world, tp_rank)
+            else:
+                ids = topk_indices[index].to(device=rows.device, dtype=torch.long)
+                if ids.shape != (response_length, top_k):
+                    raise ValueError("selected top-K ids must match the sample's response length and K")
             sampled = tokens[-response_length:].to(device=rows.device, dtype=torch.long)
             at_ids = gather_log_probs_at_ids(
                 rows, torch.cat([ids, sampled[:, None]], dim=-1), tp_group, tp_world, tp_rank
@@ -315,7 +324,10 @@ def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: Dis
     device = torch.cuda.current_device()
     vpp = mpu.get_virtual_pipeline_model_parallel_world_size() or 1
 
-    pass_tokens = [tokens.to(device=device, dtype=torch.long) for tokens in teacher_tokens]
+    # Each sequence is a distinct tensor: Slime's DataIterator preserves those
+    # objects as unconcat_tokens, which lets the callback carry selected ids
+    # through its packing without matching on potentially duplicated text.
+    pass_tokens = [tokens.to(device=device, dtype=torch.long).clone() for tokens in teacher_tokens]
     schedule = pack_forward_schedule(lengths, budget)
     view = {
         "tokens": pass_tokens,
@@ -327,6 +339,50 @@ def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: Dis
     if _TEACHER is None:
         _TEACHER = teacher_weights(settings)
     callback = gather_teacher_log_probs if settings.exact else gather_teacher_topk
+    if not settings.exact and settings.top_k_source == "student":
+        student_tokens = rollout_data["tokens"]
+        student_lengths = [int(tokens.numel()) for tokens in student_tokens]
+        student_schedule = pack_forward_schedule(student_lengths, budget)
+        student_view = {
+            "tokens": [tokens.to(device=device, dtype=torch.long) for tokens in student_tokens],
+            "loss_masks": rollout_data["loss_masks"],
+            "total_lengths": student_lengths,
+            "response_lengths": response_lengths,
+            "micro_batch_indices": student_schedule,
+        }
+        selected = forward_only(
+            gather_teacher_topk,
+            args,
+            actor.model,
+            [DataIterator(student_view, student_schedule) for _ in range(vpp)],
+            [len(student_schedule)],
+        )
+        if selected:
+            indices_by_sequence = {
+                id(tokens): indices
+                for tokens, indices in zip(pass_tokens, selected["distill_teacher_topk_ids"], strict=True)
+            }
+
+            def gather_selected(
+                logits: torch.Tensor,
+                *,
+                args: Any,
+                unconcat_tokens: list[torch.Tensor],
+                total_lengths: list[int],
+                response_lengths: list[int],
+                with_entropy: bool = False,
+            ) -> tuple[torch.Tensor, dict[str, list[torch.Tensor]]]:
+                return gather_teacher_topk(
+                    logits,
+                    args=args,
+                    unconcat_tokens=unconcat_tokens,
+                    total_lengths=total_lengths,
+                    response_lengths=response_lengths,
+                    with_entropy=with_entropy,
+                    topk_indices=[indices_by_sequence[id(tokens)] for tokens in unconcat_tokens],
+                )
+
+            callback = gather_selected
     _TEACHER.switch_in(actor)
     try:
         result = forward_only(
