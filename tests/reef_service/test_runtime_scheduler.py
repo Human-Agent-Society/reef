@@ -15,6 +15,7 @@ from reef.runtime.interfaces import (
     PreparedTrainingStep,
     StaleCandidate,
     TrainingRuntime,
+    TrainingRuntimeError,
 )
 from reef.runtime.scheduler import RuntimeScheduler
 from reef.train.algos import StepScheduling
@@ -45,14 +46,14 @@ class CheckpointTrainer(TrainingRuntime):
         self, batch, objective, algorithm_state, scheduling, scenario_step, *, serving_runtime_load_id=None
     ):
         self.calls.append(("prepare", serving_runtime_load_id))
-        return PreparedTrainingStep("train", algorithm_state, {}, {"rollout_id": scenario_step})
+        return PreparedTrainingStep("train", algorithm_state, {}, {"scenario_step": scenario_step})
 
     def train_candidate(self, payload):
         self.calls.append(("train", payload))
         if self.failure is not None:
             raise self.failure
         if self.journal is not None:
-            self.journal.update(status="CHECKPOINT", training_job_id="job-1", rollout_id=0)
+            self.journal.update(status="CHECKPOINT", training_job_id="job-1", scenario_step=0)
         return ModelCandidate(
             candidate_id="job-1",
             training_job_id="job-1",
@@ -107,7 +108,7 @@ class WeightReceiver(InferenceRuntime):
 
 
 def staged_journal(training, *, state="READY_TO_COMMIT", scenario=None):
-    training.journal.update(status=state, training_job_id="job-1", rollout_id=0, scenario=scenario)
+    training.journal.update(status=state, training_job_id="job-1", scenario_step=0, scenario=scenario)
 
 
 @pytest.mark.parametrize("colocate", [False, True])
@@ -116,7 +117,7 @@ def test_selected_weights_remain_unpublished_until_matching_commit(colocate):
     inference = WeightReceiver()
     scheduler = RuntimeScheduler(training, inference)
 
-    candidate = scheduler.train_candidate({"rollout_id": 0})
+    candidate = scheduler.train_candidate({"scenario_step": 0})
     assert candidate.current_runtime_load_id == "engine:0"
     assert inference.inference_admission_status["open"] is (not colocate)
     scheduler.activate_candidate(candidate)
@@ -131,7 +132,7 @@ def test_selected_weights_remain_unpublished_until_matching_commit(colocate):
     assert inference.calls == [("activate", "job-1"), ("acknowledge", "job-1")]
     assert inference.current_runtime_load_id() == "engine:1"
     assert inference.inference_admission_status["open"]
-    assert training.calls == [("train", {"rollout_id": 0})]
+    assert training.calls == [("train", {"scenario_step": 0})]
 
 
 def test_local_candidate_backend_uses_same_publication_order_without_remote_journal():
@@ -234,7 +235,7 @@ def test_preparation_passes_only_the_required_serving_version_value(max_stalenes
     scheduler = RuntimeScheduler(training, inference)
     inference.loaded = "engine:1"
     prepared = scheduler.prepare_training_step(TrainingBatch("batch-1"), "test", {}, StepScheduling(), 0)
-    assert prepared.payload == {"rollout_id": 0}
+    assert prepared.payload == {"scenario_step": 0}
     assert training.calls == [("prepare", expected)]
     assert not hasattr(training, "inference_runtime")
     assert not hasattr(inference, "training_runtime")
@@ -252,3 +253,18 @@ def test_attaching_to_an_unacknowledged_update_starts_with_closed_admission(stat
     scheduler.acknowledge_commit(1, "job-1")
     assert inference.inference_admission_status["open"]
     assert inference.current_runtime_load_id() == "engine:1"
+
+
+def test_a_settled_job_an_earlier_release_left_without_its_step_is_left_alone():
+    """An acknowledged job an earlier release recorded without ``scenario_step`` has nothing to finish; a job still
+    out must name its step."""
+    training = CheckpointTrainer()
+    inference = WeightReceiver()
+    scheduler = RuntimeScheduler(training, inference)
+    training.journal.update(status="COMPLETE", training_job_id="job-1", commit_acknowledged=True)
+    training.journal.pop("scenario_step", None)
+    scheduler.recover_pending_step(3)
+    assert inference.calls == []
+    training.journal.update(commit_acknowledged=False)
+    with pytest.raises(TrainingRuntimeError, match="missing its durable identity"):
+        scheduler.recover_pending_step(3)

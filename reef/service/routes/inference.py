@@ -17,7 +17,7 @@ from reef.service.streaming import (
     receipt_sse_events,
     stream_record,
 )
-from reef.service.wire import RELEASE_ID_HEADER
+from reef.service.wire import RELEASE_ID_HEADER, SCENARIO_HEADER
 
 logger = logging.getLogger(__name__)
 
@@ -71,32 +71,39 @@ class _SSERelay:
         return False
 
 
+#: The provider routes Reef serves; an evaluation call names one of them under its scenario.
+INFERENCE_PATHS = ("/v1/chat/completions", "/v1/responses", "/v1/messages", "/v1/messages/count_tokens")
+
+
 async def _relay_inference_stream(
     request: web.Request,
     payload: dict[str, Any],
     *,
+    headers: Mapping[str, str],
+    path: str,
+    record: bool,
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
+    evaluated: str | None = None,
 ) -> web.StreamResponse:
-    """Stream one upstream inference to the client and record what it sent."""
+    """Stream one upstream inference to the client and, unless it is an evaluation call, record what it sent."""
     upstream, pending = await request_service.start_stream(
-        request.headers,
-        payload,
-        request.path,
-        inference_handler,
+        headers, payload, path, inference_handler, record=record, evaluated=evaluated
     )
     response_headers = {
         name: value
         for name, value in upstream.headers.items()
         if name.lower() not in ("x-reef-agent-record-id", RELEASE_ID_HEADER)
     }
-    response_headers.update(await _release_header(request_service, request.headers))
+    if record:
+        # Only a resident harness reads the head; an evaluation episode runs a candidate, not the served tree.
+        response_headers.update(await _release_header(request_service, headers))
     content_type = next(
         (value for name, value in response_headers.items() if name.lower() == "content-type"),
         "",
     )
     is_sse = "text/event-stream" in content_type.lower()
-    if not is_sse:
+    if not is_sse and record:
         response_headers["x-reef-agent-record-id"] = pending.item.agent_record_id
     response = web.StreamResponse(status=upstream.status, headers=response_headers)
     body = bytearray()
@@ -106,7 +113,7 @@ async def _relay_inference_stream(
     try:
         await response.prepare(request)
         if is_sse:
-            relay = _SSERelay(request.path, response)
+            relay = _SSERelay(path, response)
             async for chunk in upstream.chunks:
                 body.extend(chunk)
                 if await relay.feed(chunk):
@@ -117,16 +124,18 @@ async def _relay_inference_stream(
                 error = "upstream SSE ended without a terminal event"
             else:
                 record_attempted = True
-                item = request_service.record_stream(
+                # Off the loop: recording takes the scenario's lock, which a commit may hold for a while.
+                item = await asyncio.to_thread(
+                    request_service.record_stream,
                     pending,
                     stream_record(upstream, bytes(body), complete=True),
                 )
-                for frame in receipt_sse_events(
-                    request.path,
-                    relay.chat_identity,
-                    relay.terminal,
-                    item.agent_record_id,
-                ):
+                frames = (
+                    receipt_sse_events(path, relay.chat_identity, relay.terminal, item.agent_record_id)
+                    if record
+                    else (relay.terminal,)
+                )
+                for frame in frames:
                     await response.write(frame)
                 complete = True
         else:
@@ -151,7 +160,8 @@ async def _relay_inference_stream(
             await upstream.close()
         finally:
             if not record_attempted:
-                request_service.record_stream(
+                await asyncio.to_thread(
+                    request_service.record_stream,
                     pending,
                     stream_record(upstream, bytes(body), complete=complete, error=error),
                 )
@@ -164,24 +174,43 @@ def register_inference_routes(
     request_service: RequestService,
     inference_handler: InferenceHandler | None,
 ) -> None:
-    async def inference(request: web.Request) -> web.StreamResponse:
+    async def serve(
+        request: web.Request, headers: Mapping[str, str], path: str, *, record: bool, evaluated: str | None = None
+    ) -> web.StreamResponse:
         payload = await read_object(request)
         if payload.get("stream") is True:
             return await _relay_inference_stream(
                 request,
                 payload,
+                headers=headers,
+                path=path,
+                record=record,
                 request_service=request_service,
                 inference_handler=inference_handler,
+                evaluated=evaluated,
             )
         response_payload, item = await request_service.infer_with_data(
-            request.headers,
-            payload,
-            request.path,
-            inference_handler,
+            headers, payload, path, inference_handler, record=record, evaluated=evaluated
         )
-        headers = {"x-reef-agent-record-id": item.agent_record_id}
-        headers.update(await _release_header(request_service, request.headers))
-        return web.json_response(response_payload, headers=headers)
+        response_headers = {} if item is None else {"x-reef-agent-record-id": item.agent_record_id}
+        if record:
+            response_headers.update(await _release_header(request_service, headers))
+        return web.json_response(response_payload, headers=response_headers)
+
+    async def inference(request: web.Request) -> web.StreamResponse:
+        return await serve(request, request.headers, request.path, record=True)
+
+    async def evaluation(request: web.Request) -> web.StreamResponse:
+        """An evaluation episode's call: the scenario's release, served like any other and kept by nobody.
+
+        The episode runs its own candidate of one component, named in the path
+        of a composed release, so that component's served hooks stay out.
+        """
+        path = "/v1/" + request.match_info["route"]
+        if path not in INFERENCE_PATHS:
+            raise web.HTTPNotFound(text=f"{path} is not an inference route")
+        headers = {**dict(request.headers), SCENARIO_HEADER: request.match_info["scenario"]}
+        return await serve(request, headers, path, record=False, evaluated=request.match_info.get("component"))
 
     async def multimodal(request: web.Request) -> web.StreamResponse:
         """Relay a multimodal call through the scenario's recipe; the answer streams back unchanged, unrecorded."""
@@ -202,6 +231,8 @@ def register_inference_routes(
     app.router.add_post("/v1/responses", inference)
     app.router.add_post("/v1/messages", inference)
     app.router.add_post("/v1/messages/count_tokens", inference)
+    app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", evaluation)
+    app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", evaluation)
     for path in MULTIMODAL_ROUTES:
         app.router.add_post(path, multimodal)
 

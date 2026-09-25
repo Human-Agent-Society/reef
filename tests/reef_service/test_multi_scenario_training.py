@@ -126,6 +126,39 @@ def test_a_full_weight_runtime_still_trains_one_scenario_only(tmp_path) -> None:
         dispatcher.close()
 
 
+class _PayloadRecordingRuntime(RecordingRuntime):
+    """A full weight runtime that keeps every payload it was asked to train."""
+
+    def __init__(self) -> None:
+        super().__init__(served_version="w0")
+        self.payloads: list[dict] = []
+
+    def train_candidate(self, payload):
+        self.payloads.append(dict(payload))
+        return super().train_candidate(payload)
+
+
+@pytest.mark.unit
+def test_every_job_names_its_owner_and_only_an_adapter_runtime_gets_the_slot_scenario(tmp_path) -> None:
+    """The job marker names the scenario that owns the job, on a full weight runtime too, so a delete never has to
+    guess whose job is out; only a runtime training several scenarios gets the scenario that picks its slot."""
+    full, adapters = _PayloadRecordingRuntime(), AdapterRuntime()
+    for runtime, scenario in ((full, "math"), (adapters, "code")):
+        initial = tmp_path / scenario / "initial"
+        initial.mkdir(parents=True)
+        dispatcher = build_training_dispatcher(
+            runtime, tmp_path / scenario, InMemoryRepositoryBackend.factory(initial, root=tmp_path / scenario / "repo")
+        )
+        try:
+            _feed(dispatcher, scenario, 1)
+            wait_for_step(dispatcher, 1, scenario=scenario)
+        finally:
+            dispatcher.close()
+    assert [payload["owner"] for payload in full.payloads] == ["math"]
+    assert all("scenario" not in payload for payload in full.payloads)
+    assert adapters.scenarios == ["code"]
+
+
 @pytest.mark.unit
 def test_one_scenarios_failure_reloads_only_that_scenario(tmp_path) -> None:
     initial = tmp_path / "initial"
