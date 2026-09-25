@@ -16,7 +16,7 @@ title call, the background review and the curator that write skills into the
 tree, and the snapshot the reader parses. A composition that flips any of
 them, puts a value that is not an object where a section holding one
 belongs, or puts a value that is not a list of strings where Reef adds a
-name, is rejected at render, the same gate that rejects an invalid node.
+name, is rejected at render, the same check that rejects an invalid node.
 """
 
 from __future__ import annotations
@@ -36,7 +36,7 @@ _SKILL_ROOTS = ("hermes/skills/", "hermes-commands/")
 # reef-hermes session, whose home is a temp copy. hermes skips an entry that names no directory, such as the second
 # one where REEF_HARNESS_DEST is unset. A config node's list replaces the one below it, so both follow the tree's own
 # skills.external_dirs, which hermes reads as one entry when it is a string.
-_COMMAND_ROOTS = ("${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands")
+COMMAND_ROOTS = ("${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands")
 
 # hermes's boot scaffolds the home on every start: state directories, the
 # runtime and cache files, lock files beside the state store, and the seed
@@ -64,7 +64,7 @@ def _with_frontmatter(path: str, text: str) -> str:
     return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
-def _setting(config: dict[str, Any], *keys: str) -> object:
+def nested_setting(config: dict[str, Any], *keys: str) -> object:
     """The value at ``keys`` in the config, None when a section on the way is absent or is not an object."""
     value: object = config
     for key in keys:
@@ -72,7 +72,7 @@ def _setting(config: dict[str, Any], *keys: str) -> object:
     return value
 
 
-def _strings(value: object, key: str) -> list[str]:
+def string_list(value: object, key: str) -> list[str]:
     """The strings at ``key``, empty when it is absent; a string or any other value is refused, not read."""
     if value is None:
         return []
@@ -94,12 +94,12 @@ def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
             "so the plugin can be granted"
         )
     section = dict(section or {})
-    enabled = _strings(section.get("enabled"), "plugins.enabled")
+    enabled = string_list(section.get("enabled"), "plugins.enabled")
     section["enabled"] = enabled + [name for name in plugins if name not in enabled]
     entries = dict(entries or {})
     for name in plugins:
         entry = dict(entries.get(name) or {})
-        granted = _strings(entry.get("granted_capabilities"), f"plugins.entries.{name}.granted_capabilities")
+        granted = string_list(entry.get("granted_capabilities"), f"plugins.entries.{name}.granted_capabilities")
         entry["granted_capabilities"] = granted + ["tools.override"] * ("tools.override" not in granted)
         entries[name] = entry
     section["entries"] = entries
@@ -108,29 +108,29 @@ def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     config = json.loads(files[_CONFIG])
-    if _setting(config, "security", "tirith_enabled") is not False:
+    if nested_setting(config, "security", "tirith_enabled") is not False:
         raise RenderError("hermes composition must keep security.tirith_enabled false for benchmark episodes")
-    if _setting(config, "auxiliary", "title_generation", "enabled") is not False:
+    if nested_setting(config, "auxiliary", "title_generation", "enabled") is not False:
         raise RenderError(
             "hermes composition must keep auxiliary.title_generation.enabled false for benchmark episodes"
         )
-    memory_nudge_interval = _setting(config, "memory", "nudge_interval")
-    skill_nudge_interval = _setting(config, "skills", "creation_nudge_interval")
+    memory_nudge_interval = nested_setting(config, "memory", "nudge_interval")
+    skill_nudge_interval = nested_setting(config, "skills", "creation_nudge_interval")
     if memory_nudge_interval != 0 or skill_nudge_interval != 0:
         raise RenderError(
             "hermes composition must keep memory.nudge_interval and skills.creation_nudge_interval 0, "
             "so no background review makes model calls or writes skills"
         )
-    if _setting(config, "curator", "enabled") is not False:
+    if nested_setting(config, "curator", "enabled") is not False:
         raise RenderError("hermes composition must keep curator.enabled false, so the curator leaves the skills alone")
-    if _setting(config, "sessions", "write_json_snapshots") is not True:
+    if nested_setting(config, "sessions", "write_json_snapshots") is not True:
         raise RenderError(
             "hermes composition must keep sessions.write_json_snapshots true so Reef can read the trajectory"
         )
     # skills is an object here: the nudge check above read skills.creation_nudge_interval from it.
-    tree_dirs = _setting(config, "skills", "external_dirs")
-    external_dirs = _strings([tree_dirs] if isinstance(tree_dirs, str) else tree_dirs, "skills.external_dirs")
-    config["skills"]["external_dirs"] = external_dirs + [root for root in _COMMAND_ROOTS if root not in external_dirs]
+    tree_dirs = nested_setting(config, "skills", "external_dirs")
+    external_dirs = string_list([tree_dirs] if isinstance(tree_dirs, str) else tree_dirs, "skills.external_dirs")
+    config["skills"]["external_dirs"] = external_dirs + [root for root in COMMAND_ROOTS if root not in external_dirs]
     plugins = sorted(
         path[len(_PLUGINS) :].split("/")[0]
         for path in files

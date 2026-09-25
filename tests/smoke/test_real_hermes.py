@@ -267,7 +267,7 @@ def test_real_hermes_session_keeps_its_snapshot_and_log_in_the_installed_tree(tm
 
 
 def test_real_hermes_reads_the_curator_off(tmp_path) -> None:
-    """hermes's own curator gate, run in its venv on the rendered home: the curator is off, so a session start seeds
+    """hermes's own curator check, run in its venv on the rendered home: the curator is off, so a session start seeds
     no curator state in the skills directory, which in a reef-hermes session is the installed release's."""
     descriptor = get_adapter("hermes")
     home = tmp_path / "hermes"
