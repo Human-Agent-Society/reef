@@ -1304,10 +1304,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # What the first candidate episodes were graded on, so a rejected step names the task, the reply and why.
             metrics["candidate_episodes"] = [
                 {
-                    "task": _clip_to(task, EPISODE_SUMMARY_CHARS),
+                    "task": clip_redacted(task, EPISODE_SUMMARY_CHARS),
                     "score": run.score,
-                    "failure": None if run.failure is None else _clip_to(run.failure.cause, EPISODE_SUMMARY_CHARS),
-                    "reply": None if run.reply is None else _clip_to(run.reply, EPISODE_SUMMARY_CHARS),
+                    "failure": (
+                        None if run.failure is None else clip_redacted(run.failure.cause, EPISODE_SUMMARY_CHARS)
+                    ),
+                    "reply": None if run.reply is None else clip_redacted(run.reply, EPISODE_SUMMARY_CHARS),
                 }
                 for task, run in list(zip(tasks["candidate"], runs["candidate"], strict=True))[:EPISODE_SUMMARIES]
             ]
@@ -1732,7 +1734,7 @@ EPISODE_SUMMARIES = 8
 EPISODE_SUMMARY_CHARS = 240
 
 
-def _clip_to(text: str, limit: int) -> str:
+def clip_redacted(text: str, limit: int) -> str:
     """``text`` redacted as the record is, cut at ``limit`` characters with an ellipsis marker."""
     text = redact_secret_shaped(text).strip()
     return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."

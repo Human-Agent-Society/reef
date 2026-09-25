@@ -34,11 +34,11 @@ _ADAPTERS = Path(__file__).parents[1] / "adapters"
 _ASSETS = {
     "pi": (_ADAPTERS / "pi" / "requests.ts", _ADAPTERS / "pi" / "pi_extension_api.md"),
 }
-_COMMAND_TEXT = Path(__file__).with_name("reefine_command.md")
+COMMAND_TEXT_PATH = Path(__file__).with_name("reefine_command.md")
 
 
 @dataclass(frozen=True)
-class _Command:
+class ReefineCommand:
     """How one adapter's ``/reefine`` command file reaches the request and the wrapper.
 
     ``command`` is what the person types; ``request`` names the typed request
@@ -64,13 +64,13 @@ class _Command:
     )
 
 
-_TYPED = "the text after /reefine in the person's message"
+TYPED_REQUEST = "the text after /reefine in the person's message"
 
 #: The adapters whose interactive session reaches a rendered agent_command, and how each passes the request on.
 _COMMANDS = {
     # Claude Code refuses an allowed-tools rule on a variable, so the command runs the wrapper by name: the
     # session's PATH starts with the install root.
-    "claude": _Command(
+    "claude": ReefineCommand(
         request='"$ARGUMENTS"',
         wrapper="reef-claude",
         shell_timeout="The Bash tool's own timeout counts milliseconds: give it 150000.",
@@ -83,7 +83,7 @@ _COMMANDS = {
     ),
     # Codex refuses a custom /command, so the command is a skill typed $reefine; its shell sandbox has no network,
     # so each wrapper call asks the person to approve it outside the sandbox (Codex's on-request approvals).
-    "codex": _Command(
+    "codex": ReefineCommand(
         request="the text after $reefine in the person's message",
         command="$reefine",
         wrapper_note=(
@@ -95,19 +95,19 @@ _COMMANDS = {
         shell_timeout="If the shell tool returns while it still runs, wait for it to finish.",
     ),
     # opencode runs a command with the session's current agent; a mode agent without bash could not file it.
-    "opencode": _Command(
+    "opencode": ReefineCommand(
         request='"$ARGUMENTS"',
         shell_timeout="The bash tool's own timeout counts milliseconds: give it 150000.",
         frontmatter="---\ndescription: Ask Reef to change this harness\nagent: build\n---\n",
     ),
-    "hermes": _Command(
+    "hermes": ReefineCommand(
         request=(
             "the instruction at the end of the person's message, after 'The user has provided the following "
             "instruction alongside the skill invocation:'"
         ),
         shell_timeout="The terminal tool's own timeout counts seconds too: give it 150.",
     ),
-    "dsh": _Command(request=_TYPED, shell_timeout="Give the bash tool timeoutMs 150000."),
+    "dsh": ReefineCommand(request=TYPED_REQUEST, shell_timeout="Give the bash tool timeoutMs 150000."),
 }
 
 
@@ -128,7 +128,7 @@ def command_text(adapter: str) -> str:
     command = _COMMANDS.get(adapter)
     if command is None:
         raise DescriptorError(f"adapter {adapter!r} ships no requests command")
-    body = _read(_COMMAND_TEXT, adapter).format(
+    body = _read(COMMAND_TEXT_PATH, adapter).format(
         command=command.command,
         request=command.request,
         adapter=adapter,

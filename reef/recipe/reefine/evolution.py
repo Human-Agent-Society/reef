@@ -75,7 +75,7 @@ def request_config_keys(adapter: str) -> tuple[str, ...]:
     return () if facts is None else facts.config_keys
 
 
-def _file_name(adapter: str, path: str) -> str:
+def file_name(adapter: str, path: str) -> str:
     return path.rsplit("/", 1)[-1] if path else f"{adapter}'s rules file"
 
 
@@ -83,7 +83,7 @@ def kind_lines(adapter: str) -> str:
     """One prompt line per kind a request may write on ``adapter``, with the kind's config fields and the file each
     lands in."""
     descriptor = get_adapter(adapter)
-    rules = _file_name(adapter, descriptor.node_paths.get("rules", ""))
+    rules = file_name(adapter, descriptor.node_paths.get("rules", ""))
     primary = descriptor.config_targets.get("primary")
     lines = {
         "skill": (
@@ -99,7 +99,7 @@ def kind_lines(adapter: str) -> str:
         "code_extension": '- code_extension: {"name": <id>, "code": <a complete pi extension module>}\n',
         "config": (
             '- config: {"target": "primary", "data": <an object merged into '
-            f"{_file_name(adapter, primary.path if primary else '')}, "
+            f"{file_name(adapter, primary.path if primary else '')}, "
             f"with only the top level keys {', '.join(request_config_keys(adapter))}>}}\n"
         ),
     }
@@ -678,7 +678,7 @@ class RequestAnswers:
             failure = "no answer was written" if self.unusable is None else self.unusable.reason
             design = None if self.unusable is None else self.unusable.design
             proposal = StepProposal(
-                (), {**({} if design is None else {"design": _kept_design(design)}), "failure": failure}
+                (), {**({} if design is None else {"design": kept_design(design)}), "failure": failure}
             )
         notes = dict(proposal.notes)
         if attempt > 1 and proposal is not self.undelivered:
@@ -734,9 +734,9 @@ def _answer_once(
     proposals = (
         None if slipped else _parse_proposal(reply, kinds=tuple(kinds), config_keys=request_config_keys(adapter))
     )
-    design = _design_text(reply)
+    design = design_text(reply)
     if proposals is None:
-        refusal = _provider_refusal(models)
+        refusal = provider_refusal(models)
         if refusal is not None:
             return _nothing_to_apply(reply, f"the provider refused the reply ({refusal})")
         if slipped is not None:
@@ -744,7 +744,7 @@ def _answer_once(
         if reply.strip() and not _items_in(reply):
             # No JSON at all: a slip, asked again.
             return UnusableAnswer("the reply holds no usable entry", design)
-        dropped = _dropped_entries(reply, kinds, request_config_keys(adapter))
+        dropped = dropped_entry_reasons(reply, kinds, request_config_keys(adapter))
         if dropped:
             # Entries the parser dropped, one and all: an answer to write again, never a design that declined.
             return UnusableAnswer("the reply holds no usable entry", design, dropped=tuple(dropped))
@@ -762,19 +762,19 @@ def _answer_once(
         _, refusal = admit_mutations(entries, mutations, get_adapter(adapter))
         if refusal is not None:
             return UnusableAnswer(f"the harness refused the entries: {refusal}", design, written)
-    unrestricted = _unrestricted_agents(mutations, nodes, entries)
+    unrestricted = unrestricted_agents(mutations, nodes, entries)
     if unrestricted:
         return UnusableAnswer(
             "; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design, written
         )
-    widened = _widened_permissions(mutations) if adapter == "claude" else []
+    widened = widened_permissions(mutations) if adapter == "claude" else []
     if widened:
         return UnusableAnswer("; ".join(widened), design, written)
     added, refused = _parse_requires(reply)
     notes: dict[str, Any] = {}
     if design is not None:
-        notes["design"] = _kept_design(design)
-    misnamed = _misnamed(reply, kinds)
+        notes["design"] = kept_design(design)
+    misnamed = misnamed_entries(reply, kinds)
     if misnamed:
         notes["dropped"] = misnamed
     # The review reads the whole design; the step records it cut to the record's size.
@@ -803,7 +803,7 @@ def declined_answer(
     """A design that writes no entry, on a harness whose notes name what no answer there can deliver: an answer
     with no change, reviewed like one, so those limits reach the pages and a point an entry could still deliver
     sends the request back. On pi such a reply stays a proposal with nothing to apply."""
-    notes: dict[str, Any] = {"design": _kept_design(design), "declined": DECLINED}
+    notes: dict[str, Any] = {"design": kept_design(design), "declined": DECLINED}
     review, review_failure = _review(models, str(request.get("text", "")), design, [], own, adapter=adapter)
     if review is not None:
         notes["review"] = review
@@ -831,14 +831,14 @@ def entries_in_short(mutations: Sequence[Mutation]) -> str:
     )
 
 
-def _config_agents(config: Any) -> Mapping[str, Any]:
+def config_agents(config: Any) -> Mapping[str, Any]:
     """The agents a config node's data defines under ``agent`` (opencode's key), by name; none for another node."""
     data = config.get("data") if isinstance(config, Mapping) else None
     agents = data.get("agent") if isinstance(data, Mapping) else None
     return agents if isinstance(agents, Mapping) else {}
 
 
-def _unrestricted_agents(
+def unrestricted_agents(
     mutations: Sequence[Mutation], nodes: Sequence[tuple[str, Any]], entries: Sequence[Mapping[str, Any]]
 ) -> list[str]:
     """The agents the answer's config entries define with no permission map, unless the tree already gives that
@@ -849,7 +849,7 @@ def _unrestricted_agents(
         name
         for kind, config in tree
         if kind == "config"
-        for name, agent in _config_agents(config).items()
+        for name, agent in config_agents(config).items()
         if isinstance(agent, Mapping) and isinstance(agent.get("permission"), Mapping) and agent["permission"]
     }
     names = []
@@ -857,14 +857,14 @@ def _unrestricted_agents(
         options = mutation.options or {}
         if options.get("name") != "config":
             continue
-        for name, agent in _config_agents(options.get("config")).items():
+        for name, agent in config_agents(options.get("config")).items():
             permission = agent.get("permission") if isinstance(agent, Mapping) else None
             if not (isinstance(permission, Mapping) and permission) and name not in mapped:
                 names.append(str(name))
     return names
 
 
-def _widened_permissions(mutations: Sequence[Mutation]) -> list[str]:
+def widened_permissions(mutations: Sequence[Mutation]) -> list[str]:
     """Why the answer's Claude Code permissions reach past what a request may grant: every session of the release
     runs under them, so an entry may only add an allow rule for a tool in ``CLAUDE_PREAPPROVED`` (or a
     ``WebFetch(domain:<host>)`` rule), never a mode, a directory, a deny or ask edit, a shell or a wildcard."""
@@ -1127,7 +1127,7 @@ def _strings_of(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()][:_REVIEW_ITEMS]
 
 
-def _design_text(reply: str) -> str | None:
+def design_text(reply: str) -> str | None:
     """The whole text of the reply's ``{"design": "..."}`` object; ``None`` when it wrote none."""
     for value in _items_in(reply):
         if isinstance(value, dict) and isinstance(value.get("design"), str) and value["design"].strip():
@@ -1135,7 +1135,7 @@ def _design_text(reply: str) -> str | None:
     return None
 
 
-def _kept_design(design: str) -> str:
+def kept_design(design: str) -> str:
     """The design as the step records it: whole up to ``_DESIGN_CHARS``, and past it the start cut so the last
     paragraph, the How to use the person reads, stays whole."""
     if len(design) <= _DESIGN_CHARS:
@@ -1148,9 +1148,9 @@ def _kept_design(design: str) -> str:
 
 
 def _parse_design(reply: str) -> str | None:
-    """The reply's design as the step records it (``_kept_design``); ``None`` when it wrote none."""
-    design = _design_text(reply)
-    return None if design is None else _kept_design(design)
+    """The reply's design as the step records it (``kept_design``); ``None`` when it wrote none."""
+    design = design_text(reply)
+    return None if design is None else kept_design(design)
 
 
 def _undeclared_env(mutations: Sequence[Mutation], requires: Sequence[Mapping[str, Any]]) -> list[str]:
@@ -1272,7 +1272,7 @@ def _ask(
     return reply, None
 
 
-def _provider_refusal(models: ModelBindings) -> str | None:
+def provider_refusal(models: ModelBindings) -> str | None:
     """Why the provider cut the last reply short, when its response says a filter or a refusal stopped it: an
     OpenAI ``finish_reason``, a Responses ``incomplete_details.reason`` or an Anthropic ``stop_reason``."""
     response = models.served.last_response()
@@ -1477,7 +1477,7 @@ def _rules_id(text: str) -> str:
     return f"rules-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
 
 
-def _parse_config_entry(entry_id: Any, config: dict[str, Any], config_keys: Sequence[str]) -> Proposal | None:
+def parse_config_entry(entry_id: Any, config: dict[str, Any], config_keys: Sequence[str]) -> Proposal | None:
     """A config proposal as (entry id, "config", {target, data}), or ``None`` when it names another target or a
     top level key outside ``config_keys``; an entry without an id takes one from its data."""
     data = config.get("data")
@@ -1510,7 +1510,7 @@ def _parse_entry(item: Any, kinds: Sequence[str], config_keys: Sequence[str] = (
     if not isinstance(config, dict):
         return None
     if kind == "config":
-        return _parse_config_entry(entry_id, config, config_keys)
+        return parse_config_entry(entry_id, config, config_keys)
     body = config.get(fields[-1])
     if not isinstance(body, str) or not body.strip():
         return None
@@ -1526,7 +1526,7 @@ def _parse_entry(item: Any, kinds: Sequence[str], config_keys: Sequence[str] = (
     return entry_id, kind, {field: (entry_id if field == "name" else body) for field in fields}
 
 
-def _dropped_entries(reply: str, kinds: Sequence[str], config_keys: Sequence[str]) -> list[str]:
+def dropped_entry_reasons(reply: str, kinds: Sequence[str], config_keys: Sequence[str]) -> list[str]:
     """Why each entry shaped object in the reply was dropped, one line each: a kind this harness does not take, a
     config entry that sets a key outside ``config_keys`` or another target, an empty body or an id that is no entry
     name, an id that is not its config name. Empty when every entry parsed, or when the reply holds none."""
@@ -1557,7 +1557,7 @@ def _dropped_entries(reply: str, kinds: Sequence[str], config_keys: Sequence[str
     return lines
 
 
-def _misnamed(reply: str, kinds: Sequence[str]) -> list[str]:
+def misnamed_entries(reply: str, kinds: Sequence[str]) -> list[str]:
     """The named entries in the reply that were dropped because their id is not their config name, one line each,
     so the retry tells the model which of its entries never reached the tree."""
     lines = []

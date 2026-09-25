@@ -449,7 +449,7 @@ def _reef_token(adapter: str, compose_dir: str) -> str | None:
         sys.exit(f"reef-{adapter}: {exc}")
 
 
-def _session_tree_token(adapter: str, compose_dir: str, upstream: str) -> str | None:
+def session_tree_token(adapter: str, compose_dir: str, upstream: str) -> str | None:
     """The tree's own token for a session whose tool environment lost ``REEF_TOKEN`` (dsh strips every variable
     named like a token from what its tools run), when the tree's binding names the session's service; a binding
     another install rewrote belongs to another service, and its token is never sent here."""
@@ -1095,14 +1095,14 @@ def review_points(row: Mapping[str, Any], key: str) -> list[str]:
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
 
 
-def _declined_of(row: Mapping[str, Any]) -> str:
+def declined_reason(row: Mapping[str, Any]) -> str:
     """Why the proposer wrote no entry on purpose, when its design said no entry can deliver the request."""
     notes = _metrics_of(row).get("proposal_notes")
     reason = notes.get("declined") if isinstance(notes, Mapping) else None
     return reason.strip() if isinstance(reason, str) else ""
 
 
-def _usage_of(row: Mapping[str, Any]) -> str:
+def release_usage(row: Mapping[str, Any]) -> str:
     """The first paragraph of the release's How to use on one line, cut only when long: the form a person types,
     from the release itself, never from the request's wording. Markdown backticks go, so a model that quotes the line
     in its own inline code renders it whole. Empty when the design has none."""
@@ -1154,9 +1154,9 @@ def result_line(
         )
     if selection_result == "rejected":
         return f"'{ask}' {rejection_text(metrics)}"
-    if selection_result == "skipped" and _declined_of(row):
+    if selection_result == "skipped" and declined_reason(row):
         return (
-            f"'{ask}' was answered with no change: {_declined_of(row)}. The design and what is out of reach are on "
+            f"'{ask}' was answered with no change: {declined_reason(row)}. The design and what is out of reach are on "
             f"the page: {page}"
         )
     if selection_result == "skipped":
@@ -1193,7 +1193,7 @@ def _request_state(upstream: str, scenario: str, token: str | None, record_id: s
     return "waiting", {}
 
 
-def _step_words(progress: Mapping[str, Any]) -> str:
+def step_words(progress: Mapping[str, Any]) -> str:
     """Where a running step stands, for the line a wait ends with: its phase and its time so far, which grows with
     every wait, so no two waits print the same line (a harness that stops an identical repeated call reads it
     as a loop); empty before a step took the request."""
@@ -1241,7 +1241,7 @@ def _await_step(
                 if ships_version_check(adapter)
                 else f"reef-{adapter} wait {record_id} waits again"
             )
-            print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s{_step_words(progress)}; {later}")
+            print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s{step_words(progress)}; {later}")
             return "timeout"
         if not started:
             state, progress = _request_state(upstream, scenario, token, record_id)
@@ -1431,7 +1431,7 @@ def harness(
         )
         print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or {later}")
         return 0
-    return _report_request(
+    return report_request(
         scenario, adapter, compose_dir, upstream, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
 
@@ -1458,7 +1458,7 @@ def wait_request(
         sys.exit(f"reef-{adapter} wait: name the request id evolve printed")
     upstream = _reef_url_of(adapter, compose_dir)
     token = _reef_token(adapter, compose_dir)
-    status = _report_request(
+    status = report_request(
         scenario,
         adapter,
         compose_dir,
@@ -1472,7 +1472,7 @@ def wait_request(
     return 0 if poll and status == 2 else status
 
 
-def _report_request(
+def report_request(
     scenario: str,
     adapter: str,
     compose_dir: str,
@@ -1496,14 +1496,14 @@ def _report_request(
     print(f"reef-{adapter}: {result_line(adapter, step, rows, page, unmet)}")
     uncovered = review_points(rows[step], "uncovered")
     selection_result = result_of(rows[step], rows)
-    usage = _usage_of(rows[step])
+    usage = release_usage(rows[step])
     if usage and selection_result in ("selected", "pending"):
         # The form the release is used by, so nobody guesses it from the request (codex takes $chat, not /chat).
         print(f"reef-{adapter}: how to use: {usage}")
     if uncovered:
         # After a rejection the checks decided; the review's points are notes on the change, not the cause.
         label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
-        print(f"reef-{adapter}: {label}: {_joined(uncovered)}")
+        print(f"reef-{adapter}: {label}: {joined_points(uncovered)}")
     limits = review_points(rows[step], "limits")
     if limits:
         # One point per line: a point may hold a '; ' of its own.
@@ -1515,7 +1515,7 @@ def _report_request(
     return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result, unmet)
 
 
-def _joined(points: Sequence[str]) -> str:
+def joined_points(points: Sequence[str]) -> str:
     """Review points on one line: each point's own final period dropped, so no '.;' sits between them, and a
     point after the first starting in lower case unless its first word is an acronym or a name in capitals."""
     cleaned = [point.rstrip().rstrip(".") for point in points]
@@ -1689,7 +1689,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     ):
         upstream = _strip_v1(session_service.rstrip("/"))
         scenario = session_scenario
-        token = os.environ.get("REEF_TOKEN") or _session_tree_token(adapter, compose_dir, upstream)
+        token = os.environ.get("REEF_TOKEN") or session_tree_token(adapter, compose_dir, upstream)
     else:
         upstream = _reef_url_of(adapter, compose_dir)
         token = _reef_token(adapter, compose_dir)
@@ -1948,7 +1948,7 @@ def setup_run(scenario: str, adapter: str, compose_dir: str, name: str, *, relea
     return 0 if met else 1
 
 
-def _install_prefix(adapter: str) -> str | None:
+def binary_install_prefix(adapter: str) -> str | None:
     """Where the first install put the binary (the script's ``PREFIX``): the baked ``REEF_HARNESS_BINARY`` with the
     descriptor's ``install.binary_path`` taken off its end; ``None`` when it does not end that way (a binary of the
     person's own, or an adapter reef does not install)."""
@@ -2026,12 +2026,14 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     except OSError as exc:
         print(f"reef-{adapter} update: reef unreachable at {state.upstream}: {exc}", file=sys.stderr)
         return 1
-    status = _run_install_script(script, Path(compose_dir).resolve().parent, state.token, _install_prefix(adapter))
+    status = _run_install_script(
+        script, Path(compose_dir).resolve().parent, state.token, binary_install_prefix(adapter)
+    )
     if status != 0:
         print(f"reef-{adapter} update: the install script exited {status}", file=sys.stderr)
         return 1
     print(f"reef-{adapter} update: installed release {_installed_release(compose_dir) or state.release_id}")
-    usage = _usage_of(state.row)
+    usage = release_usage(state.row)
     if usage:
         print(f"reef-{adapter} update: how to use: {usage}")
     return 0

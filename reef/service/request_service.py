@@ -876,7 +876,7 @@ class RequestService:
         if step == len(rows):
             # The next step, while a request runs it: the catalog has no row yet, so the page says so and links the
             # request's page, which follows the step live.
-            running = self._running_request_id(scenario)
+            running = self.running_request_id(scenario)
             if running is not None:
                 return build_running_step_page(step, running, link_query)
         if not 0 <= step < len(rows):
@@ -916,7 +916,7 @@ class RequestService:
         return "pi" if adapter is None else adapter
 
     @classmethod
-    def _running_request_id(cls, scenario: Scenario) -> str | None:
+    def running_request_id(cls, scenario: Scenario) -> str | None:
         """The id of the request the scenario's step is running: the reserved batch's, else the backend's progress."""
         trainer = cls.files_trainer(scenario)
         reserved = trainer.pending_batch
