@@ -48,7 +48,7 @@ from reef.runtime.executor.config import ExecutorSettings, WorkerResources, exec
 from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
-from reef.train.backend import STALE_RESULT_POLICIES
+from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import (
     CordisBackend,
     FloorPluginFactory,
@@ -305,7 +305,7 @@ class CordisRecipe(Recipe):
     served_endpoint: ServedEndpoint | None = None
     #: What a result becomes when another component's commit replaced its base while it was evaluated:
     #: merged onto the release served now, evaluated again, or refused and proposed again.
-    on_stale: str = "merge"
+    on_stale: StaleResultPolicy = "merge"
     candidate_plugin: CandidatePluginFactory = field(default_factory=ScoreComparisonPluginFactory, repr=False)
     episode_workers: int | None = None  # Deprecated Python compatibility alias.
     #: Default proposal inbox root, with one directory per scenario.

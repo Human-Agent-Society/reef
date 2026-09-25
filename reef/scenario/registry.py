@@ -85,7 +85,7 @@ class ScenarioRegistry:
         # The mode a person selected per scenario; a reload in this process applies it again, a restart does not.
         self._training_modes: dict[str, str] = {}
         self._preload_errors: dict[str, str] = {}
-        self._replaced_closer: ReplacedScenarioCloser = CloseReplacedAtOnce()
+        self.replaced_closer: ReplacedScenarioCloser = CloseReplacedAtOnce()
         self._allow_implicit_creation = allow_implicit_creation
         self._on_training_scenario_resolved: Callable[[Scenario], None] | None = None
 
@@ -129,7 +129,7 @@ class ScenarioRegistry:
 
     def set_replaced_closer(self, closer: ReplacedScenarioCloser) -> None:
         """Who closes the instance a reload replaced: a local cycle may still evaluate on it."""
-        self._replaced_closer = closer
+        self.replaced_closer = closer
 
     def has(self, scenario: str) -> bool:
         """True when the scenario exists in memory or in durable registration."""
@@ -274,7 +274,7 @@ class ScenarioRegistry:
                 # Close outside the state lock: teardown may join processor
                 # worker threads. Accepts reach the recovered instance, so
                 # nothing observes the dropped instance mid-close.
-                self._replaced_closer.close_replaced(dropped)
+                self.replaced_closer.close_replaced(dropped)
             return recovered
 
     def remove(self, scenario: str) -> Scenario | None:

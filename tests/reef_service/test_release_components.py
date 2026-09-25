@@ -531,7 +531,7 @@ def test_a_rollback_of_the_weights_after_a_rejected_harness_step_is_not_a_harnes
         scenario.commit(TrainStepResult(state={}, artifact=weights, component=WEIGHTS))
         scenario.commit(TrainStepResult(state={}, metrics={"selected": False}), component=HARNESS)
         scenario.rollback(first_harness)
-        rows, head = RequestService._harness_lineage(scenario)
+        rows, head = RequestService.harness_lineage(scenario)
         assert head == first_harness
         # Newest first: the rejected step's row (named by the first harness release), that release, the creation.
         assert [row["operation"] for row in rows] == ["training", "training", "creation"]

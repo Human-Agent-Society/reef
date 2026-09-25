@@ -8,7 +8,7 @@ from urllib.parse import urlsplit
 import pytest
 from aiohttp import web
 
-from reef.service.assembly import _served_url
+from reef.service.assembly import default_served_url
 
 
 @pytest.mark.unit
@@ -26,7 +26,7 @@ from reef.service.assembly import _served_url
     ],
 )
 def test_the_served_url_names_an_address_the_service_reaches_itself_at(host: str, expected: str) -> None:
-    assert _served_url(host, 8900) == expected
+    assert default_served_url(host, 8900) == expected
 
 
 @pytest.mark.unit
@@ -48,7 +48,7 @@ def test_the_served_url_answers_for_a_real_bind(host: str) -> None:
             server = site._server
             assert server is not None
             port = server.sockets[0].getsockname()[1]
-            address = urlsplit(_served_url(host, port))
+            address = urlsplit(default_served_url(host, port))
             _reader, writer = await asyncio.open_connection(address.hostname, address.port)
             writer.close()
         finally:

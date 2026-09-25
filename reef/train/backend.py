@@ -79,7 +79,8 @@ class PreparedStep:
 
 #: What a backend's result becomes when another component's commit replaced the release it was prepared
 #: against: merged onto the release served now, evaluated again against it, or refused and prepared again.
-STALE_RESULT_POLICIES = ("merge", "reevaluate", "refuse")
+StaleResultPolicy = Literal["merge", "reevaluate", "refuse"]
+STALE_RESULT_POLICIES: tuple[StaleResultPolicy, ...] = ("merge", "reevaluate", "refuse")
 
 
 @dataclass(frozen=True)
@@ -143,7 +144,12 @@ class CandidateBackend(CandidateEvaluator, ABC):
         return False
 
     @property
-    def stale_result_policy(self) -> str:
+    def harness_node_paths(self) -> Mapping[str, str] | None:
+        """Root-relative render paths of the harness node kinds; ``None`` for a backend that evolves no harness."""
+        return None
+
+    @property
+    def stale_result_policy(self) -> StaleResultPolicy:
         """What a result prepared against a release another trainer has since replaced becomes.
 
         One of :data:`STALE_RESULT_POLICIES`. The default refuses it: the
@@ -239,4 +245,4 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["STALE_RESULT_POLICIES", "CandidateBackend", "PreparedStep", "StepExecution"]
+__all__ = ["STALE_RESULT_POLICIES", "CandidateBackend", "PreparedStep", "StaleResultPolicy", "StepExecution"]

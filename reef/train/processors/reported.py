@@ -83,7 +83,7 @@ class _PendingReport:
 # ------------------------------------------------- reported-feedback processor
 
 
-def _accepted_by(report_type: type[ReportBase], payload: Mapping[str, Any]) -> bool:
+def accepted_by(report_type: type[ReportBase], payload: Mapping[str, Any]) -> bool:
     """Whether ``report_type`` parses ``payload``."""
     try:
         report_type.from_dict(payload)
@@ -227,7 +227,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
                 # contract takes and this one refuses is another component's, not this method's training
                 # data, and this trainer releases it. A report every component refuses still raises.
                 admitted = self.context.admitted_report_type
-                if admitted is None or admitted is report_type or not _accepted_by(admitted, item.payload):
+                if admitted is None or admitted is report_type or not accepted_by(admitted, item.payload):
                     raise
                 # Named in the log: a report meant for this trainer with a broken field also lands here.
                 logger.warning(

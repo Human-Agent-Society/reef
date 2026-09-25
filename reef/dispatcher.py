@@ -151,7 +151,7 @@ def training_request_refusal(text: str, requires: Sequence[Mapping[str, Any]] = 
     return None
 
 
-class _ReplacedAfterItsCycle(ReplacedScenarioCloser):
+class ReplacedAfterItsCycle(ReplacedScenarioCloser):
     """The dispatcher's closer: a replaced instance a local cycle still runs on closes when that cycle ends."""
 
     def __init__(self, dispatcher: Dispatcher) -> None:
@@ -218,7 +218,7 @@ class Dispatcher:
             experiment_tracker=self._experiment_tracker,
         )
         self._registry.set_training_scenario_callback(self._start_training)
-        self._registry.set_replaced_closer(_ReplacedAfterItsCycle(self))
+        self._registry.set_replaced_closer(ReplacedAfterItsCycle(self))
         self._publication = _PublicationState()
         self._training = _TrainingState()
         self._lifecycle = _LifecycleState()
@@ -337,7 +337,7 @@ class Dispatcher:
                     if backend is not None:
                         backend.retire_scenario(scenario)
                 dropped.close()
-            self._close_replaced(scenario)
+            self.close_replaced_instances(scenario)
             archived = [*self._archive_scenario_state(scenario), *self._registry.archive_registration(scenario)]
         self._registry.forget_lock(scenario)
         return {"scenario": scenario, "archived": archived}
@@ -794,20 +794,20 @@ class Dispatcher:
         for worker in workers:
             worker.ready.set()
 
-    def _local_cycle_lock(self, scenario: str) -> Lock:
+    def local_cycle_lock(self, scenario: str) -> Lock:
         with self._training.lock:
             return self._training.local_cycle_locks.setdefault(scenario, Lock())
 
     @contextmanager
-    def _local_cycle(self, scenario: str) -> Iterator[None]:
+    def local_cycle(self, scenario: str) -> Iterator[None]:
         """One local cycle's turn; at its end, the instances a reload replaced under it close."""
         try:
-            with self._local_cycle_lock(scenario):
+            with self.local_cycle_lock(scenario):
                 yield
         finally:
-            self._close_replaced(scenario)
+            self.close_replaced_instances(scenario)
 
-    def _local_cycles_run(self) -> bool:
+    def local_cycles_run(self) -> bool:
         """Whether a local cycle may start: the service answers and is not stopping."""
         return self._lifecycle.local_cycles_open.is_set() and not self._lifecycle.local_cycles_stopped.is_set()
 
@@ -815,16 +815,16 @@ class Dispatcher:
         """A reload replaced ``instance``: close it now, or when the local cycle running on it ends."""
         with self._training.lock:
             self._training.replaced.setdefault(instance.name, []).append(instance)
-        self._close_replaced(instance.name)
+        self.close_replaced_instances(instance.name)
 
-    def _close_replaced(self, scenario: str) -> None:
+    def close_replaced_instances(self, scenario: str) -> None:
         """Close the instances reloads replaced, unless a local cycle of the scenario still runs.
 
         That cycle closes them when it ends: closing an instance waits for
         the evaluation in flight on it, and the training thread, whose
         reload after a failed commit may land during one, must not.
         """
-        lock = self._local_cycle_lock(scenario)
+        lock = self.local_cycle_lock(scenario)
         while True:
             if not lock.acquire(blocking=False):
                 # Whoever holds it closes what is parked when it lets go: a cycle, a dispatched turn, or this loop.
@@ -841,7 +841,7 @@ class Dispatcher:
                 if not self._training.replaced.get(scenario):
                     return
 
-    def _stale_refusals_total(self, scenario: str, component: str | None) -> int:
+    def stale_refusals_total(self, scenario: str, component: str | None) -> int:
         with self._training.lock:
             return self._training.stale_refusals_total.get((scenario, component), 0)
 
@@ -876,7 +876,7 @@ class Dispatcher:
             # A dispatched job waiting for its turn goes before the next cycle; it wakes the workers after.
             while (
                 not self._training.turn_waiting.is_set()
-                and self._local_cycles_run()
+                and self.local_cycles_run()
                 and self._process_local_backend_step(scenario, component)
             ):
                 pass
@@ -982,8 +982,8 @@ class Dispatcher:
         # race only had the slower worker refused as stale on every cycle, and
         # each refusal threw away a full candidate evaluation. A dispatched
         # commit still lands meanwhile; the stale policy answers it.
-        with self._local_cycle(scenario):
-            if not self._local_cycles_run():
+        with self.local_cycle(scenario):
+            if not self.local_cycles_run():
                 return False
             loaded = self._registry.get_optional(scenario)
             if loaded is None:
@@ -1026,7 +1026,7 @@ class Dispatcher:
                 try:
                     self._commit_result(scenario, result, component)
                 except StaleTrainingResultError as stale:
-                    return self._retry_stale_result(scenario, current, component, stale)
+                    return self.retry_stale_result(scenario, current, component, stale)
                 except SettledTrainingResultError:
                     # The step this worker would have made is in the log already; look again for the next one.
                     logger.info("scenario %r component %r: another commit settled its result", scenario, component)
@@ -1041,7 +1041,7 @@ class Dispatcher:
             self._training.stale_refusals_in_a_row.pop((scenario, component), None)
         return True
 
-    def _retry_stale_result(
+    def retry_stale_result(
         self, scenario: str, current: Scenario, component: str | None, stale: StaleTrainingResultError
     ) -> bool:
         """Keep the refused batch for another preparation; after a few refusals in a row, wait for the next wake.
@@ -1193,13 +1193,13 @@ class Dispatcher:
         if batch is None:
             return False
         try:
-            return self._run_dispatched_turn(current, component, backend, batch)
+            return self.run_dispatched_turn(current, component, backend, batch)
         finally:
             # Local cycles that stood aside or yielded for the job run now, on every scenario, whatever the
             # outcome; a cycle whose reload waited for the job rebuilds the scenario as its first act.
             self.wake_local_workers()
 
-    def _run_dispatched_turn(
+    def run_dispatched_turn(
         self, current: Scenario, component: str | None, backend: CandidateBackend, batch: TrainingBatch
     ) -> bool:
         with self.dispatched_turn(current, component):
@@ -1258,11 +1258,11 @@ class Dispatcher:
         names.add(current.name)
         # Registered first, so it runs once every cycle lock is released: what a reload parked meanwhile closes.
         for name in sorted(names):
-            turn.callback(self._close_replaced, name)
+            turn.callback(self.close_replaced_instances, name)
         self._training.turn_waiting.set()
         try:
             for name in sorted(names):
-                turn.enter_context(self._local_cycle_lock(name))
+                turn.enter_context(self.local_cycle_lock(name))
         except BaseException:
             turn.close()
             raise
@@ -1381,10 +1381,10 @@ class Dispatcher:
             "preload_errors": preload_errors,
             "scenarios": scenarios,
             "serving": self._serving_status(),
-            "training_job": self._training_job_view(),
+            "training_job": self.training_job_view(),
         }
 
-    def _training_job_view(self) -> dict[str, Any] | None:
+    def training_job_view(self) -> dict[str, Any] | None:
         """The weight job the training runtime holds out, for an operator; ``None`` when none is out.
 
         ``owner`` names the scenario whose job it is, the one a delete refuses.
@@ -1448,7 +1448,7 @@ class Dispatcher:
                     "batch_ready": bound.trainer.batch_ready(),
                     "training_mode": bound.trainer.training_mode,
                     "processor": dict(bound.trainer.processor_status()),
-                    "stale_refusals_total": self._stale_refusals_total(scenario_name, bound.component),
+                    "stale_refusals_total": self.stale_refusals_total(scenario_name, bound.component),
                     "last_committed_step": (
                         None
                         if last is None

@@ -166,7 +166,7 @@ class RequestService:
         self._retry_policy = retry_policy or InferenceRetryPolicy()
         # The harness head of a scenario with several components, by scenario step and served release: it is
         # read on every inference answer and changes only when a commit lands.
-        self._harness_heads: dict[str, tuple[int, str, str]] = {}
+        self.harness_heads: dict[str, tuple[int, str, str]] = {}
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -484,10 +484,10 @@ class RequestService:
     async def inference_operations(self, headers: Mapping[str, str], *, record: bool = True) -> OperationMetrics:
         """Resolve the scenario before measuring its inference request lifetime."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(self._inference_scenario, parsed, record=record)
+        scenario = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
         return scenario.operations
 
-    def _inference_scenario(self, parsed: RequestHeaders, *, record: bool) -> Scenario:
+    def inference_scenario(self, parsed: RequestHeaders, *, record: bool) -> Scenario:
         """The scenario an inference serves. A recorded call may create it; an evaluation call (``record`` False)
         reads the loaded instance only, never waiting for the scenario's lock and never creating it (see
         ``ScenarioRegistry.get_loaded``)."""
@@ -515,7 +515,7 @@ class RequestService:
         an evaluation call (``record`` False) runs every component's hooks but
         the ``evaluated`` one's, whose candidate the episode runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        initial = await asyncio.to_thread(self._inference_scenario, parsed, record=record)
+        initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
         if evaluated is not None and evaluated not in initial.surface.names:
             raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
@@ -583,7 +583,7 @@ class RequestService:
         *,
         record: bool = True,
     ) -> PreparedInference:
-        scenario = self._inference_scenario(parsed, record=record)
+        scenario = self.inference_scenario(parsed, record=record)
         selected_handler = handler if handler is not None else scenario.inference_handler
         if selected_handler is None:
             raise RecipeConfigError("the served recipe has no inference handler")
@@ -616,10 +616,10 @@ class RequestService:
         Read-only: never creates a scenario.
         """
         scenario = self._file_scenario(headers)
-        return self._harness_manifest_for_scenario(scenario, release_id or self._harness_release_id(scenario))
+        return self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
 
     @staticmethod
-    def _files_trainer(scenario: Scenario) -> Trainer:
+    def files_trainer(scenario: Scenario) -> Trainer:
         """The trainer evolving the component a client pulls; a flat scenario's only trainer."""
         return scenario.trainer_for(scenario.surface.files_component)
 
@@ -660,7 +660,7 @@ class RequestService:
         return manifest
 
     @staticmethod
-    def _harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
+    def harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
         """The catalog rows a client pulls, newest first, and the head among them.
 
         Another component's step carries the tree forward unchanged, so it is
@@ -743,24 +743,24 @@ class RequestService:
         return kept, head
 
     @classmethod
-    def _harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
-        """The catalog rows a client pulls, newest first; see ``_harness_lineage``."""
-        rows, _ = cls._harness_lineage(scenario)
+    def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
+        """The catalog rows a client pulls, newest first; see ``harness_lineage``."""
+        rows, _ = cls.harness_lineage(scenario)
         return rows
 
-    def _harness_release_id(self, scenario: Scenario) -> str:
+    def harness_release_id(self, scenario: Scenario) -> str:
         """The newest served release that changed what a client pulls; a release held for review is not served."""
         current = scenario.repository.require_current_artifact().release_id
         if scenario.surface.single or scenario.surface.files_component is None:
             return current
         step = scenario.scenario_step
-        cached = self._harness_heads.get(scenario.name)
+        cached = self.harness_heads.get(scenario.name)
         if cached is not None and cached[0] == step and cached[1] == current:
             return cached[2]
-        _, head = self._harness_lineage(scenario)
+        _, head = self.harness_lineage(scenario)
         if head is None:
             head = current
-        self._harness_heads[scenario.name] = (step, current, head)
+        self.harness_heads[scenario.name] = (step, current, head)
         return head
 
     def harness_head(self, headers: Mapping[str, str]) -> str | None:
@@ -769,7 +769,7 @@ class RequestService:
             scenario = self._file_scenario(headers)
         except ArtifactNotFound:
             return None
-        return self._harness_release_id(scenario)
+        return self.harness_release_id(scenario)
 
     def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
         """Admit one agent proposal against the head release's entries and hold it for the next evolve step.
@@ -782,16 +782,16 @@ class RequestService:
         """
         proposal = ProposalPayload.from_dict(payload)
         scenario = self._file_scenario(headers)
-        backend = self._files_trainer(scenario).candidate_backend
+        backend = self.files_trainer(scenario).candidate_backend
         if not isinstance(backend, ProposalValidator) or backend.proposals is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
                 "evolution recipe with a proposal inbox"
             )
-        head = self._harness_release_id(scenario)
+        head = self.harness_release_id(scenario)
         proposal_id = ProposalInbox.new_id()
         # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
-        if self._files_trainer(scenario).training_mode == "manual":
+        if self.files_trainer(scenario).training_mode == "manual":
             return {
                 "proposal_id": proposal_id,
                 "admitted": False,
@@ -822,23 +822,23 @@ class RequestService:
         training row carries the metrics of the step that published it, so an
         update is a decision over numbers rather than a blind pull. A scenario
         with several components lists the releases that changed the pulled
-        tree (see ``_harness_lineage``); the others stay addressable by id.
+        tree (see ``harness_lineage``); the others stay addressable by id.
         Same read-only rules as ``harness_manifest``.
         """
         scenario = self._file_scenario(headers)
         return {
             "scenario": scenario.name,
-            "releases": list(reversed(self._harness_rows(scenario))),
+            "releases": list(reversed(self.harness_rows(scenario))),
         }
 
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
         """Raw retained files for a catalog row; presentation belongs to the caller."""
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self._harness_rows(scenario)))
+        rows = list(reversed(self.harness_rows(scenario)))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
-        backend = self._files_trainer(scenario).candidate_backend
+        backend = self.files_trainer(scenario).candidate_backend
         if not directory or not isinstance(backend, StepRecords):
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
@@ -863,7 +863,7 @@ class RequestService:
         An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(self._harness_rows(scenario)))
+        rows = list(reversed(self.harness_rows(scenario)))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
@@ -883,13 +883,13 @@ class RequestService:
                 before_files = None if tree is None else tree.read_files(artifact)
             except ArtifactError:
                 before_files = None
-        descriptor = getattr(self._files_trainer(scenario).candidate_backend, "descriptor", None)
+        backend = self.files_trainer(scenario).candidate_backend
         return build_release_page(
             step,
             rows,
             before_entries=before_entries,
             before_files=before_files,
-            node_paths=None if descriptor is None else descriptor.node_paths,
+            node_paths=None if backend is None else backend.harness_node_paths,
             link_query=link_query,
         )
 
@@ -913,10 +913,10 @@ class RequestService:
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
         # The step a request settled as counts the catalog rows, the ones the release page opens.
-        rows = list(reversed(self._harness_rows(scenario)))
-        backend = self._files_trainer(scenario).candidate_backend
+        rows = list(reversed(self.harness_rows(scenario)))
+        backend = self.files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = self._files_trainer(scenario).pending_batch
+        reserved = self.files_trainer(scenario).pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(record, rows, progress=progress, consumed=consumed, link_query=link_query)
 
@@ -935,7 +935,7 @@ class RequestService:
         record = self._dispatcher.read_record(scenario.name, record_id)
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
-        rows = list(reversed(self._harness_rows(scenario)))
+        rows = list(reversed(self.harness_rows(scenario)))
         step = settled_step(rows, record_id)
         if step is not None:
             return {
@@ -949,9 +949,9 @@ class RequestService:
                 "step_record": None,
                 "activity": [],
             }
-        backend = self._files_trainer(scenario).candidate_backend
+        backend = self.files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = self._files_trainer(scenario).pending_batch
+        reserved = self.files_trainer(scenario).pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)
         mine = progress if progress is not None and progress.request_id == record_id else None
@@ -998,7 +998,7 @@ class RequestService:
             create_if_missing=True,
             release_id=release_id,
         )
-        manifest = self._harness_manifest_for_scenario(scenario, release_id or self._harness_release_id(scenario))
+        manifest = self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
         descriptor = get_adapter(adapter)
         return render_install_script(
             descriptor=descriptor,
@@ -1010,7 +1010,7 @@ class RequestService:
             requires=manifest["requires"],
             # The release the script names for a first install must be one the catalog lists.
             fallback_release_id=ancestor_requiring_nothing(
-                list(reversed(self._harness_rows(scenario))), manifest["release_id"]
+                list(reversed(self.harness_rows(scenario))), manifest["release_id"]
             ),
         )
 

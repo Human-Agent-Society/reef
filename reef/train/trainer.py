@@ -387,9 +387,7 @@ class Trainer:
         # Local candidate generation and evaluation can take minutes. Keep the
         # batch reserved, but release the trainer lock so status remains live.
         with self.operations.measure("execution"):
-            execution = (
-                self._reevaluate(kept) if kept is not None else self._execute_backend_step(batch, scenario_step)
-            )
+            execution = self.reevaluate(kept) if kept is not None else self._execute_backend_step(batch, scenario_step)
         if execution.outcome != "commit" or execution.result is None:
             raise RuntimeError(f"inline candidate backend returned {execution.outcome!r}")
         with self._lock:
@@ -399,7 +397,7 @@ class Trainer:
             self._pending.prepared = execution.prepared
             return execution.result
 
-    def _reevaluate(self, prepared: PreparedStep) -> StepExecution:
+    def reevaluate(self, prepared: PreparedStep) -> StepExecution:
         """Evaluate a kept candidate against the release served now and settle it again."""
         backend = self._candidate_backend
         if backend is None:

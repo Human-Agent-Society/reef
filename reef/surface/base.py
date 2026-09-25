@@ -157,15 +157,15 @@ class ComponentSurface:
     files: FileTree | None = None
 
 
-class _ChainedLease(InferenceLease):
+class ChainedLease(InferenceLease):
     """Release every component lease, last acquired first, even when one fails."""
 
     def __init__(self, leases: tuple[InferenceLease, ...]) -> None:
-        self._leases = leases
+        self.leases = leases
 
     def release(self) -> None:
         failure: BaseException | None = None
-        for lease in reversed(self._leases):
+        for lease in reversed(self.leases):
             try:
                 lease.release()
             except Exception as exc:
@@ -174,44 +174,44 @@ class _ChainedLease(InferenceLease):
             raise failure
 
 
-class _ChainedInferenceHooks(InferenceHooks):
+class ChainedInferenceHooks(InferenceHooks):
     """Every component's hooks, applied in component declaration order."""
 
     def __init__(self, hooks: tuple[tuple[str, InferenceHooks], ...]) -> None:
-        self._hooks = hooks
+        self.component_hooks = hooks
 
     def prepare_request(self, artifact: Artifact, path: str, request: dict[str, Any]) -> dict[str, Any]:
-        for name, hooks in self._hooks:
+        for name, hooks in self.component_hooks:
             request = hooks.prepare_request(artifact.component(name), path, request)
         return request
 
     def verify_response(self, artifact: Artifact, path: str, response: Mapping[str, Any]) -> None:
-        for name, hooks in self._hooks:
+        for name, hooks in self.component_hooks:
             hooks.verify_response(artifact.component(name), path, response)
 
 
-class _LeasingChainedInferenceHooks(_ChainedInferenceHooks, LeasingInferenceHooks):
+class LeasingChainedInferenceHooks(ChainedInferenceHooks, LeasingInferenceHooks):
     def begin_request(self, artifact: Artifact, path: str) -> InferenceLease:
         leases: list[InferenceLease] = []
         try:
-            for name, hooks in self._hooks:
+            for name, hooks in self.component_hooks:
                 if isinstance(hooks, LeasingInferenceHooks):
                     leases.append(hooks.begin_request(artifact.component(name), path))
         except Exception:
-            _ChainedLease(tuple(leases)).release()
+            ChainedLease(tuple(leases)).release()
             raise
-        return _ChainedLease(tuple(leases))
+        return ChainedLease(tuple(leases))
 
 
-class _ComponentFileTree(FileTree):
+class ComponentFileTree(FileTree):
     """One component's file tree read from that component's directory."""
 
     def __init__(self, name: str, tree: FileTree) -> None:
-        self._name = name
-        self._tree = tree
+        self.component = name
+        self.tree = tree
 
     def read_files(self, artifact: Artifact) -> Mapping[str, str] | None:
-        return self._tree.read_files(artifact.component(self._name))
+        return self.tree.read_files(artifact.component(self.component))
 
 
 #: The component a surface built from the flat ``loader``, ``inference`` and ``files`` keywords serves.
@@ -341,8 +341,8 @@ class Surface:
         if self.single:
             return bound[0][1]
         if any(isinstance(hooks, LeasingInferenceHooks) for _, hooks in bound):
-            return _LeasingChainedInferenceHooks(bound)
-        return _ChainedInferenceHooks(bound)
+            return LeasingChainedInferenceHooks(bound)
+        return ChainedInferenceHooks(bound)
 
     def inference_for_evaluation(self, component: str | None) -> InferenceHooks | None:
         """The request hooks of an evaluation call that runs a candidate of ``component``: every other component's.
@@ -365,8 +365,8 @@ class Surface:
         if not bound:
             return None
         if any(isinstance(hooks, LeasingInferenceHooks) for _, hooks in bound):
-            return _LeasingChainedInferenceHooks(bound)
-        return _ChainedInferenceHooks(bound)
+            return LeasingChainedInferenceHooks(bound)
+        return ChainedInferenceHooks(bound)
 
     @property
     def files(self) -> FileTree | None:
@@ -376,7 +376,7 @@ class Surface:
         tree = self.components[name].files
         if tree is None or self.single:
             return tree
-        return _ComponentFileTree(name, tree)
+        return ComponentFileTree(name, tree)
 
     def validate(self, artifact: Artifact) -> None:
         """Run the release's own admission check, then every component's against its view of ``artifact``."""

@@ -104,7 +104,7 @@ class ScenarioCommitter:
         self._binding = binding
         self._artifacts = artifacts
         self._checkpoint_strategy = checkpoint_strategy
-        self._trainers = trainers
+        self.trainers = trainers
         # The first trainer answers commits made on the scenario's behalf, such as rollback.
         self._trainer = trainers[0].trainer
         self._step = scenario_step
@@ -191,35 +191,35 @@ class ScenarioCommitter:
         """The content id of each component the creation artifact binds; ``None`` when it has no manifest."""
         return self._releases.creation_components(scenario_step)
 
-    def _bound_trainer(self, component: str | None) -> ComponentTrainer:
+    def bound_trainer(self, component: str | None) -> ComponentTrainer:
         """The trainer bound to ``component``; ``None`` selects the first, for scenario-wide operations."""
         if component is None:
-            return self._trainers[0]
-        for bound in self._trainers:
+            return self.trainers[0]
+        for bound in self.trainers:
             if bound.component == component:
                 return bound
         raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
 
-    def _trainer_for(self, component: str | None) -> Trainer:
-        return self._bound_trainer(component).trainer
+    def trainer_for(self, component: str | None) -> Trainer:
+        return self.bound_trainer(component).trainer
 
-    def _own_record(self, record: CommitRecord, component: str | None) -> bool:
+    def own_record(self, record: CommitRecord, component: str | None) -> bool:
         """Whether ``component``'s trainer made ``record``; a record naming no trainer belongs to the only one."""
         if record.component == component:
             return True
-        return record.component is None and record.operation == "training" and len(self._trainers) == 1
+        return record.component is None and record.operation == "training" and len(self.trainers) == 1
 
     def reject_pending(self, component: str | None, metrics: Mapping[str, Any] | None = None) -> None:
         """Drop ``component``'s reserved batch; with several trainers its consumption receipt names the component."""
         with self._lock:
-            bound = self._bound_trainer(component)
-            bound.trainer.reject_pending(metrics, component=bound.component if len(self._trainers) > 1 else None)
+            bound = self.bound_trainer(component)
+            bound.trainer.reject_pending(metrics, component=bound.component if len(self.trainers) > 1 else None)
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""
         records = self._store.history() if self._store.durable else ()
-        name = self._bound_trainer(component).component
-        return next((record for record in reversed(records) if self._own_record(record, name)), None)
+        name = self.bound_trainer(component).component
+        return next((record for record in reversed(records) if self.own_record(record, name)), None)
 
     def record_is_current(self, record: CommitRecord) -> bool:
         """Whether ``record`` still describes what is served.
@@ -229,7 +229,7 @@ class ScenarioCommitter:
         also moves on every other trainer's commit, so the record stays current
         until a rollback or promote lands after it.
         """
-        if len(self._trainers) == 1:
+        if len(self.trainers) == 1:
             return record.step == self._step
         records = self._store.history() if self._store.durable else ()
         return all(
@@ -270,7 +270,7 @@ class ScenarioCommitter:
             return False
         return later.components.get(record.component) == record.components.get(record.component)
 
-    def _release_manifest(self, artifact: Artifact) -> ReleaseComponents:
+    def release_manifest(self, artifact: Artifact) -> ReleaseComponents:
         """The manifest a release carries: its own, or the one-component manifest a flat release implies."""
         manifest = artifact.components
         if manifest is not None:
@@ -281,10 +281,10 @@ class ScenarioCommitter:
                 f"scenario {self._name!r} serves components {list(surface.names)} but release "
                 f"{artifact.ref.release_id!r} carries no component manifest"
             )
-        name = surface.names[0] if surface.names else self._trainers[0].component
+        name = surface.names[0] if surface.names else self.trainers[0].component
         return ReleaseComponents({name: ComponentEntry(artifact.ref.content_id)})
 
-    def _require_components(self, artifact: Artifact) -> None:
+    def require_components(self, artifact: Artifact) -> None:
         """Refuse a release that does not bind every component this scenario serves.
 
         Reading such a release as composed would hand the whole tree, or
@@ -308,13 +308,13 @@ class ScenarioCommitter:
                 f"{artifact.ref.release_id!r} binds {list(manifest.names)}"
             )
 
-    def _recorded_components(self, artifact: Artifact) -> dict[str, str] | None:
+    def recorded_components(self, artifact: Artifact) -> dict[str, str] | None:
         """The content id of each component a release binds, for its commit record; ``None`` for a flat release."""
         if self._binding.surface.single:
             return None
-        return {name: entry.content_id for name, entry in self._release_manifest(artifact).entries.items()}
+        return {name: entry.content_id for name, entry in self.release_manifest(artifact).entries.items()}
 
-    def _held_component(self, release_id: str) -> str | None:
+    def held_component(self, release_id: str) -> str | None:
         """The component a release held for review changed; ``None`` when it is not such a release.
 
         The record names the trainer that made the release, and a trainer may
@@ -370,7 +370,7 @@ class ScenarioCommitter:
                 raise ReleaseNotRestorable(
                     f"scenario {self._name!r} release {release_id!r} has no durable checkpoint bytes"
                 )
-            if any(bound.trainer.pending_batch is not None for bound in self._trainers):
+            if any(bound.trainer.pending_batch is not None for bound in self.trainers):
                 raise ReefError("cannot rollback while a training result is pending commit")
 
             artifacts = self._artifacts
@@ -391,10 +391,10 @@ class ScenarioCommitter:
             durable = self._store.durable
             surface = self._binding.surface
             try:
-                self._require_components(source)
+                self.require_components(source)
             except ReefError as exc:
                 raise ReleaseNotRestorable(str(exc)) from exc
-            promoted = self._held_component(release_id) if operation == "promote" else None
+            promoted = self.held_component(release_id) if operation == "promote" else None
             staged: Artifact | None = None
             if promoted is not None and not surface.single:
                 # A held release carries the other components as they were when it
@@ -406,7 +406,7 @@ class ScenarioCommitter:
                 source = artifacts.stage_composed(next_step, components, parent=checkpoint)
                 staged = source
             try:
-                self._admit_restored(source, release_id, promoted)
+                self.admit_restored(source, release_id, promoted)
                 # The runtime-loaded component is restored only when the engine serves other content.
                 loaded_component = surface.loader_component
                 served = Artifact(current_ref, artifacts.repository)
@@ -453,7 +453,7 @@ class ScenarioCommitter:
                     expected_parent=checkpoint,
                     metadata={
                         **dict(source.metadata),
-                        COMPONENTS_METADATA_KEY: self._release_manifest(source).to_dict(),
+                        COMPONENTS_METADATA_KEY: self.release_manifest(source).to_dict(),
                         SCENARIO_METADATA_KEY: commit_metadata,
                     },
                     advance_heads=not durable,
@@ -468,7 +468,7 @@ class ScenarioCommitter:
                     prepared=prepared,
                     operation=operation,
                     rollback_target_release_id=release_id,
-                    components=self._recorded_components(source),
+                    components=self.recorded_components(source),
                 )
                 if durable:
                     self._install_committed_checkpoint(
@@ -485,7 +485,7 @@ class ScenarioCommitter:
                 self._resume_restored_weights()
             return published_ref
 
-    def _admit_restored(self, source: Artifact, release_id: str, promoted: str | None) -> None:
+    def admit_restored(self, source: Artifact, release_id: str, promoted: str | None) -> None:
         """Run on a release a rollback or promote restores the checks its commit ran, and no more.
 
         A flat release runs the surface's checks as its commit did. A composed
@@ -500,13 +500,13 @@ class ScenarioCommitter:
             surface.validate(source)
             return
         surface.validator.validate(source)
-        component = promoted if promoted is not None else self._published_component(release_id)
+        component = promoted if promoted is not None else self.published_component(release_id)
         if component is not None and component in surface.names:
             surface.components[component].validator.validate(surface.component_artifact(source, component))
 
-    def _published_component(self, release_id: str) -> str | None:
+    def published_component(self, release_id: str) -> str | None:
         """The component the training commit that minted ``release_id`` changed, read off the recorded manifests
-        as :meth:`_held_component` reads it (a trainer may publish another component's content); ``None`` for the
+        as :meth:`held_component` reads it (a trainer may publish another component's content); ``None`` for the
         seed, for a release another operation minted, and when the manifests do not say."""
         records = self._store.history() if self._store.durable else ()
         record = next((item for item in records if item.artifact_ref.release_id == release_id), None)
@@ -543,8 +543,8 @@ class ScenarioCommitter:
             ).local_path
             if published_tree is None:
                 return None
-            component = self._trainers[0].component if files_component is None else files_component
-            trainer = self._trainer_for(component)
+            component = self.trainers[0].component if files_component is None else files_component
+            trainer = self.trainer_for(component)
             result = trainer.shipped_content_update(published_tree)
             if result is None:
                 return None
@@ -581,10 +581,10 @@ class ScenarioCommitter:
         admission paused for good.
         """
         with self._lock, self._publication_lock:
-            bound = self._bound_trainer(component)
+            bound = self.bound_trainer(component)
             trainer, component = bound.trainer, bound.component
             self.settled_sibling = None
-            self._settle_sibling_record(component)
+            self.settle_sibling_record(component)
             if trainer.result_on_record(result):
                 # A sibling's commit settled this trainer's durable record after the caller read the result.
                 raise SettledTrainingResultError(
@@ -606,7 +606,7 @@ class ScenarioCommitter:
             served = self._artifacts.current.release_id
             if (
                 not retrying
-                and len(self._trainers) > 1
+                and len(self.trainers) > 1
                 and base is not None
                 and base != served
                 and trainer.pending_has_candidate
@@ -732,7 +732,7 @@ class ScenarioCommitter:
         pending = result.pending
         durable = self._store.durable
         checkpointed = pending or self._should_checkpoint(result)
-        local_artifact = self._stage_publication(next_step, publication, checkpoint)
+        local_artifact = self.stage_publication(next_step, publication, checkpoint)
         try:
             # A pending release is recorded but never activated and moves no head.
             # The engine must confirm the new revision before anything moves
@@ -763,7 +763,7 @@ class ScenarioCommitter:
                     # flat release) plus the manifest naming its components.
                     metadata={
                         **dict(local_artifact.metadata),
-                        COMPONENTS_METADATA_KEY: self._release_manifest(local_artifact).to_dict(),
+                        COMPONENTS_METADATA_KEY: self.release_manifest(local_artifact).to_dict(),
                         SCENARIO_METADATA_KEY: commit_metadata,
                     },
                     advance_heads=not pending and not durable,
@@ -777,7 +777,7 @@ class ScenarioCommitter:
                     prepared=prepared,
                     pending=pending,
                     component=component,
-                    components=self._recorded_components(local_artifact),
+                    components=self.recorded_components(local_artifact),
                 )
             else:
                 if not durable:
@@ -790,7 +790,7 @@ class ScenarioCommitter:
                     checkpoint=False,
                     prepared=prepared,
                     component=component,
-                    components=self._recorded_components(local_artifact),
+                    components=self.recorded_components(local_artifact),
                 )
             if not pending:
                 if checkpointed and durable:
@@ -836,7 +836,7 @@ class ScenarioCommitter:
         finally:
             self._commit_status = (self._step, self._latest_training_record, self._artifact_head_sync)
 
-    def _stage_publication(
+    def stage_publication(
         self, next_step: int, publication: SavedArtifactPublication, checkpoint: ArtifactRef
     ) -> Artifact:
         """Admit the published component and stage the release it belongs to.
@@ -857,7 +857,7 @@ class ScenarioCommitter:
             return self._artifacts.stage(next_step, publication.artifact, parent=checkpoint)
         surface.components[component].validator.validate(publication.artifact)
         carried = self._artifacts.resolve(checkpoint)
-        self._require_components(carried)
+        self.require_components(carried)
         components = {name: carried.component(name) for name in surface.names}
         components[component] = publication.artifact
         staged = self._artifacts.stage_composed(next_step, components, parent=checkpoint)
@@ -889,7 +889,7 @@ class ScenarioCommitter:
             self._latest_training_record = record
         self.advance_to(next_step)
 
-    def _settle_sibling_record(self, component: str | None) -> None:
+    def settle_sibling_record(self, component: str | None) -> None:
         """Settle another trainer's commit that reached the log but not memory, before ``component`` commits.
 
         A commit can fail after its record is durable (a lost fsync
@@ -903,10 +903,10 @@ class ScenarioCommitter:
         if not records or records[-1].step != self._step + 1:
             return
         record = records[-1]
-        if record.operation != "training" or self._own_record(record, component):
+        if record.operation != "training" or self.own_record(record, component):
             return
-        for bound in self._trainers:
-            if bound.component == component or not self._own_record(record, bound.component):
+        for bound in self.trainers:
+            if bound.component == component or not self.own_record(record, bound.component):
                 continue
             prepared = bound.trainer.pending_prepared_commit
             if prepared is None or not self._record_matches_prepared(record, prepared):
@@ -931,7 +931,7 @@ class ScenarioCommitter:
         matches = (
             record.operation == "training"
             and record.pending == result.pending
-            and self._own_record(record, component)
+            and self.own_record(record, component)
             and self._record_matches_prepared(record, prepared)
         )
         if not matches:

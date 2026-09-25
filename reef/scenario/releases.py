@@ -39,9 +39,9 @@ class ScenarioReleases:
         self._store = store
         self._publication_lock = publication_lock
         self._creation_artifact = self._resolve_creation_artifact(scenario_step)
-        self._creation_components: Mapping[str, str] | None = None
-        self._creation_components_read = False
-        self._creation_read_failed_at: int | None = None
+        self.recorded_creation_components: Mapping[str, str] | None = None
+        self.creation_components_read = False
+        self.creation_read_failed_at: int | None = None
 
     @property
     def creation_artifact(self) -> ArtifactRef:
@@ -56,18 +56,20 @@ class ScenarioReleases:
         on a remote backend a read is a fetch, which a page polled every few
         seconds must not repeat while the remote is away.
         """
-        if not self._creation_components_read:
-            if self._creation_read_failed_at == scenario_step and not retry:
+        if not self.creation_components_read:
+            if self.creation_read_failed_at == scenario_step and not retry:
                 return None
             try:
                 manifest = self._artifacts.resolve(self._creation_artifact).components
             except ArtifactError:
-                self._creation_read_failed_at = scenario_step
+                self.creation_read_failed_at = scenario_step
                 return None
-            self._creation_components_read = True
+            self.creation_components_read = True
             if manifest is not None:
-                self._creation_components = {name: entry.content_id for name, entry in manifest.entries.items()}
-        return self._creation_components
+                self.recorded_creation_components = {
+                    name: entry.content_id for name, entry in manifest.entries.items()
+                }
+        return self.recorded_creation_components
 
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""

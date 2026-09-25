@@ -162,13 +162,13 @@ def test_a_local_cycle_that_waited_for_a_job_stands_aside_when_the_job_left_admi
             scenario.records.append(record)
         outcomes: list[bool] = []
         asked_for_the_lock = threading.Event()
-        cycle_lock = dispatcher._local_cycle_lock
+        cycle_lock = dispatcher.local_cycle_lock
 
         def signalling_lock(name: str):
             asked_for_the_lock.set()
             return cycle_lock(name)
 
-        dispatcher._local_cycle_lock = signalling_lock  # type: ignore[method-assign]
+        dispatcher.local_cycle_lock = signalling_lock  # type: ignore[method-assign]
         with cycle_lock("agent"):
             worker = threading.Thread(
                 target=lambda: outcomes.append(dispatcher._process_local_backend_step("agent", HARNESS))

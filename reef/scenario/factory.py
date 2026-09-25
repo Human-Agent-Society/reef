@@ -48,7 +48,7 @@ from reef.surface.files import REPOSITORY_FILES
 from reef.train.trainer import ComponentTrainer
 
 
-def _committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
+def committed_records(store: ScenarioStore, head_record: CommitRecord | None) -> tuple[CommitRecord, ...]:
     records = store.history()
     if not records and head_record is not None:
         # No durable log: the head adopted from checkpoint metadata is the
@@ -73,7 +73,7 @@ def _consumed_by_committed_steps(
     several: its own commits and the receipts of its own stale drops.
     """
     consumed: set[str] = set()
-    for record in _committed_records(store, head_record):
+    for record in committed_records(store, head_record):
         if component is None or record.component == component:
             consumed |= record.consumed_ids
     for receipt in store.records.consumption_receipts(scenario):
@@ -83,7 +83,7 @@ def _consumed_by_committed_steps(
 
 
 @dataclass(frozen=True)
-class _RecoveredTrainerState:
+class RecoveredTrainerState:
     """What one component's trainer recovers from its own commits and drops: state, cursor, and consumed rows."""
 
     algorithm_state: Mapping[str, Any] | None
@@ -91,9 +91,9 @@ class _RecoveredTrainerState:
     consumed_ids: frozenset[str]
 
 
-def _recovered_trainer_states(
+def recovered_trainer_states(
     store: ScenarioStore, scenario: str, head_record: CommitRecord | None, surface: Surface
-) -> dict[str, _RecoveredTrainerState]:
+) -> dict[str, RecoveredTrainerState]:
     """What each component's trainer recovers from its own commits and its own stale drops.
 
     The only trainer of a one-component (or record-only) scenario owns every
@@ -101,16 +101,16 @@ def _recovered_trainer_states(
     component, and rollbacks, which carry its state. A drop is a step without a commit: its rows count as consumed, and
     the state and the cursor stay the last commit's.
     """
-    records = _committed_records(store, head_record)
+    records = committed_records(store, head_record)
     components = surface.names or (RECORDS_COMPONENT,)
-    states: dict[str, _RecoveredTrainerState] = {}
+    states: dict[str, RecoveredTrainerState] = {}
     for component in components:
         alone = len(components) == 1
         own = tuple(
             record for record in records if record.component == component or (alone and record.component is None)
         )
         last = own[-1] if own else None
-        states[component] = _RecoveredTrainerState(
+        states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
             consumed_ids=_consumed_by_committed_steps(
@@ -170,7 +170,7 @@ class ScenarioFactory:
                 )
             }
             if surface.names:
-                registration_metadata[COMPONENTS_METADATA_KEY] = self._base_manifest(
+                registration_metadata[COMPONENTS_METADATA_KEY] = self.base_manifest(
                     backend, selected, surface
                 ).to_dict()
             backend.fork(selected.release_id, metadata=registration_metadata)
@@ -196,7 +196,7 @@ class ScenarioFactory:
             registered_components=release_components(metadata),
         )
 
-    def _base_manifest(self, backend: RepositoryBackend, selected: ArtifactRef, surface: Surface) -> ReleaseComponents:
+    def base_manifest(self, backend: RepositoryBackend, selected: ArtifactRef, surface: Surface) -> ReleaseComponents:
         """Name the base release's components, so every later step carries the unchanged ones forward.
 
         A flat release is its one component. A composed base keeps its own
@@ -326,7 +326,7 @@ class ScenarioFactory:
             else:
                 scenario_step = head_record.step
                 committed_artifact = head_record.artifact_ref
-            recovered_states = _recovered_trainer_states(store, name, head_record, surface)
+            recovered_states = recovered_trainer_states(store, name, head_record, surface)
 
             # Publication stages durable bytes before the commit record is durable, while
             # the backend's head is only a post-commit mirror. A crash between the

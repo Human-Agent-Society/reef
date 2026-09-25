@@ -52,22 +52,26 @@ CHECKPOINT_CADENCE_KEY = "checkpoint_every_n_versions"
 RESERVED_COMPONENT_NAMES = ("train", "step", "reef", "operations")
 
 
-def any_component_report(report_types: tuple[type[ReportBase], ...]) -> type[ReportBase]:
+class AnyComponentReport(ReportBase):
     """A report contract a payload meets when any of ``report_types`` parses it; the refusal names each."""
 
-    class ComponentReport(ReportBase):
-        @classmethod
-        def from_dict(cls, payload: Mapping[str, Any]) -> ReportBase:
-            refusals = []
-            for report_type in report_types:
-                try:
-                    return report_type.from_dict(payload)
-                except ReportValidationError as exc:
-                    refusals.append(f"{report_type.__name__}: {exc}")
-            raise ReportValidationError("no component accepts this report: " + "; ".join(refusals))
+    report_types: ClassVar[tuple[type[ReportBase], ...]] = ()
 
-    ComponentReport.__name__ = ComponentReport.__qualname__ = "AnyOf" + "".join(item.__name__ for item in report_types)
-    return ComponentReport
+    @classmethod
+    def from_dict(cls, payload: Mapping[str, Any]) -> ReportBase:
+        refusals = []
+        for report_type in cls.report_types:
+            try:
+                return report_type.from_dict(payload)
+            except ReportValidationError as exc:
+                refusals.append(f"{report_type.__name__}: {exc}")
+        raise ReportValidationError("no component accepts this report: " + "; ".join(refusals))
+
+
+def any_component_report(report_types: tuple[type[ReportBase], ...]) -> type[ReportBase]:
+    """The contract a payload meets when any of ``report_types`` parses it, named after them."""
+    name = "AnyOf" + "".join(item.__name__ for item in report_types)
+    return type(name, (AnyComponentReport,), {"report_types": report_types})
 
 
 def configured_training_mode(config: Mapping[str, Any]) -> str | None:
@@ -131,7 +135,7 @@ class CompositeRecipe(Recipe):
         if not isinstance(raw, Mapping) or not raw:
             raise RecipeConfigError("a composite recipe config requires a non-empty 'components' object")
         # Every step of a composed scenario checkpoints, so a cadence setting is a mistake, not a choice.
-        cls._refuse_checkpoint_cadence(config, "recipe")
+        cls.refuse_checkpoint_cadence(config, "recipe")
         for component in raw:
             if component in RESERVED_COMPONENT_NAMES:
                 raise RecipeConfigError(
@@ -145,7 +149,7 @@ class CompositeRecipe(Recipe):
         for component, component_config in raw.items():
             if not isinstance(component_config, Mapping):
                 raise RecipeConfigError(f"components.{component} must be an object")
-            cls._refuse_checkpoint_cadence(component_config, f"components.{component}")
+            cls.refuse_checkpoint_cadence(component_config, f"components.{component}")
             merged = dict(component_config)
             merged.setdefault("model", dict(config.get("model", {})))
             data = merged.get("data", {})
@@ -203,7 +207,7 @@ class CompositeRecipe(Recipe):
         return selected[0][1] if selected else None
 
     @staticmethod
-    def _refuse_checkpoint_cadence(config: Mapping[str, Any], section: str) -> None:
+    def refuse_checkpoint_cadence(config: Mapping[str, Any], section: str) -> None:
         """Refuse the cadence key in every spelling it is written in: flat, under artifact, hyphenated."""
         artifact = config.get("artifact", {})
         candidates = [

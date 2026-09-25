@@ -144,7 +144,7 @@ def _training_recipe(
 COMPOSED_RECIPE_KEYS = frozenset({"components", "model", "artifact", "data", "execution", "executors"})
 
 
-def _composed_training_recipe(
+def composed_training_recipe(
     selected: str,
     recipe_type: type[Recipe],
     config: dict[str, Any],
@@ -223,7 +223,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
         weight_training = None if recipe_type is None else recipe_type.select_weight_training(config)
         if weight_training is not None and recipe_type is not None:
             weight_type, weight_config = weight_training
-            return _composed_training_recipe(
+            return composed_training_recipe(
                 selected, recipe_type, config, weight_type, weight_config, settings, env, connector
             )
         if settings.evaluation_settings is not None:
@@ -257,7 +257,7 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
     )
 
 
-def _served_url(host: str, port: int) -> str:
+def default_served_url(host: str, port: int) -> str:
     """Where this service reaches itself: loopback for a wildcard bind, an IPv6 literal in brackets.
 
     A ``::`` bind is IPv6 only (asyncio sets IPV6_V6ONLY on it), so its loopback is ``::1``.
@@ -285,7 +285,7 @@ def build_dispatcher(
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
     # A recipe's own evaluation calls come back to this Reef, so they sample the release it serves.
-    served_url = settings.served_url or _served_url(settings.host, settings.port)
+    served_url = settings.served_url or default_served_url(settings.host, settings.port)
     recipe = recipe.with_served_endpoint(
         ServedEndpoint(url=served_url, token=settings.tokens[0] if settings.tokens else None)
     )
@@ -363,7 +363,7 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
             inference_retry_policy=retry_policy,
             close_dispatcher=True,
             record_retention=record_retention,
-            open_local_cycles_at=_served_url(settings.host, settings.port),
+            open_local_cycles_at=default_served_url(settings.host, settings.port),
         )
     except BaseException:
         with suppress(Exception):

@@ -65,14 +65,14 @@ class Scenario:
         self._surface = binding.surface
         self._store = store
         self._closed = False
-        self._trainers = validate_component_trainers(trainers, binding.surface)
+        self.trainers = validate_component_trainers(trainers, binding.surface)
         self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
         self._committer = ScenarioCommitter(
             name=name,
             binding=binding,
             artifacts=self._artifact_chain,
             checkpoint_strategy=checkpoint_strategy,
-            trainers=self._trainers,
+            trainers=self.trainers,
             scenario_step=scenario_step,
             store=store,
             recovered_head_record=recovered_head_record,
@@ -123,7 +123,7 @@ class Scenario:
     @property
     def component_trainers(self) -> tuple[ComponentTrainer, ...]:
         """Every trainer of this scenario with the component it evolves, in recipe order."""
-        return self._trainers
+        return self.trainers
 
     @property
     def trainer(self) -> Trainer:
@@ -141,7 +141,7 @@ class Scenario:
         watermarks, processor schema) is safe here; do not reserve batches
         or replace results through this handle.
         """
-        stepping = self._stepping_trainers()
+        stepping = self.stepping_trainers()
         for bound in stepping:
             backend = bound.trainer.candidate_backend
             if backend is not None and backend.dispatched:
@@ -151,7 +151,7 @@ class Scenario:
     @property
     def is_job_reserved(self) -> bool:
         """Whether a dispatched trainer holds a reserved batch: its job is out at the backend until commit or reject."""
-        for bound in self._trainers:
+        for bound in self.trainers:
             backend = bound.trainer.candidate_backend
             if backend is not None and backend.dispatched and bound.trainer.pending_batch is not None:
                 return True
@@ -160,8 +160,8 @@ class Scenario:
     def trainer_for(self, component: str | None) -> Trainer:
         """The trainer evolving ``component``; ``None`` selects the first trainer, for scenario-wide operations."""
         if component is None:
-            return self._trainers[0].trainer
-        for bound in self._trainers:
+            return self.trainers[0].trainer
+        for bound in self.trainers:
             if bound.component == component:
                 return bound.trainer
         raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
@@ -169,7 +169,7 @@ class Scenario:
     @property
     def dispatched_component(self) -> str | None:
         """The component whose trainer runs a dispatched backend on the training runtime, if any."""
-        for bound in self._trainers:
+        for bound in self.trainers:
             backend = bound.trainer.candidate_backend
             if backend is not None and backend.dispatched:
                 return bound.component
@@ -187,12 +187,12 @@ class Scenario:
     @property
     def training_mode(self) -> str:
         """The mode the scenario's stepping trainers run in; a trainer that runs no step keeps none."""
-        return self._stepping_trainers()[0].trainer.training_mode
+        return self.stepping_trainers()[0].trainer.training_mode
 
-    def _stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
+    def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
         """The trainers with a candidate backend; the first trainer when none has one."""
-        stepping = tuple(bound for bound in self._trainers if bound.trainer.candidate_backend is not None)
-        return stepping or self._trainers[:1]
+        stepping = tuple(bound for bound in self.trainers if bound.trainer.candidate_backend is not None)
+        return stepping or self.trainers[:1]
 
     def set_training_mode(self, training_mode: str) -> None:
         """Select future batches without waiting for a running backend step.
@@ -204,7 +204,7 @@ class Scenario:
         """
         if training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
-        stepping = self._stepping_trainers()
+        stepping = self.stepping_trainers()
         unsupported = [
             f"{bound.component} ({type(bound.trainer.processor).__name__})"
             for bound in stepping
@@ -360,7 +360,7 @@ class Scenario:
                 return
             self._closed = True
             try:
-                for bound in self._trainers:
+                for bound in self.trainers:
                     bound.trainer.close()
             finally:
                 self._store.close()

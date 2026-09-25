@@ -35,7 +35,7 @@ from reef.train.trainer import ComponentTrainer, Trainer
 
 
 @dataclass(frozen=True)
-class _EveryCheck(ArtifactValidator):
+class EveryCheck(ArtifactValidator):
     """Admit an artifact only when every check admits it, in order."""
 
     checks: tuple[ArtifactValidator, ...]
@@ -50,7 +50,7 @@ def every_check(*checks: ArtifactValidator) -> ArtifactValidator:
     kept = tuple(check for check in checks if not isinstance(check, AcceptAnyArtifact))
     if not kept:
         return AcceptAnyArtifact()
-    return kept[0] if len(kept) == 1 else _EveryCheck(kept)
+    return kept[0] if len(kept) == 1 else EveryCheck(kept)
 
 
 @dataclass(frozen=True)
