@@ -87,8 +87,10 @@ class ObservedRecordStore(RecordStore):
     def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
         return self._inner.get_for_audit(scenario, agent_record_id)
 
-    def audit_page(self, scenario: str, *, after_sequence: int = 0, limit: int = 256) -> tuple[StoredRecord, ...]:
-        return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit)
+    def audit_page(
+        self, scenario: str, *, after_sequence: int = 0, limit: int = 256, request_type: RequestType | None = None
+    ) -> tuple[StoredRecord, ...]:
+        return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
 
     def record_consumption(
         self,

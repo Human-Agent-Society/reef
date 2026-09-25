@@ -58,7 +58,8 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                             | enqueue one training instruction                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                                                          | every known scenario and current release          |
+| ``GET /reef/scenarios``                                                          | every known scenario, current release and harness |
+|                                                                                  | adapter                                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -425,8 +426,10 @@ unknown scenario returns HTTP 404 and you create it first:
 |                                             | content_id}``; 201 created, 200 already     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios``                     | every known scenario and its current        |
-|                                             | release once loaded                         |
+| ``GET /reef/scenarios``                     | every known scenario, its current release   |
+|                                             | once loaded and, for a harness recipe, the  |
+|                                             | ``adapter`` its tree is rendered for, also  |
+|                                             | while the scenario loads                    |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types, training_mode,      |
@@ -1188,11 +1191,12 @@ Record and commit history
 
 ``GET /reef/scenarios/{scenario}/records`` reads retained record metadata,
 including consumed records. ``after_sequence`` defaults to 0 and ``limit``
-defaults to 50 (1–100). Records are oldest first; ``next_after_sequence`` is
-null at the end. Each row contains ``sequence``, ``agent_record_id``,
-``request_type``, ``created_at``, ``references``, the recorded
-``artifact_ref``, and the payload's ``score`` field. No record payload or
-learning classification is included.
+defaults to 50 (1 to 100). ``request_type`` (``inference``, ``report`` or
+``train``) lists one type only; another value is HTTP 400. Records are oldest
+first; ``next_after_sequence`` is null at the end. Each row contains
+``sequence``, ``agent_record_id``, ``request_type``, ``created_at``,
+``references``, the recorded ``artifact_ref``, and the payload's ``score``
+field. No record payload or learning classification is included.
 
 ``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
 and the stored ``payload``. A missing body returns 404: it may have expired or

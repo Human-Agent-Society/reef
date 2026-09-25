@@ -333,6 +333,10 @@ class CordisRecipe(Recipe):
     def report_type(self) -> type[ScoredRolloutReport]:
         return ScoredRolloutReport
 
+    @property
+    def harness_adapter(self) -> str | None:
+        return self.adapter
+
     def __post_init__(self) -> None:
         super().__post_init__()
         if not isinstance(self.propose, Proposer):

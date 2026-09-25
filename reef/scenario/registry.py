@@ -194,12 +194,17 @@ class ScenarioRegistry:
         return self._resolve(scenario, None)
 
     def list(self) -> tuple[dict[str, Any], ...]:
-        """Known scenarios: loaded ones with their binding, durable ones by name."""
+        """Known scenarios: loaded ones with their binding, durable ones by name, each with the harness adapter.
+
+        The adapter is the recipe's, so a scenario still loading or one whose
+        preload failed names it too; a recipe with no harness names none.
+        """
         registered: tuple[str, ...] = ()
         if isinstance(self._backend_factory, EnumerableRepositoryBackendFactory):
             registered = self._backend_factory.list_registrations()
         with self._lock:
             loaded = dict(self._scenarios)
+        adapter = self._recipe.harness_adapter
         rows = []
         for name in sorted(set(registered) | set(loaded)):
             current = loaded.get(name)
@@ -208,6 +213,8 @@ class ScenarioRegistry:
                 ref = current.repository.require_current_artifact()
                 row["release_id"] = ref.release_id
                 row["content_id"] = ref.content_id
+            if adapter is not None:
+                row["adapter"] = adapter
             rows.append(row)
         return tuple(rows)
 

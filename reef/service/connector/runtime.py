@@ -5,10 +5,31 @@ from __future__ import annotations
 import asyncio
 import ipaddress
 import math
+import re
 from typing import Any
 from urllib.parse import quote, urlsplit
 
 import aiohttp
+
+from reef.service.release_page import mutations_of, result_of
+
+#: A harness adapter name as the console builds ``reef-<adapter>`` commands from it.
+ADAPTER_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
+#: The newest harness requests one ``requests`` command reports, and the record pages it reads to find them.
+MAX_REQUESTS = 100
+MAX_REQUEST_PAGES = 50
+#: The step metrics a release summary copies when they are finite numbers.
+SUMMARY_METRICS = (
+    "selected",
+    "wins",
+    "losses",
+    "ties",
+    "candidate_score",
+    "current_score",
+    "passed",
+    "failed",
+    "floor_score",
+)
 
 
 class HTTPFailure(RuntimeError):
@@ -98,6 +119,8 @@ class ReefRuntime:
                 row = {"scenario": name}
                 if isinstance(item.get("release_id"), str):
                     row["release_id"] = item["release_id"][:180]
+                if isinstance(item.get("adapter"), str) and ADAPTER_NAME.fullmatch(item["adapter"]):
+                    row["adapter"] = item["adapter"]
                 mode = status.get("scenarios", {}).get(name, {}).get("training_mode")
                 if mode in ("auto", "manual", "hybrid"):
                     row["training_mode"] = mode
@@ -133,6 +156,8 @@ class ReefRuntime:
             if not isinstance(rows, list):
                 raise ValueError("Reef did not return a release list")
             return {"releases": [release_summary(row) for row in rows[:100]], "truncated": len(rows) > 100}
+        if action == "requests":
+            return await self.harness_requests(name, path)
         if action == "create_scenario":
             await self.client.request("/reef/scenarios", body={"name": name}, timeout=60)
         elif action == "delete_scenario":
@@ -159,6 +184,46 @@ class ReefRuntime:
             raise ValueError("Unsupported connector action")
         return {"scenario": name}
 
+    async def harness_requests(self, name: str, path: str) -> dict[str, Any]:
+        """The scenario's harness requests, newest first: ids, states and filed times, never the request text.
+
+        The retained training instructions come from the record list, oldest
+        first, and each one's state from its progress read, the reading the
+        request page and ``reef-<adapter> wait`` use. Only the state code and
+        the step leave the machine; the activity lines stay.
+        """
+        records: list[dict[str, Any]] = []
+        cursor: int | None = 0
+        for _ in range(MAX_REQUEST_PAGES):
+            page = await self.client.request(f"{path}/records?request_type=train&limit=100&after_sequence={cursor}")
+            rows, following = page.get("records"), page.get("next_after_sequence")
+            if not isinstance(rows, list):
+                raise ValueError("Reef did not return a record list")
+            if following is not None and (not isinstance(following, int) or isinstance(following, bool)):
+                raise ValueError("Reef returned an invalid record cursor")
+            # A Reef that predates the type filter lists every record, so the type is checked here too.
+            records.extend(row for row in rows if isinstance(row, dict) and row.get("request_type") == "train")
+            cursor = following
+            if cursor is None:
+                break
+        requests = []
+        for record in records[::-1][:MAX_REQUESTS]:
+            record_id = record.get("agent_record_id")
+            if not isinstance(record_id, str) or not record_id or len(record_id) > 180:
+                raise ValueError("Reef returned an invalid request ID")
+            progress = await self.client.request(
+                "/reef/harness/requests/" + quote(record_id, safe="") + "/progress", scenario=name
+            )
+            state, step = progress.get("state"), progress.get("step")
+            entry: dict[str, Any] = {"id": record_id, "state": state[:40] if isinstance(state, str) else "unknown"}
+            if isinstance(step, int) and not isinstance(step, bool):
+                entry["step"] = step
+            created_at = record.get("created_at")
+            if isinstance(created_at, (int, float)) and math.isfinite(created_at):
+                entry["created_at"] = created_at
+            requests.append(entry)
+        return {"requests": requests, "truncated": cursor is not None or len(records) > MAX_REQUESTS}
+
 
 def scenario_name(value: Any) -> str:
     if (
@@ -172,8 +237,25 @@ def scenario_name(value: Any) -> str:
     return value
 
 
+def finite_numbers(values: dict[str, Any], keys: tuple[str, ...]) -> dict[str, Any]:
+    """The named values that are finite numbers or booleans, so the summary stays valid JSON."""
+    return {
+        key: values[key]
+        for key in keys
+        if isinstance(values.get(key), (bool, int, float)) and math.isfinite(values[key])
+    }
+
+
 def release_summary(row: Any) -> dict[str, Any]:
-    """Only publish catalog identifiers and numeric gate results, never artifact files or prompts."""
+    """Only publish catalog identifiers, numeric evaluation results and short codes.
+
+    Never artifact files, request text, entry bodies or prompts: a request
+    keeps its id and the names and kinds of what it requires, an agent's
+    proposal its id, a recheck its reason code, a mutation its op, id and
+    kind, and a selection its outcome, policy, evaluator and counts.
+    ``result`` is the release page's result for a step (``selected``,
+    ``rejected``, ``skipped``, ``failed`` or ``pending``).
+    """
     if not isinstance(row, dict):
         raise ValueError("Invalid release row")
     result: dict[str, Any] = {}
@@ -187,11 +269,57 @@ def release_summary(row: Any) -> dict[str, Any]:
         result["recorded_at"] = row["recorded_at"]
     metrics = row.get("metrics")
     if isinstance(metrics, dict):
-        result["metrics"] = {
-            key: metrics[key]
-            for key in ("selected", "wins", "losses", "ties", "candidate_score", "current_score")
-            if isinstance(metrics.get(key), (bool, int, float)) and math.isfinite(metrics[key])
-        }
+        summary = finite_numbers(metrics, SUMMARY_METRICS)
         if metrics.get("skipped"):
-            result["metrics"]["skipped"] = True
+            summary["skipped"] = True
+        request = metrics.get("training_request")
+        if isinstance(request, dict) and isinstance(request.get("id"), str):
+            requires = request.get("requires")
+            summary["training_request"] = {
+                "id": request["id"][:180],
+                "requires": [
+                    {"name": item["name"][:180], "kind": item["kind"][:40]}
+                    for item in (requires if isinstance(requires, list) else [])[:50]
+                    if isinstance(item, dict)
+                    and isinstance(item.get("name"), str)
+                    and isinstance(item.get("kind"), str)
+                ],
+            }
+        # An agent's proposal keeps its id; its reason is text and stays.
+        proposal = metrics.get("proposal")
+        if isinstance(proposal, dict) and isinstance(proposal.get("id"), str):
+            summary["proposal"] = {"id": proposal["id"][:180]}
+        if metrics.get("recheck") is True:
+            summary["recheck"] = True
+            if isinstance(metrics.get("recheck_reason"), str):
+                summary["recheck_reason"] = metrics["recheck_reason"][:40]
+        mutations = mutations_of(metrics)
+        if mutations:
+            summary["mutation_count"] = len(mutations)
+            summary["mutations"] = []
+            for mutation in mutations[:50]:
+                entry: dict[str, Any] = {
+                    key: mutation[key][:180] for key in ("op", "id") if isinstance(mutation.get(key), str)
+                }
+                options = mutation.get("options")
+                # The kind is the entry's ``options.name``; its ``config`` is the entry body and stays.
+                if isinstance(options, dict) and isinstance(options.get("name"), str):
+                    entry["options"] = {"name": options["name"][:80]}
+                summary["mutations"].append(entry)
+        selection = metrics.get("selection")
+        if isinstance(selection, dict):
+            decision: dict[str, Any] = {
+                key: selection[key][:80] for key in ("outcome", "policy") if isinstance(selection.get(key), str)
+            }
+            if isinstance(selection.get("metrics"), dict):
+                decision["metrics"] = finite_numbers(selection["metrics"], ("passed", "failed", "floor_score"))
+            evaluation = selection.get("evaluation")
+            if isinstance(evaluation, dict) and isinstance(evaluation.get("evaluator"), str):
+                decision["evaluation"] = {"evaluator": evaluation["evaluator"][:80]}
+            summary["selection"] = decision
+        result["metrics"] = summary
+    # The operation already names a row that is no step; a step gets its result.
+    code = result_of(row)
+    if code != str(row.get("operation") or "unknown"):
+        result["result"] = code
     return result

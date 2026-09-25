@@ -4,6 +4,7 @@ import asyncio
 
 from aiohttp import web
 
+from reef.core.records_types import RequestType
 from reef.scenario.scenario import Scenario
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
@@ -89,11 +90,14 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
         )
 
     async def record_list(request: web.Request) -> web.Response:
+        request_type = request.query.get("request_type")
         result = await asyncio.to_thread(
             request_service.dispatcher.read_records,
             request.match_info["scenario"],
             after_sequence=int(request.query.get("after_sequence", "0")),
             limit=int(request.query.get("limit", "50")),
+            # An unknown type is a ValueError, which answers HTTP 400.
+            request_type=None if request_type is None else RequestType(request_type),
         )
         return web.json_response(result, headers={"Cache-Control": "no-store"})
 

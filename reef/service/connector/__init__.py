@@ -56,8 +56,21 @@ class Connector:
             refresh = command.get("action") == "refresh"
             value = await self.snapshot() if refresh else await self.runtime.execute(command)
             result: dict[str, Any] = {"state": "succeeded", "value": value}
-            if command.get("action") != "releases":
+            if command.get("action") not in ("releases", "requests"):
                 result["snapshot"] = value if refresh else await self.snapshot()
+            if command.get("action") == "releases" and len(json.dumps(result).encode()) > BODY_LIMIT:
+                # Rows come newest first: keep the newest that fit and mark the list truncated, as the row cap does.
+                # The whole list did not fit, so at least the oldest row goes.
+                rows = value["releases"]
+                room = BODY_LIMIT - len(json.dumps({**result, "value": {"releases": [], "truncated": True}}).encode())
+                kept = 0
+                for row in rows[:-1]:
+                    # A row after the first also takes the ", " that separates it.
+                    room -= len(json.dumps(row).encode()) + (2 if kept else 0)
+                    if room < 0:
+                        break
+                    kept += 1
+                result["value"] = {"releases": rows[:kept], "truncated": True}
             if len(json.dumps(result).encode()) > BODY_LIMIT:
                 result = {"state": "failed", "error": "The result exceeds the connector size limit"}
         except asyncio.CancelledError:

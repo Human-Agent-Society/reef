@@ -10,6 +10,7 @@ the stock ``CordisRecipe`` implementation:
   reaches the day's traffic through the proxy, not just through client pull.
   The same surface binds the catalog tree's admission rules, which the
   scenario runs before a pool is published or restored.
+  No harness tree is installed, so ``harness_adapter`` names none.
 - ``evolution.seed_skills`` (optional) names a directory of
   ``<name>/SKILL.md`` files - the benchmark's shipped skills library - and
   seeds one skill node per file, so the first-boot composition is the
@@ -73,3 +74,7 @@ class SkillClawRecipe(CordisRecipe):
 
     def build_surface(self, scenario: str) -> Surface:
         return create_skill_surface([SkillCatalogModule(public_root=PUBLIC_SKILL_ROOT)])
+
+    @property
+    def harness_adapter(self) -> str | None:
+        return None

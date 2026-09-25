@@ -16,7 +16,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.cli import main
-from reef.service.connector import Connector, _running, authorize
+from reef.service.connector import BODY_LIMIT, Connector, _running, authorize
 from reef.service.connector.runtime import HTTPFailure, JSONClient, ReefRuntime, endpoint_url, release_summary
 from reef.service.connector.service import ReefService, serve_address
 from reef.service.connector.state import ConnectorState
@@ -105,7 +105,268 @@ def test_snapshots_and_releases_strip_private_data():
             },
         }
     )
-    assert row == {"release_id": "seed", "current": True, "metrics": {"wins": 3, "selected": True, "skipped": True}}
+    assert row == {
+        "release_id": "seed",
+        "current": True,
+        "metrics": {"wins": 3, "selected": True, "skipped": True},
+        "result": "selected",
+    }
+
+
+def test_snapshot_names_each_scenario_adapter():
+    async def run():
+        client = AsyncMock()
+        client.base_url = "http://127.0.0.1:8900"
+        client.request.side_effect = [
+            {
+                "scenarios": [
+                    {"scenario": "chat", "release_id": "seed", "adapter": "claude"},
+                    {"scenario": "odd", "adapter": "pi; rm -rf ~"},
+                    {"scenario": "weights"},
+                ]
+            },
+            {"scenarios": {}},
+        ]
+        return await ReefRuntime(client).snapshot()
+
+    assert asyncio.run(run())["scenarios"] == [
+        {"scenario": "chat", "release_id": "seed", "adapter": "claude"},
+        {"scenario": "odd"},
+        {"scenario": "weights"},
+    ]
+
+
+def test_release_summary_keeps_request_mutation_and_selection_codes_without_text():
+    """A published request step as the catalog lists it: ids, kinds, counts and codes leave; every text stays."""
+    row = release_summary(
+        {
+            "release_id": "published",
+            "parent_release_id": "seed",
+            "operation": "training",
+            "current": True,
+            "pending": False,
+            "recorded_at": 1790000000.5,
+            "metrics": {
+                "selected": True,
+                "candidate_score": 1.0,
+                "passed": 1,
+                "failed": 0,
+                "floor_score": 1.0,
+                "step_record": "/private/steps/chat/1",
+                "proposal_notes": {"design": "private design", "review": {"covered": ["private point"]}},
+                "training_request": {
+                    "id": "3d44ceb6",
+                    "text": "private request text",
+                    "session": "private-session",
+                    "client": {"platform": "private"},
+                    "requires": [{"name": "SEARCH_KEY", "kind": "env", "check": "private check command"}],
+                },
+                "mutations": [
+                    {
+                        "op": "create",
+                        "id": "chat",
+                        "options": {"name": "agent_command", "config": {"text": "private"}},
+                    },
+                    {"op": "create", "id": "chat-rules", "options": {"name": "rules", "config": {"text": "private"}}},
+                    {"op": "update", "id": "settings", "options": {"config": {"allow": ["private"]}}},
+                ],
+                "selection": {
+                    "outcome": "select",
+                    "policy": "floor",
+                    "reason": "private reason text",
+                    "candidate_id": "private-candidate",
+                    "metrics": {"passed": 1, "failed": 0, "floor_score": 1.0},
+                    "evaluation": {"evaluator": "harness_episode_pairs", "metrics": {"candidate_paths": ["private"]}},
+                },
+            },
+        }
+    )
+    assert row == {
+        "release_id": "published",
+        "parent_release_id": "seed",
+        "operation": "training",
+        "current": True,
+        "pending": False,
+        "recorded_at": 1790000000.5,
+        "metrics": {
+            "selected": True,
+            "candidate_score": 1.0,
+            "passed": 1,
+            "failed": 0,
+            "floor_score": 1.0,
+            "training_request": {"id": "3d44ceb6", "requires": [{"name": "SEARCH_KEY", "kind": "env"}]},
+            "mutation_count": 3,
+            "mutations": [
+                {"op": "create", "id": "chat", "options": {"name": "agent_command"}},
+                {"op": "create", "id": "chat-rules", "options": {"name": "rules"}},
+                {"op": "update", "id": "settings"},
+            ],
+            "selection": {
+                "outcome": "select",
+                "policy": "floor",
+                "metrics": {"passed": 1, "failed": 0, "floor_score": 1.0},
+                "evaluation": {"evaluator": "harness_episode_pairs"},
+            },
+        },
+        "result": "selected",
+    }
+    assert "private" not in json.dumps(row)
+    failed = release_summary(
+        {"operation": "training", "metrics": {"skipped": "private", "error": "private traceback"}}
+    )
+    assert failed == {"operation": "training", "metrics": {"skipped": True}, "result": "failed"}
+    assert "result" not in release_summary({"operation": "creation", "metrics": {}})
+
+
+def test_release_summary_names_proposal_and_recheck_steps_without_text():
+    """A step from an agent's proposal keeps the proposal id; a recheck keeps its reason code."""
+    proposal = release_summary(
+        {
+            "operation": "training",
+            "metrics": {
+                "selected": False,
+                "proposal": {
+                    "id": "proposal-7",
+                    "session": "private-session",
+                    "release_id": "seed",
+                    "reason": "private reason text",
+                },
+                "mutation": {"op": "create", "id": "x", "options": {"name": "skill", "config": {"text": "private"}}},
+            },
+        }
+    )
+    assert proposal == {
+        "operation": "training",
+        "metrics": {
+            "selected": False,
+            "proposal": {"id": "proposal-7"},
+            "mutation_count": 1,
+            "mutations": [{"op": "create", "id": "x", "options": {"name": "skill"}}],
+        },
+        "result": "rejected",
+    }
+    recheck = release_summary(
+        {"operation": "training", "metrics": {"selected": True, "recheck": True, "recheck_reason": "drift"}}
+    )
+    assert recheck["metrics"] == {"selected": True, "recheck": True, "recheck_reason": "drift"}
+    assert "private" not in json.dumps([proposal, recheck])
+
+
+def test_releases_over_the_size_limit_keep_the_newest_rows_that_fit(tmp_path):
+    """A long catalog drops its oldest rows to fit the result limit instead of failing the whole read."""
+
+    def result_for(rows):
+        async def run():
+            state = ConnectorState(tmp_path)
+            runtime = AsyncMock()
+            runtime.execute.return_value = {"releases": rows, "truncated": False}
+            command = {"id": str(uuid.uuid4()), "action": "releases", "scenario": "chat"}
+            try:
+                await Connector(AsyncMock(), runtime, state).execute(command)
+                return dict(state.pending())[command["id"]]
+            finally:
+                state.close()
+
+        return asyncio.run(run())
+
+    def size(value):
+        return len(json.dumps(value).encode())
+
+    def rows_of():
+        return [{"release_id": f"step-{index:03d}", "metrics": {"mutation_count": 20}} for index in range(100)]
+
+    # Rows come newest first. A list exactly at the limit comes whole; one byte over drops its oldest row.
+    rows = rows_of()
+    rows[-1]["release_id"] += "x" * (
+        BODY_LIMIT - size({"state": "succeeded", "value": {"releases": rows, "truncated": False}})
+    )
+    whole = result_for(rows)
+    assert whole == {"state": "succeeded", "value": {"releases": rows, "truncated": False}}
+    assert size(whole) == BODY_LIMIT
+    rows[-1]["release_id"] += "x"
+    assert result_for(rows) == {"state": "succeeded", "value": {"releases": rows[:-1], "truncated": True}}
+    # The second oldest row pads the newest 99 to the limit exactly; one byte more and it goes too.
+    rows = rows_of()
+    rows[98]["release_id"] += "x" * (
+        BODY_LIMIT - size({"state": "succeeded", "value": {"releases": rows[:99], "truncated": True}})
+    )
+    fitted = result_for(rows)
+    assert fitted == {"state": "succeeded", "value": {"releases": rows[:99], "truncated": True}}
+    assert size(fitted) == BODY_LIMIT
+    rows[98]["release_id"] += "x"
+    assert result_for(rows) == {"state": "succeeded", "value": {"releases": rows[:98], "truncated": True}}
+
+
+def test_requests_lists_ids_states_and_times_without_text(tmp_path):
+    async def run():
+        seen = []
+
+        async def handler(request):
+            seen.append((request.path, request.query_string, request.headers.get("x-reef-scenario")))
+            if request.path.endswith("/records"):
+                after = int(request.query["after_sequence"])
+                # The first page answers like a Reef that predates the type filter: an inference record comes too.
+                pages = {
+                    0: {
+                        "records": [
+                            {"sequence": 1, "agent_record_id": "turn", "request_type": "inference", "created_at": 1.0},
+                            {"sequence": 2, "agent_record_id": "first", "request_type": "train", "created_at": 2.0},
+                        ],
+                        "next_after_sequence": 2,
+                    },
+                    2: {
+                        "records": [
+                            {"sequence": 3, "agent_record_id": "second", "request_type": "train", "created_at": 3.0}
+                        ],
+                        "next_after_sequence": None,
+                    },
+                }
+                return web.json_response(pages[after])
+            progress = {
+                "first": {"state": "selected", "step": 1, "activity": []},
+                "second": {
+                    "state": "proposing",
+                    "step": None,
+                    "meaning": "private words",
+                    "step_record": "/private/steps/chat/2",
+                    "activity": [{"at": 1.0, "kind": "model", "text": "private proposer line"}],
+                },
+            }
+            return web.json_response(progress[request.path.split("/")[4]])
+
+        app = web.Application()
+        app.router.add_route("*", "/{path:.*}", handler)
+        async with TestServer(app) as server, aiohttp.ClientSession() as session:
+            runtime = ReefRuntime(JSONClient(session, str(server.make_url("")).rstrip("/"), "local-test-token"))
+            state = ConnectorState(tmp_path)
+            connector = Connector(AsyncMock(), runtime, state)
+            command = {"id": str(uuid.uuid4()), "action": "requests", "scenario": "chat a"}
+            try:
+                await connector.execute(command)
+                result = dict(state.pending())[command["id"]]
+            finally:
+                state.close()
+        assert result == {
+            "state": "succeeded",
+            "value": {
+                "requests": [
+                    {"id": "second", "state": "proposing", "created_at": 3.0},
+                    {"id": "first", "state": "selected", "step": 1, "created_at": 2.0},
+                ],
+                "truncated": False,
+            },
+        }
+        assert "private" not in json.dumps(result)
+        assert [entry for entry in seen if entry[0].endswith("/records")] == [
+            ("/reef/scenarios/chat a/records", "request_type=train&limit=100&after_sequence=0", None),
+            ("/reef/scenarios/chat a/records", "request_type=train&limit=100&after_sequence=2", None),
+        ]
+        assert [entry for entry in seen if entry[0].endswith("/progress")] == [
+            ("/reef/harness/requests/second/progress", "", "chat a"),
+            ("/reef/harness/requests/first/progress", "", "chat a"),
+        ]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
