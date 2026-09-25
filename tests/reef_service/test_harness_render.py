@@ -13,6 +13,7 @@ import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
+from reef.harness.tree.mutations import Mutation, admit_mutations
 from reef.harness.tree.render import RenderError, render_composition
 
 GOLDENS = Path(__file__).parent / "data" / "harness_goldens"
@@ -284,11 +285,17 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
         "api_key": "k-1",
     }
     assert config["agent"] == {"max_turns": 40}
-    # The defaults that keep an episode hermetic and single request, and the second skill root.
-    assert config["approval"] == {"tirith_enabled": False}
+    # The defaults that keep an episode hermetic and single request, and the second skill root, found beside
+    # the episode home and, in a reef-hermes session whose home is a temp copy, at the install root.
+    assert config["security"] == {"tirith_enabled": False} and "approval" not in config
     assert config["auxiliary"] == {"title_generation": {"enabled": False}}
     assert config["memory"] == {"nudge_interval": 0} and config["sessions"] == {"write_json_snapshots": True}
-    assert config["skills"] == {"external_dirs": ["${HERMES_HOME}/../hermes-commands"]}
+    # No background review or curator writes skills into the tree: in a reef-hermes session it is the release.
+    assert config["curator"] == {"enabled": False}
+    assert config["skills"] == {
+        "creation_nudge_interval": 0,
+        "external_dirs": ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"],
+    }
     # A rendered plugin is enabled and granted, and gets its manifest.
     assert config["plugins"] == {
         "enabled": ["tracer"],
@@ -314,11 +321,91 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
 def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:
     descriptor = get_adapter("hermes")
     with pytest.raises(RenderError, match="tirith_enabled false"):
-        render_composition([("config", {"data": {"approval": {"tirith_enabled": True}}})], descriptor)
+        render_composition([("config", {"data": {"security": {"tirith_enabled": True}}})], descriptor)
     with pytest.raises(RenderError, match=r"title_generation\.enabled false"):
         render_composition([("config", {"data": {"auxiliary": {"title_generation": {"enabled": True}}}})], descriptor)
     with pytest.raises(RenderError, match="write_json_snapshots true"):
         render_composition([("config", {"data": {"sessions": {"write_json_snapshots": False}}})], descriptor)
+    for review in ({"memory": {"nudge_interval": 10}}, {"skills": {"creation_nudge_interval": 10}}):
+        with pytest.raises(RenderError, match=r"skills\.creation_nudge_interval 0"):
+            render_composition([("config", {"data": review})], descriptor)
+    with pytest.raises(RenderError, match=r"curator\.enabled false"):
+        render_composition([("config", {"data": {"curator": {"enabled": True}}})], descriptor)
+
+
+def test_hermes_admission_refuses_a_config_section_that_is_not_an_object() -> None:
+    """A config mutation that turns a section the render checks read into a string or a list is a refused
+    proposal, not an error raised out of the admission."""
+    descriptor = get_adapter("hermes")
+    sections = (
+        {"security": "off"},
+        {"auxiliary": {"title_generation": "off"}},
+        {"memory": "on"},
+        {"skills": "notes"},
+        {"curator": "on"},
+        {"sessions": [True]},
+    )
+    for data in sections:
+        entries, refusal = admit_mutations(
+            [], [Mutation("create", "c1", {"name": "config", "config": {"data": data}})], descriptor
+        )
+        assert entries == [] and refusal is not None and refusal.startswith("hermes composition must keep"), data
+    tracer = Mutation(
+        "create",
+        "e1",
+        {"name": "code_extension", "config": {"name": "tracer", "code": "def register(ctx):\n    pass\n"}},
+    )
+    for plugins in ("tracer", {"entries": ["tracer"]}, {"entries": {"tracer": "on"}}):
+        config = Mutation("create", "c1", {"name": "config", "config": {"data": {"plugins": plugins}}})
+        entries, refusal = admit_mutations([], [config, tracer], descriptor)
+        assert entries == [] and refusal is not None and "each rendered plugin's entry objects" in refusal, plugins
+
+
+def test_hermes_admission_refuses_plugin_names_that_are_not_a_list_of_strings() -> None:
+    """The grant adds the rendered plugin to plugins.enabled and tools.override to its granted_capabilities. A value
+    there that is not a list of strings is a refused proposal: not an error raised out of the admission, and not a
+    string or an object read one character or key at a time. The tree's own names stay ahead of the grant's."""
+    descriptor = get_adapter("hermes")
+    extension = ("code_extension", {"name": "tracer", "code": "def register(ctx):\n    pass\n"})
+    tracer = Mutation("create", "e1", {"name": "code_extension", "config": extension[1]})
+    for value in (1, True, 1.5, "", "tracer", {"tracer": True}, ["tracer", 2]):
+        for key, plugins in (
+            ("plugins.enabled", {"enabled": value}),
+            ("plugins.entries.tracer.granted_capabilities", {"entries": {"tracer": {"granted_capabilities": value}}}),
+        ):
+            config = Mutation("create", "c1", {"name": "config", "config": {"data": {"plugins": plugins}}})
+            entries, refusal = admit_mutations([], [config, tracer], descriptor)
+            assert entries == [] and refusal == f"hermes composition must keep {key} a list of strings", (key, value)
+    own = {"enabled": ["other"], "entries": {"tracer": {"granted_capabilities": ["llm.model_override"]}}}
+    files = render_composition([("config", {"data": {"plugins": own}}), extension], descriptor)
+    assert yaml.safe_load(files[HERMES_CONFIG])["plugins"] == {
+        "enabled": ["other", "tracer"],
+        "entries": {"tracer": {"granted_capabilities": ["llm.model_override", "tools.override"]}},
+    }
+
+
+def test_hermes_quirks_add_both_commands_roots_after_the_external_dirs_a_tree_sets() -> None:
+    """A config node's list replaces the one below it, so a tree that sets skills.external_dirs would drop the
+    commands roots and every agent command would be unknown to hermes; the roots follow the tree's own entries, and
+    a string is one entry, as hermes reads it. A value hermes cannot read as entries is a refused proposal."""
+    descriptor = get_adapter("hermes")
+    roots = ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"]
+    for listed, expected in (
+        ([], roots),
+        (None, roots),
+        ("extra", ["extra", *roots]),
+        (["extra"], ["extra", *roots]),
+        ([roots[1], "extra"], [roots[1], "extra", roots[0]]),
+    ):
+        files = render_composition([("config", {"data": {"skills": {"external_dirs": listed}}})], descriptor)
+        assert yaml.safe_load(files[HERMES_CONFIG])["skills"]["external_dirs"] == expected, listed
+    refused = "hermes composition must keep skills.external_dirs a list of strings"
+    for listed in (1, True, 1.5, {"extra": True}, ["extra", 2]):
+        config = Mutation(
+            "create", "c1", {"name": "config", "config": {"data": {"skills": {"external_dirs": listed}}}}
+        )
+        entries, refusal = admit_mutations([], [config], descriptor)
+        assert entries == [] and refusal == refused, listed
 
 
 NATIVE_TOOL = (
@@ -406,7 +493,11 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
         "pi": (ClientState("pi-agent/sessions", "directory"),),
         "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
         "codex": (ClientState("codex/sessions", "directory"),),
-        "hermes": (ClientState("hermes/state.db", "sqlite"),),
+        "hermes": (
+            ClientState("hermes/state.db", "sqlite"),
+            ClientState("hermes/sessions", "directory"),
+            ClientState("hermes/logs", "directory"),
+        ),
         "dsh": (
             ClientState("dsh/.credentials.yaml", "file"),
             ClientState("dsh/settings.yaml", "file"),

@@ -27,36 +27,48 @@ env:
   HERMES_HOME: "{root}/hermes"
 # --resume, -c and `hermes sessions list` read state.db. It must already be
 # a database: hermes sets a zero-length file aside and creates a new one.
+# The session snapshots and logs hermes writes are kept beside it.
 client_state:
   - path: "hermes/state.db"
     kind: sqlite
+  - path: "hermes/sessions"
+    kind: directory
+  - path: "hermes/logs"
+    kind: directory
 files:
   config:
     primary:
       path: "hermes/config.yaml"
       defaults:
-        # tirith_enabled downloads a scanner binary from GitHub at boot;
-        # title_generation is one extra model call per episode; the memory
-        # nudge spawns a background review agent; the snapshot is the
-        # trajectory the reader parses.
-        approval:
-          tirith_enabled: false
+        # security.tirith_enabled downloads a scanner binary from GitHub at
+        # boot, and the scanner blocks a command it cannot resolve, such as
+        # "$REEF_HARNESS_WRAPPER" evolve; title_generation is one extra model
+        # call per episode; the memory and skill nudges spawn a background
+        # review agent, which makes model calls and writes skills into the
+        # tree; the curator writes its state into the tree's skills at the
+        # first start and later archives and backs up skills there; the
+        # snapshot is the trajectory the reader parses.
         auxiliary:
           title_generation:
             enabled: false
+        curator:
+          enabled: false
         memory:
           nudge_interval: 0
+        security:
+          tirith_enabled: false
         sessions:
           write_json_snapshots: true
         skills:
-          external_dirs:
-            - "${HERMES_HOME}/../hermes-commands"
+          creation_nudge_interval: 0
   # hermes reads one home level rules file, SOUL.md; AGENTS.md is project
   # scoped and read from the working directory chain, never from the home.
   rules: "hermes/SOUL.md"
   # Every skill is also a /name slash command in the interactive CLI, and
-  # hermes has no other command surface, so a command is a skill under the
-  # second root skills.external_dirs lists.
+  # hermes has no other command surface, so a command is a skill under a
+  # second root. The quirks module adds it to skills.external_dirs twice,
+  # beside the home for an episode and at the install root for a
+  # reef-hermes session, after any entries the tree lists.
   agent_command: "hermes-commands/{name}/SKILL.md"
   skill: "hermes/skills/{name}/SKILL.md"
   # A hermes plugin: register(ctx) in the package init, the manifest and
@@ -70,8 +82,17 @@ trajectory:
 cleanup_whitelist:
   - "hermes/state.db"
   - "hermes/state.db*"
+  # hermes records each provider key it finds in its environment in the
+  # credential pool, as a fingerprint and never the key, and locks the file.
+  - "hermes/auth.json"
   - "hermes/auth.lock"
+  # hermes writes its default rules file when the tree has no rules.
+  - "hermes/SOUL.md"
+  # hermes rewrites the bundled skill manifest at every start and counts each
+  # skill load in skills/.usage.json under a lock file; no config key turns
+  # either off.
   - "hermes/skills/.bundled_manifest"
+  - "hermes/skills/.usage.json*"
   - "hermes/logs/**"
   - "hermes/cache/**"
   - "hermes/runtime/**"

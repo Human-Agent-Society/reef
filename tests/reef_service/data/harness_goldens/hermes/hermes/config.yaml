@@ -1,10 +1,10 @@
 agent:
   max_turns: 40
-approval:
-  tirith_enabled: false
 auxiliary:
   title_generation:
     enabled: false
+curator:
+  enabled: false
 memory:
   nudge_interval: 0
 plugins:
@@ -14,8 +14,12 @@ plugins:
     tracer:
       granted_capabilities:
       - tools.override
+security:
+  tirith_enabled: false
 sessions:
   write_json_snapshots: true
 skills:
+  creation_nudge_interval: 0
   external_dirs:
   - ${HERMES_HOME}/../hermes-commands
+  - ${REEF_HARNESS_DEST}/hermes-commands

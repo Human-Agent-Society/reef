@@ -176,6 +176,7 @@ import json
 import os
 import re
 import shutil
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -201,6 +202,7 @@ from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
+from reef.harness.episodes.vendor_install import version_probe_env
 from reef.harness.episodes.version_check import ships_version_check
 from reef.harness.step_result import design_sections, next_action, rejection_text
 
@@ -618,6 +620,21 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
+class CaptureProxyServer(ThreadingHTTPServer):
+    """The proxy's HTTP server, quiet when a client resets a connection.
+
+    An agent that drops a kept alive connection with a reset, as hermes does
+    on every run, ends that connection normally, so no traceback reaches the
+    person's terminal; every other error still prints one."""
+
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        if isinstance(sys.exc_info()[1], ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
+
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
@@ -649,7 +666,7 @@ class CaptureProxy:
         self._store = _TaggedStore(self.tags)
         handler = build_handler(self._config, self._store)
         self._handler = handler if observer is None else _observing_handler(handler, observer)
-        self._server: ThreadingHTTPServer | None = None
+        self._server: CaptureProxyServer | None = None
 
     @property
     def port(self) -> int:
@@ -658,7 +675,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
+        server = CaptureProxyServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):
@@ -2091,7 +2108,12 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             rows.append((False, "service", f"{upstream} unreachable: {exc}"))
     if Path(binary).is_file():
         try:
-            version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            # The descriptor's env on a scratch root: hermes writes a home skeleton on --version.
+            with tempfile.TemporaryDirectory(prefix="reef-probe-") as probe_root:
+                probe_env = {**os.environ, **version_probe_env(get_adapter(adapter), Path(probe_root))}
+                version = subprocess.run(
+                    [binary, "--version"], capture_output=True, text=True, timeout=20, env=probe_env
+                )
             first = (version.stdout or version.stderr).strip().splitlines()
             rows.append((version.returncode == 0, "binary", f"{binary} ({first[0] if first else 'no output'})"))
         except (OSError, subprocess.TimeoutExpired) as exc:

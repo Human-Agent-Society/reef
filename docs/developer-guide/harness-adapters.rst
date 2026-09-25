@@ -112,13 +112,22 @@ The ``hermes`` adapter runs ``hermes chat -Q --oneshot -q "<task>"`` with
 quirks write the merged configuration as YAML. They enforce these defaults
 so an episode stays self-contained and makes one request:
 
-- ``approval.tirith_enabled`` disables the terminal scanner download.
+- ``security.tirith_enabled`` disables the terminal scanner download. The
+  scanner would also block a command it cannot resolve, such as
+  ``"$REEF_HARNESS_WRAPPER" evolve``.
 - ``auxiliary.title_generation.enabled`` disables the title model call.
-- ``memory.nudge_interval: 0`` disables background memory reviews.
+- ``memory.nudge_interval: 0`` and ``skills.creation_nudge_interval: 0``
+  disable the background memory and skill reviews, which make model calls
+  and write skills into the tree.
+- ``curator.enabled: false`` disables the curator. It writes its state into
+  the tree's ``skills/`` at the first start, and later archives and backs up
+  the skills there, which in a ``reef-hermes`` session are the installed
+  release's.
 - ``sessions.write_json_snapshots`` enables the per-session snapshot read by
   ``hermes-session-json``.
 
-Rendering rejects a tree that changes any of those settings. The quirks
+Rendering rejects a tree that changes any of those settings, or that puts a
+value that is not an object where a section holding one belongs. The quirks
 also write ``.no-bundled-skills``, so episodes use the tree's skills instead
 of the bundled catalog.
 
@@ -128,14 +137,37 @@ Node paths and transformations are:
   ``AGENTS.md`` is project-scoped and read from the working-directory chain.
 - ``skill`` becomes ``skills/<name>/SKILL.md``. The adapter adds the required
   ``name`` and ``description`` frontmatter if the node text lacks it.
-- ``agent_command`` becomes a skill under ``hermes-commands``, listed in
-  ``skills.external_dirs``. Hermes exposes skills as ``/name`` commands and
-  has no separate command surface.
+- ``agent_command`` becomes a skill under ``hermes-commands``, which the
+  quirks add to ``skills.external_dirs``. Hermes exposes skills as ``/name``
+  commands and has no separate command surface.
 - ``code_extension`` becomes a plugin package at
   ``plugins/<name>/__init__.py`` defining ``register(ctx)``. The quirks
   write its manifest, ``plugins.enabled`` entry, and ``tools.override``
   permission. Hermes requires this consent before loading a plugin; plugin
   tools are then available through ``tool_search`` and ``tool_call``.
+
+The quirks add the commands root to ``skills.external_dirs`` twice: beside
+the home (``${HERMES_HOME}/../hermes-commands``) for an episode, and under
+the install root (``${REEF_HARNESS_DEST}/hermes-commands``) for a
+``reef-hermes`` session, whose home is a temporary copy. Hermes skips an
+entry that names no directory.
+
+The tree's own entries in ``skills.external_dirs``, ``plugins.enabled``, and
+a rendered plugin's ``granted_capabilities`` stay ahead of the ones the
+quirks add, because a config node's list replaces the list below it. A
+string in ``skills.external_dirs`` is one entry, as Hermes reads it.
+Rendering rejects any other value in these three settings that is not a
+list of strings.
+
+A ``reef-hermes`` session keeps ``state.db``, the session snapshots under
+``sessions/``, and the logs under ``logs/`` in the installed tree, so a
+later session finds what an earlier one wrote. Hermes also writes files of
+its own into ``skills/`` that no config key turns off: the bundled skill
+manifest it rewrites at every start, the one essential skill it seeds
+(``autonomous-ai-agents/hermes-agent``), and the usage counts it updates
+when a skill is loaded (``.usage.json`` and its lock). An episode lists them
+in ``cleanup_whitelist``; in a ``reef-hermes`` session they are written into
+the installed release's ``skills/``.
 
 The model binding uses a custom provider with a literal key in
 ``config.yaml`` and supports only the ``openai`` dialect. Hermes's default
