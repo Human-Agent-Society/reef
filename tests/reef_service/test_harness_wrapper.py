@@ -2711,6 +2711,7 @@ INSTALL_SCRIPT = textwrap.dedent(
     set -eu
     printf '%s\\n' "$1" > "$1/dest-seen"
     printf '%s\\n' "${REEF_TOKEN:-}" > "$1/token-seen"
+    printf '%s\\n' "${REEF_PYTHON:-}" > "$1/python-seen"
     cp "$1/.reef-harness-release" "$1/release-before"
     printf '{"release_id": "v2", "files": []}\\n' > "$1/.reef-harness-release"
     echo "reef: done"
@@ -2780,6 +2781,7 @@ def test_update_runs_the_fetched_install_script_for_the_install_root_and_refuses
     root = Path(compose).resolve().parent
     assert (tmp_path / "dest-seen").read_text().strip() == str(root)
     assert (tmp_path / "token-seen").read_text().strip() == "tok"
+    assert (tmp_path / "python-seen").read_text().strip() == sys.executable
     assert [item["name"] for item in json.loads((tmp_path / "release-before").read_text())["setup"]] == ["SMTP"]
     assert json.loads(release_file.read_text())["release_id"] == "v2"
     assert not list(Path(tempfile.gettempdir()).glob("reef-harness-install-*.sh"))

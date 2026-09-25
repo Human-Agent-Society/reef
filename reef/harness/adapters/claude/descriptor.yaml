@@ -29,6 +29,7 @@ env:
   DISABLE_UPDATES: "1"
   DISABLE_TELEMETRY: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+# Keep interactive installs on the same pinned version as evaluation episodes.
 # An interactive run through reef-claude gets only CLAUDE_CONFIG_DIR from the
 # env above. reef pins Claude Code's version, and Claude Code's own updater
 # would otherwise install the latest release over the person's own claude:
