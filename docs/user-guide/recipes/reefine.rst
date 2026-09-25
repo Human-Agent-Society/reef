@@ -180,7 +180,7 @@ enforces a behavior (an opencode agent with a permission map, Claude Code
 permissions that pre-approve only ``WebSearch`` and ``WebFetch``, Codex's
 ``web_search``). It writes no ``code_extension``,
 since it knows pi's extension API and no other. The prompt tells it that
-harness's own facts from ``reef/recipe/reefine/harness_facts.py``: how you
+harness's own facts from its adapter's ``harness_facts.yaml``: how you
 type a command there, which file holds the rules, which tools the harness
 has (web search among them, with what it needs: ``DEEPSEEK_API_KEY`` on
 dsh) and how the harness offers a mode. The review judges new commands by

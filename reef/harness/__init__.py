@@ -10,7 +10,8 @@ The map, one subpackage per job:
     shared by serving and training (``mutations``).
 ``adapters/``
     one directory per agent, the mapping only: a ``descriptor.yaml`` (schema in
-    ``descriptor``) plus quirks. pi, opencode, claude, codex, dsh, hermes, and
+    ``descriptor``) plus quirks, and the ``harness_facts.yaml`` a text proposer
+    reads about the harness's own surface (``harness_facts``). pi, opencode, claude, codex, dsh, hermes, and
     the two programs Reef ships, native and terminus.
 ``episodes/``
     one headless run and its reading: launch on a rendered root, locally or

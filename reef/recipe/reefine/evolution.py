@@ -25,6 +25,7 @@ from typing import Any
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
+from reef.harness.adapters.harness_facts import harness_facts
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, ships_requests
 from reef.harness.episodes.run import EpisodeResult
@@ -32,7 +33,6 @@ from reef.harness.episodes.trajectory import final_assistant_text
 from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
 from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
-from reef.recipe.reefine.harness_facts import harness_facts
 from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
 from reef.train.types import TrajectoryItem
 
@@ -946,7 +946,7 @@ def _request_prompt(
         kinds=kind_lines(adapter),
         extensions=EXTENSIONS_SECTION if extensions else harness_section(adapter),
         platforms=(
-            facts.machine
+            facts.machine + " "
             if facts is not None and facts.machine
             else PLATFORMS_SENTENCE.format(platform="branch on process.platform, " if extensions else "")
         ),

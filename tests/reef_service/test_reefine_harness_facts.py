@@ -17,9 +17,9 @@ import pytest
 from reef_service.test_harness_example import NODES, PLAN_MARKER, REQUEST, Model, failure_of, request_reply
 
 from reef.harness.adapters import get_adapter
+from reef.harness.adapters.harness_facts import harness_facts
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.recipe.reefine import evolution
-from reef.recipe.reefine.harness_facts import FACTS
 
 CHAT = {"id": "chat", "name": "agent_command", "config": {"name": "chat", "text": "# chat\n\nChat mode is on."}}
 RULES = {"id": "chat-rules", "name": "rules", "config": {"text": "While chat mode is on, only search the web."}}
@@ -41,7 +41,7 @@ def test_the_request_prompt_names_the_harness_its_rules_file_its_command_and_its
     model = Model(request_reply(RULES))
     evolution.propose(NODES, (), model, requests=(REQUEST,), adapter=adapter)
     prompt = model.prompt
-    facts = FACTS[adapter]
+    facts = harness_facts(adapter)
     assert f"This harness is {facts.title}" in prompt and facts.command in prompt and facts.tools in prompt
     assert f"markdown appended to {rules_file}" in prompt and f"as {typed}" in prompt
     assert "- code_extension:" not in prompt and "pi.registerCommand" not in prompt
@@ -97,7 +97,7 @@ def test_the_review_judges_commands_by_the_harness_surface() -> None:
     model = Model(request_reply(CHAT, RULES), review)
     evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="codex")
     (text,) = [prompt for prompt in model.prompts if "now you review the change" in prompt]
-    assert FACTS["codex"].command in text and FACTS["codex"].mode in text
+    assert harness_facts("codex").command in text and harness_facts("codex").mode in text
     assert "pi.registerCommand" not in text
     model = Model(request_reply(CHAT, RULES), review)
     evolution.propose(NODES, (), model, requests=(REQUEST,))
@@ -194,11 +194,11 @@ def test_dsh_names_its_setup_as_the_way_to_give_the_web_search_key() -> None:
 def test_the_tool_lists_are_what_a_session_offers_and_claude_replaces_every_arguments() -> None:
     """The tools a recorded reef-claude session (Claude Code 2.1.257) and reef-hermes session (v2026.8.31) offered,
     all of them, so a mode's wording can name what it keeps and what it declines."""
-    claude = [name.split(" (")[0] for name in FACTS["claude"].tools.replace(" and ", ", ").split(", ")]
-    hermes = [name.split(" (")[0] for name in FACTS["hermes"].tools.replace(" and ", ", ").split(", ")]
+    claude = [name.split(" (")[0] for name in harness_facts("claude").tools.replace(" and ", ", ").split(", ")]
+    hermes = [name.split(" (")[0] for name in harness_facts("hermes").tools.replace(" and ", ", ").split(", ")]
     assert len(claude) == 25 and {"Bash", "Skill", "TaskOutput", "WebSearch"} <= set(claude)
     assert len(hermes) == 21 and {"session_search", "text_to_speech", "vision_analyze", "web_search"} <= set(hermes)
-    assert "replaces every $ARGUMENTS in the file" in FACTS["claude"].command
+    assert "replaces every $ARGUMENTS in the file" in harness_facts("claude").command
 
 
 def test_the_dsh_tools_are_the_26_a_pinned_dsh_session_offers() -> None:
@@ -234,7 +234,7 @@ def test_the_dsh_tools_are_the_26_a_pinned_dsh_session_offers() -> None:
     ]
     install = get_adapter("dsh").install
     assert install is not None and install.version == "0.1.2-alpha.5"
-    listed = set(re.findall(r"[a-z_]+", FACTS["dsh"].tools))
+    listed = set(re.findall(r"[a-z_]+", harness_facts("dsh").tools))
     assert len(offered) == 26 and set(offered) <= listed
 
 
@@ -335,7 +335,7 @@ def test_terminus_gets_its_own_facts_and_no_setup_command() -> None:
     review = json.dumps({"result": "complete", "delivers": True, "covered": ["chat"], "uncovered": []})
     model = Model(request_reply(CHAT, RULES), review)
     evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="terminus")
-    facts = FACTS["terminus"]
+    facts = harness_facts("terminus")
     assert f"This harness is {facts.title}" in model.prompt and facts.tools in model.prompt
     assert "reef-terminus setup" not in model.prompt and "this harness has no setup command" in model.prompt
     # Its runs happen in a task's Linux container: the prompt says so instead of the person's platforms.
