@@ -201,3 +201,22 @@ sampled token counts, and hashes of the source logs and resolved configurations.
 These are author-implementation reference curves, not Reef 7B benchmark curves.
 The H100 hardware and runtime differ from the paper's GH200 setup. Additional
 seeds, ToolAlpaca/Qwen3, and full benchmark training through Reef remain pending.
+
+## Retained Chemistry response examples
+
+The [response gallery](results/2026-09-24/chemistry-seed42-response-examples.md)
+contains every example recoverable from the reference-run console logs:
+34 SDPO responses and 28 default-GRPO responses to the same one test question.
+The [JSON collection](results/2026-09-24/chemistry-seed42-response-examples.json)
+records the extracted text, scores, training-batch numbers, cumulative training
+time, source-log line ranges, and checksums. Both source-log hashes match the
+published experiment record. Batch 0 is the initial evaluation, followed by one
+printed example every five training batches; the final over-budget evaluations
+are retained and marked explicitly.
+
+All 34 printed SDPO responses contain `<reasoning>`, although some explanations
+are incorrect despite receiving the correct-answer score. These examples cannot
+establish reasoning quality or memorization across the test set. Full training
+and validation response dumps were disabled, as was checkpoint saving; the saved
+artifacts contain no trained model for additional tests. The gallery preserves
+the console text without repairing scientific claims or missing closing tags.
