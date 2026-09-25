@@ -12,6 +12,7 @@ import ast
 import hashlib
 import json
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -24,7 +25,7 @@ from reef.train.slime_backend.distill.objective import restricted_divergence, to
 REFERENCE_COMMIT = "7c457fc1b1f636ae794eb0362ba37d4743b06fbc"
 
 
-def reference_function(checkout: Path):
+def reference_function(checkout: Path) -> tuple[Callable[..., Any], str]:
     revision = subprocess.check_output(["git", "-C", str(checkout), "rev-parse", "HEAD"], text=True).strip()
     if revision != REFERENCE_COMMIT:
         raise ValueError(f"reference checkout must be {REFERENCE_COMMIT}, got {revision}")
@@ -50,7 +51,7 @@ def reference_function(checkout: Path):
     return namespace["compute_self_distillation_loss"], hashlib.sha256(source.encode()).hexdigest()
 
 
-def compare(checkout: Path, device: str) -> dict:
+def compare(checkout: Path, device: str) -> dict[str, Any]:
     reference, source_hash = reference_function(checkout)
     generator = torch.Generator(device=device).manual_seed(2026)
     results = []

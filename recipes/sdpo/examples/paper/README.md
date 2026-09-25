@@ -52,7 +52,7 @@ separately labeled. The author sweeps both minibatches and both learning rates. 
 seed, model revision, resolved Hydra configuration and training log. It preserves
 the author's preprocessing and scoring functions.
 
-## Qualify Reef's training cycle
+## Check Reef's training cycle
 
 In a supported four-GPU Reef environment, download `Qwen/Qwen3-0.6B` at a fixed
 revision to `/tmp/models/Qwen3-0.6B`, then run from the repository root:
@@ -62,8 +62,8 @@ bash recipes/sdpo/examples/paper/run.sh
 ```
 
 `smoke.yaml` uses fresh state under `/tmp/reef-sdpo-smoke`; do not reuse that
-state for another qualification run. `harness/smoke.py` is a direct
-`reef_client` campaign, so this qualification does not require Harbor or
+state for another smoke run. `harness/smoke.py` is a direct
+`reef_client` campaign, so this smoke test does not require Harbor or
 reef-eval. It performs two synchronous grids (2 questions × 2 attempts), supplies
 formatting feedback, and waits for both weight releases. Results record receipts,
 scores, sampling time and training time. This small synthetic test uses a different
@@ -124,34 +124,33 @@ optimizer batch size and evaluation budget constant when changing GPU count;
 use extra devices for independent seeds/comparators after measuring throughput.
 
 Reef's published Slime image is x86; GB200 hosts use ARM. A CUDA/BF16 probe alone
-does not qualify the Megatron/SGLang stack. First validate one complete
+does not validate the Megatron/SGLang stack. First validate one complete
 rollout → report → teacher pass → update → weight publication cycle.
 
 The current recipe supports one update per grid and context parallelism 1.
 Its EMA state is not persisted by the shared backend. Section 4 sequential
-minibatches and exact training resume require further work. The two-step GPU qualification below establishes the small-model training path;
+minibatches and exact training resume require further work. The two-step GPU smoke test below establishes the small-model training path;
 full paper-result parity still requires the benchmark runs and comparisons.
 
-## Recorded GPU qualification
+## Recorded GPU smoke test
 
 On 2026-09-24, four H100 80GB GPUs completed two synchronous updates with
 Qwen3-0.6B and published new live weights after each update. The
-[qualification record](results/2026-09-24/qualification.json) includes the model
-revision, runtime pins, timings and numerical checks. The
-[source manifest](results/2026-09-24/source-manifest.json) identifies the exact
-source snapshot exercised on the worker.
+[smoke record](results/2026-09-24/qualification.json) includes the model
+revision, runtime pins, timings and numerical checks. The worker ran the
+recipe as first submitted in pull request #608, on the base commit the record names.
 
 The 24 CUDA loss/gradient comparisons against the pinned author's functions
 passed (maximum gradient error 3.21e-9). The worker's 31 SDPO tests also passed.
 The synthetic updates had finite, nonzero loss and gradients; all task scores
 were zero and formatting feedback supplied the teacher targets. These results
-qualify the training integration, not benchmark accuracy or paper reproduction.
+check the training integration, not benchmark accuracy or paper reproduction.
 
 The [author-reference smoke](results/2026-09-24/author-reference-smoke.json)
 also completed two OLMo-3-7B-Instruct updates on four H100s with the complete
 32×8 sampling batch and 210×16 final validation. Training took 420.3 seconds;
 validation took 510.7 seconds. Its final avg@16 was 0.24970. There was no
-untrained evaluation in this short qualification, so it does not measure an
+untrained evaluation in this short smoke run, so it does not measure an
 accuracy improvement or reproduce the paper's 1h/5h results.
 
 ## Chemistry reference result, seed 42

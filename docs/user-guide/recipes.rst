@@ -57,16 +57,16 @@ learns from each score before the next task arrives.
      - ``recipes/sao/``
      - `SAO <recipes/sao.rst>`__
      - `SAO on IMOAnswerBench <../../recipes/sao/examples/imo_answerbench/README.md>`__
-   * - SDPO
-     - model weights
-     - ``recipes/sdpo/``
-     - `SDPO <recipes/sdpo.rst>`__
-     - `Paper reference checks <../../recipes/sdpo/examples/paper/README.md>`__
    * - SDFT
      - model weights
      - ``recipes/sdft/``
      - `SDFT <recipes/sdft.rst>`__
      - `SDFT on a skill stream <../../recipes/sdft/examples/skill_stream/README.md>`__
+   * - SDPO
+     - model weights
+     - ``recipes/sdpo/``
+     - `SDPO <recipes/sdpo.rst>`__
+     - `Paper reference checks <../../recipes/sdpo/examples/paper/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``

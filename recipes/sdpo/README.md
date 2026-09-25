@@ -11,4 +11,4 @@ Self-Distillation](https://arxiv.org/abs/2601.20802), using the
 
 The recipe requires the Slime training environment. CPU tests verify the
 processor and loss mathematics; a successful numerical check does not establish
-paper learning-curve reproduction or qualify a GPU deployment.
+paper learning-curve reproduction or validate a GPU deployment.

@@ -55,7 +55,7 @@
   "resolved_config_sha256": "bd3dc2f4a813dec413f8888171d03211d8e3b506c658535a64b0b04ba5386278",
   "limitations": [
     "Two optimizer steps do not establish learning-curve or paper-result reproduction.",
-    "This smoke did not include an untrained-model evaluation; the final score is not evidence of an improvement.",
+    "This smoke did not include an untrained-model evaluation; the final score does not show an improvement.",
     "The PyTorch peak allocated-memory metric is retained verbatim; with sleep/offload it can exceed physical device memory and must not be interpreted as measured HBM usage.",
     "The run uses the pinned author checkout with the current NGC vLLM image, not the original paper runtime."
   ]

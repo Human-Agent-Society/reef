@@ -1,6 +1,6 @@
 """Exercise two complete SDPO updates against an already-running Reef service.
 
-This synthetic arithmetic task is infrastructure qualification, not a paper
+This synthetic arithmetic task is an infrastructure smoke test, not a paper
 benchmark. It uses environmental formatting feedback and records each release.
 """
 
@@ -13,6 +13,7 @@ import urllib.error
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from typing import Any
 
 from reef_client import ReefClient
 
@@ -25,7 +26,7 @@ class SmokeRun:
         self.output = output
         self.client = ReefClient(self.url, token=token, timeout_s=1200)
 
-    def releases(self) -> list[dict]:
+    def releases(self) -> list[dict[str, Any]]:
         request = urllib.request.Request(
             f"{self.url}/reef/scenarios/{self.scenario}/releases",
             headers={"Authorization": f"Bearer {self.token}"},

@@ -17,6 +17,7 @@ import shlex
 import signal
 import subprocess
 import sys
+from collections.abc import Mapping
 from contextlib import suppress
 from pathlib import Path
 
@@ -89,7 +90,9 @@ def progress_record(line: str) -> tuple[int, float, bool] | None:
     return int(step.group(1)), seconds, " - val-core/" in plain
 
 
-def run_training(command, *, cwd, environment, output, training_hours: float) -> None:
+def run_training(
+    command: list[str], *, cwd: Path, environment: Mapping[str, str], output: Path, training_hours: float
+) -> None:
     """Stop a time-budget run after the first validation beyond its boundary.
 
     This leaves the author's checkout untouched. Evaluate the best checkpoint

@@ -1,4 +1,4 @@
-# Synthetic two-step qualification on 4 GPUs; not paper hyperparameters.
+# Synthetic two-step training-cycle smoke test on 4 GPUs; not paper hyperparameters.
 schema-version: 2
 reef:
   host: 127.0.0.1
@@ -59,17 +59,11 @@ training:
     seq-length: "2048"
     rollout-max-response-len: "128"
     rollout-max-context-len: "2048"
-    num-layers: "28"
-    hidden-size: "1024"
-    ffn-hidden-size: "3072"
-    num-attention-heads: "16"
+    # Qwen3 architecture flags beyond the sizes Reef reads from the HF config.
     group-query-attention: true
-    num-query-groups: "8"
-    kv-channels: "128"
     padded-vocab-size: "151936"
     position-embedding-type: rope
     rotary-base: "1000000"
-    norm-epsilon: "0.000001"
     swiglu: true
     disable-bias-linear: true
     qk-layernorm: true

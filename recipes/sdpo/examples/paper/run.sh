@@ -1,5 +1,5 @@
 #!/bin/bash
-# Two-step synthetic qualification in a configured Reef GPU environment.
+# Two-step synthetic training-cycle smoke test in a configured Reef GPU environment.
 # Download Qwen/Qwen3-0.6B to /tmp/models/Qwen3-0.6B first; use fresh state.
 set -euo pipefail
 example_dir="$(cd "$(dirname "$0")" && pwd)"
