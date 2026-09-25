@@ -68,7 +68,7 @@ def _weight_job_before_the_restart(root: Path, *, published: bool) -> dict:
     backend = MemoryTrainingBackend(root)
     backend.checkpoint = TrainingCheckpoint(0, root / "checkpoint", scenario_step=RESERVED_AT)
     result = TrainingExecution(FileTrainingJobStore(backend.path), backend, backend.state).execute(
-        {**PAYLOAD, "rollout_id": RESERVED_AT}
+        {**PAYLOAD, "scenario_step": RESERVED_AT}
     )
     marker = read_marker(backend.path)
     assert (result.outcome, marker["status"], marker["scenario_step"]) == ("checkpoint", "CHECKPOINT", RESERVED_AT)
@@ -94,12 +94,12 @@ def test_the_rebuilt_batch_replays_the_job_at_the_moved_step(tmp_path: Path, pub
     # After the restart the trainer rebuilds the same batch; the scenario step is what the harness left.
     coordinator, scheduler = _restarted(tmp_path / "moved")
     scheduler.recover_pending_step(MOVED_TO, committed_training_job_id=None, committed_training_without_job_id=False)
-    moved = scheduler.train_candidate({**PAYLOAD, "rollout_id": MOVED_TO})
+    moved = scheduler.train_candidate({**PAYLOAD, "scenario_step": MOVED_TO})
     same_coordinator, same_scheduler = _restarted(tmp_path / "same")
     same_scheduler.recover_pending_step(
         RESERVED_AT, committed_training_job_id=None, committed_training_without_job_id=False
     )
-    same = same_scheduler.train_candidate({**PAYLOAD, "rollout_id": RESERVED_AT})
+    same = same_scheduler.train_candidate({**PAYLOAD, "scenario_step": RESERVED_AT})
 
     # The moved step behaves exactly as the unmoved one: the marker's job resumes, nothing trains again.
     assert (type(moved), moved.training_job_id) == (type(same), same.training_job_id)
