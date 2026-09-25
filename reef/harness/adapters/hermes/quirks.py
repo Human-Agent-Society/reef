@@ -25,7 +25,7 @@ import yaml
 from reef.harness.tree.render import RenderError
 
 _CONFIG = "hermes/config.yaml"
-_ENV = "hermes/.env"
+ENV_PATH = "hermes/.env"
 _MARKER = "hermes/.no-bundled-skills"
 _PLUGINS = "hermes/plugins/"
 _SKILL_ROOTS = ("hermes/skills/", "hermes-commands/")
@@ -92,7 +92,7 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
     if plugins:
         config = _granted(config, plugins)
     files[_CONFIG] = yaml.dump(config, sort_keys=True, default_flow_style=False, allow_unicode=True)
-    files[_ENV] = "".join(f"{key}={value}\n" for key, value in sorted(json.loads(files[_ENV]).items()))
+    files[ENV_PATH] = "".join(f"{key}={value}\n" for key, value in sorted(json.loads(files[ENV_PATH]).items()))
     files[_MARKER] = ""
     for path, text in list(files.items()):
         if any(path.startswith(root) for root in _SKILL_ROOTS) and path.endswith("/SKILL.md"):
