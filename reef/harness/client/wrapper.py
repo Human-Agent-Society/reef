@@ -2232,8 +2232,9 @@ def _run_install_script(script: bytes, install_root: Path, token: str | None, pr
     env = os.environ.copy()
     if token:
         env["REEF_TOKEN"] = token
-    # The script looks for python3 on PATH; this interpreter is the one with reef installed, whatever the shell's
-    # PATH puts first (an agent's shell tool may rebuild it from a login shell).
+    # Keep the exact interpreter, including when it has no python3 sibling on PATH.
+    env["REEF_PYTHON"] = sys.executable
+    # Older services generate scripts that still resolve python3 on PATH.
     env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
     try:
         arguments = [str(install_root)] if prefix is None else [str(install_root), prefix]
@@ -2438,7 +2439,7 @@ def main() -> None:
 
     args = sys.argv[1:]
     if args and args[0] in ("--help", "-h", "help"):
-        print(_usage(adapter))
+        print(_usage(adapter), flush=True)
         if args[0] == "help":
             return
         # --help and -h go on to the agent below, so its own help follows.

@@ -829,10 +829,11 @@ else
     exit 1
 fi
 
-# One interpreter for the install and the wrapper it writes: the python3 this shell resolves,
-# followed through to the interpreter behind it (a version manager's shim would re-decide it at
-# every run), by absolute path. -P (Python 3.11 and newer) keeps the working directory off sys.path.
-PYTHON="$(command -v python3 || true)"
+# One interpreter for the install and the wrapper it writes: REEF_PYTHON when the caller names one (the
+# wrapper's update names its own), else the python3 this shell resolves, followed through to the
+# interpreter behind it (a version manager's shim would re-decide it at every run), by absolute path.
+# -P (Python 3.11 and newer) keeps the working directory off sys.path.
+PYTHON="${REEF_PYTHON:-$(command -v python3 || true)}"
 if [ -z "$PYTHON" ]; then
     echo 'reef: python3 not found on PATH' >&2
     exit 1
@@ -1350,6 +1351,15 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
     assert fifth.returncode == 0, fifth.stderr
     assert "composition already current" in fifth.stdout
     assert link.resolve() == wrapper.resolve()
+
+
+@pytest.mark.unit
+def test_install_uses_the_explicit_interpreter_when_path_has_a_broken_python(tmp_path) -> None:
+    script, dest, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n")
+    _write_executable(tmp_path / "shim" / "python3", "#!/bin/sh\nexit 91\n")
+    result = _run_install(script, dest, prefix, {**env, "REEF_PYTHON": sys.executable})
+    assert result.returncode == 0, result.stderr
+    assert f'exec "{sys.executable}"' in (dest / "reef-pi").read_text()
 
 
 @pytest.mark.unit

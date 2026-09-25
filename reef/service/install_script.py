@@ -30,10 +30,11 @@ install root: the sha256 of each composition, binding and wrapper file, the
 release file's checksum without its check offs, and the address the script
 was served from. ``reef-<adapter>`` refuses to start a session while one of
 those files differs from the record.
-The interpreter is decided once: the python3 the installing shell resolves,
-followed through to the interpreter behind it and pinned by absolute path
-into the wrapper, so a later shell with another python3 on PATH runs the one
-that passed the import check here.
+The interpreter is decided once: ``REEF_PYTHON`` when the caller names one,
+else the python3 the installing shell resolves, followed through to the
+interpreter behind it and pinned by absolute path into the wrapper, so a
+later shell with another python3 on PATH runs the one that passed the import
+check here.
 """
 
 from __future__ import annotations
@@ -522,7 +523,9 @@ def _spinner_lines() -> list[str]:
 def _python_lines() -> list[str]:
     """Resolve the interpreter once, for the script's own python steps and the wrapper it writes.
 
-    The python3 the installing shell resolves is followed through to the
+    ``REEF_PYTHON`` names the interpreter when the caller has one (the
+    wrapper's ``update`` runs the script with its own); else the python3 the
+    installing shell resolves is followed through to the
     interpreter behind it (``sys.executable``: a version manager's shim on
     PATH would otherwise re-decide the interpreter at every run, and a venv's
     python reports the venv's own path) and pinned by absolute path, so a
@@ -535,10 +538,11 @@ def _python_lines() -> list[str]:
     reach the agent's own ``python3`` runs through the wrapper's environment.
     """
     return [
-        "# One interpreter for the install and the wrapper it writes: the python3 this shell resolves,",
-        "# followed through to the interpreter behind it (a version manager's shim would re-decide it at",
-        "# every run), by absolute path. -P (Python 3.11 and newer) keeps the working directory off sys.path.",
-        'PYTHON="$(command -v python3 || true)"',
+        "# One interpreter for the install and the wrapper it writes: REEF_PYTHON when the caller names one (the",
+        "# wrapper's update names its own), else the python3 this shell resolves, followed through to the",
+        "# interpreter behind it (a version manager's shim would re-decide it at every run), by absolute path.",
+        "# -P (Python 3.11 and newer) keeps the working directory off sys.path.",
+        'PYTHON="${REEF_PYTHON:-$(command -v python3 || true)}"',
         'if [ -z "$PYTHON" ]; then',
         "    echo 'reef: python3 not found on PATH' >&2",
         "    exit 1",
