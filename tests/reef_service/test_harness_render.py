@@ -279,6 +279,8 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
         "base_url": "http://127.0.0.1:9/v1",
         "api_key": "k-1",
     }
+    # An OpenRouter host is hermes's own provider, whose key it reads from the environment or its home's .env.
+    assert files["hermes/.env"] == "OPENAI_API_KEY=k-1\n"
     assert config["agent"] == {"max_turns": 40}
     # The defaults that keep an episode hermetic and single request, and the second skill root.
     assert config["approval"] == {"tirith_enabled": False}
