@@ -282,7 +282,7 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
     ]
 
 
-def _stream_lines(name: str, paths: Sequence[str]) -> list[str]:
+def stream_lines(name: str, paths: Sequence[str]) -> list[str]:
     """The shell function ``name``: the checksum stream of ``paths`` on disk, as ``composition_checksum`` hashes it."""
     return [
         f"{name}() {{",
@@ -536,7 +536,7 @@ def render_install_script(
             "# The current check's stream, as baked into CURRENT_CHECKSUM: the same stream without the",
             "# served files the model binding below rewrites on every run.",
             f'CURRENT_CHECKSUM="{composition_checksum({relative: files[relative] for relative in unbound})}"',
-            *_stream_lines("current_stream", unbound),
+            *stream_lines("current_stream", unbound),
         ]
     release_info_text = (
         json.dumps(
@@ -601,7 +601,7 @@ def render_install_script(
         "# The checksum stream, as baked into CHECKSUM: each sorted relative path,",
         "# its byte length, then its bytes, newline separated. The unquoted wc",
         "# substitution word-splits away the padding BSD wc prints.",
-        *_stream_lines("compose_stream", ordered),
+        *stream_lines("compose_stream", ordered),
         *current_stream_lines,
         "",
         'mkdir -p "$DEST"',
