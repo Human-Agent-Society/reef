@@ -23,10 +23,12 @@ class SavedArtifactPublication:
 
     Engine-local ``runtime_load_id`` tokens deliberately stop at checkpoint
     export; once bytes are materialized, the published version is the source
-    of identity.
+    of identity. ``component`` names which component of a multi-component
+    release the artifact replaces; the committer carries the others forward.
     """
 
     artifact: Artifact
+    component: str | None = None
 
 
 @dataclass(frozen=True)
@@ -68,6 +70,11 @@ class TrainStepResult:
     so it travels as a field rather than as a metrics key: only durable bytes
     can be held back, and a step that publishes live weights or nothing at all
     is rejected here instead of having the request silently dropped.
+
+    ``component`` names the release component ``artifact`` replaces. A scenario
+    serving several components requires it; the committer carries the other
+    components forward from the previous checkpoint. A flat scenario may leave
+    it unset.
     """
 
     state: Mapping[str, Any] | None
@@ -78,10 +85,16 @@ class TrainStepResult:
     training_job_id: str | None = None
     source_runtime_load_id: str | None = None
     pending: bool = False
+    component: str | None = None
 
     def __post_init__(self) -> None:
         if self.checkpoint_path is not None and self.runtime_load_id is None:
             raise ValueError("checkpoint_path requires the runtime_load_id it was exported from")
+        if self.component is not None:
+            if not isinstance(self.component, str) or not self.component:
+                raise ValueError("component must be a non-empty string or None")
+            if self.artifact is None:
+                raise ValueError("component names the artifact a step publishes; set artifact")
         if self.training_job_id is not None:
             if not isinstance(self.training_job_id, str) or not self.training_job_id:
                 raise ValueError("training_job_id must be a non-empty string or None")
@@ -104,7 +117,7 @@ class TrainStepResult:
     @property
     def publication(self) -> ArtifactPublication:
         if self.artifact is not None:
-            return SavedArtifactPublication(self.artifact)
+            return SavedArtifactPublication(self.artifact, self.component)
         if self.runtime_load_id is not None:
             if self.checkpoint_path is not None:
                 return DurableWeightsPublication(self.checkpoint_path, self.runtime_load_id)
