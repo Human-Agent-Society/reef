@@ -21,7 +21,6 @@ from unittest.mock import patch
 import pytest
 import yaml
 
-from reef.core.page_key import page_key
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.client.wrapper import (
     harness,
@@ -37,6 +36,7 @@ from reef.harness.client.wrapper import (
     update,
     wait_request,
 )
+from reef.harness.page_key import page_key
 from reef.harness.step_result import missed_episodes
 
 

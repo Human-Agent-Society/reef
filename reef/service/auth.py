@@ -7,7 +7,7 @@ from collections.abc import Iterable
 
 from aiohttp import web
 
-from reef.core.page_key import page_key_for_digest
+from reef.harness.page_key import page_key_for_digest
 
 
 def normalize_tokens(tokens: str | Iterable[str] | None) -> frozenset[str]:
@@ -57,7 +57,7 @@ def create_authentication_middleware(
     The two harness pages (``PAGE_ROUTES``) also accept a credential in the
     query on a GET that carries no Authorization header: they are links a
     person opens in a browser, which cannot send the header. ``?key=`` is the
-    page key of the query's ``scenario`` (:mod:`reef.core.page_key`) for an
+    page key of the query's ``scenario`` (:mod:`reef.harness.page_key`) for an
     accepted token: it opens those two pages of that scenario alone, a
     request whose ``x-reef-scenario`` header names another scenario is
     refused, and the token cannot be read back from it, so the links the

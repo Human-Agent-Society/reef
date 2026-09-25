@@ -1017,7 +1017,7 @@ they also take the scenario and a credential as query parameters,
 ``Authorization: Bearer``; a header wins when present, and each page's links
 to the other carry the parameters it was opened with. The page key is the
 HMAC SHA-256 of ``reef-page``, a newline and the scenario name, keyed by the
-SHA-256 digest of the token, as hex (``reef.core.page_key.page_key``): it
+SHA-256 digest of the token, as hex (``reef.harness.page_key.page_key``): it
 opens these two pages of that one scenario and no other route, a request
 whose ``x-reef-scenario`` header names another scenario is HTTP 401, and the
 token cannot be read back from it. The links ``reef-<adapter>`` and pi's

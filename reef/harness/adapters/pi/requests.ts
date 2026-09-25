@@ -401,7 +401,7 @@ export default function requests(pi) {
   };
 
   // A page a browser opens: the query carries the scenario and, in place of the token, its page key (reef's
-  // reef/core/page_key.py), which opens this scenario's two pages alone. The model reads these links in tool
+  // reef/harness/page_key.py), which opens this scenario's two pages alone. The model reads these links in tool
   // results and prompts, so they must not carry the token.
   const pageKey = (token) =>
     createHmac("sha256", createHash("sha256").update(token, "utf8").digest())

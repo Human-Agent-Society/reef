@@ -196,12 +196,12 @@ from typing import Any
 import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
-from reef.core.page_key import page_key
 from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 from reef.harness.episodes.version_check import ships_version_check
+from reef.harness.page_key import page_key
 from reef.harness.step_result import design_sections, next_action, rejection_text
 
 

@@ -32,8 +32,8 @@ from typing import Any
 
 import pytest
 
-from reef.core.page_key import page_key
 from reef.core.training_request import CLIENT_COMMANDS, TrainingRequest
+from reef.harness.page_key import page_key
 
 ASSET = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "requests.ts"
 SKILL = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "pi_extension_api.md"

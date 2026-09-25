@@ -21,7 +21,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef_service.test_harness_proposals import _dispatcher, _recipe
 
 from reef.core import AgentRecord, RequestType
-from reef.core.page_key import page_key
+from reef.harness.page_key import page_key
 from reef.service.app import create_app
 from reef.service.release_page import build_release_page
 from reef.service.request_page import (

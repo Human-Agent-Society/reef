@@ -24,6 +24,9 @@ The map, one subpackage per job:
 ``client/``
     what runs on a user's machine: the wrapper the install script bakes
     around a pulled harness.
+``page_key``
+    the key a harness page link carries in place of the service token: the
+    wrapper and pi's extension write it, the service's authentication reads it.
 ``step_result``
     what a settled step means for the person who asked, and the next action
     it offers: the words the wrapper prints and the harness pages render.
