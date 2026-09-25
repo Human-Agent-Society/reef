@@ -20,7 +20,7 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
-# An interactive run through reef-claude: /reefine runs `reef-claude evolve --wait`
+# An interactive run through reef-claude can run `reef-claude evolve --wait`
 # with the Bash tool, and a step takes minutes; Claude Code caps a Bash call at
 # ten minutes unless this raises the ceiling. The auto-updater stays off, as in
 # episodes, because reef pins the version.

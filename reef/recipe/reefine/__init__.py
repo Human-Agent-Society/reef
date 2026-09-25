@@ -25,7 +25,7 @@ from reef.runtime.interfaces import MultimodalRelay
 class ReefineRecipe(CordisRecipe):
     """Refine a pi harness once per instruction, with extensions held for review.
 
-    Configuration defaults enable harness requests and update notices, and
+    Configuration defaults enable pi's harness requests and update notices, and
     answer a request with the agent proposer (:mod:`reef.recipe.reefine.agent`)
     where the host can isolate it (``evolution.proposer_agent``).
     ``evolution.multimodal`` names a gateway for images, embeddings, speech and
@@ -78,7 +78,7 @@ class ReefineRecipe(CordisRecipe):
             "propose": "reef.recipe.reefine.agent:propose",
             "proposer_agent": {},
             "evaluate": "reef.recipe.reefine.evolution:evaluate",
-            "requests": True,
+            "requests": evolution.get("adapter", "pi") == "pi",
             "version_check": True,
             # What runs on the person's machine waits for their review: an extension, and a settings change
             # (hooks are shell commands).

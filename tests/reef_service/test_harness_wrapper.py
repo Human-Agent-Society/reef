@@ -2751,7 +2751,7 @@ def test_install_without_a_release_installs_the_served_head_and_passes_an_unmet_
 def test_notice_says_what_a_new_session_should_hear_and_nothing_when_the_tree_is_current(tmp_path, capsys) -> None:
     """A served head this tree is behind and every release that waits for review are one line each; a current
     tree with nothing waiting prints nothing; ``--hook claude`` wraps the lines as the SessionStart hook's JSON,
-    with the wrapper's shell commands replaced by the /reefine forms the session offers."""
+    preserving the wrapper's shell commands."""
     rows = [_row("v1"), _row("v2"), _row("ab0617ad5aaacf06", pending=True)]
     reef = _ReleasesReef(rows)
     compose, _ = _setup_tree(tmp_path, reef.port, {"release_id": "v1"})
@@ -2770,9 +2770,9 @@ def test_notice_says_what_a_new_session_should_hear_and_nothing_when_the_tree_is
     with patch.dict(os.environ, env, clear=True):
         assert notice("setup-scenario", "pi", compose, hook="claude") == 0
     hook = json.loads(capsys.readouterr().out)
-    assert "/reefine update installs it" in hook["systemMessage"]
-    assert "/reefine install ab0617ad promotes" in hook["systemMessage"]
-    assert "reef-pi" not in hook["systemMessage"]
+    assert "reef-pi update installs it" in hook["systemMessage"]
+    assert "reef-pi install --release ab0617ad promotes" in hook["systemMessage"]
+    assert "/reefine" not in hook["systemMessage"]
     assert hook["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     assert hook["hookSpecificOutput"]["additionalContext"].startswith(hook["systemMessage"])
     with patch.dict(os.environ, env, clear=True):

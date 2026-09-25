@@ -1314,8 +1314,8 @@ def notice(scenario: str, adapter: str, compose_dir: str, *, hook: str | None = 
 
     ``claude``: one JSON object whose ``systemMessage`` Claude Code shows the
     person and whose ``additionalContext`` tells the model what the person
-    can ask for, with ``/reefine update`` and ``/reefine install <id>`` in
-    place of the shell commands. Silent, exit 0, when there is nothing to say."""
+    can ask for through the wrapper's shell commands.
+    Silent, exit 0, when there is nothing to say."""
     lines = notice_lines(scenario, adapter, compose_dir)
     if not lines:
         return 0
@@ -1325,11 +1325,7 @@ def notice(scenario: str, adapter: str, compose_dir: str, *, hook: str | None = 
     if hook != "claude":
         print(f"reef-{adapter} notice: no hook shape named {hook!r}", file=sys.stderr)
         return 2
-    text = (
-        "\n".join(lines)
-        .replace(f"reef-{adapter} update", "/reefine update")
-        .replace(f"reef-{adapter} install --release", "/reefine install")
-    )
+    text = "\n".join(lines)
     print(
         json.dumps(
             {
@@ -1337,8 +1333,8 @@ def notice(scenario: str, adapter: str, compose_dir: str, *, hook: str | None = 
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",
                     "additionalContext": (
-                        f"{text}\nWhen the user asks for it, /reefine update installs the served release and "
-                        "/reefine install <id> promotes and installs a release that waits for review."
+                        f"{text}\nWhen the user asks for it, reef-{adapter} update installs the served release and "
+                        f"reef-{adapter} install --release <id> promotes and installs a release that waits for review."
                     ),
                 },
             }

@@ -345,14 +345,13 @@ OpenAI-only upstream cannot serve it. The install script
 and ``reef-claude`` starts Claude Code with the tree as its
 ``CLAUDE_CONFIG_DIR``.
 
-Claude Code loads no code from a harness, so reef's own entries take another
-shape there: ``/reefine`` is a command file (``claude/commands/reefine.md``)
-that runs the wrapper with the Bash tool, the update notice is a
+Submit a request with ``reef-claude evolve --wait -- "<what the harness should do>"``.
+The Claude profile defaults to ``evolution.requests: false`` and ships no
+request command or API reference skill. The update notice is a
 ``SessionStart`` hook in ``settings.json`` that runs ``reef-claude notice``
 when a session starts (a newer served release, or a release that waits for
-review, is one line each), and the API reference the proposer reads is the
-``reef-claude-harness-api`` skill. The seed also allows ``Bash(reef-claude *)``,
-so ``/reefine install <id>`` runs without a permission prompt once you say yes.
+review, is one line each). The seed also allows ``Bash(reef-claude *)``,
+so the agent can run the wrapper when you ask it to.
 
 The text proposer answers a Claude Code request with the kinds Claude Code
 reads: ``skill``, ``rules``, ``agent_command`` (a command file with
@@ -364,10 +363,9 @@ and off is a marker file under the session's ``CLAUDE_CONFIG_DIR`` written by
 runs shell commands on your machine, so it waits for your review like an
 extension does (``review_kinds`` lists both by default). The result line of
 a held release names ``reef-claude install --release <id>``, which promotes
-it and installs it in one step; ``/reefine install <id>`` does the same from
-the session, and ``/reefine update`` installs a served head. The agent
-proposer runs pi only, so a Claude Code request is always answered by the
-text proposer.
+it and installs it in one step; ``reef-claude update`` installs a served head.
+The agent proposer runs pi only, so a Claude Code request is always answered
+by the text proposer.
 
 Migration
 ---------

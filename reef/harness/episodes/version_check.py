@@ -29,8 +29,7 @@ _ASSETS = {
 #: exits 0 and prints nothing.
 CLAUDE_NOTICE_HOOK = 'if [ -n "$REEF_HARNESS_WRAPPER" ]; then "$REEF_HARNESS_WRAPPER" notice --hook claude; fi'
 
-#: The wrapper's own subcommands run from a session without a permission prompt: /reefine runs them in the
-#: turn that invoked it, which its allowed-tools cover, and again in the turn after the person said to install.
+#: The wrapper's own subcommands run from a session without a permission prompt when the person asks for them.
 CLAUDE_WRAPPER_RULE = "Bash(reef-claude *)"
 
 _CONFIGS: dict[str, dict[str, Any]] = {

@@ -58,9 +58,7 @@ NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
 NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
 #: Entry ids of reef's own shipped entries (the update notice, the harness requests extension and its skill): a seed or a
 #: recovered state carries them, and no mutation creates, updates or removes one.
-RESERVED_ENTRY_IDS = frozenset(
-    {"reef-version-check", "reef-requests", "reef-pi-extension-api", "reef-claude-harness-api"}
-)
+RESERVED_ENTRY_IDS = frozenset({"reef-version-check", "reef-requests", "reef-pi-extension-api"})
 #: The native graph's stage vocabulary: the keys a stage may carry and the outcomes its edges may name.
 NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "model": ((), ("tool_calls", "text")),

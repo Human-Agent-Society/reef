@@ -1,12 +1,4 @@
-"""Reef's shipped entries for the Claude Code adapter: the ``/reefine`` command, the harness reference skill
-and the update notice, seeded by the reefine profile's defaults, rendered where Claude Code reads them, and
-the text proposer's surface for that adapter.
-
-Claude Code loads no code from a harness tree, so the three entries are a
-command file, a skill and a settings hook, and a request for that harness is
-answered with the kinds Claude Code reads (skill, rules, agent_command, config)
-by a prompt that never mentions pi's extension API.
-"""
+"""Claude Code's update notice and adapter-specific text proposer."""
 
 from __future__ import annotations
 
@@ -18,11 +10,10 @@ from reef_service.test_harness_recipe import batch, make_binary
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, request_entries, requests_skill_id
 from reef.harness.episodes.version_check import CLAUDE_NOTICE_HOOK, VERSION_CHECK_ENTRY_ID, version_check_entry
-from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.harness.tree.render import render_composition
 from reef.recipe import build_recipe
+from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine import ReefineRecipe, evolution
 from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
@@ -30,18 +21,13 @@ from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve
 CLAUDE = get_adapter("claude")
 
 
-def test_the_claude_requests_entries_are_a_command_file_and_a_reference_skill() -> None:
-    command, skill = request_entries("claude")
-    assert command["id"] == REQUESTS_ENTRY_ID and command["name"] == "agent_command"
-    assert command["config"]["name"] == "reefine"
-    text = command["config"]["text"]
-    assert text.startswith("---\n") and "description:" in text.split("---")[1]
-    # The command runs the wrapper by name; run_agent puts the install root on PATH for that.
-    assert "reef-claude evolve --wait" in text and "reef-claude install --release" in text
-    assert skill["id"] == "reef-claude-harness-api" == requests_skill_id("claude") and skill["name"] == "skill"
-    assert skill["id"] in RESERVED_ENTRY_IDS
-    assert skill["config"]["text"].startswith("---\nname: reef-claude-harness-api\n")
-    assert requests_skill_id("opencode") is None
+def test_claude_rejects_enabling_an_unshipped_requests_extension() -> None:
+    with pytest.raises(RecipeConfigError, match="ships no requests extension"):
+        build_recipe(
+            "reef.recipe.reefine:ReefineRecipe",
+            {},
+            {"evolution": {"adapter": "claude", "requests": True, "tasks": ["probe"]}},
+        )
 
 
 def test_the_claude_notice_is_a_session_start_hook_that_runs_only_through_the_wrapper() -> None:
@@ -49,7 +35,7 @@ def test_the_claude_notice_is_a_session_start_hook_that_runs_only_through_the_wr
     assert entry["id"] == VERSION_CHECK_ENTRY_ID and entry["name"] == "config"
     (group,) = entry["config"]["data"]["hooks"]["SessionStart"]
     assert group["hooks"] == [{"type": "command", "command": CLAUDE_NOTICE_HOOK}]
-    # The session runs the wrapper without a permission prompt, so /reefine installs on the person's yes.
+    # The session runs the wrapper without a permission prompt when the person asks to install.
     assert entry["config"]["data"]["permissions"] == {"allow": ["Bash(reef-claude *)"]}
     # Without the wrapper in the environment (an episode, a tree run by hand) the hook does nothing.
     assert CLAUDE_NOTICE_HOOK.startswith('if [ -n "$REEF_HARNESS_WRAPPER" ]')
@@ -57,11 +43,9 @@ def test_the_claude_notice_is_a_session_start_hook_that_runs_only_through_the_wr
 
 
 def test_the_entries_render_where_claude_code_reads_them_and_the_hook_survives_a_second_config() -> None:
-    seed = (version_check_entry("claude"), *request_entries("claude"))
+    seed = (version_check_entry("claude"),)
     nodes = [(str(options["name"]), options["config"]) for options in seed]
     files = render_composition(nodes, CLAUDE)
-    assert files["claude/commands/reefine.md"] == request_entries("claude")[0]["config"]["text"]
-    assert files["claude/skills/reef-claude-harness-api/SKILL.md"] == request_entries("claude")[1]["config"]["text"]
     settings = json.loads(files["claude/settings.json"])
     assert settings["includeCoAuthoredBy"] is False  # the descriptor's defaults stay
     assert settings["hooks"]["SessionStart"][0]["hooks"][0]["command"] == CLAUDE_NOTICE_HOOK
@@ -89,16 +73,11 @@ def test_the_entries_render_where_claude_code_reads_them_and_the_hook_survives_a
 
 
 def test_the_reefine_profile_boots_for_claude_with_its_defaults(tmp_path: Path) -> None:
-    """``requests`` and ``version_check`` default to true, and the claude adapter ships both, so a profile that
-    names the adapter and nothing else boots; a settings change waits for review like an extension."""
+    """The Claude profile boots with just its update notice; settings changes still wait for review."""
     config = {"evolution": {"adapter": "claude", "tasks": ["[health] Run `echo reef-ok` and reply with its output."]}}
     built = build_recipe("reef.recipe.reefine:ReefineRecipe", {}, config)
     assert isinstance(built, ReefineRecipe) and built.adapter == "claude"
-    assert [options["id"] for options in built.seed] == [
-        VERSION_CHECK_ENTRY_ID,
-        REQUESTS_ENTRY_ID,
-        "reef-claude-harness-api",
-    ]
+    assert [options["id"] for options in built.seed] == [VERSION_CHECK_ENTRY_ID]
     assert built.review_kinds == ("code_extension", "config")
     backend = CordisBackend(
         descriptor=CLAUDE,
@@ -111,7 +90,9 @@ def test_the_reefine_profile_boots_for_claude_with_its_defaults(tmp_path: Path) 
         binary=str(make_binary(tmp_path)),
     )
     entries = [dict(entry) for entry in built.seed]
-    assert "claude/commands/reefine.md" in backend._render_for_episode(entries)
+    rendered = backend._render_for_episode(entries)
+    assert not any(path.startswith(("claude/commands/", "claude/skills/")) for path in rendered)
+    assert "SessionStart" in json.loads(rendered["claude/settings.json"])["hooks"]
     result = backend.prepare_step(batch(), {"steps": 1, "entries": entries}, 0)
     assert result.outcome == "skip" and result.metrics["skipped"] == "no proposal"
 
@@ -136,7 +117,7 @@ def test_the_claude_surface_tells_the_proposer_claude_codes_kinds_and_nothing_of
     for claude_word in ("- config:", "settings.json", "PreToolUse", "$ARGUMENTS", "CLAUDE.md", "reef-claude setup"):
         assert claude_word in prompt
     assert surface.request_kinds == ("skill", "rules", "agent_command", "config")
-    assert surface.api_skill == requests_skill_id("claude")
+    assert surface.api_skill is None
     # pi keeps the prompt it had, and an adapter without a surface of its own gets pi's.
     pi = evolution.surface_of("pi")
     assert "pi.registerCommand" in pi.guidance and pi.request_kinds[-1] == "code_extension"

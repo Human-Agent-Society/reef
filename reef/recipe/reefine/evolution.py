@@ -239,7 +239,7 @@ CLAUDE_SURFACE = HarnessSurface(
     env_read="$NAME in the hook's or the command's shell line",
     setup="reef-claude setup",
     session_env=_CLAUDE_SESSION_ENV,
-    api_skill="reef-claude-harness-api",
+    api_skill=None,
     request_kinds=("skill", "rules", "agent_command", "config"),
     enforcing_kinds=("config",),
 )
