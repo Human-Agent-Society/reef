@@ -25,14 +25,7 @@ import time
 from collections.abc import Mapping, Sequence
 
 from reef.core.requirements import required_by
-from reef.core.training_request import (
-    design_sections,
-    floor_tasks_note,
-    missed_episode_text,
-    missed_episodes,
-    unscored_failures,
-)
-from reef.harness.episodes.version_check import ships_version_check
+from reef.harness.step_result import design_sections, floor_tasks_note, next_action, reef_installs, rejection_text
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import (
     DECLINED_WORDS,
@@ -40,7 +33,6 @@ from reef.service.release_page import (
     failed_words,
     kept_answer,
     mutations_of,
-    reef_installs,
     result_of,
     served_step,
     step_href,
@@ -254,30 +246,7 @@ def meaning(
     if selection_result.startswith("promoted"):
         return f"passed the checks and was {selection_result}; the release that step published serves it"
     if selection_result == "rejected":
-        unscored = unscored_failures(metrics)
-        if unscored:
-            return (
-                f"the evaluation could not run: {'; '.join(unscored)}; nothing judged the change and nothing was "
-                "published"
-            )
-        selection = metrics.get("selection")
-        reason = selection.get("reason") if isinstance(selection, Mapping) else None
-        missed = missed_episodes(metrics)
-        if not missed:
-            return (
-                f"did not pass the checks ({reason or 'the checks failed'}); nothing changed: rephrase or split the "
-                "request"
-            )
-        # An episode that failed was the harness's run, not the request: no rephrasing would change it.
-        advice = (
-            "the episode failed, so the change itself was not judged"
-            if any(episode.get("failure") for episode in missed)
-            else "rephrase or split the request"
-        )
-        return (
-            f"did not pass the checks ({reason or 'the checks failed'}): {missed_episode_text(missed[0])}; "
-            f"nothing changed: {advice}"
-        )
+        return rejection_text(metrics)
     if selection_result == "skipped" and declined(metrics):
         return DECLINED_WORDS
     if selection_result == "skipped":
@@ -285,52 +254,6 @@ def meaning(
     if selection_result == "failed":
         return failed_words(metrics)
     return f"the step ended as {selection_result}"
-
-
-def next_action(
-    adapter: str, step: int, selection_result: str, record_id: str, requires: Sequence[str] = ()
-) -> tuple[str, str, str] | None:
-    """The next action a settled step offers: its heading, the commands (one per line, each one a person can run
-    as it stands) and where to run them; ``None`` when a rejected or skipped step offers none. pi installs from
-    its own session (``/versions``); another adapter's person runs its wrapper in a terminal, setup first when
-    the release's chain requires items (``requires``, their names): the install refuses a release whose items
-    are not set up."""
-    if selection_result not in ("pending", "selected"):
-        return None
-    if not reef_installs(adapter):
-        # A batch runner with no wrapper: nothing to set up or update on this machine.
-        if selection_result != "selected":
-            return None
-        return (
-            "Run it",
-            "GET /reef/harness",
-            "It serves this release's tree now; a run gets it from there. What the release requires must hold in "
-            "the Harbor task the run uses.",
-        )
-    if ships_version_check(adapter):
-        return (
-            "Read this page, then install" if selection_result == "pending" else "Install when ready",
-            f"/versions v{step} install",
-            f"Run this in your reef-{adapter} session. You can keep chatting until you are ready.",
-        )
-    if selection_result == "pending":
-        return (
-            "Read this page, then serve it",
-            f"reef-{adapter} wait {record_id}",
-            "Run this in a terminal: it asks whether to serve this release, then installs it.",
-        )
-    if requires:
-        return (
-            "Set up, then install",
-            f"reef-{adapter} setup\nreef-{adapter} update",
-            f"Run these in a terminal, in this order: setup asks for what this release needs ({', '.join(requires)}), update "
-            f"installs it; then start reef-{adapter} again to use the new version.",
-        )
-    return (
-        "Install when ready",
-        f"reef-{adapter} update",
-        f"Run this in a terminal, then start reef-{adapter} again to use the new version.",
-    )
 
 
 def result_html(
@@ -365,11 +288,12 @@ def result_html(
     href = step_href(step, link_query)
     release_id = row.get("release_id")
     requires = [item["name"] for item in required_by(rows, release_id if isinstance(release_id, str) else None)]
-    offered = next_action(adapter, step, selection_result, record_id, requires)
-    if offered is not None:
-        action, command, where = offered
-        commands = "".join(f"<code>{escape(line)}</code>" for line in command.splitlines())
-        parts.append(f'<div class="next-action"><h3>{escape(action)}</h3>{commands}<p>{escape(where)}</p></div>')
+    action = next_action(adapter, step, selection_result, record_id, requires)
+    if action is not None:
+        commands = "".join(f"<code>{escape(command)}</code>" for command in action.commands)
+        parts.append(
+            f'<div class="next-action"><h3>{escape(action.heading)}</h3>{commands}<p>{escape(action.place)}</p></div>'
+        )
     parts.append(
         f'<a class="version-link" href="{escape(href)}">View v{step}<span aria-hidden="true">&#8599;</span></a>'
     )

@@ -198,16 +198,11 @@ from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_han
 
 from reef.core.page_key import page_key
 from reef.core.requirements import required_by
-from reef.core.training_request import (
-    CLIENT_COMMANDS,
-    design_sections,
-    missed_episode_text,
-    missed_episodes,
-    unscored_failures,
-)
+from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 from reef.harness.episodes.version_check import ships_version_check
+from reef.harness.step_result import design_sections, next_action, rejection_text
 
 
 def _captures_dir() -> Path:
@@ -1124,12 +1119,14 @@ def _failure_of(row: Mapping[str, Any]) -> str:
     return failure.strip() if isinstance(failure, str) else ""
 
 
-def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str) -> str:
+def result_line(
+    adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str, unmet: Sequence[str] = ()
+) -> str:
     """One line for a settled step: its result and the next action, quoting the request's first 60 characters.
 
     The extension's watch says the same in the session; ``evolve --wait``
     and ``doctor`` say it here. ``page`` is the step's page link, which the
-    pending line names as the review."""
+    pending line names as the review; ``unmet`` names the items the release still needs set up."""
     row = rows[step]
     metrics = _metrics_of(row)
     ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
@@ -1142,14 +1139,9 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
                 f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it "
                 "(the update notice offers it)."
             )
-        release_id = row.get("release_id")
-        if required_by(rows, release_id if isinstance(release_id, str) else None):
-            # The install refuses a release whose items are not set up: setup comes first.
-            return (
-                f"'{ask}' is published as release {release}. Run reef-{adapter} setup, then reef-{adapter} update, "
-                f"then restart reef-{adapter}."
-            )
-        return f"'{ask}' is published as release {release}. Run reef-{adapter} update, then restart reef-{adapter}."
+        action = next_action(adapter, step, selection_result, str(_request_of(row).get("id") or ""), unmet)
+        commands = ", then ".join(action.terminal) if action is not None else f"reef-{adapter} update"
+        return f"'{ask}' is published as release {release}. Run {commands}, then restart reef-{adapter}."
     if selection_result == "pending":
         where = (
             f"/versions v{step} opens the page, /versions v{step} install serves it"
@@ -1161,26 +1153,7 @@ def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page
             f"runs: {where}. Page: {page}"
         )
     if selection_result == "rejected":
-        unscored = unscored_failures(metrics)
-        if unscored:
-            return (
-                f"'{ask}' could not be evaluated: {'; '.join(unscored)}. Nothing judged the change and nothing was "
-                "published; fix that and ask again."
-            )
-        selection = metrics.get("selection")
-        reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
-        missed = missed_episodes(metrics)
-        if not missed:
-            return f"'{ask}' did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
-        # The first missed episode says what the checks saw; an episode that failed was not the request's fault.
-        advice = (
-            "the episode failed, so the change itself was not judged"
-            if any(episode.get("failure") for episode in missed)
-            else "rephrase or split the request"
-        )
-        return (
-            f"'{ask}' did not pass the checks ({reason}): {missed_episode_text(missed[0])}. Nothing changed; {advice}."
-        )
+        return f"'{ask}' {rejection_text(metrics)}"
     if selection_result == "skipped" and _declined_of(row):
         return (
             f"'{ask}' was answered with no change: {_declined_of(row)}. The design and what is out of reach are on "
@@ -1322,26 +1295,31 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
     return head
 
 
-def _next_commands(adapter: str, step: int, selection_result: str, needs_setup: bool = True) -> str:
-    """The commands that take the next step by hand, for a person who declined it or has no terminal; setup is
-    named only when the release requires something not met yet."""
-    install = f"reef-{adapter} setup, then reef-{adapter} update" if needs_setup else f"reef-{adapter} update"
-    if selection_result == "pending" and ships_version_check(adapter):
-        setup_and = f"reef-{adapter} setup and reef-{adapter} update" if needs_setup else f"reef-{adapter} update"
-        return f"/versions v{step} install in a reef-{adapter} session, or {setup_and}"
-    if selection_result == "pending":
-        return f"reef-{adapter} page {step}, then reef-{adapter} wait on a terminal offers to serve it"
-    return install
+def next_commands(adapter: str, step: int, selection_result: str, record_id: str, unmet: Sequence[str]) -> str:
+    """The commands that take the next step by hand, for a person who declined it or has no terminal: the terminal
+    commands of the step's :class:`NextAction`, setup named only while ``unmet`` names an item."""
+    action = next_action(adapter, step, selection_result, record_id, unmet)
+    if action is None:
+        return ""
+    terminal = ", then ".join(action.terminal)
+    if selection_result != "pending":
+        return terminal
+    if ships_version_check(adapter):
+        return f"{action.commands[0]} in a reef-{adapter} session, or {' and '.join(action.terminal)}"
+    return f"{terminal} in a terminal"
 
 
-def _needs_setup(compose_dir: str, rows: Sequence[Mapping[str, Any]], release: str) -> bool:
-    """Whether ``release`` requires an item this machine has not met: its chain's union, read as update reads it,
-    an env item the environment or the env file sets counting as met; nothing is written."""
+def unmet_requires(compose_dir: str, rows: Sequence[Mapping[str, Any]], release: str) -> list[str]:
+    """The names of the items ``release`` requires that this machine has not met: its chain's union, read as update
+    reads it, an env item the environment or the env file sets counting as met; nothing is written."""
     record = _read_release_info(compose_dir) or {}
     recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
-    requires = required_by(rows, release)
-    state = _Setup(record, None, requires, recorded, dict(recorded), _read_env_file(compose_dir), "", "", None)
-    return bool(state.unmet())
+    values = _read_env_file(compose_dir)
+    return [
+        item["name"]
+        for item in required_by(rows, release)
+        if not (_met(item, recorded.get(item["name"])) or _auto_met(item, values))
+    ]
 
 
 def _install(scenario: str, adapter: str, compose_dir: str, release: str) -> int:
@@ -1364,7 +1342,7 @@ def _next_step(
     row: Mapping[str, Any],
     step: int,
     selection_result: str,
-    needs_setup: bool = True,
+    unmet: Sequence[str],
 ) -> int:
     """After a release, hand the person the next step: install a selected one, promote then install a pending one.
 
@@ -1374,20 +1352,21 @@ def _next_step(
     release = str(row.get("release_id") or "")
     if selection_result not in ("selected", "pending") or not release:
         return 0
+    record_id = str(_request_of(row).get("id") or "")
     if not sys.stdin.isatty():
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result, needs_setup)}")
+        print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
     if selection_result == "pending":
         print(f"reef-{adapter}: read the change first: reef-{adapter} page {step}")
         if not _confirm(adapter, "Promote now? [y/N]", default_yes=False):
-            print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result, needs_setup)}")
+            print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
             return 0
         head = _promote(upstream, scenario, adapter, token, release)
         if head is None:
             return 1
         release = head
     elif not _confirm(adapter, "Install now? [Y/n]", default_yes=True):
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result, needs_setup)}")
+        print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
     return _install(scenario, adapter, compose_dir, release)
 
@@ -1511,7 +1490,10 @@ def _report_request(
     if isinstance(settled, str):
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
     step, rows = settled
-    print(f"reef-{adapter}: {result_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
+    release = str(rows[step].get("release_id") or "")
+    unmet = unmet_requires(compose_dir, rows, release) if release else []
+    page = _step_page_link(upstream, scenario, token, step)
+    print(f"reef-{adapter}: {result_line(adapter, step, rows, page, unmet)}")
     uncovered = review_points(rows[step], "uncovered")
     selection_result = result_of(rows[step], rows)
     usage = _usage_of(rows[step])
@@ -1530,9 +1512,7 @@ def _report_request(
             print(f"  - {point}")
     if selection_result in ("rejected", "skipped"):
         return 1
-    release = str(rows[step].get("release_id") or "")
-    needs_setup = bool(release) and _needs_setup(compose_dir, rows, release)
-    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result, needs_setup)
+    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result, unmet)
 
 
 def _joined(points: Sequence[str]) -> str:

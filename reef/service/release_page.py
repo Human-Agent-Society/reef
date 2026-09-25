@@ -26,14 +26,14 @@ from typing import Any
 from urllib.parse import quote, urlencode
 
 from reef.core.requirements import required_by
-from reef.core.training_request import (
+from reef.harness.step_result import (
     design_sections,
     floor_tasks_note,
     missed_episode_text,
     missed_episodes,
+    reef_installs,
     unscored_failures,
 )
-from reef.harness.adapters import get_adapter
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
@@ -561,12 +561,6 @@ def _refused_table(entries: Sequence[Mapping[str, Any]]) -> str:
         "<table><thead><tr><th>name</th><th>kind</th><th>check</th><th>prompt</th><th>reason</th></tr></thead>"
         f"<tbody>{''.join(rows)}</tbody></table>"
     )
-
-
-def reef_installs(adapter: str) -> bool:
-    """Whether Reef installs ``adapter``'s harness with a wrapper that sets up and updates it; terminus, a batch
-    runner, has none: its tree is served by ``GET /reef/harness`` and a run's Harbor task holds what it needs."""
-    return get_adapter(adapter).install is not None
 
 
 def kept_answer(notes: Mapping[str, Any]) -> str | None:

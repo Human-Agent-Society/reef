@@ -23,6 +23,9 @@ The map, one subpackage per job:
 ``client/``
     what runs on a user's machine: the wrapper the install script bakes
     around a pulled harness.
+``step_result``
+    what a settled step means for the person who asked, and the next action
+    it offers: the words the wrapper prints and the harness pages render.
 
 This package depends on core values and runtime contracts, never on training,
 recipes, scenario coordination, or the HTTP service.

@@ -25,9 +25,9 @@ from reef_service.test_harness_requests import _post, _request
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
-from reef.core.training_request import design_sections
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.step_result import design_sections
 from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
 from reef.service.page_chrome import status_label

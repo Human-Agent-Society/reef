@@ -26,6 +26,7 @@ from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.client.wrapper import (
     harness,
     main,
+    next_commands,
     report,
     result_line,
     run_agent,
@@ -1399,14 +1400,25 @@ def _step_row(release_id: str, metrics: dict, *, pending: bool = False, request_
 
 
 @pytest.mark.unit
+def test_a_pending_release_off_pi_names_the_wait_command_with_its_request() -> None:
+    """Without the update notice a pending release is served through the wrapper's wait, which takes the request id;
+    on pi the session's /versions install comes first, the terminal commands after it."""
+    assert next_commands("claude", 3, "pending", "q-1", []) == "reef-claude wait q-1 in a terminal"
+    assert next_commands("pi", 3, "pending", "q-1", ["X"]) == (
+        "/versions v3 install in a reef-pi session, or reef-pi setup and reef-pi update"
+    )
+
+
+@pytest.mark.unit
 def test_a_published_release_that_requires_setup_names_setup_before_update() -> None:
     """The install refuses a release whose chain requires items not set up, so the result line off pi names
-    reef-<adapter> setup first; a release that requires nothing names update alone."""
+    reef-<adapter> setup first while an item is unmet; once every item is met it names update alone."""
     requires = [{"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "Your DeepSeek key"}]
     row = _step_row("rel-1", {"selected": True, "published": True})
     row["metrics"]["training_request"]["requires"] = requires
-    line = result_line("dsh", 1, [CREATION_ROW, row], "page")
+    line = result_line("dsh", 1, [CREATION_ROW, row], "page", ["DEEPSEEK_API_KEY"])
     assert "Run reef-dsh setup, then reef-dsh update, then restart reef-dsh." in line
+    assert "Run reef-dsh update, then restart reef-dsh." in result_line("dsh", 1, [CREATION_ROW, row], "page")
     plain = _step_row("rel-1", {"selected": True, "published": True})
     assert "Run reef-dsh update, then restart reef-dsh." in result_line("dsh", 1, [CREATION_ROW, plain], "page")
 

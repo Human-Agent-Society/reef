@@ -211,7 +211,7 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
     )
     page = build_request_page(_record(), [CREATION, rejected], now=1_100.0)
     assert '<span class="rejected">Not selected</span>' in page
-    assert "did not pass the checks (candidate missed the floor on 1 of 1 tasks); nothing changed" in page
+    assert "did not pass the checks (candidate missed the floor on 1 of 1 tasks). Nothing changed" in page
     assert "rephrase or split the request" in page
     assert "What changed" not in _sections(page)
     changed = _section(page, "Proposed changes")
@@ -271,7 +271,7 @@ def test_an_evaluation_that_never_ran_says_so_on_both_pages_with_no_candidate_sc
     )
     row = _row(metrics)
     result = _section(build_request_page(_record(), [CREATION, row], now=1_100.0), "Result")
-    assert f"the evaluation could not run: {cause}" in result and "did not pass the checks" not in result
+    assert f"could not be evaluated: {cause}" in result and "did not pass the checks" not in result
     note = "The floor tasks (health) were set before this request"
     assert note in result
     version = build_release_page(1, [CREATION, row])
