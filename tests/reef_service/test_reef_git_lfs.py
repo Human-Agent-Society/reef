@@ -341,3 +341,106 @@ def test_archiving_a_scenario_renames_its_ref_and_drops_its_work_clone(tmp_path:
     fresh = factory("doomed")
     assert fresh.metadata() is None
     assert fresh.fork().parent_release_id == run_git("--git-dir", str(remote), "rev-parse", "refs/reef/base")
+
+
+@pytest.mark.integration
+def test_bootstrap_snapshot_goes_under_its_component_beside_the_seed_files(
+    tmp_path: Path,
+    fake_git_lfs: None,
+) -> None:
+    remote = tmp_path / "artifacts.git"
+    run_git("init", "--bare", str(remote))
+    snapshot = tmp_path / "models--org--model" / "snapshots" / "upstream-sha"
+    snapshot.mkdir(parents=True)
+    (snapshot / "config.json").write_text("{}")
+    (snapshot / "model.safetensors").write_text("weights")
+
+    backend = GitLFSRepositoryBackend.factory(
+        remote,
+        "org/model@main",
+        work_dir=tmp_path / "work",
+        cache_dir=tmp_path / "cache",
+        snapshot_download=lambda **kwargs: str(snapshot),
+        bootstrap_files={"harness/AGENTS.md": "seed rules\n"},
+        bootstrap_subdirectory="weights",
+    )("agent")
+
+    base = backend.materialize(backend.resolve_release())
+    assert base.local_path is not None
+    assert (base.local_path / "weights" / "config.json").read_text() == "{}"
+    assert (base.local_path / "weights" / "model.safetensors").read_text() == "weights"
+    assert (base.local_path / "harness" / "AGENTS.md").read_text() == "seed rules\n"
+    assert not (base.local_path / "config.json").exists()
+    manifest = json.loads(run_git("--git-dir", str(remote), "show", f"{base.ref.release_id}:reef-artifact.json"))
+    assert manifest["source"]["component"] == "weights"
+    with pytest.raises(ValueError, match="directory name"):
+        GitLFSRepositoryBackend.factory(
+            remote,
+            "org/model@main",
+            work_dir=tmp_path / "w2",
+            cache_dir=tmp_path / "c2",
+            bootstrap_subdirectory="../x",
+        )("agent")
+
+
+@pytest.mark.integration
+def test_a_published_file_is_linked_into_the_work_tree_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
+    """Released files are immutable, so a publish links them into the clone instead of copying a checkpoint per step."""
+    remote = tmp_path / "artifacts.git"
+    backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    head = backend.fork()
+    source = tmp_path / "release"
+    source.mkdir()
+    (source / "weights.bin").write_bytes(b"\x00" * 64)
+    backend.publish(Artifact.local(source), expected_parent=head)
+    assert (source / "weights.bin").stat().st_nlink == 2
+    assert (tmp_path / "work" / "repository" / "weights.bin").read_bytes() == b"\x00" * 64
+
+
+@pytest.mark.integration
+def test_the_work_tree_never_writes_through_a_link(tmp_path: Path, fake_git_lfs: None) -> None:
+    """A linked file shares its bytes with the source, so the files Reef rewrites are written to a fresh inode."""
+    remote = tmp_path / "artifacts.git"
+    run_git("init", "--bare", str(remote))
+    snapshot = tmp_path / "models--org--model" / "snapshots" / "upstream-sha"
+    snapshot.mkdir(parents=True)
+    blobs = tmp_path / "hub-cache"
+    blobs.mkdir()
+    (blobs / "attributes").write_text("*.bin filter=lfs\n")
+    (blobs / "weights").write_text("base")
+    (snapshot / ".gitattributes").symlink_to(blobs / "attributes")
+    (snapshot / "model.safetensors").symlink_to(blobs / "weights")
+    backend = GitLFSRepositoryBackend.factory(
+        remote,
+        "org/model@main",
+        work_dir=tmp_path / "work",
+        cache_dir=tmp_path / "cache",
+        snapshot_download=lambda **kwargs: str(snapshot),
+        bootstrap_files={"AGENTS.md": "seed\n"},
+    )("agent")
+    head = backend.fork()
+    # The bootstrap rewrote .gitattributes in the work tree, not the Hugging Face blob behind the snapshot.
+    assert (blobs / "attributes").read_text() == "*.bin filter=lfs\n"
+    assert (blobs / "weights").read_text() == "base"
+    assert "*.safetensors filter=lfs" in backend.materialize(head).local_path.joinpath(".gitattributes").read_text()
+
+    source = tmp_path / "release"
+    source.mkdir()
+    (source / "reef-artifact.json").write_text("{}")
+    (source / ".gitattributes").write_text("stale\n")
+    (source / "weights.bin").write_bytes(b"\x01" * 8)
+    backend.publish(Artifact.local(source), expected_parent=head)
+    assert (source / "reef-artifact.json").read_text() == "{}"
+    assert (source / ".gitattributes").read_text() == "stale\n"
+
+
+@pytest.mark.integration
+def test_a_broken_symlink_below_the_top_level_is_refused_by_name(tmp_path: Path, fake_git_lfs: None) -> None:
+    remote = tmp_path / "artifacts.git"
+    backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    head = backend.fork()
+    source = tmp_path / "release"
+    (source / "sub").mkdir(parents=True)
+    (source / "sub" / "gone").symlink_to(tmp_path / "nowhere")
+    with pytest.raises(ArtifactSourceError, match=r"broken symlink: .*sub/gone"):
+        backend.publish(Artifact.local(source), expected_parent=head)

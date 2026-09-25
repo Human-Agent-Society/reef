@@ -755,8 +755,17 @@ is recorded, a training/save failure is ambiguous and requires operator
 recovery; automatic retry must not repeat a possible optimizer step. A
 checkpointed or completed job replays without preparing or training again.
 Resource cleanup failure after ``CHECKPOINT`` also replays the recorded result.
-Job hashing, scenario/global checkpoint indexes and persisted marker fields
-remain compatible with existing deployments.
+A job's identity is its batch and admission fence: the scenario step is not
+part of it, since the other components of a composite advance that step while
+the job is out, nor is the processor's batch number, which a reload starts
+again. Upgrade Reef while no job is out: ``GET /reef/status`` shows
+``training_job`` as ``null``. A marker an earlier release left for a job still
+out names it by that release's identity, so the job is refused with
+``operator recovery required``, and the error names the marker's job and this
+batch's job. Nothing trains. Finish the job with the earlier release, then
+start this one. Do not delete the marker to get past the refusal: from
+``CHECKPOINT`` on, the optimizer step is in the checkpoint, and a job trained
+again from the start would apply the batch twice.
 
 Commit-gated weight publication
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~

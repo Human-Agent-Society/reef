@@ -407,10 +407,20 @@ class InferenceMemory:
 # -- Durable job execution ----------------------------------------------------
 
 
+#: The payload key naming the scenario that owns a job. The marker records it; the job identity leaves it out, since
+#: a job is its batch whichever scenario asked for it.
+JOB_OWNER_KEY = "owner"
+
+
 def training_job_id(payload: Mapping[str, Any]) -> str:
-    """Preserve the retry-stable identity of the shared training payload."""
+    """Preserve the retry-stable identity of the shared training payload: its batch and admission fence."""
     identity = dict(payload)
     identity.pop("max_staleness", None)
+    identity.pop(JOB_OWNER_KEY, None)
+    # The other components of a composite advance the scenario step while a job is out; its retry must replay.
+    identity.pop("rollout_id", None)
+    # The processor numbers batches per process; a reload numbers the same rows again.
+    identity.pop("batch_id", None)
     if uses_staleness_admission(payload):
         # A newer admission fence on retry must not repeat an optimizer step.
         identity.pop("expected_runtime_load_id", None)
@@ -469,7 +479,10 @@ class TrainingExecution:
         if disposition == "conflict":
             if marker is None:
                 raise RuntimeError("conflicting training disposition has no marker")
-            raise RuntimeError(f"training marker is {marker['status']}; operator recovery required")
+            raise RuntimeError(
+                f"training marker is {marker['status']} for job {marker['job_id']}, not this batch's job "
+                f"{job_id}; operator recovery required (see Training-step coordination in the executors guide)"
+            )
         if disposition != "fresh":
             if marker is None:
                 raise RuntimeError("replayed training disposition has no marker")
@@ -505,8 +518,13 @@ class TrainingExecution:
         parent_runtime_load_id = payload.get("expected_runtime_load_id")
         if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
             running["parent_runtime_load_id"] = parent_runtime_load_id
-        if checkpoint.scenario is not None:
-            running.update(scenario=checkpoint.scenario, scenario_step=checkpoint.scenario_step)
+        # The owner: the adapter's scenario on a runtime training several, else the scenario the payload names.
+        owner = checkpoint.scenario if checkpoint.scenario is not None else payload.get(JOB_OWNER_KEY)
+        if isinstance(owner, str) and owner:
+            running["scenario"] = owner
+        if checkpoint.scenario_step is not None:
+            # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
+            running["scenario_step"] = checkpoint.scenario_step
         store.write(running)
         self._state.phase = "training"
         try:
@@ -625,6 +643,11 @@ class RuntimeScheduler:
         if not isinstance(candidate, ModelCandidate):
             raise RuntimeContractError("training runtime must return ModelCandidate")
         return replace(candidate, current_runtime_load_id=current)
+
+    @property
+    def colocated(self) -> bool:
+        """Whether the backend hands the engine's devices to training for the whole job."""
+        return self._colocated
 
     def activate_candidate(self, candidate: ModelCandidate) -> ActivatedModel:
         """Stage selected weights behind closed inference admission."""
@@ -807,9 +830,8 @@ class TrainingCoordinator:
         self._last_train_metrics: dict[str, Any] = {}
         self._operation_lock = Lock()
         self._training.start()
-        self._inference_url = TrainingRecovery(self._publication, self._weight_publisher).restore(
-            self._execution.recover()
-        )
+        recovered = self._execution.recover()
+        self._inference_url = TrainingRecovery(self._publication, self._weight_publisher).restore(recovered)
 
     def prepare_training_step(
         self,
@@ -875,8 +897,8 @@ class TrainingCoordinator:
         training_job.update(
             status=marker["status"],
             training_job_id=marker["job_id"],
-            # Reef reasons in scenario steps; in per-scenario mode the
-            # marker's rollout id is the bridge-global checkpoint index.
+            # Reef reasons in scenario steps; the marker's rollout id is the
+            # backend's own checkpoint index (older markers carry only that).
             rollout_id=marker.get("scenario_step", marker["rollout_id"]),
             runtime_load_id=marker.get("runtime_load_id"),
             commit_acknowledged=marker.get("commit_acknowledged", False),

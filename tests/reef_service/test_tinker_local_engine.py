@@ -135,7 +135,8 @@ def objective():
     unregister_objective(value.name)
 
 
-def item(version):
+def item(version, sample=0):
+    # ``sample`` makes another rollout: a job is its rows, so a new step trains new rows.
     return TrajectoryItem(
         {
             "schema_version": "ATIF-v1.6",
@@ -144,7 +145,7 @@ def item(version):
             "extra": {
                 "reef": {
                     "training": {
-                        "tokens": [10, 11, 20, 21],
+                        "tokens": [10 + sample, 11, 20, 21],
                         "loss_mask": [1, 0],
                         "rollout_log_probs": [-0.2, -0.4],
                         "runtime_load_id": version,
@@ -169,7 +170,7 @@ class Stack:
     def payload(self, objective, *, step):
         version = self.coordinator.serving_runtime_load_id()
         prepared = self.coordinator.prepare_training_step(
-            TrainingBatch("b", (item(version),)),
+            TrainingBatch("b", (item(version, sample=step),)),
             objective.name,
             {},
             StepScheduling(unit="sample", batch_size="actual"),

@@ -208,7 +208,7 @@ class GEPARecipe(CordisRecipe):
         if isinstance(candidate_plugin, _UnboundPlugin):
             candidate_plugin = _ArchivePluginFactory(archive)
         bound = dataclasses.replace(self, propose=propose, candidate_plugin=candidate_plugin)
-        candidate_backend = GEPABackend(archive=archive, **bound._backend_kwargs())
+        candidate_backend = GEPABackend(archive=archive, **bound._backend_kwargs(scenario))
         return bound._build_trainer(
             scenario,
             records,

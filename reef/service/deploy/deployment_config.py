@@ -227,6 +227,25 @@ def translate_references(config: dict[str, Any], arguments: tuple[ConfigArgument
 _EXECUTION_ROLES = ("services", "training", "rollout", "evolution", "generator")
 
 
+def selected_weight_training(
+    recipe_type: type[Recipe], config: Mapping[str, Any]
+) -> type[WeightTrainingRecipe] | None:
+    """The class a deployment of ``recipe_type`` trains weights with: itself, or a component it names.
+
+    A component lives under ``reef`` in the unversioned layout and under
+    ``reef.data`` once the versioned layout is translated; both are read.
+    """
+    reef = config.get("reef", {})
+    sections = (reef, reef.get("data", {})) if isinstance(reef, Mapping) else ()
+    for section in sections:
+        if not isinstance(section, Mapping):
+            continue
+        selected = recipe_type.select_weight_training(section)
+        if selected is not None:
+            return selected[0]
+    return None
+
+
 def _recipe_definition(config: Mapping[str, Any]) -> tuple[type[Recipe] | None, tuple[str, ...]]:
     reference = config_value(config, "reef", "recipe", expand=False)
     if isinstance(reference, str) and (":" in reference or reference == "recipe"):

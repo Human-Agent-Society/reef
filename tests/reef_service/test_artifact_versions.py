@@ -69,6 +69,10 @@ class RollbackRuntime(StubTrainingRuntime):
         del decision
         self.candidate_versions.pop(candidate.candidate_id, None)
 
+    @property
+    def supports_checkpoint_restore(self):
+        return True
+
     def restore_checkpoint(self, artifact):
         assert not self.inference.inference_admission_status["open"]
         self.restore_order.append("training")
