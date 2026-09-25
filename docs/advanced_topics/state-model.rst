@@ -61,6 +61,19 @@ incarnation keeps tokens unique across training-group restarts. The release
 record is durable; the bytes are not, so a restart restores the last checkpoint.
 The step counter, algorithm state, and record progress do survive.
 
+A release binds one or more named components. Every shipped recipe declares
+one, so its releases are flat: the artifact is the component and its
+``content_id`` is the component's. A recipe that declares several components
+(``weights`` and ``harness``, say) serves releases that keep one directory
+per component and carry a component manifest in their metadata. Each step
+publishes one component and the committer carries the others forward from
+the previous checkpoint, so the release still binds the whole combination:
+its ``content_id`` derives from the component content ids, a rollback
+restores every component together, and only a component whose content the
+engine does not already serve is loaded or activated. Such a scenario must
+checkpoint every step, because a live weight release names an engine load and
+nothing else.
+
 Durable releases are Git-backed, one ref per scenario, with LFS patterns for
 weight files and a ``reef-artifact.json`` manifest in every release. Heads move
 only by compare-and-swap: ``advance_current`` requires the expected head,
@@ -117,6 +130,45 @@ durable store, the order is:
    * - Pending checkpoint
      - Publish durable bytes, commit the store, apply trainer state;
        leave serving and checkpoint heads in place.
+
+Every trainer is bound to a release component (``records`` when the recipe
+serves none). With several trainers, every commit record names the
+``component`` that made it and the ``base_release_id`` its batch was reserved
+against; a scenario of one trainer names neither, so its records, checkpoint
+metadata and drop receipts keep the format they had before components. A scenario whose
+recipe builds one trainer per component runs those trainers as separate
+workers that meet at this commit boundary, where the scenario lock
+serializes their commits. Local workers of one scenario take turns for a
+whole cycle, prepare and commit together, so they never overtake each
+other. When a dispatched commit fails, the training thread rebuilds the
+scenario from durable state at once; a local cycle still running on the
+old instance keeps that instance open until it ends, then commits nothing
+and looks again on the rebuilt instance, which holds its rows unread. A
+local cycle whose scenario is deleted under it ends without a commit too.
+A local result whose base a dispatched commit has replaced goes
+the way its backend's ``stale_result_policy`` says: ``merge`` commits it
+onto the release served now (the harness backend's default, since each
+of its episode pairings compared candidate and current under the same
+conditions when it ran; the commit metrics then name the release in
+``merged_onto``), ``reevaluate`` keeps the candidate and runs its evaluation again
+against the new release, and ``refuse`` (the default for a backend that
+says nothing) drops the result and prepares the batch again; a refused
+worker reports its refusals in ``/reef/status`` and after a few in a row
+waits for its next wake instead of spinning. The batch prepared again keeps
+the rows the first attempt took from the processor, so the commit that lands
+acknowledges them once. A step that prepared no candidate (a skip) publishes
+nothing, so it is never stale and commits as it is. A dispatched result is always
+merged: the backend published its weights
+before the result arrived and its job can only be finished, so the step
+lands on the release served now and the record's ``base_release_id`` shows
+what the batch was reserved against. A lone trainer is never refused: only
+its own retried attempt can have moved the head. A commit retires no row,
+so the trainers share every stored row and each keeps its own consumption:
+a row one trainer consumed is still there for the others. A batch a trainer
+drops as stale goes on a consumption receipt that names its component. On
+restart each trainer recovers its state and read cursor from its own commits
+and skips the rows its own commits and receipts name, which needs durable
+commit storage.
 
 Without a durable store, live and local saved releases advance the serving
 head before settling the in-memory commit. A conflicting head therefore
