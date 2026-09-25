@@ -192,17 +192,12 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         payload: Mapping[str, Any],
         *,
         job_id: str,
-        rollout_id: int,
+        scenario_step: int,
         prior_marker: Mapping[str, Any] | None,
     ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
         scenario = self._job_scenario(payload)
-        scenario_step = rollout_id
-        if scenario is not None:
-            # Scenario steps are per scenario; the bridge's checkpoint index
-            # stays one monotonic sequence across all of them.
-            rollout_id = self._next_rollout_id
-        elif rollout_id != self._next_rollout_id:
-            raise RuntimeError(f"expected rollout {self._next_rollout_id}, got {rollout_id}")
+        # The checkpoint index is the bridge's own sequence, not the scenario step.
+        rollout_id = self._next_rollout_id
         max_staleness = _max_staleness(payload)
         checkpoint = Path(self._checkpoint_path(rollout_id))
         if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
@@ -243,7 +238,9 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             packed = self._batch_processor.prepare_external_train_data(rollout_data)
             yield _SlimePreparedTrainingJob(
                 self,
-                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step if scenario else None),
+                checkpoint=TrainingCheckpoint(
+                    rollout_id=rollout_id, path=checkpoint, scenario_step=scenario_step, scenario=scenario
+                ),
                 job_id=job_id,
                 rollout_data=rollout_data,
                 packed=packed,
@@ -278,7 +275,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         """Persist the paired model/optimizer checkpoints and record the step."""
         checkpoint = job.checkpoint
         rollout_id = checkpoint.rollout_id
-        self._group.save_model(rollout_id, force_sync=True)
+        self._group.save_model(rollout_id, force_sync=True, scenario_step=checkpoint.scenario_step)
         if self._critic_save_root is not None and critic_checkpoint_due(rollout_id, self.critic_save_interval):
             # Persist the critic's weights and optimizer alongside the actor
             # pair: every commit by default, critic-only warmup included,
@@ -286,7 +283,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             # stated cold-start concern). A larger interval skips the full
             # critic save on the commits in between. No HF export: the
             # critic never serves.
-            self._critic_group.save_model(rollout_id, force_sync=True)
+            self._critic_group.save_model(rollout_id, force_sync=True, scenario_step=checkpoint.scenario_step)
         if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
             raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
         if self._storage is not None:

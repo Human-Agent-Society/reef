@@ -54,7 +54,7 @@ class FakeTrainGroupHandle(RayCoordinatorClient):
             "training_job": {
                 "deferred_weight_update": True,
                 "status": getattr(self, "status", "IDLE"),
-                "rollout_id": 0,
+                "scenario_step": 0,
                 "training_job_id": "job-0",
             },
         }
@@ -103,13 +103,13 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
         *,
         colocate: bool = False,
         status: str = "IDLE",
-        rollout_id: int = 0,
+        scenario_step: int = 0,
         lora_adapter: str | None = None,
     ) -> None:
         self.colocate = colocate
         self.status = status
-        self.rollout_id = rollout_id
-        self.training_job_id = f"job-{rollout_id}"
+        self.scenario_step = scenario_step
+        self.training_job_id = f"job-{scenario_step}"
         self.runtime_load_id = "engine:0"
         self.lora_adapter = lora_adapter
         self.calls: list[str] = []
@@ -124,7 +124,7 @@ class DeferredWeightUpdateTrainGroupHandle(FakeTrainGroupHandle):
             "training_job": {
                 "deferred_weight_update": True,
                 "status": self.status,
-                "rollout_id": self.rollout_id,
+                "scenario_step": self.scenario_step,
                 "training_job_id": self.training_job_id,
                 "commit_acknowledged": self.status == "COMPLETE",
             },
@@ -337,7 +337,7 @@ def test_ray_runtime_prepares_and_executes_one_transaction() -> None:
 
     assert prepared.payload is not None
     payload = prepared.payload
-    assert payload["rollout_id"] == 7 and payload["expected_runtime_load_id"] == "v0"
+    assert payload["scenario_step"] == 7 and payload["expected_runtime_load_id"] == "v0"
     assert runtime.execute_training_job(payload) == TrainingJobResult(
         outcome="complete",
         runtime_load_id="v1",
@@ -367,7 +367,7 @@ def test_ray_runtime_prepares_sft_without_reef_advantages() -> None:
     assert payload["loss"] == "sft"
     assert "advantages" not in payload
     assert payload["expected_runtime_load_id"] == "v0"
-    assert payload["rollout_id"] == 3
+    assert payload["scenario_step"] == 3
 
 
 @pytest.mark.unit
@@ -379,7 +379,7 @@ def test_ray_runtime_rejects_unstructured_training_results() -> None:
     runtime = ExecutorRuntimeFixture(train_group_handle=InvalidResultTrainGroup(), inference_url="http://router")
 
     with pytest.raises(RayRuntimeError, match="invalid training result: dict"):
-        runtime.execute_training_job({"rollout_id": 1})
+        runtime.execute_training_job({"scenario_step": 1})
 
 
 @pytest.mark.unit
@@ -417,7 +417,7 @@ def test_ray_runtime_preserves_backend_prepared_policy_signals(batch, objective,
     assert payload["loss"] == loss
     assert payload["advantages"] == pytest.approx(advantages)
     assert payload["expected_runtime_load_id"] == "v0"
-    assert payload["rollout_id"] == 9
+    assert payload["scenario_step"] == 9
 
 
 @pytest.mark.unit
@@ -590,7 +590,7 @@ def test_ray_runtime_prepares_a_sao_job_from_producing_runtime_load_id() -> None
     payload = prepared.payload
 
     assert payload["loss"] == "sao"
-    assert payload["rollout_id"] == 4 and payload["expected_runtime_load_id"] == "slime-v3"
+    assert payload["scenario_step"] == 4 and payload["expected_runtime_load_id"] == "slime-v3"
     assert "max_staleness" not in payload
     assert handle.probes == initialization_probes
 
@@ -959,7 +959,7 @@ def test_noncolocated_weight_update_preserves_inflight_and_queues_new_requests_u
     inflight = asyncio.run(runtime.acquire_inference())
     assert runtime.current_runtime_load_id() == "engine:0"
 
-    result = runtime.execute_training_job({"rollout_id": 0})
+    result = runtime.execute_training_job({"scenario_step": 0})
 
     assert result.training_job_id == "job-0"
     assert handle.calls == ["execute", "update_weights"]
@@ -990,7 +990,7 @@ def test_candidate_rejection_leaves_serving_weights_unchanged() -> None:
     handle = DeferredWeightUpdateTrainGroupHandle()
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
-    candidate = runtime.train_candidate({"rollout_id": 0})
+    candidate = runtime.train_candidate({"scenario_step": 0})
     evaluation = EvaluationResult("test", "1", {})
     runtime.reject_candidate(
         candidate,
@@ -1010,7 +1010,7 @@ def test_colocated_weight_update_retracts_without_draining_inflight() -> None:
     inflight = asyncio.run(runtime.acquire_inference())
     assert runtime.current_runtime_load_id() == "engine:0"
 
-    result = runtime.execute_training_job({"rollout_id": 0})
+    result = runtime.execute_training_job({"scenario_step": 0})
 
     assert handle.calls == ["execute", "update_weights"]
     assert runtime.inference_admission_status == {"open": False, "active": 1}
@@ -1033,7 +1033,7 @@ def test_colocated_weight_update_does_not_wait_for_inference_timeout() -> None:
     )
     inflight = asyncio.run(runtime.acquire_inference())
 
-    result = runtime.execute_training_job({"rollout_id": 0})
+    result = runtime.execute_training_job({"scenario_step": 0})
 
     assert result.training_job_id == handle.training_job_id
     assert handle.calls == ["execute", "update_weights"]
@@ -1054,7 +1054,7 @@ def test_colocated_checkpoint_rejection_reopens_admission_when_backend_stayed_id
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
     with pytest.raises(RuntimeError, match="checkpoint rejected"):
-        runtime.execute_training_job({"rollout_id": 0})
+        runtime.execute_training_job({"scenario_step": 0})
 
     assert handle.calls == ["execute"]
     assert runtime.inference_admission_status == {"open": True, "active": 0}
@@ -1144,7 +1144,7 @@ def test_colocated_completed_checkpoint_replay_reopens_admission() -> None:
     handle = CompletedReplay(colocate=True)
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
-    result = runtime.execute_training_job({"rollout_id": 0})
+    result = runtime.execute_training_job({"scenario_step": 0})
 
     assert result.outcome == "complete"
     assert handle.calls == ["execute"]
@@ -1153,7 +1153,7 @@ def test_colocated_completed_checkpoint_replay_reopens_admission() -> None:
 
 @pytest.mark.unit
 def test_recovery_acknowledges_a_training_job_after_the_scenario_commit() -> None:
-    handle = DeferredWeightUpdateTrainGroupHandle(status="READY_TO_COMMIT", rollout_id=3)
+    handle = DeferredWeightUpdateTrainGroupHandle(status="READY_TO_COMMIT", scenario_step=3)
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
     runtime.reconcile_training_job(
@@ -1167,7 +1167,7 @@ def test_recovery_acknowledges_a_training_job_after_the_scenario_commit() -> Non
 
 @pytest.mark.unit
 def test_recovery_does_not_acknowledge_an_unrelated_later_commit() -> None:
-    handle = DeferredWeightUpdateTrainGroupHandle(status="READY_TO_COMMIT", rollout_id=3)
+    handle = DeferredWeightUpdateTrainGroupHandle(status="READY_TO_COMMIT", scenario_step=3)
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
     runtime.reconcile_training_job(
@@ -1187,7 +1187,7 @@ def test_legacy_complete_marker_stays_closed_until_reef_commit_is_proven() -> No
             health["training_job"] = {**health["training_job"], "commit_acknowledged": False}
             return health
 
-    handle = LegacyCompleteHandle(status="COMPLETE", rollout_id=3)
+    handle = LegacyCompleteHandle(status="COMPLETE", scenario_step=3)
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
     runtime.reconcile_training_job(scenario_step=3)
@@ -1214,7 +1214,7 @@ def test_legacy_complete_marker_does_not_trust_an_unrelated_later_training_commi
             health["training_job"] = {**health["training_job"], "commit_acknowledged": False}
             return health
 
-    handle = LegacyCompleteHandle(status="COMPLETE", rollout_id=3)
+    handle = LegacyCompleteHandle(status="COMPLETE", scenario_step=3)
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
     runtime.reconcile_training_job(
@@ -1228,7 +1228,7 @@ def test_legacy_complete_marker_does_not_trust_an_unrelated_later_training_commi
 
 @pytest.mark.unit
 def test_recovery_republishes_an_uncertain_partial_weight_update_before_commit() -> None:
-    handle = DeferredWeightUpdateTrainGroupHandle(status="UPDATING_WEIGHTS", rollout_id=3)
+    handle = DeferredWeightUpdateTrainGroupHandle(status="UPDATING_WEIGHTS", scenario_step=3)
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
 
     runtime.reconcile_training_job(scenario_step=3)
@@ -1246,7 +1246,7 @@ def test_queued_tttd_fanout_freezes_the_head_that_reopens_admission(monkeypatch)
     monkeypatch.setattr(asyncio, "to_thread", call_inline)
     handle = DeferredWeightUpdateTrainGroupHandle()
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
-    updated = runtime.execute_training_job({"rollout_id": 0})
+    updated = runtime.execute_training_job({"scenario_step": 0})
 
     class Scenario:
         operations = OperationMetrics(("serve/request", "serve/admission"))
