@@ -2621,7 +2621,7 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     reef.close()
 
 
-def _dsh_install(tmp_path: Path) -> Path:
+def dsh_install(tmp_path: Path) -> Path:
     """An installed dsh tree with one agent_command, bound to a Reef that is never called."""
     from reef.harness.adapters import get_adapter
     from reef.harness.episodes.model_binding import ModelBinding
@@ -2641,7 +2641,7 @@ def _dsh_install(tmp_path: Path) -> Path:
 def test_dsh_run_reads_the_trees_commands_from_the_install_root(tmp_path) -> None:
     """reef-dsh points DSH_HOME at the temp copy and DSH_AGENTS_HOME, a ``{root}`` value of ``client_env``, at the
     installed tree's command root, where the rendered agent_commands are; a shell that sets its own keeps it."""
-    root = _dsh_install(tmp_path)
+    root = dsh_install(tmp_path)
     compose = str(root / "dsh")
     binary = _make_env_dump_binary(tmp_path)
     captures = tmp_path / "captures"
@@ -2672,7 +2672,7 @@ def test_run_agent_ends_quietly_on_ctrl_c(tmp_path, on_interrupt, status) -> Non
     import subprocess
     import time
 
-    compose = str(_dsh_install(tmp_path) / "dsh")
+    compose = str(dsh_install(tmp_path) / "dsh")
     binary = tmp_path / "fake-dsh"
     binary.write_text(
         f"#!{sys.executable}\n"

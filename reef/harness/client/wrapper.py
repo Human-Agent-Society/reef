@@ -324,7 +324,7 @@ def _bindings(descriptor: AdapterDescriptor, placeholder: str = "{base_url}") ->
     return [_Binding(target, path, tuple(dialects)) for (target, path), dialects in found.items()]
 
 
-def _suffix(binding: _Binding, file: Path, url: str) -> str:
+def installed_url_suffix(binding: _Binding, file: Path, url: str) -> str:
     """What the binding's template writes after ``{base_url}`` in the dialect the tree was installed with.
 
     Dialects may share a key path but not the suffix: pi and dsh reach
@@ -415,16 +415,16 @@ def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
         if match is None:
             continue
         url = match.group("url").rstrip("/")
-        suffix = _suffix(binding, file, match.group("url")).rstrip("/")
+        suffix = installed_url_suffix(binding, file, match.group("url")).rstrip("/")
         return url[: -len(suffix)] if suffix and url.endswith(suffix) else url
     return None
 
 
-class _BindingLoader(yaml.SafeLoader):
+class BindingLoader(yaml.SafeLoader):
     """Safe YAML that reads a tag a harness defines for itself (dsh's ``!!js`` expressions) as its plain scalar."""
 
 
-_BindingLoader.add_constructor(None, lambda loader, node: loader.construct_scalar(node))
+BindingLoader.add_constructor(None, lambda loader, node: loader.construct_scalar(node))
 
 
 def _parse_binding_file(file: Path) -> Any:
@@ -436,7 +436,7 @@ def _parse_binding_file(file: Path) -> Any:
     if suffix == ".toml":
         return tomllib.loads(text)
     if suffix in {".yaml", ".yml"}:
-        return yaml.load(text, Loader=_BindingLoader)
+        return yaml.load(text, Loader=BindingLoader)
     if file.name == ".env" or suffix == ".env":
         pairs = (line.split("=", 1) for line in text.splitlines() if "=" in line and not line.lstrip().startswith("#"))
         return {key.strip(): value.strip().strip("\"'") for key, value in pairs}
@@ -527,7 +527,7 @@ def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port:
         if match is None:
             continue
         span = match.span("url")
-        text = text[: span[0]] + proxy + _suffix(binding, src, match.group("url")) + text[span[1] :]
+        text = text[: span[0]] + proxy + installed_url_suffix(binding, src, match.group("url")) + text[span[1] :]
         dst = _materialize(temp_dir, compose_dir, PurePosixPath(src.relative_to(compose_dir).as_posix()))
         if dst.is_symlink() or dst.exists():
             dst.unlink()
