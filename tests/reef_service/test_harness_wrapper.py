@@ -539,6 +539,61 @@ def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
 
 
 @pytest.mark.unit
+def test_codex_folder_trust_outlives_the_run_outside_the_tree_and_only_for_the_sessions_folder(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex writes the answer to its trust prompt into the temp config.toml the wrapper removes. The wrapper keeps
+    the answer for the session's folder in ~/.reef/trust, readable by the person alone, and adds it to the next
+    session's copy; trust a command wrote for another folder is dropped, and the installed config.toml never
+    changes."""
+    from reef.harness.adapters import get_adapter
+    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.tree.render import render_composition
+
+    descriptor = get_adapter("codex")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy", api="responses")
+    compose = tmp_path / "tree" / "codex"
+    for relative, text in render_composition(binding.compose_nodes(descriptor), descriptor).items():
+        (tmp_path / "tree" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tree" / relative).write_text(text, encoding="utf-8")
+    installed = (compose / "config.toml").read_bytes()
+    project = tmp_path / "project"
+    project.mkdir()
+    binary = tmp_path / "fake-codex"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import json, os, tomllib
+            from pathlib import Path
+            config = Path(os.environ["CODEX_HOME"]) / "config.toml"
+            projects = tomllib.loads(config.read_text()).get("projects", {{}})
+            open({str(seen)!r}, "a").write(json.dumps(projects, sort_keys=True) + "\\n")
+            with config.open("a") as handle:
+                handle.write('\\n[projects."' + os.getcwd() + '"]\\ntrust_level = "trusted"\\n')
+                handle.write('\\n[projects."/elsewhere"]\\ntrust_level = "trusted"\\n')
+            """
+        )
+    )
+    binary.chmod(0o755)
+    monkeypatch.chdir(project)
+    with patch.dict(
+        os.environ, {**os.environ, "HOME": str(tmp_path / "home"), "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    ):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), str(compose), "test-scenario", "codex", "CODEX_HOME", ["exec", prompt])
+
+    folder = str(project.resolve())
+    assert [json.loads(line) for line in seen.read_text().splitlines()] == [{}, {folder: {"trust_level": "trusted"}}]
+    (store,) = (tmp_path / "home" / ".reef" / "trust").iterdir()
+    assert json.loads(store.read_text())["projects"] == {folder: "trusted"}
+    assert store.stat().st_mode & 0o777 == 0o600
+    assert (compose / "config.toml").read_bytes() == installed
+
+
+@pytest.mark.unit
 def test_partial_per_receipt_failure_retries_only_the_unsent(tmp_path) -> None:
     """When a later per-receipt post fails, the restored claim holds only the
     receipts that never went out, so a retry cannot duplicate reports."""

@@ -25,7 +25,7 @@ from reef.harness.episodes.trajectory import (
     reader_for,
 )
 from reef.harness.tree.render import render_composition
-from reef.recipe.reefine.evolution import final_assistant_text
+from reef.recipe.reefine.evolution import final_assistant_text, grade_text
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -78,14 +78,16 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
-assert args[:6] == [
-    "exec", "--json", "--strict-config", "--sandbox", "workspace-write", "--skip-git-repo-check",
+assert args[:10] == [
+    "exec", "--json", "--strict-config", "--config", 'approval_policy="never"', "--config", 'web_search="disabled"',
+    "--sandbox", "workspace-write", "--skip-git-repo-check",
 ], args
-prompt = args[6]
+prompt = args[10]
 codex_home = Path(os.environ["CODEX_HOME"])
 assert Path(os.environ["HOME"]) == codex_home.parent
 config = (codex_home / "config.toml").read_text()
-assert 'approval_policy = "never"' in config and 'web_search = "disabled"' in config
+# The argv pins approvals off; config.toml leaves them to Codex's default for a person's reef-codex session.
+assert "approval_policy" not in config and 'web_search = "disabled"' in config
 rollout = codex_home / "sessions" / "2026" / "09" / "02" / "rollout.jsonl"
 rollout.parent.mkdir(parents=True)
 events = [
@@ -239,6 +241,49 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
     second.write_text('{"type": "event_msg"}\n{"type": "turn_context"\n')
     assert [event["type"] for event in read_codex_session(tmp_path)] == ["session_meta", "event_msg"]
     assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
+
+
+def test_codex_reader_lifts_each_message_so_the_final_assistant_text_is_found(tmp_path: Path) -> None:
+    """Codex 0.152.1 writes a message as a response_item payload with Responses API parts; the scorers read a
+    message at the top with text parts, as pi writes it. The lines are the shapes of a real health episode."""
+    task = "[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output."
+    reply = {
+        "type": "message",
+        "id": "msg_tmp_1",
+        "role": "assistant",
+        "content": [{"type": "output_text", "text": "reef-ok"}],
+        "internal_chat_message_metadata_passthrough": {"turn_id": "t1", "content_item_kinds": ["unknown"]},
+    }
+    lines = [
+        {"timestamp": "t", "type": "session_meta", "payload": {"id": "s1"}},
+        {
+            "timestamp": "t",
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": task}]},
+        },
+        {
+            "timestamp": "t",
+            "type": "response_item",
+            "payload": {"type": "function_call", "name": "exec_command", "arguments": '{"cmd": "echo reef-ok"}'},
+        },
+        {
+            "timestamp": "t",
+            "type": "response_item",
+            "payload": {"type": "function_call_output", "output": "reef-ok\n"},
+        },
+        {"timestamp": "t", "type": "response_item", "payload": reply},
+        {"timestamp": "t", "type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": "reef-ok"}},
+    ]
+    rollout = tmp_path / "2026" / "09" / "24" / "rollout-01.jsonl"
+    rollout.parent.mkdir(parents=True)
+    rollout.write_text("".join(json.dumps(line) + "\n" for line in lines))
+    events = read_codex_session(tmp_path)
+    assert [{key: value for key, value in event.items() if key != "message"} for event in events] == lines
+    assert [index for index, event in enumerate(events) if "message" in event] == [1, 4]
+    assert events[1]["message"]["content"] == [{"type": "text", "text": task}]
+    assert events[4]["message"] == {**reply, "content": [{"type": "text", "text": "reef-ok"}]}
+    assert final_assistant_text(events) == "reef-ok"
+    assert grade_text(task, final_assistant_text(events)) == 1.0
 
 
 def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path: Path) -> None:

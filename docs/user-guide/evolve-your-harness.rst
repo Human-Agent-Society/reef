@@ -117,9 +117,26 @@ the model proposes a loop, a person serves it.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
 ``skill``. Codex rejects ``code_extension`` because lifecycle hooks run outside
-its command sandbox. Terminus accepts one Python module defining
-``Agent(Terminus2)`` when Reef's sandbox isolates the runner and Harbor uses
-remote E2B tasks. See the adapter guide for the required deployment settings.
+its command sandbox. Codex 0.152.1 loads no custom prompts, so a Codex
+``agent_command`` is a skill that you type as ``$name``. A Codex tree may turn
+on ``web_search`` for your ``reef-codex`` session; episodes always run with
+web search off. The shell in a ``reef-codex`` session has no network, so a
+command that reaches Reef, such as ``reef-codex evolve``, runs only after you
+approve it when Codex asks. Episodes never ask, and ``reef-codex exec``
+cannot ask, so its shell cannot reach Reef. Answer "Yes, proceed", which
+approves one call. "Yes, and don't ask again" runs every command that starts
+with the text Codex shows in that answer with no question until the session
+ends, and after it too when the installed tree has a ``codex/rules``
+directory, since the rule then lands there. An approved call runs the ``reef-codex`` file as it is at that moment,
+and when the harness is installed inside the project directory the session
+can change that file before the call. Codex asks once whether you trust the
+folder a session starts in; ``reef-codex`` keeps that answer for the folder
+(or the repository above it) in ``~/.reef/trust``, readable by you alone and
+outside the install root, and the installed ``codex/config.toml`` never
+changes. Delete the file there to be asked again. Terminus accepts one Python module
+defining ``Agent(Terminus2)`` when Reef's sandbox isolates the runner and
+Harbor uses remote E2B tasks. See the adapter guide for the required
+deployment settings.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 

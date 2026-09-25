@@ -143,6 +143,64 @@ approval policy runs tools in the working directory without prompting and
 returns a tool error for commands it considers dangerous. The adapter does
 not use a bypass flag.
 
+Codex CLI
+~~~~~~~~~
+
+The ``codex`` adapter runs ``codex exec --json`` headless with its user
+home relocated through ``CODEX_HOME``. Its ``primary`` target is
+``config.toml``; the quirks write the merged configuration as TOML. They
+enforce these defaults so an episode stays self-contained: the update
+check, analytics, feedback, and telemetry are off, and the
+``workspace-write`` sandbox has no network. Rendering rejects a tree that
+changes them.
+
+Node paths and transformations are:
+
+- ``rules`` becomes ``AGENTS.md``.
+- ``skill`` becomes ``skills/<name>/SKILL.md`` below ``CODEX_HOME``, the root
+  that both ``codex exec`` and the interactive CLI list. The adapter adds the
+  required ``name`` and ``description`` frontmatter if the node text lacks
+  it.
+- ``agent_command`` becomes a skill in the same root, which the person types
+  as ``$name``. Codex 0.152.1 loads no custom prompts, and the interactive
+  CLI rejects an unknown ``/name``. A skill and an ``agent_command`` with one
+  name render to one path, so Reef rejects them.
+- ``code_extension`` is rejected, because Codex hooks run outside its
+  command sandbox.
+
+The tree may set ``web_search`` (``disabled``, ``cached``, ``indexed``, or
+``live``) for a person's ``reef-codex`` session, but not
+``approval_policy``. The episode argv pins
+``--config approval_policy="never"`` and ``--config web_search="disabled"``,
+which win over ``config.toml``, so an episode never waits for an approval
+and never searches the web.
+
+An interactive ``reef-codex`` session keeps Codex's own ``on-request``
+approvals and the sandbox without network. A wrapper call that reaches Reef
+therefore runs only after the model asks for an escalation and the person
+approves it. ``reef-codex exec`` runs with approval ``never``, so its shell
+cannot reach Reef. A command or skill that runs the wrapper tells the model
+to ask on the first call: set ``sandbox_permissions`` to
+``"require_escalated"`` and put the question in ``justification``, because
+the command needs the network to reach Reef.
+
+Codex's answer "Yes, and don't ask again" writes a rule to
+``rules/default.rules`` in the temporary copy, so it holds until the session
+ends. When the installed tree has a ``codex/rules`` directory, the temporary
+copy links it and the rule stays there. For a command that starts with
+``$REEF_HARNESS_WRAPPER``, the rule is the whole command text, so the same
+call with another argument asks again. For a command that starts with the
+wrapper's path or name, the rule is the prefix the model proposes in
+``prefix_rule``, such as the path and ``page``, and it covers every later
+call with that prefix. A rule on the name also runs a ``reef-codex`` file
+that the session writes to a directory earlier on ``PATH``.
+
+The model binding supports only the ``responses`` dialect. The
+``codex-session-jsonl`` reader gives each message in a rollout a
+``message`` field, with its ``input_text`` and ``output_text`` parts typed
+``text``. This is the shape a pi session writes, so the evaluator reads
+Codex's final reply.
+
 Native tools and execution
 ~~~~~~~~~~~~~~~~~~~~~~~~~~
 

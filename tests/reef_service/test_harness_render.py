@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tomllib
 from pathlib import Path
 
@@ -95,10 +96,11 @@ def test_codex_rejects_code_extensions_until_hooks_have_separate_isolation() -> 
 
 def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
     descriptor = get_adapter("codex")
-    with pytest.raises(RenderError, match="approval_policy never"):
-        render_composition([("config", {"data": {"approval_policy": "on-request"}})], descriptor)
-    with pytest.raises(RenderError, match="web_search disabled"):
-        render_composition([("config", {"data": {"web_search": "live"}})], descriptor)
+    for approval_policy in ("on-request", "never"):
+        with pytest.raises(RenderError, match="may not set approval_policy"):
+            render_composition([("config", {"data": {"approval_policy": approval_policy}})], descriptor)
+    with pytest.raises(RenderError, match="web_search must be one of disabled, cached, indexed, live"):
+        render_composition([("config", {"data": {"web_search": "always"}})], descriptor)
     for data, message in (
         ({"features": {"apps": True}}, r"features\.apps disabled"),
         ({"features": {"hooks": True}}, r"features\.hooks disabled"),
@@ -117,6 +119,34 @@ def test_codex_quirk_rejects_reopened_hermetic_switches() -> None:
     ):
         with pytest.raises(RenderError, match=message):
             render_composition([("config", {"data": data})], descriptor)
+
+
+def test_codex_episode_argv_pins_approvals_and_web_search_off_over_the_session_config() -> None:
+    """A reef-codex session reads config.toml: no approval_policy, so Codex asks the person on request, and the
+    tree's web_search. The episode argv overrides both before the prompt."""
+    descriptor = get_adapter("codex")
+    files = render_composition([("config", {"data": {"web_search": "live"}})], descriptor)
+    config = tomllib.loads(files["codex/config.toml"])
+    assert config["web_search"] == "live" and "approval_policy" not in config
+    argv = list(descriptor.argv)
+    overrides = [argv[index + 1] for index, token in enumerate(argv) if token == "--config"]
+    assert overrides == ['approval_policy="never"', 'web_search="disabled"'] and argv[-1] == "{prompt}"
+
+
+def test_codex_renders_a_command_as_a_skill_and_refuses_one_that_shares_a_skills_name() -> None:
+    """Codex 0.152.1 loads no custom prompts, so a command is a skill typed as $name, in the one skill root."""
+    descriptor = get_adapter("codex")
+    command = ("agent_command", {"name": "reefine", "text": "File the text after $reefine as a request."})
+    files = render_composition([command], descriptor)
+    assert files["codex/skills/reefine/SKILL.md"] == (
+        "---\nname: reefine\ndescription: File the text after $reefine as a request.\n---\n"
+        "File the text after $reefine as a request.\n"
+    )
+    assert not any(path.startswith(("codex/prompts/", ".agents/")) for path in files)
+    skill = ("skill", {"name": "reefine", "text": "# reefine"})
+    collision = "'codex/skills/reefine/SKILL.md': skill 'reefine' and agent_command 'reefine'; rename one"
+    with pytest.raises(RenderError, match=re.escape(collision)):
+        render_composition([skill, command], descriptor)
 
 
 def test_codex_accepts_admitted_model_tuning() -> None:
@@ -367,7 +397,8 @@ def test_unknown_config_target_is_rejected() -> None:
 
 def test_two_nodes_cannot_render_to_the_same_path() -> None:
     skill = ("skill", {"name": "notes", "text": "# notes"})
-    with pytest.raises(RenderError, match="same path"):
+    collision = "same path 'pi-agent/skills/notes/SKILL.md': skill 'notes' and skill 'notes'"
+    with pytest.raises(RenderError, match=re.escape(collision)):
         render_composition([skill, skill], get_adapter("pi"))
 
 
