@@ -5,7 +5,7 @@
   <img src="docs/assets/reef-logo-light.svg" alt="Reef" width="220">
 </picture>
 
-<h3>Continual learning infra for self-improving agents</h3>
+<h3>Infrastructure for continually self‑improving agents</h3>
 
 [![CI](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml)
 [![PyPI package: reef-infra](https://img.shields.io/pypi/v/reef-infra?label=PyPI%3A%20reef-infra&logo=pypi&logoColor=white)](https://pypi.org/project/reef-infra/)
