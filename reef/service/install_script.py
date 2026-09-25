@@ -103,7 +103,7 @@ def _wrapper_quoted(text: str) -> str:
     return quoted.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
 
 
-def _probe_value(value: str) -> str:
+def probe_value(value: str) -> str:
     """A descriptor env value for the version probe in shell: ``{root}`` becomes the scratch ``$PROBE_ROOT``."""
     head, *rest = value.split("{root}")
     text = _single_quoted(head) if head else ""
@@ -260,7 +260,7 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
     # after, so a binary that writes its state on --version (hermes, opencode) leaves the person's home alone.
     relocated = [value for value in descriptor.env.values() if "{root}" in value]
     probe_env = " ".join(
-        f"{key}={_probe_value(value)}" if "{root}" in value else f"{key}={_single_quoted(value)}"
+        f"{key}={probe_value(value)}" if "{root}" in value else f"{key}={_single_quoted(value)}"
         for key, value in descriptor.env.items()
     )
     probe = f'{probe_env} "$BINARY"'.lstrip()
@@ -268,7 +268,7 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
     if relocated:
         probe_lines = [
             '    PROBE_ROOT="$(mktemp -d)"',
-            "    mkdir -p " + " ".join(_probe_value(value) for value in relocated),
+            "    mkdir -p " + " ".join(probe_value(value) for value in relocated),
             *probe_lines,
             '    rm -rf "$PROBE_ROOT"',
         ]
