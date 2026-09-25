@@ -28,8 +28,8 @@ def save_lora_adapter_to_path(
     output_dir: str | Path,
     adapter_tensors,
     *,
-    scenario_step: int,
     scenario: str | None = None,
+    scenario_step: int | None = None,
 ) -> None:
     """Gather a replicated/sharded Bridge export and write one PEFT adapter.
 
@@ -108,8 +108,8 @@ def _write_adapter_checkpoint(
     path: Path,
     tensors: dict[str, torch.Tensor],
     *,
-    scenario_step: int,
     scenario: str | None = None,
+    scenario_step: int | None = None,
 ) -> None:
     from safetensors.torch import save_file
 

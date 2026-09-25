@@ -70,8 +70,9 @@ class ExecutorTrainingRuntime(TrainingRuntime):
         payload = dict(prepared.payload)
         samples = _ordered_samples(batch, payload.pop("source_rows", None))
         payload.update(self._admission_fields(samples, serving_runtime_load_id))
-        # The backend numbers its own checkpoints; the job records the scenario step it trains.
-        payload["scenario_step"] = scenario_step
+        # The scenario step crosses into the backend job under the wire key ``rollout_id``; the backend
+        # numbers its own checkpoints and records this value as the job's ``scenario_step``.
+        payload["rollout_id"] = scenario_step
         return PreparedTrainingStep(
             action="train",
             payload=payload,

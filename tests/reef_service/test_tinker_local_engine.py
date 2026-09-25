@@ -175,7 +175,7 @@ class Stack:
             {},
             StepScheduling(unit="sample", batch_size="actual"),
         )
-        return {**prepared.payload, "scenario": "math", "scenario_step": step, "expected_runtime_load_id": version}
+        return {**prepared.payload, "scenario": "math", "rollout_id": step, "expected_runtime_load_id": version}
 
 
 def test_each_step_branches_from_the_published_checkpoint_and_loads_its_adapter(tmp_path, objective):

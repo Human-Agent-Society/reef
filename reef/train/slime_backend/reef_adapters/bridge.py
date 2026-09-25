@@ -192,11 +192,13 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         payload: Mapping[str, Any],
         *,
         job_id: str,
-        scenario_step: int,
+        rollout_id: int,
         prior_marker: Mapping[str, Any] | None,
     ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
         scenario = self._job_scenario(payload)
-        # The checkpoint index is the bridge's own sequence, not the scenario step.
+        # Reef numbers a job by its scenario step, which other scenarios and the other components of a
+        # composite also advance; the bridge's checkpoint index stays one monotonic sequence of its own.
+        scenario_step = rollout_id
         rollout_id = self._next_rollout_id
         max_staleness = _max_staleness(payload)
         checkpoint = Path(self._checkpoint_path(rollout_id))
@@ -238,9 +240,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             packed = self._batch_processor.prepare_external_train_data(rollout_data)
             yield _SlimePreparedTrainingJob(
                 self,
-                checkpoint=TrainingCheckpoint(
-                    rollout_id=rollout_id, path=checkpoint, scenario_step=scenario_step, scenario=scenario
-                ),
+                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step),
                 job_id=job_id,
                 rollout_data=rollout_data,
                 packed=packed,
@@ -283,7 +283,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             # stated cold-start concern). A larger interval skips the full
             # critic save on the commits in between. No HF export: the
             # critic never serves.
-            self._critic_group.save_model(rollout_id, force_sync=True, scenario_step=checkpoint.scenario_step)
+            self._critic_group.save_model(rollout_id, force_sync=True)
         if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
             raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
         if self._storage is not None:

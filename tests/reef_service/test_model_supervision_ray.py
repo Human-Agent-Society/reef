@@ -285,7 +285,6 @@ def deployment(tmp_path, monkeypatch):
             "status": "COMPLETE",
             "job_id": "job",
             "rollout_id": 0,
-            "scenario_step": 0,
             "runtime_load_id": "checkpoint:1",
             "checkpoint_path": str(tmp_path),
             "commit_acknowledged": True,
@@ -501,7 +500,7 @@ class ScheduledTrainingBackend(TrainingBackend):
     def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
         raise AssertionError("unexpected prepare_training_step in this fixture")
 
-    def prepare(self, payload, *, job_id, scenario_step, prior_marker):
+    def prepare(self, payload, *, job_id, rollout_id, prior_marker):
         raise AssertionError("unexpected prepare in this fixture")
 
     def initialize_version(self, runtime_load_id):

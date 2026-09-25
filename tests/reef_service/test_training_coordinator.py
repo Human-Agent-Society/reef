@@ -112,14 +112,9 @@ class Trainer(TrainingBackend):
         self.events.append("training.close")
 
     @contextmanager
-    def prepare(self, payload, *, job_id, scenario_step, prior_marker):
-        rollout_id = self.context.next_rollout_id
+    def prepare(self, payload, *, job_id, rollout_id, prior_marker):
         yield Job(
-            TrainingCheckpoint(
-                rollout_id,
-                Path(self.config.save_hf_template.format(rollout_id=rollout_id)),
-                scenario_step=scenario_step,
-            ),
+            TrainingCheckpoint(rollout_id, Path(self.config.save_hf_template.format(rollout_id=rollout_id))),
             self.events,
         )
 
@@ -172,7 +167,7 @@ def build(tmp_path, *, colocate=False, owns_training=True):
 def test_two_backend_operations_share_one_commit_gate(tmp_path, colocate):
     coordinator, training, inference, events = build(tmp_path, colocate=colocate)
     result = coordinator.execute_training_job(
-        {"scenario_step": 0, "expected_runtime_load_id": coordinator.serving_runtime_load_id()}
+        {"rollout_id": 0, "expected_runtime_load_id": coordinator.serving_runtime_load_id()}
     )
     assert result.outcome == "checkpoint"
     assert "training.send" not in [item[0] if isinstance(item, tuple) else item for item in events]
@@ -194,7 +189,7 @@ def test_two_backend_operations_share_one_commit_gate(tmp_path, colocate):
 def test_partial_receive_stays_fenced_and_retries_full_transfer(tmp_path):
     coordinator, training, inference, events = build(tmp_path)
     result = coordinator.execute_training_job(
-        {"scenario_step": 0, "expected_runtime_load_id": coordinator.serving_runtime_load_id()}
+        {"rollout_id": 0, "expected_runtime_load_id": coordinator.serving_runtime_load_id()}
     )
     training.partial = True
     with pytest.raises(RuntimeError, match="engines disagree"):
@@ -219,7 +214,7 @@ def test_partial_receive_stays_fenced_and_retries_full_transfer(tmp_path):
 def test_restart_republishes_pending_version_without_resuming(tmp_path):
     coordinator, training, inference, events = build(tmp_path)
     result = coordinator.execute_training_job(
-        {"scenario_step": 0, "expected_runtime_load_id": coordinator.serving_runtime_load_id()}
+        {"rollout_id": 0, "expected_runtime_load_id": coordinator.serving_runtime_load_id()}
     )
     published = coordinator.update_serving_weights(result.training_job_id).runtime_load_id
     events.clear()
@@ -242,7 +237,7 @@ def test_deployment_retains_training_worker_ownership(tmp_path):
 
 def test_reef_selects_and_persists_target_before_partial_transfer(tmp_path):
     coordinator, training, inference, _ = build(tmp_path)
-    result = coordinator.execute_training_job({"scenario_step": 0, "expected_runtime_load_id": "inc:1"})
+    result = coordinator.execute_training_job({"rollout_id": 0, "expected_runtime_load_id": "inc:1"})
     training.partial = True
     with pytest.raises(RuntimeError, match="engines disagree"):
         coordinator.update_serving_weights(result.training_job_id)
@@ -262,7 +257,7 @@ def test_reef_selects_and_persists_target_before_partial_transfer(tmp_path):
 
 def test_sender_cannot_choose_a_different_published_identity(tmp_path, monkeypatch):
     coordinator, training, inference, _ = build(tmp_path)
-    result = coordinator.execute_training_job({"scenario_step": 0, "expected_runtime_load_id": "inc:1"})
+    result = coordinator.execute_training_job({"rollout_id": 0, "expected_runtime_load_id": "inc:1"})
 
     class WrongSender(Trainer):
         def send_weights(self, runtime_load_id, *, force_full):
@@ -313,7 +308,7 @@ def test_backend_terminal_failure_is_observable_during_idle_serving(tmp_path):
 
 def test_colocated_sender_prepares_before_receiver_memory_is_restored(tmp_path):
     coordinator, _, inference, events = build(tmp_path, colocate=True)
-    candidate = coordinator.execute_training_job({"scenario_step": 0, "expected_runtime_load_id": "inc:1"})
+    candidate = coordinator.execute_training_job({"rollout_id": 0, "expected_runtime_load_id": "inc:1"})
     events.clear()
     coordinator.update_serving_weights(candidate.training_job_id)
     assert events == [

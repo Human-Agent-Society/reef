@@ -52,7 +52,7 @@ def test_lora_checkpoint_is_readable_by_peft_without_base_weights(tmp_path) -> N
         ("model.layers.0.self_attn.q_proj.lora_B.weight", torch.ones(4, 2)),
     ]
 
-    save_lora_adapter_to_path(_args(megatron_lora_alpha=32), output, tensors, scenario_step=0)
+    save_lora_adapter_to_path(_args(megatron_lora_alpha=32), output, tensors)
 
     config = json.loads((output / "adapter_config.json").read_text(encoding="utf-8"))
     assert config["base_model_name_or_path"] == "/models/Qwen3-8B"
@@ -136,7 +136,6 @@ def test_lora_checkpoint_records_no_dtype_for_a_mixed_export(tmp_path) -> None:
             ("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4, dtype=torch.float32)),
             ("model.layers.0.self_attn.q_proj.lora_B.weight", torch.ones(4, 2, dtype=torch.bfloat16)),
         ],
-        scenario_step=0,
     )
 
     assert json.loads((output / "reef-adapter.json").read_text(encoding="utf-8"))["dtype"] is None
@@ -148,7 +147,6 @@ def test_lora_checkpoint_rejects_base_tensors(tmp_path) -> None:
             _args(megatron_lora_alpha=32),
             tmp_path / "checkpoint-0",
             [("model.embed_tokens.weight", torch.ones(2, 2))],
-            scenario_step=0,
         )
 
 
@@ -165,7 +163,6 @@ def test_lora_checkpoint_does_not_publish_a_partial_directory(tmp_path, monkeypa
             _args(megatron_lora_alpha=32),
             output,
             [("model.layers.0.self_attn.q_proj.lora_A.weight", torch.ones(2, 4))],
-            scenario_step=0,
         )
 
     assert not output.exists()

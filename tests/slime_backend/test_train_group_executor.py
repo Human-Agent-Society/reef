@@ -41,7 +41,7 @@ class _Worker:
             self.args.train_barrier.wait(timeout=5)
         return {"rank": self.rank, "external_data": external_data}
 
-    def save_model(self, rollout_id, *, force_sync, scenario_step):
+    def save_model(self, rollout_id, *, force_sync):
         self.save_calls.append((rollout_id, force_sync))
         if self.args.fail_save_rank == self.rank:
             raise RuntimeError("worker save failed")
@@ -148,7 +148,7 @@ def test_custom_executor_factory_recreates_workers_with_checkpoint_and_manager(m
     assert group.create() is None
     assert len(group.args.launches) == 1
 
-    assert group.save_model(4, force_sync=True, scenario_step=4) == [0, 1]
+    assert group.save_model(4, force_sync=True) == [0, 1]
     group.release()
     group.release()
     assert [worker.shutdown_calls for worker in first.workers] == [1, 1]
@@ -219,7 +219,7 @@ def test_failed_save_does_not_repoint_checkpoint_resume_parameters(make_group) -
     )
 
     with pytest.raises(RuntimeError, match="worker save failed"):
-        group.save_model(6, force_sync=True, scenario_step=6)
+        group.save_model(6, force_sync=True)
 
     assert (
         group.args.load,

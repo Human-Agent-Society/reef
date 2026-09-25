@@ -201,7 +201,6 @@ def test_new_coordinator_process_reconnects_surviving_engine_and_preserves_commi
             "status": status,
             "job_id": "restart-job",
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
             "runtime_load_id": "checkpoint:1",
             "commit_acknowledged": status != "READY_TO_COMMIT",
@@ -247,7 +246,6 @@ def test_new_process_with_invalid_checkpoint_never_reopens_surviving_engine(clus
         "status": "COMPLETE",
         "job_id": "restart-job",
         "rollout_id": 0,
-        "scenario_step": 0,
         "checkpoint_path": str(checkpoint),
         "runtime_load_id": "checkpoint:1",
     }

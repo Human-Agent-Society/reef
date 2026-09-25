@@ -325,7 +325,7 @@ def test_full_weight_save_delegates_without_reopening_slimes_timer(
     actor = object.__new__(module.ReefMegatronTrainRayActor)
     actor.args = object()
 
-    actor.save_model(7, force_sync=True, scenario_step=7)
+    actor.save_model(7, force_sync=True)
 
     assert saved == [(7, True)]
     assert _StubTimer.started == ["save_model"]
@@ -378,11 +378,11 @@ def test_lora_save_times_the_branch_that_does_not_delegate(monkeypatch: pytest.M
     monkeypatch.setattr(
         actor,
         "_save_lora_model",
-        lambda rollout_id, force_sync=False, *, scenario_step: saved.append((rollout_id, force_sync)),
+        lambda rollout_id, force_sync=False, scenario_step=None: saved.append((rollout_id, force_sync)),
         raising=False,
     )
 
-    actor.save_model(3, scenario_step=3)
+    actor.save_model(3)
 
     assert saved == [(3, False)]
     assert _StubTimer.started == ["save_model"]

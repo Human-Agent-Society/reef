@@ -91,7 +91,7 @@ class _SlottedGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1]) - 1
 
-    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
         checkpoint.mkdir(parents=True)
         (checkpoint / "weights").write_text("hf", encoding="utf-8")
@@ -242,7 +242,7 @@ def _actor(
 
 def _job(scenario: str, step: int, producing: str, *, max_staleness: int | None = None) -> dict:
     payload = _payload([_sao_row(f"{scenario}-{step}", producing_runtime_load_id=producing)])
-    payload.update(scenario=scenario, scenario_step=step, expected_runtime_load_id=producing)
+    payload.update(scenario=scenario, rollout_id=step, expected_runtime_load_id=producing)
     if max_staleness is not None:
         payload.update(max_staleness=max_staleness, producing_runtime_load_ids=[producing])
     return payload
@@ -314,7 +314,7 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     health = actor.health()
     assert health["lora_mode"] == "scenario" and health["lora_adapter"] is None
     assert health["lora_adapters"]["b"]["runtime_load_id"] == "inc:2"
-    assert health["training_job"]["scenario"] == "a" and health["training_job"]["scenario_step"] == 1
+    assert health["training_job"]["scenario"] == "a" and health["training_job"]["rollout_id"] == 1
 
 
 @pytest.mark.unit

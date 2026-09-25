@@ -244,7 +244,6 @@ def test_republication_restores_engine_and_monitor_pause_through_commit_gate(con
             "status": "COMPLETE" if committed else "READY_TO_COMMIT",
             "job_id": "job",
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
             "runtime_load_id": "engine:1",
         },

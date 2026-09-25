@@ -68,7 +68,6 @@ def publication(tmp_path):
         {
             "job_id": "job-1",
             "rollout_id": 0,
-            "scenario_step": 0,
             "status": "CHECKPOINT",
             "checkpoint_path": str(checkpoint),
             "train_metrics": {"loss": 0.5},

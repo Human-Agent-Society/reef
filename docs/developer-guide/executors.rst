@@ -740,13 +740,6 @@ storage-blocked result without starting a job. Reef applies shared
 scenario/staleness admission. Slime implements checkpoint capacity checks,
 teacher scoring, tensorization and DP packing in its preparation adapter.
 
-The training payload carries the Reef ``scenario_step`` the job trains; the
-backend picks the checkpoint index from its own sequence, which the
-``{rollout_id}`` checkpoint path template and the marker's ``rollout_id`` name.
-Every marker records both, and the coordinator's health reports the job's
-``scenario_step``. A marker of a job still out without ``scenario_step`` is
-invalid; a settled one an earlier release left behind is read as it is.
-
 Reef records ``RUNNING`` before calling ``train``, then invokes
 ``save_checkpoint`` and verifies the checkpoint directory. Training metrics and
 method telemetry are recorded together with ``CHECKPOINT`` in one durable write,

@@ -305,7 +305,7 @@ class _RecordingGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         pass
 
-    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
         if self.critic:
             self.saved_training_checkpoint_rollouts.append(rollout_id)
             return
@@ -346,7 +346,7 @@ def _sao_actor(
             _sao_row("b", reward=1.0, producing_runtime_load_id="inc:3"),
         ]
     )
-    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
     return actor, actor_group, critic_group, payload
 
 
@@ -393,7 +393,7 @@ def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_
     actor.acknowledge_training_commit(first.training_job_id)
     # The next batch, reserved four scenario steps later.
     next_batch = _payload([_sao_row("c", producing_runtime_load_id=first.runtime_load_id)])
-    next_batch.update(scenario_step=4, expected_runtime_load_id=first.runtime_load_id)
+    next_batch.update(rollout_id=4, expected_runtime_load_id=first.runtime_load_id)
     later = _execute_and_update_weights(actor, next_batch)
 
     assert (first.outcome, later.outcome) == ("complete", "complete")
@@ -403,7 +403,7 @@ def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_
     assert actor_group.saved_scenario_steps == [0, 4]
     marker = read_marker(tmp_path / LATEST_JOB_MARKER_FILENAME)
     assert (marker["rollout_id"], marker["scenario_step"]) == (1, 4)
-    assert actor.health()["training_job"]["scenario_step"] == 4
+    assert actor.health()["training_job"]["rollout_id"] == 4
 
 
 @pytest.mark.unit
@@ -510,7 +510,7 @@ def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get
         loss_family="sao",
     )
     payload = _payload([_sao_row("a", producing_runtime_load_id="inc:4")])
-    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -875,7 +875,7 @@ def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
         loss_family="sao",
     )
     payload = _payload([_sao_row("a")])
-    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
 
     with pytest.raises(RuntimeError, match="SAO requires a value model"):
         _execute_and_update_weights(actor, payload)

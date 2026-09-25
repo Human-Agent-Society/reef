@@ -171,12 +171,6 @@ def _validate_marker(value: dict[str, Any], path: Path) -> None:
         raise RuntimeError(f"invalid training marker: {path}")
     if not isinstance(rollout_id, int) or isinstance(rollout_id, bool) or rollout_id < 0:
         raise RuntimeError(f"invalid training marker: {path}")
-    # A job still out is finished by the scenario step it trained; a settled marker needs none, so one an earlier
-    # release left behind when no job was out does not stop a start.
-    if "scenario_step" in value or marker_in_flight(value):
-        scenario_step = value.get("scenario_step")
-        if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
-            raise RuntimeError(f"invalid training marker scenario step: {path}")
     commit_acknowledged = value.get("commit_acknowledged")
     if commit_acknowledged is not None and not isinstance(commit_acknowledged, bool):
         raise RuntimeError(f"invalid training marker commit acknowledgement: {path}")

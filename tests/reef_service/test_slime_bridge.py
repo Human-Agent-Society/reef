@@ -438,7 +438,7 @@ class _FakeGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.republication_calls.append(runtime_load_id)
 
-    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
         self.save_calls.append((rollout_id, force_sync))
         self.timeline.append("save_model")
 
@@ -449,8 +449,8 @@ class _DurableGroup(_FakeGroup):
         self.template = template
         self.megatron_root = megatron_root
 
-    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
-        super().save_model(rollout_id, force_sync, scenario_step=scenario_step)
+    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
+        super().save_model(rollout_id, force_sync, scenario_step)
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
         checkpoint.mkdir(parents=True)
         (checkpoint / "weights").write_text("hf", encoding="utf-8")
@@ -471,7 +471,7 @@ def _durable_actor(tmp_path):
         save_hf_template=template,
     )
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
     return actor, group, payload
 
 
@@ -512,7 +512,7 @@ def _sao_durable_actor(
         "samples": rows,
         "rollout_ids": list(range(len(rows))),
         "loss": "sao",
-        "scenario_step": 0,
+        "rollout_id": 0,
         "expected_runtime_load_id": serving_version,
         "max_staleness": max_staleness,
         "producing_runtime_load_ids": list(producing_versions),
@@ -550,7 +550,7 @@ def _loss_family_durable_actor(
         "samples": [_row("source-0")],
         "rollout_ids": [0],
         "loss": loss_family,
-        "scenario_step": 0,
+        "rollout_id": 0,
         "expected_runtime_load_id": serving_version,
         "max_staleness": 2,
         "producing_runtime_load_ids": [producing_version],
@@ -655,7 +655,7 @@ def test_bridge_packs_locally_then_passes_list_of_boxes(tmp_path, monkeypatch) -
     manager.prepare_external_train_data = prepare
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -678,7 +678,7 @@ def test_colocated_durable_job_offloads_then_publishes_before_completion(tmp_pat
     manager = _FakeRolloutManager(["packed"], timeline=timeline)
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template, colocate=True)
     payload = _payload(loss="tttd", advantages=[0.25, -0.25, 0.0])
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -732,7 +732,7 @@ def test_bridge_checkpoint_requires_save_template() -> None:
         _FakeGroup(), _FakeRolloutManager([]), batch_processor=_FakeRolloutManager([]), save_hf_template=None
     )
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
     with pytest.raises(RuntimeError, match="checkpoint path"):
         _execute_and_update_weights(actor, payload)
@@ -765,7 +765,7 @@ def test_bridge_defers_resume_until_reef_acknowledges_the_commit(tmp_path) -> No
     assert manager.lifecycle_calls == ["pause_generation", "continue_generation"]
     manager.lifecycle_calls.clear()
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
 
     checkpoint = actor.execute_training_job(payload)
 
@@ -805,7 +805,7 @@ def test_pause_barrier_failure_marks_the_engines_it_retired_for_rebuild(tmp_path
     manager = _FakeRolloutManager(["packed"])
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
     checkpoint = actor.execute_training_job(payload)
     terminated: list[str] = []
 
@@ -832,7 +832,7 @@ def test_publication_retry_rebuilds_the_engines_the_barrier_retired(tmp_path) ->
     manager = _FakeRolloutManager(["packed"])
     actor = build_slime_coordinator(group, manager, batch_processor=manager, save_hf_template=template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1")
     checkpoint = actor.execute_training_job(payload)
     barrier_fails = True
 
@@ -892,7 +892,7 @@ def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> N
         ],
         "rollout_ids": [0],
         "loss": "sft",
-        "scenario_step": 0,
+        "rollout_id": 0,
         "expected_runtime_load_id": "engine:7",
         "max_staleness": 2,
         "producing_runtime_load_ids": [None],
@@ -924,7 +924,7 @@ def test_bridge_rejects_mixed_token_versions_at_exact_admission_without_running_
         "samples": [_row("mixed", tokens=(10, 20, 21), loss_mask=(1, 1), log_probs=(-0.1, -0.2))],
         "rollout_ids": [0],
         "loss": "sft",
-        "scenario_step": 0,
+        "rollout_id": 0,
         "expected_runtime_load_id": "engine:7",
         "max_staleness": 0,
         "producing_runtime_load_ids": [None],
@@ -1154,7 +1154,7 @@ def test_bridge_rejects_symlinked_checkpoint(tmp_path, monkeypatch) -> None:
     target = tmp_path / "checkpoint-target"
     target.mkdir()
 
-    def save_model(rollout_id, force_sync=False, *, scenario_step):
+    def save_model(rollout_id, force_sync=False, scenario_step=None):
         group.save_calls.append((rollout_id, force_sync))
         Path(group.template.format(rollout_id=rollout_id)).symlink_to(target, target_is_directory=True)
 
@@ -1190,7 +1190,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
         source_megatron=str(source_megatron),
     )
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
     first = _execute_and_update_weights(actor, payload)
     assert first.training_job_id is not None
@@ -1205,7 +1205,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
     assert stored["reward"] == pytest.approx(sum(row[4] for row in payload["samples"]) / 3)
 
     # The next batch: new rows, since the same rows at a later step are the same job.
-    second = {**payload, "scenario_step": 1, "samples": [_row("d"), _row("e", reward=1.0), _row("f", reward=-1.0)]}
+    second = {**payload, "rollout_id": 1, "samples": [_row("d"), _row("e", reward=1.0), _row("f", reward=-1.0)]}
     blocked = _execute_and_update_weights(actor, second)
     assert blocked.outcome == "storage_blocked"
     assert blocked.storage["blocked"] is True
@@ -1228,13 +1228,7 @@ def test_bridge_catalogs_paired_checkpoint_metrics_and_blocks_before_second_opti
 def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exists, error) -> None:
     template = str(tmp_path / "checkpoint-{rollout_id}")
     checkpoint = Path(template.format(rollout_id=0))
-    marker = {
-        "status": status,
-        "job_id": JOB_ID,
-        "rollout_id": 0,
-        "scenario_step": 0,
-        "checkpoint_path": str(checkpoint),
-    }
+    marker = {"status": status, "job_id": JOB_ID, "rollout_id": 0, "checkpoint_path": str(checkpoint)}
     if status == "RUNNING":
         marker.pop("checkpoint_path")
     elif status == "COMPLETE":
@@ -1244,7 +1238,7 @@ def test_bridge_marker_recovery_is_fail_closed(tmp_path, status, checkpoint_exis
     write_marker(tmp_path / ".reef-latest-job.json", marker)
     group = _DurableGroup(template)
     payload = _payload(loss="sft")
-    payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
+    payload.update(rollout_id=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
 
     if error is not None:
         with pytest.raises(RuntimeError, match=error):
@@ -1281,7 +1275,6 @@ def test_unacknowledged_head_committed_marker_is_not_commit_proof(tmp_path) -> N
             "status": "HEAD_COMMITTED",
             "job_id": JOB_ID,
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
             "runtime_load_id": "engine:1",
         },
@@ -1294,7 +1287,7 @@ def test_unacknowledged_head_committed_marker_is_not_commit_proof(tmp_path) -> N
 @pytest.mark.unit
 def test_marker_transition_cannot_skip_the_weight_update_phase(tmp_path) -> None:
     path = tmp_path / ".reef-latest-job.json"
-    marker = {"status": "CHECKPOINT", "job_id": JOB_ID, "rollout_id": 0, "scenario_step": 0}
+    marker = {"status": "CHECKPOINT", "job_id": JOB_ID, "rollout_id": 0}
 
     with pytest.raises(RuntimeError, match=r"CHECKPOINT.*READY_TO_COMMIT"):
         transition_marker(path, marker, "READY_TO_COMMIT", runtime_load_id="engine:1")
@@ -1314,7 +1307,6 @@ def test_weight_update_recovery_converges_disagreeing_engines_before_startup_val
             "status": "UPDATING_WEIGHTS",
             "job_id": JOB_ID,
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
         },
     )
@@ -1351,7 +1343,6 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
             "status": "COMPLETE",
             "job_id": JOB_ID,
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
             "runtime_load_id": recovered_version,
         },
@@ -1395,7 +1386,7 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
         ],
         "rollout_ids": [0],
         "loss": "sao",
-        "scenario_step": 1,
+        "rollout_id": 1,
         "expected_runtime_load_id": recovered_version,
         "max_staleness": 2,
         "producing_runtime_load_ids": ["checkpoint-incarnation:1"],
@@ -1444,7 +1435,6 @@ def test_bridge_marker_rejects_unsafe_checkpoint_path(tmp_path, kind) -> None:
             "status": "COMPLETE",
             "job_id": JOB_ID,
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": "" if kind == "empty" else str(link),
             "runtime_load_id": "v1",
         },
@@ -1768,7 +1758,7 @@ def test_training_preflight_rejects_ambiguous_marker_before_creating_workers(tmp
     checkpoint.mkdir(parents=True)
     write_marker(
         root / "hf" / ".reef-latest-job.json",
-        {"status": status, "job_id": "job", "rollout_id": 0, "scenario_step": 0, "checkpoint_path": str(checkpoint)},
+        {"status": status, "job_id": "job", "rollout_id": 0, "checkpoint_path": str(checkpoint)},
     )
     monkeypatch.setattr(
         bridge,
@@ -2065,7 +2055,6 @@ def test_standalone_republication_cannot_publish_checkpointed_candidate(tmp_path
             "status": "CHECKPOINT",
             "job_id": JOB_ID,
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
         },
     )
@@ -2089,7 +2078,6 @@ def test_committed_restart_reasserts_pause_before_checkpoint_transfer(tmp_path):
             "status": "COMPLETE",
             "job_id": JOB_ID,
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
             "runtime_load_id": "v1",
         },
@@ -2114,7 +2102,6 @@ def test_startup_reconstruction_failure_aborts_supplied_inference(tmp_path, fail
             "status": "COMPLETE",
             "job_id": JOB_ID,
             "rollout_id": 0,
-            "scenario_step": 0,
             "checkpoint_path": str(checkpoint),
             "runtime_load_id": "v1",
         },
