@@ -1081,7 +1081,7 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
     server.shutdown()
 
 
-def _make_waiting_pi(tmp_path: Path) -> Path:
+def make_waiting_pi(tmp_path: Path) -> Path:
     """A fake pi that makes one call through the proxy, notes its agent directory, then waits for a signal and notes
     which one came."""
     binary = tmp_path / "fake-waiting-pi"
@@ -1115,7 +1115,7 @@ def _make_waiting_pi(tmp_path: Path) -> Path:
     return binary
 
 
-def _start_wrapper(tmp_path: Path, binary: Path, compose: str, captures: Path, preexec_fn=None) -> subprocess.Popen:
+def start_wrapper(tmp_path: Path, binary: Path, compose: str, captures: Path, preexec_fn=None) -> subprocess.Popen:
     """``run_agent`` in a process of its own, as ``reef-pi`` runs it, once the agent is up and waiting."""
     repo_root = str(Path(__file__).resolve().parents[2])
     env = {
@@ -1148,7 +1148,7 @@ def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cle
     compose = _make_compose(tmp_path, reef.port)
     captures = tmp_path / "captures"
     captures.mkdir()
-    wrapper = _start_wrapper(tmp_path, _make_waiting_pi(tmp_path), compose, captures)
+    wrapper = start_wrapper(tmp_path, make_waiting_pi(tmp_path), compose, captures)
     temp = Path(json.loads((tmp_path / "agent.json").read_text())["dir"])
     assert temp.is_dir() and temp.name.startswith("reef-harness-")
     os.kill(wrapper.pid, signum)
@@ -1160,7 +1160,7 @@ def test_a_closed_terminal_or_a_kill_reaches_the_agent_and_the_wrapper_still_cle
     assert [turn["receipt"] for turn in json.loads(spooled.read_text())["turns"]] == ["ask-receipt"]
 
 
-def _make_recording_pi(tmp_path: Path, body: str) -> Path:
+def make_recording_pi(tmp_path: Path, body: str) -> Path:
     """A fake pi that runs ``body`` with ``agent``, its agent directory, and ``seen``, a file beside it, defined."""
     binary = tmp_path / "fake-pi"
     binary.write_text(
@@ -1178,7 +1178,7 @@ def test_the_temp_copy_is_made_in_the_cache_directory_for_the_person_alone(tmp_p
     its temp copy again during the session, so the copy is made in ``$XDG_CACHE_HOME/reef-harness/sessions``
     (``~/.cache`` without the variable), mode 0700 like the directory holding it, and removed after the run."""
     compose = _make_compose(tmp_path, 1)
-    binary = _make_recording_pi(
+    binary = make_recording_pi(
         tmp_path,
         """\
         modes = [agent.stat().st_mode & 0o777, agent.parent.stat().st_mode & 0o777]
@@ -1215,7 +1215,7 @@ def test_a_link_at_a_client_state_path_is_removed_before_the_run_so_the_state_st
     (outside / "settings.json").write_text('{"mine": true}\n', encoding="utf-8")
     (compose / "sessions").symlink_to(outside / "sessions")
     (compose / "settings.json").symlink_to(outside / "settings.json")
-    binary = _make_recording_pi(
+    binary = make_recording_pi(
         tmp_path,
         """\
         (agent / "sessions" / "1.jsonl").write_text("{}\\n")
@@ -1251,7 +1251,7 @@ def test_a_hangup_the_caller_ignores_stays_ignored(tmp_path) -> None:
     captures = tmp_path / "captures"
     captures.mkdir()
     ignored = functools.partial(signal.signal, signal.SIGHUP, signal.SIG_IGN)
-    wrapper = _start_wrapper(tmp_path, _make_waiting_pi(tmp_path), compose, captures, preexec_fn=ignored)
+    wrapper = start_wrapper(tmp_path, make_waiting_pi(tmp_path), compose, captures, preexec_fn=ignored)
     temp = Path(json.loads((tmp_path / "agent.json").read_text())["dir"])
     os.kill(wrapper.pid, signal.SIGHUP)
     with pytest.raises(subprocess.TimeoutExpired):
@@ -1355,7 +1355,7 @@ def _ask_env(captures: Path, compose: str, **extra: str) -> dict[str, str]:
     return env
 
 
-def _unrecorded_notice(compose: str) -> str:
+def unrecorded_notice(compose: str) -> str:
     """The line ``reef-pi`` prints first when it starts a session on a tree no install recorded."""
     return (
         f"reef-pi: {Path(compose).parent.resolve()} has no install record (an install made before Reef kept one), "
@@ -2118,7 +2118,7 @@ def test_run_agent_refuses_unmet_requirements_and_shows_setup_without_running_ch
     proxy.assert_not_called()
     err = capsys.readouterr().err
     assert err.splitlines() == [
-        _unrecorded_notice(compose),
+        unrecorded_notice(compose),
         "reef-pi: cannot start agent; this release has unmet requirements:",
         f"  notify (permission): touch {ran}",
         "    Allow notifications",
@@ -2861,7 +2861,7 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     assert (seen["FILE_ONLY"], seen["BOTH"]) == ("from-file", "from-shell")
     assert seen["REEF_HARNESS_WRAPPER"] == str(Path(compose).resolve().parent / "reef-pi")
     assert seen["REEF_HARNESS_DEST"] == str(Path(compose).resolve().parent)
-    assert capsys.readouterr().err == _unrecorded_notice(compose) + "\n"
+    assert capsys.readouterr().err == unrecorded_notice(compose) + "\n"
     # Without a wrapper at the install root nothing names one, and the shell's own setting is kept.
     wrapper.unlink()
     with (
@@ -2885,7 +2885,7 @@ def test_a_start_on_a_tree_no_install_recorded_says_its_files_were_not_checked(t
     env = {**_ask_env(captures, compose), "HOME": str(home)}
     with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
         run_agent(str(binary), compose, "ask-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "hi"])
-    assert capsys.readouterr().err.splitlines() == [_unrecorded_notice(compose)]
+    assert capsys.readouterr().err.splitlines() == [unrecorded_notice(compose)]
     root = str(Path(compose).parent.resolve())
     record = home / ".reef" / "installs" / f"{hashlib.sha256(root.encode()).hexdigest()}.json"
     record.parent.mkdir(parents=True)

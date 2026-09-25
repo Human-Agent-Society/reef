@@ -329,7 +329,7 @@ def _binding_lines(bindings: Mapping[str, str]) -> list[str]:
 TOKEN_PLACEHOLDER = "__REEF_TOKEN__"
 
 
-def _written_path_lines(written: Sequence[str]) -> list[str]:
+def written_path_lines(written: Sequence[str]) -> list[str]:
     """Shell that makes the paths in ``written``, relative to ``$DEST``, safe to write before the tree is written.
 
     ``cat >`` writes through a link, and a link that reads the same bytes
@@ -389,7 +389,7 @@ def _written_path_lines(written: Sequence[str]) -> list[str]:
     ]
 
 
-def _prune_lines(kept: Sequence[str]) -> list[str]:
+def prune_lines(kept: Sequence[str]) -> list[str]:
     """Shell that removes the files the release file on disk lists and ``kept`` lacks, never through a link.
 
     This is what the stdlib client pull does, so installing an older
@@ -439,7 +439,7 @@ def _prune_lines(kept: Sequence[str]) -> list[str]:
     ]
 
 
-def _install_record_lines(wrapper_name: str, written: Sequence[str]) -> list[str]:
+def install_record_lines(wrapper_name: str, written: Sequence[str]) -> list[str]:
     """Record what this install wrote in ``~/.reef/installs``, where ``reef-<adapter>`` reads it before a session.
 
     The record names the install root, the address the script was served
@@ -726,7 +726,7 @@ def render_install_script(
         "",
         *_ensure_binary_lines(descriptor, install),
         "",
-        *_written_path_lines([HARNESS_RELEASE_FILE, *recorded]),
+        *written_path_lines([HARNESS_RELEASE_FILE, *recorded]),
         "",
         "# The checksum stream, as baked into CHECKSUM: each sorted relative path,",
         "# its byte length, then its bytes, newline separated. The unquoted wc",
@@ -762,7 +762,7 @@ def render_install_script(
         f'    echo "reef: writing the harness tree ({len(ordered)} file{"" if len(ordered) == 1 else "s"}) to $DEST"',
         "    # The check offs the release file on disk holds, carried into the new release file below.",
         f'    SETUP="$(release_info_tool carry "$DEST/{HARNESS_RELEASE_FILE}")"',
-        *_prune_lines(ordered),
+        *prune_lines(ordered),
         *(_write_file_block(relative, files[relative]).rstrip("\n") for relative in ordered),
         '    written="$(compose_stream | sha256)"',
         '    if [ "$written" != "$CHECKSUM" ]; then',
@@ -776,7 +776,7 @@ def render_install_script(
         "",
         *_wrapper_lines(descriptor, env_var, compose_dir, release_id, scenario),
         *_binding_lines(bindings),
-        *_install_record_lines(wrapper_name, recorded),
+        *install_record_lines(wrapper_name, recorded),
         "",
         'echo "reef: done"',
         f'echo "run:     $DEST/{wrapper_name}"',

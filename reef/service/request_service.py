@@ -66,7 +66,7 @@ def _random_harness_scenario_name() -> str:
     return f"harness-{uuid.uuid4().hex[:12]}"
 
 
-def _install_service_url(headers: Mapping[str, str]) -> str | None:
+def install_service_url(headers: Mapping[str, str]) -> str | None:
     """The address an install request reached Reef at, from its Host; None without one.
 
     A gateway in front of Reef names the address the client reached in the
@@ -1030,7 +1030,7 @@ class RequestService:
             scenario=scenario.name,
             binding_files=binding_files,
             # The install record keeps the address the binding names, for a wrapper whose binding a session changed.
-            service_url=_install_service_url(headers) if binding_files else None,
+            service_url=install_service_url(headers) if binding_files else None,
             requires=manifest["requires"],
             # The release the script names for a first install must be one the catalog lists.
             fallback_release_id=ancestor_requiring_nothing(
@@ -1053,7 +1053,7 @@ class RequestService:
         when any of those is unknown, and the script then installs the
         composition as before.
         """
-        service_url = _install_service_url(headers)
+        service_url = install_service_url(headers)
         evaluation_metrics = manifest.get("evaluation", manifest.get("gate")) or {}
         model = (
             (evaluation_metrics.get("evaluation_context", evaluation_metrics.get("gated_against")) or {}).get("model")

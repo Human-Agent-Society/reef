@@ -1629,7 +1629,7 @@ def test_a_reinstall_removes_nothing_through_a_link_on_a_listed_path(tmp_path) -
     assert (dest / "pi-agent/AGENTS.md").read_bytes() == b"two\n"
 
 
-def _session_install(tmp_path: Path, requires: list[dict] | None = None) -> tuple[Path, Path, Path, dict]:
+def session_install(tmp_path: Path, requires: list[dict] | None = None) -> tuple[Path, Path, Path, dict]:
     """A pi install as the route serves it, with the model binding and the service address, whose fake pi lists
     the files its agent directory holds and writes its environment beside them."""
     descriptor = get_adapter("pi")
@@ -1658,7 +1658,7 @@ def _session_install(tmp_path: Path, requires: list[dict] | None = None) -> tupl
     return script, tmp_path / "dest", prefix, {**env, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path / "captures")}
 
 
-def _start_session(dest: Path, env: dict) -> subprocess.CompletedProcess:
+def start_session(dest: Path, env: dict) -> subprocess.CompletedProcess:
     listing = dest.parent / "listing.txt"
     listing.unlink(missing_ok=True)
     return subprocess.run(
@@ -1674,7 +1674,7 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     ``reef-pi`` refuses to start while one of them changed, naming it, and a rerun of the install (what ``update``
     runs) restores it. The session gets those files and the client state; a file added to the tree never
     reaches it, and a change to pi's own settings or to the check offs is no reason to refuse."""
-    script, dest, prefix, env = _session_install(tmp_path)
+    script, dest, prefix, env = session_install(tmp_path)
     assert _run_install(script, dest, prefix, env).returncode == 0
     root = str(dest.resolve())
     record_path = tmp_path / "home/.reef/installs" / f"{hashlib.sha256(root.encode()).hexdigest()}.json"
@@ -1698,7 +1698,7 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     assert record_path.stat().st_mtime_ns == before
 
     listed = ["./AGENTS.md", "./models.json", "./settings.json", "./skills/notes/SKILL.md"]
-    assert _start_session(dest, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
     assert (tmp_path / "listing.txt").read_text().split() == listed
     # Files a session adds to the tree are not linked into the next one; pi's settings are its own to write.
     (dest / "pi-agent/skills/added").mkdir()
@@ -1709,7 +1709,7 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     release = json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))
     release["setup"] = [{"name": "notify", "checked_at": 1.0, "check": None}]
     (dest / HARNESS_RELEASE_FILE).write_text(json.dumps(release, indent=2) + "\n", encoding="utf-8")
-    assert _start_session(dest, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
     assert (tmp_path / "listing.txt").read_text().split() == listed
 
     changes = {
@@ -1723,7 +1723,7 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     }
     for relative, change in changes.items():
         change(dest / relative)
-        refused = _start_session(dest, env)
+        refused = start_session(dest, env)
         assert refused.returncode == 3, refused.stderr
         assert refused.stderr.splitlines() == [
             f"reef-pi: cannot start agent; these files in {root} changed since the install wrote them:",
@@ -1732,15 +1732,15 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
         ]
         assert not (tmp_path / "listing.txt").exists()
         assert _run_install(script, dest, prefix, env).returncode == 0
-        assert _start_session(dest, env).returncode == 0, relative
+        assert start_session(dest, env).returncode == 0, relative
     # A file replaced by a link counts as changed even when the link reads the same bytes.
     (tmp_path / "copy.md").write_bytes((dest / "pi-agent/AGENTS.md").read_bytes())
     (dest / "pi-agent/AGENTS.md").unlink()
     (dest / "pi-agent/AGENTS.md").symlink_to(tmp_path / "copy.md")
-    assert _start_session(dest, env).returncode == 3
+    assert start_session(dest, env).returncode == 3
 
 
-def _refusal(root: str, *entries: str) -> list[str]:
+def refusal_lines(root: str, *entries: str) -> list[str]:
     """The lines ``reef-pi`` prints when it refuses to start on a tree whose recorded files changed."""
     return [
         f"reef-pi: cannot start agent; these files in {root} changed since the install wrote them:",
@@ -1754,7 +1754,7 @@ def test_a_session_reads_copies_of_the_files_the_install_wrote_and_links_only_th
     """Codex skips a linked ``SKILL.md`` and hermes warns on every linked skill, so the temp copy holds each file the
     install wrote as a regular file with its mode, and links only the client state. What the session writes over a
     copied file stays in the temp copy: the installed file keeps its bytes and the next session starts."""
-    script, dest, prefix, env = _session_install(tmp_path)
+    script, dest, prefix, env = session_install(tmp_path)
     assert _run_install(script, dest, prefix, env).returncode == 0
     (dest / "pi-agent/skills/notes/SKILL.md").chmod(0o600)
     record = tmp_path / "types.txt"
@@ -1767,14 +1767,14 @@ def test_a_session_reads_copies_of_the_files_the_install_wrote_and_links_only_th
         'echo "session rules" > AGENTS.md\n',
     )
     rules = (dest / "pi-agent/AGENTS.md").read_bytes()
-    assert _start_session(dest, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
     lines = record.read_text().split("\n")
     assert "file ./AGENTS.md" in lines and "file ./skills/notes/SKILL.md" in lines and "file ./models.json" in lines
     # pi's sessions and settings are client state, what the session writes into the tree.
     assert [line for line in lines if line.startswith("link ")] == ["link ./sessions", "link ./settings.json"]
     assert lines[-2] == "600"
     assert (dest / "pi-agent/AGENTS.md").read_bytes() == rules
-    assert _start_session(dest, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
 
 
 @pytest.mark.unit
@@ -1785,7 +1785,7 @@ def test_a_link_inside_the_install_root_counts_as_changed_and_the_install_puts_a
     file reached through a link (at the file, at a directory above it, or a second hard link) as changed, and a
     rerun of the install (what ``update`` runs) puts a regular file there without writing through the link: what
     the link reached keeps its bytes, and the next start runs."""
-    script, dest, prefix, env = _session_install(tmp_path)
+    script, dest, prefix, env = session_install(tmp_path)
     assert _run_install(script, dest, prefix, env).returncode == 0
     root = str(dest.resolve())
     moved = dest / "moved"
@@ -1830,8 +1830,8 @@ def test_a_link_inside_the_install_root_counts_as_changed_and_the_install_puts_a
         shutil.rmtree(moved, ignore_errors=True)
         reached = make_link()
         kept = reached.read_bytes()
-        refused = _start_session(dest, env)
-        assert refused.returncode == 3 and refused.stderr.splitlines() == _refusal(root, entry)
+        refused = start_session(dest, env)
+        assert refused.returncode == 3 and refused.stderr.splitlines() == refusal_lines(root, entry)
         rerun = _run_install(script, dest, prefix, env)
         assert rerun.returncode == 0, rerun.stderr
         assert "was a link" in rerun.stdout
@@ -1839,7 +1839,7 @@ def test_a_link_inside_the_install_root_counts_as_changed_and_the_install_puts_a
         assert not any((dest / part).is_symlink() for part in [*PurePosixPath(relative).parents, relative])
         assert path.is_file() and path.stat().st_nlink == 1
         assert reached.read_bytes() == kept
-        started = _start_session(dest, env)
+        started = start_session(dest, env)
         assert started.returncode == 0, (entry, started.stderr)
 
 
@@ -1851,15 +1851,17 @@ def test_the_install_refuses_a_link_that_leads_outside_the_install_root_and_writ
     would take the install's write there. The start names what it reaches as changed (the record names the root,
     so a linked composition directory does not move it), the install refuses, naming the link and its target, and
     writes nothing; once the link is gone the install restores the tree."""
-    script, dest, prefix, env = _session_install(tmp_path)
+    script, dest, prefix, env = session_install(tmp_path)
     assert _run_install(script, dest, prefix, env).returncode == 0
     root = str(dest.resolve())
     outside = tmp_path / "outside.json"
     outside.write_text("the person's own file\n", encoding="utf-8")
     (dest / "pi-agent/models.json").unlink()
     (dest / "pi-agent/models.json").symlink_to(outside)
-    refused = _start_session(dest, env)
-    assert refused.returncode == 3 and refused.stderr.splitlines() == _refusal(root, "pi-agent/models.json (a link)")
+    refused = start_session(dest, env)
+    assert refused.returncode == 3 and refused.stderr.splitlines() == refusal_lines(
+        root, "pi-agent/models.json (a link)"
+    )
     rerun = _run_install(script, dest, prefix, env)
     assert rerun.returncode == 1
     assert rerun.stderr.splitlines()[-2:] == [
@@ -1869,16 +1871,16 @@ def test_the_install_refuses_a_link_that_leads_outside_the_install_root_and_writ
     assert outside.read_text(encoding="utf-8") == "the person's own file\n"
     (dest / "pi-agent/models.json").unlink()
     assert _run_install(script, dest, prefix, env).returncode == 0
-    assert _start_session(dest, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
 
     elsewhere = tmp_path / "elsewhere/pi-agent"
     elsewhere.parent.mkdir()
     (dest / "pi-agent").rename(elsewhere)
     (dest / "pi-agent").symlink_to(elsewhere)
     (elsewhere / "AGENTS.md").write_text("session rules\n", encoding="utf-8")
-    refused = _start_session(dest, env)
+    refused = start_session(dest, env)
     assert refused.returncode == 3
-    assert refused.stderr.splitlines() == _refusal(
+    assert refused.stderr.splitlines() == refusal_lines(
         root,
         "pi-agent/AGENTS.md (pi-agent is a link)",
         "pi-agent/models.json (pi-agent is a link)",
@@ -1890,13 +1892,13 @@ def test_the_install_refuses_a_link_that_leads_outside_the_install_root_and_writ
     assert (elsewhere / "AGENTS.md").read_text(encoding="utf-8") == "session rules\n"
     (dest / "pi-agent").unlink()
     assert _run_install(script, dest, prefix, env).returncode == 0
-    assert _start_session(dest, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
 
 
-def _checked_install(tmp_path: Path) -> tuple[Path, Path, Path, dict, list[dict]]:
-    """``_session_install`` for a release that requires ``REEF_AWAY_PHONE``, installed over a release file that
+def checked_install(tmp_path: Path) -> tuple[Path, Path, Path, dict, list[dict]]:
+    """``session_install`` for a release that requires ``REEF_AWAY_PHONE``, installed over a release file that
     already checks it off, so a session starts on the check off alone."""
-    script, dest, prefix, env = _session_install(tmp_path, requires=[{"name": "REEF_AWAY_PHONE", "kind": "env"}])
+    script, dest, prefix, env = session_install(tmp_path, requires=[{"name": "REEF_AWAY_PHONE", "kind": "env"}])
     env.pop("REEF_AWAY_PHONE", None)
     dest.mkdir()
     checked = [{"name": "REEF_AWAY_PHONE", "checked_at": 1.0, "check": None}]
@@ -1911,7 +1913,7 @@ def test_a_release_file_link_inside_the_install_root_becomes_a_copy_that_keeps_i
     """A link inside the install root is replaced with a copy of what it reads, not with nothing: for the release
     file that copy holds the check offs ``setup`` recorded, which the install carries into the release file it
     keeps, so the next start still finds the release's items met."""
-    script, dest, prefix, env, checked = _checked_install(tmp_path)
+    script, dest, prefix, env, checked = checked_install(tmp_path)
     root = str(dest.resolve())
     release_file = dest / HARNESS_RELEASE_FILE
     moved = dest / "moved" / HARNESS_RELEASE_FILE
@@ -1919,8 +1921,8 @@ def test_a_release_file_link_inside_the_install_root_becomes_a_copy_that_keeps_i
     release_file.rename(moved)
     release_file.symlink_to(moved)
     kept = moved.read_bytes()
-    refused = _start_session(dest, env)
-    assert refused.returncode == 3 and refused.stderr.splitlines() == _refusal(
+    refused = start_session(dest, env)
+    assert refused.returncode == 3 and refused.stderr.splitlines() == refusal_lines(
         root, f"{HARNESS_RELEASE_FILE} (a link)"
     )
     rerun = _run_install(script, dest, prefix, env)
@@ -1928,7 +1930,7 @@ def test_a_release_file_link_inside_the_install_root_becomes_a_copy_that_keeps_i
     assert f"reef: {HARNESS_RELEASE_FILE} was a link; it is a regular file now" in rerun.stdout.splitlines()
     assert not release_file.is_symlink() and release_file.read_bytes() == kept == moved.read_bytes()
     assert json.loads(release_file.read_text(encoding="utf-8"))["setup"] == checked
-    started = _start_session(dest, env)
+    started = start_session(dest, env)
     assert started.returncode == 0, started.stderr
 
 
@@ -1940,14 +1942,14 @@ def test_a_path_the_install_writes_that_is_not_a_regular_file_is_named_and_refus
     that is not a regular file; the install refuses it, naming it, instead of writing into it, and once it is
     removed the install restores the tree. A FIFO at the release file stops neither the start nor the install's
     setup check, and one at the env file does not stop the start."""
-    script, dest, prefix, env, _ = _checked_install(tmp_path)
+    script, dest, prefix, env, _ = checked_install(tmp_path)
     root = str(dest.resolve())
     models = dest / "pi-agent/models.json"
     models.unlink()
     os.mkfifo(models)
-    refused = _start_session(dest, env)
+    refused = start_session(dest, env)
     assert refused.returncode == 3
-    assert refused.stderr.splitlines() == _refusal(root, "pi-agent/models.json (not a regular file)")
+    assert refused.stderr.splitlines() == refusal_lines(root, "pi-agent/models.json (not a regular file)")
     rerun = _run_install(script, dest, prefix, env)
     assert rerun.returncode == 1
     assert rerun.stderr.splitlines()[-2:] == [
@@ -1956,15 +1958,15 @@ def test_a_path_the_install_writes_that_is_not_a_regular_file_is_named_and_refus
     ]
     models.unlink()
     assert _run_install(script, dest, prefix, env).returncode == 0
-    assert _start_session(dest, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
 
     release_file = dest / HARNESS_RELEASE_FILE
     kept = release_file.read_bytes()
     release_file.unlink()
     os.mkfifo(release_file)
-    refused = _start_session(dest, env)
+    refused = start_session(dest, env)
     assert refused.returncode == 3
-    assert refused.stderr.splitlines() == _refusal(root, f"{HARNESS_RELEASE_FILE} (not a regular file)")
+    assert refused.stderr.splitlines() == refusal_lines(root, f"{HARNESS_RELEASE_FILE} (not a regular file)")
     rerun = _run_install(script, dest, prefix, env)
     assert rerun.returncode == 1
     assert rerun.stderr.splitlines()[-1] == (
@@ -1975,7 +1977,7 @@ def test_a_path_the_install_writes_that_is_not_a_regular_file_is_named_and_refus
     assert _run_install(script, dest, prefix, env).returncode == 0
 
     os.mkfifo(dest / ".reef-harness-env")
-    started = _start_session(dest, env)
+    started = start_session(dest, env)
     assert started.returncode == 0, started.stderr
 
 
@@ -1983,14 +1985,14 @@ def test_a_path_the_install_writes_that_is_not_a_regular_file_is_named_and_refus
 def test_a_recorded_install_gives_the_session_only_the_env_file_values_its_release_names(tmp_path) -> None:
     """The env file sits in the tree a session can write, so with an install record the session gets only the
     variables the release's ``env`` items name, never another line of the file."""
-    script, dest, prefix, env = _session_install(tmp_path, requires=[{"name": "REEF_AWAY_PHONE", "kind": "env"}])
+    script, dest, prefix, env = session_install(tmp_path, requires=[{"name": "REEF_AWAY_PHONE", "kind": "env"}])
     dest.mkdir()
     checked = [{"name": "REEF_AWAY_PHONE", "checked_at": 1.0, "check": None}]
     (dest / HARNESS_RELEASE_FILE).write_text(json.dumps({"setup": checked}), encoding="utf-8")
     assert _run_install(script, dest, prefix, env).returncode == 0
     (dest / ".reef-harness-env").write_text("REEF_AWAY_PHONE=+15550100\nREEF_EXTRA_LINE=1\n", encoding="utf-8")
     shell = {key: value for key, value in env.items() if key not in ("REEF_AWAY_PHONE", "REEF_EXTRA_LINE")}
-    assert _start_session(dest, shell).returncode == 0
+    assert start_session(dest, shell).returncode == 0
     seen = dict(line.split("=", 1) for line in (tmp_path / "env.txt").read_text().splitlines() if "=" in line)
     assert seen["REEF_AWAY_PHONE"] == "+15550100"
     assert "REEF_EXTRA_LINE" not in seen

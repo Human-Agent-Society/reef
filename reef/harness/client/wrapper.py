@@ -492,7 +492,7 @@ def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port:
         dst.write_text(text, encoding="utf-8")
 
 
-def _temp_copies_dir() -> Path:
+def temp_copies_dir() -> Path:
     """Where a session's temp copy of the tree goes: the person's cache directory, never TMPDIR or /tmp.
 
     That is ``$XDG_CACHE_HOME/reef-harness/sessions``, under ``~/.cache`` by
@@ -512,7 +512,7 @@ def _create_temp_composition(
 ) -> str:
     """Build the composition in a temp dir, overriding the binding files.
 
-    The temp dir is made in ``_temp_copies_dir``, readable by the person
+    The temp dir is made in ``temp_copies_dir``, readable by the person
     alone. ``copied`` names the files below the composition directory the
     install recorded, each copied with its mode into real directories, and
     ``linked`` the client state, linked one by one, so a file added to the
@@ -523,7 +523,7 @@ def _create_temp_composition(
     never reads through a link. None links every top-level item, for a tree
     the install recorded nothing for."""
     compose = Path(compose_dir)
-    copies = _temp_copies_dir()
+    copies = temp_copies_dir()
     copies.mkdir(mode=0o700, parents=True, exist_ok=True)
     temp_dir = tempfile.mkdtemp(prefix="reef-harness-", dir=copies)
     temp = Path(temp_dir)
@@ -741,7 +741,7 @@ def _write_release_info(compose_dir: str, record: Mapping[str, Any]) -> None:
     os.replace(staging, release_file)
 
 
-def _read_install_record(compose_dir: str) -> dict[str, Any] | None:
+def read_install_record(compose_dir: str) -> dict[str, Any] | None:
     """What the install script recorded for this install root: ``install_root``, ``service_url`` (the address the
     script was served from), ``release_file`` (the checksum of the release file without its check offs) and
     ``files`` (each file it wrote, relative to the root, with its sha256). None when no install recorded one.
@@ -760,7 +760,7 @@ def _read_install_record(compose_dir: str) -> dict[str, Any] | None:
     return record
 
 
-def _recorded_files(record: Mapping[str, Any]) -> dict[str, str]:
+def recorded_install_files(record: Mapping[str, Any]) -> dict[str, str]:
     """The record's files, each root-relative path with its sha256."""
     files = record.get("files")
     if not isinstance(files, Mapping):
@@ -768,13 +768,13 @@ def _recorded_files(record: Mapping[str, Any]) -> dict[str, str]:
     return {str(relative): str(checksum) for relative, checksum in files.items()}
 
 
-def _is_client_state(descriptor: AdapterDescriptor, relative: PurePosixPath) -> bool:
+def is_client_state(descriptor: AdapterDescriptor, relative: PurePosixPath) -> bool:
     """Whether a root-relative path is client state or lies below it: the binary's to write, never checked."""
     states = [PurePosixPath(state.path) for state in descriptor.client_state]
     return any(relative == state or state in relative.parents for state in states)
 
 
-def _link_on_path(install_root: Path, relative: str) -> str | None:
+def link_on_path(install_root: Path, relative: str) -> str | None:
     """How a link reaches ``relative`` below ``install_root``, in the words the refusal prints; None when none does.
 
     The install writes a recorded file where it is, so a link at the file,
@@ -791,7 +791,7 @@ def _link_on_path(install_root: Path, relative: str) -> str | None:
     return None
 
 
-def _changed_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapping[str, Any]) -> list[str]:
+def changed_install_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapping[str, Any]) -> list[str]:
     """The files the install recorded that differ from the record now, relative to the install root.
 
     A file is changed when it is gone, holds other bytes, is reached
@@ -803,11 +803,11 @@ def _changed_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapp
     offs ``setup`` adds."""
     install_root = Path(str(record["install_root"]))
     changed = []
-    for relative, checksum in sorted(_recorded_files(record).items()):
-        if _is_client_state(descriptor, PurePosixPath(relative)):
+    for relative, checksum in sorted(recorded_install_files(record).items()):
+        if is_client_state(descriptor, PurePosixPath(relative)):
             continue
         path = install_root / relative
-        link = _link_on_path(install_root, relative)
+        link = link_on_path(install_root, relative)
         if link is not None:
             changed.append(f"{relative} ({link})")
         elif path.exists() and not path.is_file():
@@ -817,7 +817,7 @@ def _changed_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapp
     release_checksum = record.get("release_file")
     if isinstance(release_checksum, str):
         release_path = install_root / HARNESS_RELEASE_FILE
-        link = _link_on_path(install_root, HARNESS_RELEASE_FILE)
+        link = link_on_path(install_root, HARNESS_RELEASE_FILE)
         info = _read_release_info(compose_dir)
         written = {key: value for key, value in (info or {}).items() if key != "setup"}
         text = json.dumps(written, indent=2) + "\n"
@@ -830,9 +830,9 @@ def _changed_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapp
     return changed
 
 
-def _recorded_service_url(compose_dir: str) -> str | None:
+def recorded_service_url(compose_dir: str) -> str | None:
     """The Reef address the install recorded, without ``/v1``; None when no install recorded one."""
-    service_url = (_read_install_record(compose_dir) or {}).get("service_url")
+    service_url = (read_install_record(compose_dir) or {}).get("service_url")
     return _strip_v1(service_url.rstrip("/")) if isinstance(service_url, str) and service_url else None
 
 
@@ -944,7 +944,7 @@ def _item_line(item: Mapping[str, Any]) -> str:
     return f"{item['name']} ({item.get('kind', 'unknown')})" + (f": {check}" if check else "")
 
 
-def _keep_client_files(kept: Mapping[ClientState, PurePosixPath], temp: Path, compose: Path) -> None:
+def keep_client_files(kept: Mapping[ClientState, PurePosixPath], temp: Path, compose: Path) -> None:
     """Copy each ``file`` kind of client state the binary wrote in the temp copy into the installed tree."""
     for state, relative in kept.items():
         written = temp / relative
@@ -963,7 +963,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     descriptor = get_adapter(adapter)
     install_root = Path(compose_dir).parent.resolve()
     # A session can write a tree installed in its project, and the next session must not run what it wrote.
-    install_record = _read_install_record(compose_dir)
+    install_record = read_install_record(compose_dir)
     if install_record is None and descriptor.install is not None:
         # Said on every such start: an unchecked start must not look like a checked one.
         print(
@@ -971,7 +971,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             f"files were not checked before this session; reef-{adapter} update records them",
             file=sys.stderr,
         )
-    changed = [] if install_record is None else _changed_files(descriptor, compose_dir, install_record)
+    changed = [] if install_record is None else changed_install_files(descriptor, compose_dir, install_record)
     if changed:
         print(
             f"reef-{adapter}: cannot start agent; these files in {install_root} changed since the install wrote them:",
@@ -1064,11 +1064,11 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     if install_record is None:
         copied = None
     else:
-        recorded = [PurePosixPath(relative) for relative in _recorded_files(install_record)]
+        recorded = [PurePosixPath(relative) for relative in recorded_install_files(install_record)]
         copied = sorted(
             path.relative_to(subdir)
             for path in recorded
-            if subdir in path.parents and not _is_client_state(descriptor, path)
+            if subdir in path.parents and not is_client_state(descriptor, path)
         )
     env = os.environ.copy()
     # What an interactive run needs beyond the episode env; the person's own setting wins.
@@ -1131,7 +1131,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         proxy.stop()
         try:
             if temp_dir is not None:
-                _keep_client_files(kept, Path(temp_dir), Path(compose_dir))
+                keep_client_files(kept, Path(temp_dir), Path(compose_dir))
         finally:
             if temp_dir is not None:
                 shutil.rmtree(temp_dir, ignore_errors=True)
@@ -1634,7 +1634,7 @@ def _reef_url_of(adapter: str, compose_dir: str) -> str:
 
     The record comes first: a session can change the model binding of a tree
     in its project, and ``update`` must not run a script from that address."""
-    recorded = _recorded_service_url(compose_dir)
+    recorded = recorded_service_url(compose_dir)
     if recorded is not None:
         return recorded
     try:
@@ -2096,7 +2096,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     except Exception as exc:  # pragma: no cover - the wrapper itself imports both
         rows.append((False, "interpreter", f"{sys.executable} does not import reef: {exc}"))
     try:
-        upstream = _recorded_service_url(compose_dir) or _extract_reef_url(adapter, Path(compose_dir))
+        upstream = recorded_service_url(compose_dir) or _extract_reef_url(adapter, Path(compose_dir))
     except WrapperError as exc:
         upstream = None
         rows.append((False, "service", f"binding unreadable: {exc}"))
