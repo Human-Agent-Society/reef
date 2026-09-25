@@ -36,6 +36,8 @@ dependencies = [
 [project.optional-dependencies]
 # Python-side inference adapters; install native SGLang in its GPU environment.
 sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=5.9"]
+# Python-side vLLM adapter; install native vLLM in its GPU environment.
+vllm = ["httpx", "requests", "ray[default]"]
 tinker = [
     "tinker==0.29.1",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).

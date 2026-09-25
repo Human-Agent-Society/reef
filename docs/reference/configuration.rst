@@ -231,6 +231,24 @@ the committed checkpoint before restart; its training checkpoint must not be
 used to reconstruct serving. See `Worker executors <../developer-guide/executors.rst>`__ for the
 recovery policy and compatibility limits.
 
+``reef.inference_backend: vllm`` selects the vLLM engine integration for
+training-time serving. Reef launches one vLLM server per engine on the
+reserved GPUs with ``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
+``--logprobs-mode processed_logprobs``, and drives publication through vLLM's
+control routes: ``/pause?mode=keep`` (a retracting pause adds
+``/reset_prefix_cache?reset_running_requests=true``), ``/sleep`` and
+``/wake_up`` for colocated memory release, ``/update_weight_version``,
+``/collective_rpc reload_weights`` and the ``/v1/load_lora_adapter`` routes.
+Engines are single-node; more than one engine needs ``router_url``. Engine
+options use vLLM's engine-argument names; Reef sets ``model``, ``host``,
+``port``, ``tensor_parallel_size`` and ``enable_sleep_mode`` itself, rejects
+``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
+instead) and enables prefix caching only under a retracting pause. vLLM
+releases the KV cache only together with the weights, so
+``keep-lora-base-resident`` is unavailable on it. The Slime and Tinker
+backends still produce SGLang engine options, so their managed launches keep
+``inference.backend: sglang`` until they select options per backend.
+
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
 Reef does not discover, launch, schedule, probe or stop them. The recipe consumes
