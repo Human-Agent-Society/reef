@@ -703,7 +703,8 @@ The first three are read-only and take ``x-reef-scenario``. Install also require
 ``dsh``, ``hermes``, or an external descriptor. Only an adapter whose descriptor
 declares an install section can be named here: ``native`` and ``terminus`` ship
 with reef and pin no vendor binary, so they answer HTTP 400 rather than a
-script. If install omits ``x-reef-scenario``, Reef creates a scenario with a
+script, naming ``GET /reef/harness`` for the tree and ``POST /reef/train`` for
+a request. If install omits ``x-reef-scenario``, Reef creates a scenario with a
 generated ``harness-`` name and embeds that assignment in the wrapper script;
 when exactly one configured recipe serves harness files, it selects that recipe
 automatically.

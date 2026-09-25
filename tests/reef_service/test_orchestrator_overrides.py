@@ -124,3 +124,5 @@ def test_the_install_hint_is_the_one_line_that_installs_the_deployments_harness(
         "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash"
     )
     assert install_hint({"reef": {"recipe": "recipe"}}) is None
+    # terminus has no install script: the line would print a command that answers 400.
+    assert install_hint({"evolution": {"adapter": "terminus"}, "reef": {"port": 8900}}) is None
