@@ -10,7 +10,7 @@ from reef_service.test_harness_recipe import batch, make_binary
 
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.version_check import CLAUDE_NOTICE_HOOK, VERSION_CHECK_ENTRY_ID, version_check_entry
+from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, version_check_entry
 from reef.harness.tree.render import render_composition
 from reef.recipe import build_recipe
 from reef.recipe.errors import RecipeConfigError
@@ -19,6 +19,7 @@ from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 CLAUDE = get_adapter("claude")
+CLAUDE_NOTICE_HOOK = 'if [ -n "$REEF_HARNESS_WRAPPER" ]; then "$REEF_HARNESS_WRAPPER" notice --hook claude; fi'
 
 
 def test_claude_rejects_enabling_an_unshipped_requests_extension() -> None:
