@@ -28,7 +28,6 @@
 // lazily from pi's own loader, so plain node loads the file without it. Evaluation
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
 // evaluation never sees the commands or the tools.
-import { createHash, createHmac } from "node:crypto";
 import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { release } from "node:os";
 import { delimiter, join } from "node:path";
@@ -400,16 +399,16 @@ export default function requests(pi) {
     return { "x-reef-scenario": scenario, ...(token ? { authorization: `Bearer ${token}` } : {}) };
   };
 
-  // A page a browser opens: the query carries the scenario and, in place of the token, its page key (reef's
-  // reef/harness/page_key.py), which opens this scenario's two pages alone. The model reads these links in tool
-  // results and prompts, so they must not carry the token.
-  const pageKey = (token) =>
-    createHmac("sha256", createHash("sha256").update(token, "utf8").digest())
-      .update(`reef-page\n${scenario}`, "utf8")
-      .digest("hex");
+  // A page a browser opens: the query carries the scenario and, in place of the token, the page key the service
+  // hands out with a filed request and the release catalog, which opens this scenario's two pages alone. The model
+  // reads these links in tool results and prompts, so they must not carry the token. Without a key (authentication
+  // off, or no answer read yet) the link carries the scenario alone.
+  let pageKey = null;
+  const notePageKey = (answer) => {
+    if (answer && typeof answer.page_key === "string" && answer.page_key) pageKey = answer.page_key;
+  };
   const pageLink = (path) => {
-    const token = process.env.REEF_TOKEN;
-    const query = `scenario=${encodeURIComponent(scenario)}${token ? `&key=${pageKey(token)}` : ""}`;
+    const query = `scenario=${encodeURIComponent(scenario)}${pageKey ? `&key=${encodeURIComponent(pageKey)}` : ""}`;
     return `${serviceUrl}${path}?${query}`;
   };
   const requestPageLink = (recordId) => pageLink(`/reef/harness/requests/${encodeURIComponent(recordId)}/page`);
@@ -464,6 +463,7 @@ export default function requests(pi) {
     }
     if (!response.ok) throw new Error(`reef refused the request (HTTP ${response.status}): ${await response.text()}`);
     const answer = await response.json();
+    notePageKey(answer);
     return String(answer.agent_record_id);
   };
 
@@ -477,7 +477,9 @@ export default function requests(pi) {
       throw new Error(`reef unreachable at ${serviceUrl}: ${message(error)}`);
     }
     if (!response.ok) throw new Error(`reef refused the catalog read (HTTP ${response.status}): ${await response.text()}`);
-    const rows = (await response.json()).releases;
+    const catalog = await response.json();
+    notePageKey(catalog);
+    const rows = catalog.releases;
     return Array.isArray(rows) ? rows : [];
   };
 

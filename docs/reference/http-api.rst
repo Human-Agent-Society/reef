@@ -326,7 +326,9 @@ to them; with none queued the step batches as ``auto`` does.
      -H "Content-Type: application/json" \
      -d '{"agent_record_id":"change-001","text":"Add a skill that runs tests before answering", "session":"session-1", "release_id":"release-1"}'
 
-The response is ``{agent_record_id, scenario, request_type: "train"}``.
+The response is ``{agent_record_id, scenario, request_type: "train"}``,
+plus ``page_key`` when the request presented a service token: the key the
+request's page link carries (see Request page).
 HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
 do not change a step already in flight. A step that fails with an
@@ -680,7 +682,8 @@ Harness artifacts
 |                                | an ``x-reef-release-id`` response header                      |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
-|                                | carrying the evaluation metrics of the publishing step        |
+|                                | carrying the evaluation metrics of the publishing step, plus  |
+|                                | ``page_key`` when the request presented a service token       |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
 |                                | binary, writes the tree, and writes the adapter's model       |
@@ -1015,13 +1018,16 @@ Both pages are links a person opens in a browser, which sends no header, so
 they also take the scenario and a credential as query parameters,
 ``?scenario=<name>&key=<page key>``, in place of ``x-reef-scenario`` and
 ``Authorization: Bearer``; a header wins when present, and each page's links
-to the other carry the parameters it was opened with. The page key is the
-HMAC SHA-256 of ``reef-page``, a newline and the scenario name, keyed by the
-SHA-256 digest of the token, as hex (``reef.harness.page_key.page_key``): it
-opens these two pages of that one scenario and no other route, a request
-whose ``x-reef-scenario`` header names another scenario is HTTP 401, and the
-token cannot be read back from it. The links ``reef-<adapter>`` and pi's
-extension print carry it, since a session's model reads them. The pages
+to the other carry the parameters it was opened with. The service hands
+the page key out: ``POST /reef/train`` and ``GET /reef/harness/releases``
+answer it as ``page_key`` to a request that presented a service token (an
+evaluation token gets none), and clients put it in the links as it is,
+never deriving it themselves. It opens these two pages of that one scenario
+and no other route, a request whose ``x-reef-scenario`` header names another
+scenario is HTTP 401, and the token cannot be read back from it (the service
+derives it as an HMAC SHA-256 of the scenario keyed by the token's digest,
+``reef.service.auth.page_key_for_digest``). The links ``reef-<adapter>`` and
+pi's extension print carry it, since a session's model reads them. The pages
 still take ``?token=<token>``, which then sits in the URL, in the browser's
 history and in whatever logs request lines. Every other route reads the
 headers alone; a ``?key=`` or a ``?token=`` elsewhere is HTTP 401.

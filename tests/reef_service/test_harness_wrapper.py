@@ -36,7 +36,6 @@ from reef.harness.client.wrapper import (
     update,
     wait_request,
 )
-from reef.harness.page_key import page_key
 from reef.harness.step_result import missed_episodes
 
 
@@ -1075,6 +1074,10 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
 # -- reef-<adapter> harness: submit native manual training ---------------------
 
 
+#: The page key the fake services hand out to a request that presented a token, as a real one derives it.
+PAGE_KEY = "k3y-from-the-service"
+
+
 class _FakeReef:
     """A reef that records every call: inference answers with a receipt, the request route with ``answer``,
     ``GET /reef/harness/releases`` with ``rows``, the request's progress route with ``progress`` (404 without
@@ -1113,7 +1116,8 @@ class _FakeReef:
             def do_GET(self):
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if self.path == "/reef/harness/releases":
-                    self._answer(200, {"scenario": "ask-scenario", "releases": rows or []})
+                    keyed = {"page_key": PAGE_KEY} if "Authorization" in self.headers else {}
+                    self._answer(200, {"scenario": "ask-scenario", "releases": rows or [], **keyed})
                 elif self.path == progress_path and readings:
                     read = len([call for call in seen if call["path"] == progress_path])
                     self._answer(200, readings[min(read, len(readings)) - 1])
@@ -1131,7 +1135,8 @@ class _FakeReef:
                         200, {"choices": [{"message": {"content": "ok"}}]}, {"x-reef-agent-record-id": receipt}
                     )
                 elif self.path == "/reef/train":
-                    self._answer(status, answer)
+                    keyed = {"page_key": PAGE_KEY} if status == 200 and "Authorization" in self.headers else {}
+                    self._answer(status, {**answer, **keyed})
                 elif self.path == "/reef/scenarios/ask-scenario/promote" and promote is not None:
                     self._answer(200, promote)
                 else:
@@ -1200,7 +1205,7 @@ def test_harness_submits_training_and_preserves_the_last_sessions_receipts(tmp_p
     out = capsys.readouterr().out.splitlines()
     assert out[-3] == "reef-pi: training request q-1 accepted"
     # The link to the request's page follows, with the scenario and the shell's token as query parameters.
-    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={page_key('tok', 'ask-scenario')}"
+    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={PAGE_KEY}"
     assert out[-2] == f"reef-pi: watch it here: {link}"
     assert out[-1] == "reef-pi: reef is running the step; add --wait to stay here, or check /versions later"
 
@@ -1514,11 +1519,11 @@ def test_harness_wait_prints_the_result_line_and_exits_by_it(tmp_path, capsys, r
     upstream = f"http://127.0.0.1:{reef.port}"
     assert out[:3] == [
         "reef-pi: training request q-1 accepted",
-        f"reef-pi: watch it here: {upstream}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={page_key('dummy', 'ask-scenario')}",
+        f"reef-pi: watch it here: {upstream}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={PAGE_KEY}",
         "reef-pi: reef is running the step; waiting up to 5 s for its result",
     ]
     # The pending line names the step's page link, the scenario and the token as query parameters.
-    page = f"{upstream}/reef/harness/releases/1/page?scenario=ask-scenario&key={page_key('dummy', 'ask-scenario')}"
+    page = f"{upstream}/reef/harness/releases/1/page?scenario=ask-scenario&key={PAGE_KEY}"
     # Without a terminal (pytest's stdin is none) the next step is printed as commands, never asked.
     assert out[3:] == [line.replace("{page}", page) for line in lines]
     assert [call["path"] for call in reef.seen] == ["/reef/train", "/reef/harness/releases"]
@@ -1686,7 +1691,7 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
     out = capsys.readouterr().out.splitlines()
     assert out[3] == "reef-pi: no result yet for 'text me' after 0.05 s; /versions shows it when it settles"
     assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 2
-    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={page_key('dummy', 'ask-scenario')}"
+    link = f"http://127.0.0.1:{reef.port}/reef/harness/requests/q-1/page?scenario=ask-scenario&key={PAGE_KEY}"
     assert out[-3:] == [
         "reef-pi: training request q-1 accepted",
         f"reef-pi: watch it here: {link}",
@@ -2043,7 +2048,8 @@ class _ReleasesReef:
                 step = re.fullmatch(r"/reef/harness/releases/(\d+)/page", self.path)
                 if self.path == "/reef/harness/releases":
                     code, kind = 200, "application/json"
-                    raw = json.dumps({"scenario": "setup-scenario", "releases": rows}).encode()
+                    keyed = {"page_key": PAGE_KEY} if "Authorization" in self.headers else {}
+                    raw = json.dumps({"scenario": "setup-scenario", "releases": rows, **keyed}).encode()
                 elif step is not None and int(step.group(1)) in (pages or {}):
                     code, kind, raw = 200, "text/html", (pages or {})[int(step.group(1))].encode()
                 elif self.path.startswith("/reef/harness/install?") and install is not None:
@@ -3048,7 +3054,7 @@ class _DoctorReef:
                 if self.headers.get("Authorization") != f"Bearer {token}":
                     code, payload = 401, {"error": "invalid service token"}
                 elif self.path == "/reef/harness/releases":
-                    code, payload = 200, {"releases": catalog}
+                    code, payload = 200, {"releases": catalog, "page_key": PAGE_KEY}
                 else:
                     code, payload = 404, {}
                 raw = json.dumps(payload).encode()
@@ -3147,7 +3153,7 @@ def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, ca
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 0
     out = capsys.readouterr().out.splitlines()
     assert any(line.startswith("ok  release") and "rel-1 installed, the served head" in line for line in out)
-    page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&key={page_key('dummy', 'doc-scenario')}"
+    page = f"http://127.0.0.1:{reef.port}/reef/harness/releases/1/page?scenario=doc-scenario&key={PAGE_KEY}"
     assert out[-1].startswith("ok  review") and out[-1].endswith(f"rel-2222 waits for your review: {page}")
     reef.close()
 

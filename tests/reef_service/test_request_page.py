@@ -21,7 +21,6 @@ from aiohttp.test_utils import TestClient, TestServer
 from reef_service.test_harness_proposals import _dispatcher, _recipe
 
 from reef.core import AgentRecord, RequestType
-from reef.harness.page_key import page_key
 from reef.service.app import create_app
 from reef.service.release_page import build_release_page
 from reef.service.request_page import (
@@ -555,7 +554,12 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             body = {"text": TEXT, "session": SESSION, "release_id": "rel-0"}
             response = await client.post("/reef/train", headers=headers, json=body)
             assert response.status == 200, await response.text()
-            record_id = (await response.json())["agent_record_id"]
+            answer = await response.json()
+            record_id = answer["agent_record_id"]
+            # The service hands out the page key its links carry; the catalog read hands out the same one.
+            filed_key = answer["page_key"]
+            catalog = await (await client.get("/reef/harness/releases", headers=headers)).json()
+            assert catalog["page_key"] == filed_key and "secret" not in filed_key
             link = f"/reef/harness/requests/{record_id}/page"
             assert await asyncio.to_thread(entered.wait, 10)
 
@@ -592,8 +596,8 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             running = await response.text()
             assert response.status == 200 and "This step is running" in running and REFRESH in running
             assert f'href="{link}?scenario=agents&amp;token=secret">Follow the request' in running
-            # The page key the wrapper prints opens both pages of this scenario, and their links carry it forward.
-            keyed = {"scenario": SCENARIO, "key": page_key("secret", SCENARIO)}
+            # The page key the service handed out opens both pages of this scenario, and their links carry it forward.
+            keyed = {"scenario": SCENARIO, "key": filed_key}
             response = await client.get("/reef/harness/releases/1/page", params=keyed)
             assert response.status == 200
             assert f'href="{link}?scenario=agents&amp;key={keyed["key"]}">Follow the request' in await response.text()

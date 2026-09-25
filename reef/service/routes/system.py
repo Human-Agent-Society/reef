@@ -6,6 +6,7 @@ from aiohttp import web
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
+from reef.service.auth import page_key_of
 from reef.service.errors import translate_error
 from reef.service.install_script import render_install_failure, render_install_preamble, render_streamed_install
 from reef.service.request_service import RequestService, page_headers
@@ -62,7 +63,9 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
 
     async def harness_releases(request: web.Request) -> web.Response:
         catalog = await asyncio.to_thread(request_service.harness_releases, request.headers)
-        return web.json_response(catalog)
+        # The key the step pages' links carry in place of the token.
+        page_key = page_key_of(request, catalog["scenario"])
+        return web.json_response(catalog if page_key is None else {**catalog, "page_key": page_key})
 
     async def harness_release_page(request: web.Request) -> web.Response:
         step = int(request.match_info["step"])

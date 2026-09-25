@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
+
+from reef.service.auth import page_key_for_digest, page_key_of
 
 
 def _make_client(tokens, evaluation_tokens=None) -> TestClient:
@@ -17,7 +20,11 @@ def _make_client(tokens, evaluation_tokens=None) -> TestClient:
         del request
         return web.Response(text="ok")
 
+    async def _page_key(request: web.Request) -> web.Response:
+        return web.Response(text=str(page_key_of(request, "mine")))
+
     app.router.add_get("/protected", _ok)
+    app.router.add_get("/page-key", _page_key)
     app.router.add_get("/healthz", _ok)
     # The two harness pages a browser opens by a link, and their neighbours that are no page.
     app.router.add_get("/reef/harness/requests/{record_id}/page", _ok)
@@ -196,7 +203,9 @@ def test_the_authorization_header_wins_over_the_query_token() -> None:
 def test_a_page_key_opens_the_two_pages_of_its_scenario_and_nothing_else() -> None:
     """The links a session's model reads carry the scenario's page key, never the token: the key opens that
     scenario's request and step pages, and 401s on another scenario and on every other route."""
-    from reef.harness.page_key import page_key
+
+    def page_key(token: str, scenario: str) -> str:
+        return page_key_for_digest(hashlib.sha256(token.encode()).digest(), scenario)
 
     async def run() -> None:
         client = _make_client(["old", "secret"])
@@ -229,5 +238,24 @@ def test_a_page_key_opens_the_two_pages_of_its_scenario_and_nothing_else() -> No
                 "/reef/harness/requests/3f1c2a9d0b7e/page", params={"scenario": "mine", "key": key}
             )
             assert resp.status == 401
+
+    asyncio.run(run())
+
+
+def test_the_page_key_is_derived_from_the_service_token_the_request_presented() -> None:
+    """A route hands out the page key of the token that opened it, by the Bearer header or x-api-key; an evaluation
+    token, which opens no page, gets none, and with authentication off there is none to hand out."""
+    expected = page_key_for_digest(hashlib.sha256(b"secret").digest(), "mine")
+
+    async def run() -> None:
+        client = _make_client(["secret"], evaluation_tokens=["eval"])
+        async with client:
+            for headers in ({"Authorization": "Bearer secret"}, {"x-api-key": "secret"}):
+                resp = await client.get("/page-key", headers=headers)
+                assert resp.status == 200 and await resp.text() == expected
+            assert (await client.get("/page-key", headers={"Authorization": "Bearer eval"})).status == 401
+        client = _make_client(None)
+        async with client:
+            assert await (await client.get("/page-key")).text() == "None"
 
     asyncio.run(run())

@@ -22,7 +22,7 @@ classifiers = [
 # Reef core dependencies. Keep this list free of training and GPU packages:
 # `pip install reef-infra` must support the base `recipe` configuration on CPU.
 dependencies = [
-    "aiohttp",
+    "aiohttp>=3.14",  # web.RequestKey
     "alembic>=1.13,<2",
     "huggingface_hub",
     "pyyaml",

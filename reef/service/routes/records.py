@@ -5,6 +5,7 @@ import asyncio
 from aiohttp import web
 
 from reef.core.records_types import RequestType
+from reef.service.auth import page_key_of
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 
@@ -55,13 +56,16 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
                 request_type=request_type,
                 agent_record_id=agent_record_id,
             )
-            return web.json_response(
-                {
-                    "agent_record_id": item.agent_record_id,
-                    "scenario": item.scenario,
-                    "request_type": item.request_type.value,
-                }
-            )
+            answer = {
+                "agent_record_id": item.agent_record_id,
+                "scenario": item.scenario,
+                "request_type": item.request_type.value,
+            }
+            # A training request has a page: the key its link carries in place of the token.
+            page_key = page_key_of(request, item.scenario) if request_type is RequestType.TRAIN else None
+            if page_key is not None:
+                answer["page_key"] = page_key
+            return web.json_response(answer)
 
         return accept
 

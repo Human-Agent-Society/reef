@@ -626,7 +626,7 @@ registers two commands, two tools and two event handlers:
   <link>`` and throws the command's error messages; the command's own filing
   notifies the same expected time and the same link. The link is the
   request's page, ``GET /reef/harness/requests/<id>/page`` with ``scenario``
-  and, when ``REEF_TOKEN`` is set, that scenario's page key as ``key`` (never
+  and the ``page_key`` the service answered the filing with as ``key`` (never
   the token, since the model reads the tool result) as query parameters, so a
   browser opens it without the headers.
 - The spinner, while a step runs: ``ctx.ui.setWidget`` draws one line above

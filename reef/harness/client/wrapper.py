@@ -201,7 +201,6 @@ from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 from reef.harness.episodes.version_check import ships_version_check
-from reef.harness.page_key import page_key
 from reef.harness.step_result import design_sections, next_action, rejection_text
 
 
@@ -1030,25 +1029,33 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 3]}..."
 
 
-def _page_link(upstream: str, path: str, scenario: str, token: str | None) -> str:
-    """A page a browser opens: the query carries the scenario and, in place of the token, its page key, which opens
-    this scenario's two pages alone; a session's model reads the link, so it must not carry the token."""
+def _page_link(upstream: str, path: str, scenario: str, page_key: str | None) -> str:
+    """A page a browser opens: the query carries the scenario and, in place of the token, the page key the service
+    handed out, which opens this scenario's two pages alone; a session's model reads the link, so it must not
+    carry the token. Without a key (authentication off) the link carries the scenario alone."""
     query = f"scenario={urllib.parse.quote(scenario, safe='')}"
-    if token:
-        query += f"&key={page_key(token, scenario)}"
+    if page_key:
+        query += f"&key={urllib.parse.quote(page_key, safe='')}"
     return f"{upstream}{path}?{query}"
 
 
-def _request_page_link(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
+def _request_page_link(upstream: str, scenario: str, page_key: str | None, record_id: str) -> str:
     """The link to a request's page, ``GET /reef/harness/requests/<id>/page``."""
     return _page_link(
-        upstream, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario, token
+        upstream, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario, page_key
     )
 
 
-def _step_page_link(upstream: str, scenario: str, token: str | None, step: int) -> str:
+def _step_page_link(upstream: str, scenario: str, page_key: str | None, step: int) -> str:
     """The link to a step's page, ``GET /reef/harness/releases/<step>/page``."""
-    return _page_link(upstream, f"/reef/harness/releases/{step}/page", scenario, token)
+    return _page_link(upstream, f"/reef/harness/releases/{step}/page", scenario, page_key)
+
+
+def page_key_in(answer: Any) -> str | None:
+    """The ``page_key`` a service response carries (``POST /reef/train``, ``GET /reef/harness/releases``); ``None``
+    when it carries none (authentication off, or a service from before page keys)."""
+    key = answer.get("page_key") if isinstance(answer, Mapping) else None
+    return key if isinstance(key, str) and key else None
 
 
 def _metrics_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1218,7 +1225,7 @@ def _await_step(
     *,
     timeout_s: float,
     poll_s: float,
-) -> tuple[int, list[dict[str, Any]]] | str:
+) -> tuple[int, ReleaseCatalog] | str:
     """Poll the catalog until a step has consumed the request: its index and the catalog.
 
     ``"timeout"`` once ``timeout_s`` passes, the step still running, and
@@ -1231,10 +1238,10 @@ def _await_step(
     missing = 0
     progress: Mapping[str, Any] = {}
     while True:
-        rows = _catalog(upstream, scenario, adapter, token)
-        step = _step_of(rows, record_id)
+        catalog = _catalog(upstream, scenario, adapter, token)
+        step = _step_of(catalog.rows, record_id)
         if step is not None:
-            return step, rows
+            return step, catalog
         if time.monotonic() >= deadline:
             later = (
                 "/versions shows it when it settles"
@@ -1427,7 +1434,7 @@ def harness(
         # A 200 without the id is a reef this wrapper does not know; say so instead of a traceback.
         sys.exit(f"reef-{adapter}: reef answered 200 without an agent_record_id: {json.dumps(answer)[:200]}")
     print(f"reef-{adapter}: training request {record_id} accepted")
-    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, token, record_id)}")
+    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, page_key_in(answer), record_id)}")
     if not wait:
         later = (
             "check /versions later" if ships_version_check(adapter) else f"run reef-{adapter} wait {record_id} later"
@@ -1492,10 +1499,11 @@ def report_request(
     settled = _await_step(upstream, scenario, adapter, token, record_id, ask, timeout_s=timeout_s, poll_s=poll_s)
     if isinstance(settled, str):
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
-    step, rows = settled
+    step, catalog = settled
+    rows = catalog.rows
     release = str(rows[step].get("release_id") or "")
     unmet = unmet_requires(compose_dir, rows, release) if release else []
-    page = _step_page_link(upstream, scenario, token, step)
+    page = _step_page_link(upstream, scenario, catalog.page_key, step)
     print(f"reef-{adapter}: {result_line(adapter, step, rows, page, unmet)}")
     uncovered = review_points(rows[step], "uncovered")
     selection_result = result_of(rows[step], rows)
@@ -1590,8 +1598,16 @@ def _reef_url_of(adapter: str, compose_dir: str) -> str:
     return _strip_v1(reef_url)
 
 
-def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> list[dict[str, Any]]:
-    """The release catalog as ``GET /reef/harness/releases`` lists it, oldest first."""
+@dataclass(frozen=True)
+class ReleaseCatalog:
+    """``GET /reef/harness/releases``: the rows oldest first, and the page key the step pages' links carry."""
+
+    rows: list[dict[str, Any]]
+    page_key: str | None
+
+
+def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> ReleaseCatalog:
+    """The release catalog as ``GET /reef/harness/releases`` lists it."""
     req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
@@ -1602,7 +1618,7 @@ def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> l
     except OSError as exc:
         sys.exit(f"reef-{adapter}: reef unreachable at {upstream}: {exc}")
     rows = catalog.get("releases") if isinstance(catalog, Mapping) else None
-    return [dict(row) for row in rows or [] if isinstance(row, Mapping)]
+    return ReleaseCatalog([dict(row) for row in rows or [] if isinstance(row, Mapping)], page_key_in(catalog))
 
 
 def _release_to_set_up(rows: Sequence[Mapping[str, Any]], release: str | None) -> Mapping[str, Any] | None:
@@ -1696,7 +1712,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     else:
         upstream = _reef_url_of(adapter, compose_dir)
         token = _reef_token(adapter, compose_dir)
-    rows = _catalog(upstream, scenario, adapter, token)
+    rows = _catalog(upstream, scenario, adapter, token).rows
     row = _release_to_set_up(rows, release)
     if row is None and release is not None:
         print(
@@ -2056,6 +2072,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     usually asking what happened to their request."""
     rows: list[tuple[bool, str, str]] = []
     catalog: list[Mapping[str, Any]] | None = None
+    page_key: str | None = None
     token: str | None = None
     prog = f"reef-{adapter}"
     try:
@@ -2079,8 +2096,10 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
         req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
-                listed = json.loads(response.read()).get("releases")
+                answer = json.loads(response.read())
+            listed = answer.get("releases")
             catalog = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
+            page_key = page_key_in(answer)
             rows.append((True, "service", f"{upstream} answers, token {'accepted' if token else 'not needed'}"))
         except urllib.error.HTTPError as exc:
             rows.append(
@@ -2136,7 +2155,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     # A release held for review is not something the install needs, but it is what the person is waiting on.
     if catalog is not None and upstream is not None:
         for step, waiting in _waiting_for_review(catalog):
-            page = _step_page_link(upstream, scenario, token, step)
+            page = _step_page_link(upstream, scenario, page_key, step)
             rows.append((True, "review", f"{str(waiting.get('release_id'))[:8]} waits for your review: {page}"))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))
