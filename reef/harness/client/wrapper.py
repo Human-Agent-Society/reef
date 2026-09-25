@@ -33,8 +33,9 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
   or ``hybrid``. Acceptance queues a step without inference receipts or a
   feedback report; the merged ``requires`` list rides ``training_request``
   in the commit's metrics. The accepted line is followed by a link to the
-  request's page (``GET /reef/harness/requests/<id>/page`` with the scenario
-  and the token as query parameters, so a browser opens it as is). With
+  request's page, the ``page_path`` the service answered with (its query
+  holds the scenario and a page key, never the token, so a browser opens it
+  as is). With
   ``--wait`` the wrapper polls the release catalog every 5 s for the step
   that consumed the request (``--timeout`` seconds, 1800 by default), says
   once when the request's progress shows a step took it, and prints the
@@ -1029,33 +1030,26 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else f"{text[: limit - 3]}..."
 
 
-def _page_link(upstream: str, path: str, scenario: str, page_key: str | None) -> str:
-    """A page a browser opens: the query carries the scenario and, in place of the token, the page key the service
-    handed out, which opens this scenario's two pages alone; a session's model reads the link, so it must not
-    carry the token. Without a key (authentication off) the link carries the scenario alone."""
-    query = f"scenario={urllib.parse.quote(scenario, safe='')}"
-    if page_key:
-        query += f"&key={urllib.parse.quote(page_key, safe='')}"
-    return f"{upstream}{path}?{query}"
+def page_link(upstream: str, answer: Mapping[str, Any], route: str, scenario: str) -> str:
+    """The link a browser opens for a page: ``upstream`` and the ``page_path`` the service answered (a filed
+    request, a catalog row), whose query carries the scenario and a page key in place of the token, since a
+    session's model reads the link. A service from before page paths gets ``route`` with the scenario alone."""
+    path = answer.get("page_path")
+    if isinstance(path, str) and path.startswith("/"):
+        return f"{upstream}{path}"
+    return f"{upstream}{route}?scenario={urllib.parse.quote(scenario, safe='')}"
 
 
-def _request_page_link(upstream: str, scenario: str, page_key: str | None, record_id: str) -> str:
-    """The link to a request's page, ``GET /reef/harness/requests/<id>/page``."""
-    return _page_link(
-        upstream, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario, page_key
+def _request_page_link(upstream: str, scenario: str, answer: Mapping[str, Any], record_id: str) -> str:
+    """The link to a request's page, ``GET /reef/harness/requests/<id>/page``, from the filing's answer."""
+    return page_link(
+        upstream, answer, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario
     )
 
 
-def _step_page_link(upstream: str, scenario: str, page_key: str | None, step: int) -> str:
-    """The link to a step's page, ``GET /reef/harness/releases/<step>/page``."""
-    return _page_link(upstream, f"/reef/harness/releases/{step}/page", scenario, page_key)
-
-
-def page_key_in(answer: Any) -> str | None:
-    """The ``page_key`` a service response carries (``POST /reef/train``, ``GET /reef/harness/releases``); ``None``
-    when it carries none (authentication off, or a service from before page keys)."""
-    key = answer.get("page_key") if isinstance(answer, Mapping) else None
-    return key if isinstance(key, str) and key else None
+def _step_page_link(upstream: str, scenario: str, rows: Sequence[Mapping[str, Any]], step: int) -> str:
+    """The link to a step's page, ``GET /reef/harness/releases/<step>/page``, from the step's catalog row."""
+    return page_link(upstream, rows[step], f"/reef/harness/releases/{step}/page", scenario)
 
 
 def _metrics_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1225,7 +1219,7 @@ def _await_step(
     *,
     timeout_s: float,
     poll_s: float,
-) -> tuple[int, ReleaseCatalog] | str:
+) -> tuple[int, list[dict[str, Any]]] | str:
     """Poll the catalog until a step has consumed the request: its index and the catalog.
 
     ``"timeout"`` once ``timeout_s`` passes, the step still running, and
@@ -1238,10 +1232,10 @@ def _await_step(
     missing = 0
     progress: Mapping[str, Any] = {}
     while True:
-        catalog = _catalog(upstream, scenario, adapter, token)
-        step = _step_of(catalog.rows, record_id)
+        rows = _catalog(upstream, scenario, adapter, token)
+        step = _step_of(rows, record_id)
         if step is not None:
-            return step, catalog
+            return step, rows
         if time.monotonic() >= deadline:
             later = (
                 "/versions shows it when it settles"
@@ -1434,7 +1428,7 @@ def harness(
         # A 200 without the id is a reef this wrapper does not know; say so instead of a traceback.
         sys.exit(f"reef-{adapter}: reef answered 200 without an agent_record_id: {json.dumps(answer)[:200]}")
     print(f"reef-{adapter}: training request {record_id} accepted")
-    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, page_key_in(answer), record_id)}")
+    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, answer, record_id)}")
     if not wait:
         later = (
             "check /versions later" if ships_version_check(adapter) else f"run reef-{adapter} wait {record_id} later"
@@ -1499,11 +1493,10 @@ def report_request(
     settled = _await_step(upstream, scenario, adapter, token, record_id, ask, timeout_s=timeout_s, poll_s=poll_s)
     if isinstance(settled, str):
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
-    step, catalog = settled
-    rows = catalog.rows
+    step, rows = settled
     release = str(rows[step].get("release_id") or "")
     unmet = unmet_requires(compose_dir, rows, release) if release else []
-    page = _step_page_link(upstream, scenario, catalog.page_key, step)
+    page = _step_page_link(upstream, scenario, rows, step)
     print(f"reef-{adapter}: {result_line(adapter, step, rows, page, unmet)}")
     uncovered = review_points(rows[step], "uncovered")
     selection_result = result_of(rows[step], rows)
@@ -1598,16 +1591,8 @@ def _reef_url_of(adapter: str, compose_dir: str) -> str:
     return _strip_v1(reef_url)
 
 
-@dataclass(frozen=True)
-class ReleaseCatalog:
-    """``GET /reef/harness/releases``: the rows oldest first, and the page key the step pages' links carry."""
-
-    rows: list[dict[str, Any]]
-    page_key: str | None
-
-
-def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> ReleaseCatalog:
-    """The release catalog as ``GET /reef/harness/releases`` lists it."""
+def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> list[dict[str, Any]]:
+    """The release catalog as ``GET /reef/harness/releases`` lists it, oldest first."""
     req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
@@ -1618,7 +1603,7 @@ def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> R
     except OSError as exc:
         sys.exit(f"reef-{adapter}: reef unreachable at {upstream}: {exc}")
     rows = catalog.get("releases") if isinstance(catalog, Mapping) else None
-    return ReleaseCatalog([dict(row) for row in rows or [] if isinstance(row, Mapping)], page_key_in(catalog))
+    return [dict(row) for row in rows or [] if isinstance(row, Mapping)]
 
 
 def _release_to_set_up(rows: Sequence[Mapping[str, Any]], release: str | None) -> Mapping[str, Any] | None:
@@ -1712,7 +1697,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     else:
         upstream = _reef_url_of(adapter, compose_dir)
         token = _reef_token(adapter, compose_dir)
-    rows = _catalog(upstream, scenario, adapter, token).rows
+    rows = _catalog(upstream, scenario, adapter, token)
     row = _release_to_set_up(rows, release)
     if row is None and release is not None:
         print(
@@ -2072,7 +2057,6 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     usually asking what happened to their request."""
     rows: list[tuple[bool, str, str]] = []
     catalog: list[Mapping[str, Any]] | None = None
-    page_key: str | None = None
     token: str | None = None
     prog = f"reef-{adapter}"
     try:
@@ -2096,10 +2080,8 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
         req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
         try:
             with urllib.request.urlopen(req, timeout=10) as response:
-                answer = json.loads(response.read())
-            listed = answer.get("releases")
+                listed = json.loads(response.read()).get("releases")
             catalog = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
-            page_key = page_key_in(answer)
             rows.append((True, "service", f"{upstream} answers, token {'accepted' if token else 'not needed'}"))
         except urllib.error.HTTPError as exc:
             rows.append(
@@ -2155,7 +2137,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     # A release held for review is not something the install needs, but it is what the person is waiting on.
     if catalog is not None and upstream is not None:
         for step, waiting in _waiting_for_review(catalog):
-            page = _step_page_link(upstream, scenario, page_key, step)
+            page = _step_page_link(upstream, scenario, catalog, step)
             rows.append((True, "review", f"{str(waiting.get('release_id'))[:8]} waits for your review: {page}"))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))

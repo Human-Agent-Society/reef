@@ -6,7 +6,7 @@ from aiohttp import web
 
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.service.auth import page_key_of
+from reef.service.auth import page_query
 from reef.service.errors import translate_error
 from reef.service.install_script import render_install_failure, render_install_preamble, render_streamed_install
 from reef.service.request_service import RequestService, page_headers
@@ -63,22 +63,27 @@ def register_system_routes(app: web.Application, *, request_service: RequestServ
 
     async def harness_releases(request: web.Request) -> web.Response:
         catalog = await asyncio.to_thread(request_service.harness_releases, request.headers)
-        # The key the step pages' links carry in place of the token.
-        page_key = page_key_of(request, catalog["scenario"])
-        return web.json_response(catalog if page_key is None else {**catalog, "page_key": page_key})
+        # Each row names its step's page, the step being its position oldest first; the link carries a page key in
+        # place of the token.
+        query = page_query(request, catalog["scenario"])
+        rows = [
+            {**row, "page_path": f"/reef/harness/releases/{step}/page?{query}"}
+            for step, row in enumerate(catalog["releases"])
+        ]
+        return web.json_response({**catalog, "releases": rows})
 
     async def harness_release_page(request: web.Request) -> web.Response:
         step = int(request.match_info["step"])
         headers = page_headers(request.headers, request.query)
         # The chain's links open the way this page was opened: the query parameters travel with them.
-        link_query = {key: request.query[key] for key in ("scenario", "key", "token") if key in request.query}
+        link_query = {key: request.query[key] for key in ("scenario", "key") if key in request.query}
         page = await asyncio.to_thread(request_service.harness_release_page, headers, step, link_query)
         return web.Response(text=page, content_type="text/html")
 
     async def harness_request_page(request: web.Request) -> web.Response:
         headers = page_headers(request.headers, request.query)
         # The version page link opens the way this page was opened: the query parameters travel with it.
-        link_query = {key: request.query[key] for key in ("scenario", "key", "token") if key in request.query}
+        link_query = {key: request.query[key] for key in ("scenario", "key") if key in request.query}
         page = await asyncio.to_thread(
             request_service.harness_request_page, headers, request.match_info["record_id"], link_query
         )

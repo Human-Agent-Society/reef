@@ -53,8 +53,8 @@ def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[s
     """The headers a page route reads, ``?scenario=`` standing in for ``x-reef-scenario`` when that header is absent.
 
     A page is a link a person opens in a browser, which sends no ``x-reef-*``
-    header; the header wins when both are present. The token has the same
-    fallback in :mod:`reef.service.auth`, for the page routes alone.
+    header; the header wins when both are present. The page key stands in for
+    the token in :mod:`reef.service.auth`, for the page routes alone.
     """
     merged = dict(headers.items())
     scenario = query.get("scenario", "").strip()

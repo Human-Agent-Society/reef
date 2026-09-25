@@ -5,6 +5,7 @@ import hmac
 import re
 import secrets
 from collections.abc import Iterable
+from urllib.parse import urlencode
 
 from aiohttp import web
 
@@ -37,7 +38,7 @@ def _digest(token: str) -> bytes:
 #: What a page key's HMAC covers before the scenario name, so the key is good for nothing but a page link.
 PAGE_KEY_CONTEXT = b"reef-page\n"
 
-#: Where the middleware keeps the digest of the service token a request presented, for ``page_key_of``.
+#: Where the middleware keeps the digest of the service token a request presented, for ``page_query``.
 TOKEN_DIGEST = web.RequestKey("reef_token_digest", bytes)
 
 
@@ -50,16 +51,17 @@ def page_key_for_digest(digest: bytes, scenario: str) -> str:
     prints the link and the provider behind it. The page key is an HMAC of the
     scenario keyed by the token's digest (the service keeps only digests): it
     opens those two pages of that one scenario, and the token cannot be read
-    back from it. Only the service derives it; clients read it from
-    ``page_key_of``'s responses."""
+    back from it. Only the service derives it, inside the page paths its
+    responses carry (``page_query``); clients never see it apart from a link."""
     return hmac.new(digest, PAGE_KEY_CONTEXT + scenario.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
-def page_key_of(request: web.Request, scenario: str) -> str | None:
-    """The page key of ``scenario`` for the service token ``request`` presented; ``None`` when it presented none
-    (authentication off, or a page opened by its key)."""
+def page_query(request: web.Request, scenario: str) -> str:
+    """The query a harness page link carries for ``scenario``: the scenario and, when ``request`` presented a service
+    token, that scenario's page key, so a browser opens the page without the headers."""
     digest = request.get(TOKEN_DIGEST)
-    return None if digest is None else page_key_for_digest(digest, scenario)
+    key = {} if digest is None else {"key": page_key_for_digest(digest, scenario)}
+    return urlencode({"scenario": scenario, **key})
 
 
 #: The harness pages a person opens by a link: the only routes that read a credential from the query string.
@@ -89,10 +91,9 @@ def create_authentication_middleware(
     request whose ``x-reef-scenario`` header names another scenario is
     refused, and the token cannot be read back from it, so the links the
     harness wrapper and pi's extension print, which a session's model reads,
-    carry it. ``?token=`` still opens them too; that token sits in the URL,
-    in the browser's history and in whatever logs request lines. Every other
-    route, and any request that carries the header, is judged by the header
-    alone. A request with no Authorization header may present the token in
+    carry it. The token itself is never read from a query. Every other route,
+    and any request that carries the header, is judged by the header alone. A
+    request with no Authorization header may present the token in
     ``x-api-key`` instead, the header the Anthropic dialect's clients send.
 
     ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
@@ -108,7 +109,7 @@ def create_authentication_middleware(
     evaluation_accepted = tuple(_digest(token) for token in normalize_tokens(evaluation_tokens))
 
     def _presented(request: web.Request) -> str | None:
-        """The credential to judge: the Bearer header's, else the Anthropic dialect's ``x-api-key``, else ``?token=`` on a page route a browser opens."""
+        """The credential to judge: the Bearer header's, else the Anthropic dialect's ``x-api-key``."""
         authorization = request.headers.get("Authorization")
         if isinstance(authorization, str):
             # The auth-scheme is case-insensitive per RFC 9110 §11.1; only the
@@ -122,8 +123,6 @@ def create_authentication_middleware(
             # A client speaking the Anthropic dialect (an evaluation episode, a
             # proposer bound to this service) presents its key in this header.
             return api_key
-        if request.method == "GET" and PAGE_ROUTES.match(request.path):
-            return request.query.get("token") or None
         return None
 
     def _page_key_opens(request: web.Request) -> bool:
@@ -155,7 +154,7 @@ def create_authentication_middleware(
         for digest in accepted:
             matched |= secrets.compare_digest(presented, digest)
         if matched:
-            # A service token, not an evaluation one: the routes that hand out page keys derive them from it.
+            # A service token, not an evaluation one: the routes that hand out page links derive their key from it.
             request[TOKEN_DIGEST] = presented
         if request.method == "POST" and EVALUATION_ROUTES.match(request.rel_url.raw_path):
             for digest in evaluation_accepted:
@@ -180,5 +179,5 @@ __all__ = [
     "create_authentication_middleware",
     "normalize_tokens",
     "page_key_for_digest",
-    "page_key_of",
+    "page_query",
 ]

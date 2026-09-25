@@ -792,10 +792,9 @@ The two request tools are:
   command. It returns the request id, an expected time of a few
   minutes, and a link to watch the step; filing errors are returned as
   command errors. The link opens
-  ``GET /reef/harness/requests/<id>/page`` with ``scenario`` and the
-  scenario-scoped ``page_key`` the service answered the filing with as
-  ``key`` in the query string. The service token stays out of the link the
-  model reads.
+  ``page_path`` the service answered the filing with: the request's page,
+  its query holding the scenario and a scenario-scoped page key. The service
+  token stays out of the link the model reads.
 Progress in pi
 ~~~~~~~~~~~~~~
 

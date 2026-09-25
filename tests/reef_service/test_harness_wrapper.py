@@ -1078,6 +1078,13 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
 PAGE_KEY = "k3y-from-the-service"
 
 
+def _paged(rows: list[dict], scenario: str, keyed: bool) -> list[dict]:
+    """``rows`` as the service lists them: each with its step page's path, the page key in its query when the
+    request presented a token."""
+    query = f"scenario={scenario}" + (f"&key={PAGE_KEY}" if keyed else "")
+    return [{**row, "page_path": f"/reef/harness/releases/{step}/page?{query}"} for step, row in enumerate(rows)]
+
+
 class _FakeReef:
     """A reef that records every call: inference answers with a receipt, the request route with ``answer``,
     ``GET /reef/harness/releases`` with ``rows``, the request's progress route with ``progress`` (404 without
@@ -1116,8 +1123,8 @@ class _FakeReef:
             def do_GET(self):
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if self.path == "/reef/harness/releases":
-                    keyed = {"page_key": PAGE_KEY} if "Authorization" in self.headers else {}
-                    self._answer(200, {"scenario": "ask-scenario", "releases": rows or [], **keyed})
+                    listed = _paged(rows or [], "ask-scenario", "Authorization" in self.headers)
+                    self._answer(200, {"scenario": "ask-scenario", "releases": listed})
                 elif self.path == progress_path and readings:
                     read = len([call for call in seen if call["path"] == progress_path])
                     self._answer(200, readings[min(read, len(readings)) - 1])
@@ -1135,8 +1142,9 @@ class _FakeReef:
                         200, {"choices": [{"message": {"content": "ok"}}]}, {"x-reef-agent-record-id": receipt}
                     )
                 elif self.path == "/reef/train":
-                    keyed = {"page_key": PAGE_KEY} if status == 200 and "Authorization" in self.headers else {}
-                    self._answer(status, {**answer, **keyed})
+                    key = f"&key={PAGE_KEY}" if "Authorization" in self.headers else ""
+                    page = f"/reef/harness/requests/{answer.get('agent_record_id')}/page?scenario=ask-scenario{key}"
+                    self._answer(status, {**answer, "page_path": page} if status == 200 else answer)
                 elif self.path == "/reef/scenarios/ask-scenario/promote" and promote is not None:
                     self._answer(200, promote)
                 else:
@@ -2048,8 +2056,10 @@ class _ReleasesReef:
                 step = re.fullmatch(r"/reef/harness/releases/(\d+)/page", self.path)
                 if self.path == "/reef/harness/releases":
                     code, kind = 200, "application/json"
-                    keyed = {"page_key": PAGE_KEY} if "Authorization" in self.headers else {}
-                    raw = json.dumps({"scenario": "setup-scenario", "releases": rows, **keyed}).encode()
+                    # The scenario the request names, as a real service answers for it.
+                    scenario = self.headers.get("x-reef-scenario", "setup-scenario")
+                    listed = _paged(rows, scenario, "Authorization" in self.headers)
+                    raw = json.dumps({"scenario": scenario, "releases": listed}).encode()
                 elif step is not None and int(step.group(1)) in (pages or {}):
                     code, kind, raw = 200, "text/html", (pages or {})[int(step.group(1))].encode()
                 elif self.path.startswith("/reef/harness/install?") and install is not None:
@@ -3054,7 +3064,7 @@ class _DoctorReef:
                 if self.headers.get("Authorization") != f"Bearer {token}":
                     code, payload = 401, {"error": "invalid service token"}
                 elif self.path == "/reef/harness/releases":
-                    code, payload = 200, {"releases": catalog, "page_key": PAGE_KEY}
+                    code, payload = 200, {"releases": _paged(catalog, "doc-scenario", True)}
                 else:
                     code, payload = 404, {}
                 raw = json.dumps(payload).encode()
@@ -3139,7 +3149,8 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
 
 @pytest.mark.unit
 def test_doctor_links_a_release_awaiting_review_with_the_page_query(tmp_path, capsys, monkeypatch) -> None:
-    """The review row's page link carries the scenario and the token, so it opens from a browser as the wait's."""
+    """The review row's page link is the one the service lists, with the scenario and the page key, so it opens
+    from a browser as the wait's."""
     from reef.harness.client.wrapper import doctor
 
     pending = _step_row("rel-2222-pending", {"selected": True}, pending=True)

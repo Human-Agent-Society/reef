@@ -8,7 +8,7 @@ import hashlib
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from reef.service.auth import page_key_for_digest, page_key_of
+from reef.service.auth import page_key_for_digest, page_query
 
 
 def _make_client(tokens, evaluation_tokens=None) -> TestClient:
@@ -20,11 +20,11 @@ def _make_client(tokens, evaluation_tokens=None) -> TestClient:
         del request
         return web.Response(text="ok")
 
-    async def _page_key(request: web.Request) -> web.Response:
-        return web.Response(text=str(page_key_of(request, "mine")))
+    async def _page_query(request: web.Request) -> web.Response:
+        return web.Response(text=page_query(request, "mine"))
 
     app.router.add_get("/protected", _ok)
-    app.router.add_get("/page-key", _page_key)
+    app.router.add_get("/page-query", _page_query)
     app.router.add_get("/healthz", _ok)
     # The two harness pages a browser opens by a link, and their neighbours that are no page.
     app.router.add_get("/reef/harness/requests/{record_id}/page", _ok)
@@ -154,46 +154,22 @@ def test_healthz_reachable_without_credentials() -> None:
     asyncio.run(run())
 
 
-def test_the_two_pages_accept_the_token_as_a_query_parameter() -> None:
+def test_the_token_is_never_read_from_a_query() -> None:
+    """The token belongs in a header: a page link carries a page key instead, so ``?token=`` opens nothing, not
+    even the two pages, and a header still decides a page request that carries one."""
+
     async def run() -> None:
         client = _make_client("secret")
         async with client:
-            for path in ("/reef/harness/requests/3f1c2a9d0b7e/page", "/reef/harness/releases/3/page"):
-                resp = await client.get(path, params={"token": "secret"})
-                assert resp.status == 200, path
-                resp = await client.get(path, params={"token": "nope"})
-                assert resp.status == 401, path
-                resp = await client.get(path, params={"token": ""})
-                assert resp.status == 401, path
-                resp = await client.get(path)
-                assert resp.status == 401, path
-
-    asyncio.run(run())
-
-
-def test_the_query_token_is_refused_off_the_two_pages() -> None:
-    async def run() -> None:
-        client = _make_client("secret")
-        async with client:
-            for path in ("/protected", "/reef/harness/releases", "/reef/harness/releases/3/records"):
+            for path in (
+                "/reef/harness/requests/3f1c2a9d0b7e/page",
+                "/reef/harness/releases/3/page",
+                "/protected",
+                "/reef/harness/releases",
+            ):
                 resp = await client.get(path, params={"token": "secret"})
                 assert resp.status == 401, path
-            # The page path with another method is no page a browser opens.
-            resp = await client.post("/reef/harness/requests/3f1c2a9d0b7e/page", params={"token": "secret"})
-            assert resp.status == 401
-
-    asyncio.run(run())
-
-
-def test_the_authorization_header_wins_over_the_query_token() -> None:
-    async def run() -> None:
-        client = _make_client("secret")
-        async with client:
             path = "/reef/harness/releases/3/page"
-            resp = await client.get(path, params={"token": "secret"}, headers={"Authorization": "Bearer nope"})
-            assert resp.status == 401
-            resp = await client.get(path, params={"token": "secret"}, headers={"Authorization": "Basic secret"})
-            assert resp.status == 401
             resp = await client.get(path, params={"token": "nope"}, headers={"Authorization": "Bearer secret"})
             assert resp.status == 200
 
@@ -242,20 +218,21 @@ def test_a_page_key_opens_the_two_pages_of_its_scenario_and_nothing_else() -> No
     asyncio.run(run())
 
 
-def test_the_page_key_is_derived_from_the_service_token_the_request_presented() -> None:
-    """A route hands out the page key of the token that opened it, by the Bearer header or x-api-key; an evaluation
-    token, which opens no page, gets none, and with authentication off there is none to hand out."""
-    expected = page_key_for_digest(hashlib.sha256(b"secret").digest(), "mine")
+def test_a_page_query_carries_the_key_of_the_service_token_the_request_presented() -> None:
+    """A route hands out page links whose query carries the page key of the token that opened it, by the Bearer
+    header or x-api-key; an evaluation token, which opens no page, gets none, and with authentication off the query
+    names the scenario alone."""
+    expected = "scenario=mine&key=" + page_key_for_digest(hashlib.sha256(b"secret").digest(), "mine")
 
     async def run() -> None:
         client = _make_client(["secret"], evaluation_tokens=["eval"])
         async with client:
             for headers in ({"Authorization": "Bearer secret"}, {"x-api-key": "secret"}):
-                resp = await client.get("/page-key", headers=headers)
+                resp = await client.get("/page-query", headers=headers)
                 assert resp.status == 200 and await resp.text() == expected
-            assert (await client.get("/page-key", headers={"Authorization": "Bearer eval"})).status == 401
+            assert (await client.get("/page-query", headers={"Authorization": "Bearer eval"})).status == 401
         client = _make_client(None)
         async with client:
-            assert await (await client.get("/page-key")).text() == "None"
+            assert await (await client.get("/page-query")).text() == "scenario=mine"
 
     asyncio.run(run())

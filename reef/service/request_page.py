@@ -284,7 +284,7 @@ def result_html(
     failure = notes.get("failure") if isinstance(notes, Mapping) else None
     if isinstance(failure, str) and failure.strip():
         parts.append(f'<div class="failure"><h3>Proposer failure</h3><p>{escape(failure)}</p></div>')
-    # Carry the scenario and authentication to the version page without displaying the token.
+    # Carry the scenario and the page key to the version page.
     href = step_href(step, link_query)
     release_id = row.get("release_id")
     requires = [item["name"] for item in required_by(rows, release_id if isinstance(release_id, str) else None)]

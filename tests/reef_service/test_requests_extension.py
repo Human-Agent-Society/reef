@@ -41,7 +41,23 @@ pytestmark = pytest.mark.skipif(shutil.which("node") is None, reason="node not i
 
 #: The page key the service hands out with a filed request and the catalog, in place of the token.
 PAGE_KEY = "k3y-from-the-service"
-ACCEPTED = {"agent_record_id": "q-1", "scenario": "code-repair", "request_type": "train", "page_key": PAGE_KEY}
+ACCEPTED = {
+    "agent_record_id": "q-1",
+    "scenario": "code-repair",
+    "request_type": "train",
+    "page_path": f"/reef/harness/requests/q-1/page?scenario=code-repair&key={PAGE_KEY}",
+}
+
+
+def _listed(catalog: dict) -> dict:
+    """``catalog`` as the service answers it: each row with its step page's path, the page key in its query."""
+    rows = [
+        {**row, "page_path": f"/reef/harness/releases/{step}/page?scenario=code-repair&key={PAGE_KEY}"}
+        for step, row in enumerate(catalog["releases"])
+    ]
+    return {**catalog, "releases": rows}
+
+
 # One runner for every case: it loads the asset with a stub pi, a stub ctx and a stub fetch, runs the command,
 # tool or event TEST_STEP names (TEST_REPEAT times), waits TEST_WAIT_MS for the watch, and prints what the
 # extension registered and every call it made. TEST_ARGS_2 is what a second TEST_REPEAT run passes instead of
@@ -445,7 +461,6 @@ def test_the_command_falls_back_to_the_release_file_beside_the_agent_dir(tmp_pat
 LONG_TEXT = "text me when you are blocked, and say what you tried before you stopped"
 RELEASES = {
     "scenario": "code-repair",
-    "page_key": PAGE_KEY,
     "releases": [
         {"release_id": "rel-0000-creation", "parent_release_id": None, "operation": "creation", "pending": False},
         {
@@ -490,6 +505,7 @@ RELEASES = {
         },
     ],
 }
+RELEASES = _listed(RELEASES)
 CATALOG = {"GET /reef/harness/releases": {"status": 200, "body": RELEASES}}
 PROMOTED = {"POST /reef/scenarios/code-repair/promote": {"status": 200, "body": {"release_id": "rel-4444-promote"}}}
 
@@ -534,7 +550,7 @@ def test_versions_lists_aligned_columns_with_requests_below_each_row(tmp_path: P
 def test_versions_keeps_multiline_requests_out_of_columns(tmp_path: Path, headless: str) -> None:
     rows = [{"release_id": f"release-{step}", "operation": "creation"} for step in range(11)]
     rows[9]["metrics"] = {"training_request": {"text": "  支持复制图片\n\n Clarification...\t完成  "}}
-    catalog = {"GET /reef/harness/releases": {"status": 200, "body": {"releases": rows, "page_key": PAGE_KEY}}}
+    catalog = {"GET /reef/harness/releases": {"status": 200, "body": _listed({"releases": rows})}}
     out = _versions(tmp_path, _install_root(tmp_path), catalog, TEST_HEADLESS=headless)
     (notice,) = _notices(out)
     assert notice["message"].splitlines()[-7:-4] == [
@@ -661,7 +677,6 @@ def test_versions_refuses_a_missing_step_and_bad_arguments_with_a_notice(tmp_pat
 # The catalog as the service reports it: its current flag sits on the newest row, here a pending win.
 NEWEST_PENDING = {
     "scenario": "code-repair",
-    "page_key": PAGE_KEY,
     "releases": [
         {"release_id": "rel-0000-creation", "parent_release_id": None, "operation": "creation", "pending": False},
         {
@@ -698,6 +713,7 @@ NEWEST_PENDING = {
         },
     ],
 }
+NEWEST_PENDING = _listed(NEWEST_PENDING)
 # The same catalog after a person promoted the pending win: the promote row names it as its target.
 PROMOTE_ROW = {
     "release_id": "rel-5555-promote",
@@ -709,9 +725,9 @@ PROMOTE_ROW = {
 }
 AFTER_PROMOTE = {
     "scenario": "code-repair",
-    "page_key": PAGE_KEY,
     "releases": [*NEWEST_PENDING["releases"][:4], {**NEWEST_PENDING["releases"][4], "current": False}, PROMOTE_ROW],
 }
+AFTER_PROMOTE = _listed(AFTER_PROMOTE)
 
 
 def test_versions_marks_the_served_head_current_and_never_the_pending_row(tmp_path: Path) -> None:
@@ -1197,7 +1213,7 @@ def _catalog_with(row: dict[str, Any]) -> dict[str, Any]:
         "POST /reef/train": {"status": 200, "body": ACCEPTED},
         "GET /reef/harness/releases": {
             "status": 200,
-            "body": {"scenario": "code-repair", "releases": [CREATION_ROW, row], "page_key": PAGE_KEY},
+            "body": _listed({"scenario": "code-repair", "releases": [CREATION_ROW, row]}),
         },
     }
 
@@ -1208,7 +1224,7 @@ WAITING = {
     "POST /reef/train": {"status": 200, "body": ACCEPTED},
     "GET /reef/harness/releases": {
         "status": 200,
-        "body": {"scenario": "code-repair", "releases": [CREATION_ROW], "page_key": PAGE_KEY},
+        "body": _listed({"scenario": "code-repair", "releases": [CREATION_ROW]}),
     },
 }
 
@@ -2077,7 +2093,7 @@ def test_session_start_drops_a_stored_request_the_service_no_longer_knows(tmp_pa
     answers = {
         "GET /reef/harness/releases": {
             "status": 200,
-            "body": {"scenario": "code-repair", "releases": [CREATION_ROW], "page_key": PAGE_KEY},
+            "body": _listed({"scenario": "code-repair", "releases": [CREATION_ROW]}),
         },
         "GET /reef/scenarios/code-repair/records/q-9": {"status": 404, "body": {"error": "no record"}},
     }

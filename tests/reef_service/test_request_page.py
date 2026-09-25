@@ -2,7 +2,7 @@
 
 ``GET /reef/harness/requests/{record_id}/page`` renders it from the request's
 agent record, the catalog and the running step's progress, and a browser opens
-it by a link that carries the scenario and the token as query parameters. The
+it by a link that carries the scenario and a page key as query parameters. The
 live chain here runs in ``training_mode: manual`` with a proposer that holds
 its step open until the test has read the page mid-step.
 """
@@ -10,11 +10,13 @@ its step open until the test has read the page mid-step.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import re
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
+from urllib.parse import urlencode
 
 import pytest
 from aiohttp.test_utils import TestClient, TestServer
@@ -22,6 +24,7 @@ from reef_service.test_harness_proposals import _dispatcher, _recipe
 
 from reef.core import AgentRecord, RequestType
 from reef.service.app import create_app
+from reef.service.auth import page_key_for_digest
 from reef.service.release_page import build_release_page
 from reef.service.request_page import (
     MAX_ACTIVITY_SHOWN,
@@ -40,7 +43,9 @@ TEXT = "text me when the run is blocked"
 SESSION = "3f1c2a9d0b7e"
 MARKER = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 SCENARIO = "agents"
-QUERY = {"scenario": SCENARIO, "token": "secret"}
+#: What a page link the service hands out carries for the token "secret": the scenario and its page key.
+KEY = page_key_for_digest(hashlib.sha256(b"secret").digest(), SCENARIO)
+QUERY = {"scenario": SCENARIO, "key": KEY}
 
 
 def _record(text: str = TEXT, requires: list | None = None) -> dict:
@@ -102,7 +107,7 @@ def test_the_logo_leads_to_the_served_head_the_request_is_asked_against() -> Non
     """The top bar is navigable on both pages, and only ever to a page route a browser can open."""
     rows = [CREATION, _row(_answered(selected=True, mutation=MUTATION))]
     page = build_request_page(_record(), rows, link_query=QUERY, now=1_100.0)
-    head = "/reef/harness/releases/1/page?scenario=agents&amp;token=secret"
+    head = f"/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}"
     assert f'<a class="brand" href="{head}" aria-label="Harness home">' in page
     assert f'<a href="{head}">Harness</a>' in page and "<b>Requests</b>" in page
     for href in re.findall(r'href="([^"]+)"', page):
@@ -189,7 +194,7 @@ def test_a_settled_selected_request_carries_the_result_the_mutation_and_the_link
         in selection_result
     )
     assert '<dt>Release</dt><dd class="id">rel-1</dd>' in selection_result
-    assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View v1' in selection_result
+    assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in selection_result
     assert "<h3>Error</h3>" not in selection_result and "Proposer failure" not in selection_result
     changed = _section(page, "What changed")
     assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in changed
@@ -469,7 +474,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_
     page = build_request_page(
         _record(text=text, requires=requires),
         [CREATION, row],
-        link_query={"scenario": "a b", "token": "t&<"},
+        link_query={"scenario": "a b", "key": "k&<"},
         now=1_100.0,
     )
     page.encode("ascii")
@@ -482,7 +487,7 @@ def test_the_page_module_is_ascii_and_the_builder_escapes_the_request_the_notes_
     assert '<tr><td>&lt;x&gt;</td><td>service</td><td class="id"></td><td>Sign in to &lt;x&gt;</td></tr>' in request
     assert "Needs from your machine" not in build_request_page(_record(text=text), [CREATION], now=1_100.0)
     assert "&lt;b&gt;failed&lt;/b&gt;" in page and "<li>&lt;i&gt;off&lt;/i&gt;</li>" in page
-    assert 'href="/reef/harness/releases/1/page?scenario=a+b&amp;token=t%26%3C"' in page
+    assert 'href="/reef/harness/releases/1/page?scenario=a+b&amp;key=k%26%3C"' in page
     assert '<meta name="referrer" content="no-referrer">' in page
     queued = build_request_page(_record(text=text), [CREATION], now=1_100.0)
     queued.encode("ascii")
@@ -556,14 +561,16 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             assert response.status == 200, await response.text()
             answer = await response.json()
             record_id = answer["agent_record_id"]
-            # The service hands out the page key its links carry; the catalog read hands out the same one.
-            filed_key = answer["page_key"]
-            catalog = await (await client.get("/reef/harness/releases", headers=headers)).json()
-            assert catalog["page_key"] == filed_key and "secret" not in filed_key
             link = f"/reef/harness/requests/{record_id}/page"
+            # The service hands out the links a browser opens: the scenario and a page key, never the token.
+            assert answer["page_path"] == f"{link}?{urlencode(QUERY)}"
+            catalog = await (await client.get("/reef/harness/releases", headers=headers)).json()
+            assert [row["page_path"] for row in catalog["releases"]] == [
+                f"/reef/harness/releases/0/page?{urlencode(QUERY)}"
+            ]
             assert await asyncio.to_thread(entered.wait, 10)
 
-            # The link a browser opens: no header, the scenario and the token in the query.
+            # The link a browser opens: no header, the scenario and the page key in the query.
             response = await client.get(link, params=QUERY)
             page = await response.text()
             assert response.status == 200 and response.headers["content-type"].startswith("text/html"), page
@@ -584,28 +591,23 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             assert progress["request_id"] == record_id
             assert progress["meaning"] == STATE_WORDS["proposing"]
             assert progress["activity"] == []  # the holding proposer has called no model
-            # A JSON route reads the headers alone: the page's query token is refused here.
+            # A JSON route reads the headers alone: the page's key is refused here.
             assert (await client.get(progress_route, params=QUERY)).status == 401
             assert (await client.get("/reef/harness/requests/nope/progress", headers=headers)).status == 404
 
-            # The version page opens the same way; the wrong token, no token or a token elsewhere does not.
+            # The version page opens the same way; the wrong key, no key, a key elsewhere or the token in the query
+            # does not.
             response = await client.get("/reef/harness/releases/0/page", params=QUERY)
             assert response.status == 200 and "<title>Harness v0</title>" in await response.text()
             # The step the request is running has no row yet: its page says so and links the request, not a 404.
             response = await client.get("/reef/harness/releases/1/page", params=QUERY)
             running = await response.text()
             assert response.status == 200 and "This step is running" in running and REFRESH in running
-            assert f'href="{link}?scenario=agents&amp;token=secret">Follow the request' in running
-            # The page key the service handed out opens both pages of this scenario, and their links carry it forward.
-            keyed = {"scenario": SCENARIO, "key": filed_key}
-            response = await client.get("/reef/harness/releases/1/page", params=keyed)
-            assert response.status == 200
-            assert f'href="{link}?scenario=agents&amp;key={keyed["key"]}">Follow the request' in await response.text()
-            assert (await client.get(link, params=keyed)).status == 200
-            assert (await client.get(progress_route, params=keyed)).status == 401
+            assert f'href="{link}?scenario=agents&amp;key={KEY}">Follow the request' in running
             assert (await client.get("/reef/harness/releases/2/page", params=QUERY)).status == 404
-            response = await client.get(link, params={**QUERY, "token": "nope"})
+            response = await client.get(link, params={**QUERY, "key": "nope"})
             assert response.status == 401 and await response.text() == "invalid service token"
+            assert (await client.get(link, params={"scenario": SCENARIO, "token": "secret"})).status == 401
             response = await client.get(link, params={"scenario": SCENARIO})
             assert response.status == 401
             response = await client.get("/reef/harness/releases", params=QUERY)
@@ -613,7 +615,7 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
             # The header wins when present, and without a scenario from anywhere the page is a 400.
             response = await client.get(link, params=QUERY, headers={"Authorization": "Bearer nope"})
             assert response.status == 401
-            response = await client.get(link, params={"token": "secret"})
+            response = await client.get(link, headers={"Authorization": "Bearer secret"})
             assert response.status == 400
             # The headers keep working, and win over a query scenario.
             response = await client.get(link, headers=headers, params={"scenario": "other"})
@@ -643,7 +645,7 @@ def test_the_page_follows_a_filed_request_from_proposing_to_its_result_by_a_brow
                 assert '<span class="selected">Published</span>' in page
                 assert "Published as release " in page and "/versions v1 install" in page
                 assert '<span class="tag operation-create">create</span><span class="node-id">r1</span>' in page
-            assert 'href="/reef/harness/releases/1/page?scenario=agents&amp;token=secret">View v1' in page
+            assert f'href="/reef/harness/releases/1/page?scenario=agents&amp;key={KEY}">View v1' in page
 
             # An unknown id, and a record that is no training instruction, are 404s naming the id.
             response = await client.get("/reef/harness/requests/nope/page", params=QUERY)
