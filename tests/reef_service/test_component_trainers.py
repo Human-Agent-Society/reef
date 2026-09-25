@@ -2094,6 +2094,35 @@ def test_adopted_checkpoint_is_attributed_to_the_trainer_that_made_it(
     assert scenario.last_commit_for(WEIGHTS) is None
 
 
+@dataclass(frozen=True)
+class _OneTrainerRecipe(_TwoTrainerRecipe):
+    """The harness trainer alone, serving one component: the shape of every shipped recipe."""
+
+    def build_surface(self, scenario: str) -> Surface:
+        return Surface(components={HARNESS: ComponentSurface(files=TextFileTree())})
+
+
+@pytest.mark.unit
+def test_a_lone_trainer_names_no_component_and_no_base_release_on_record(
+    tmp_path: Path, dispatchers: _Dispatchers
+) -> None:
+    """A scenario of one trainer writes what it wrote before components: its commit record, the checkpoint's
+    scenario metadata and its drop receipts name neither a component nor the release its batch was reserved on."""
+    recipe = _OneTrainerRecipe(backends={HARNESS: _ComponentBackend(HARNESS, tmp_path / "candidates")})
+    dispatcher, _ = dispatchers.open(recipe=recipe, backend_factory=_seeded_repository(tmp_path, (HARNESS,)))
+    scenario = _scenario(dispatcher, 1, 2)
+    assert _commit_step(scenario, HARNESS) is not None
+    record = scenario.store.history()[-1]
+    assert (record.component, record.base_release_id, record.components) == (None, None, None)
+    checkpoint = scenario.repository.materialize(scenario.current_artifact_ref()).metadata[SCENARIO_METADATA_KEY]
+    assert isinstance(checkpoint, Mapping)
+    assert "component" not in checkpoint and "base_release_id" not in checkpoint
+    assert scenario.prepare_training_step(HARNESS) is not None
+    scenario.reject_pending(component=HARNESS)
+    [receipt] = scenario.records.consumption_receipts("agent")
+    assert "component" not in receipt["metadata"]
+
+
 @pytest.mark.unit
 def test_dispatcher_runs_one_worker_per_component(dispatchers: _Dispatchers) -> None:
     dispatcher, _ = dispatchers.open()

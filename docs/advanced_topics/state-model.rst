@@ -132,8 +132,10 @@ durable store, the order is:
        leave serving and checkpoint heads in place.
 
 Every trainer is bound to a release component (``records`` when the recipe
-serves none), and every commit record names the ``component`` that made it
-and the ``base_release_id`` its batch was reserved against. A scenario whose
+serves none). With several trainers, every commit record names the
+``component`` that made it and the ``base_release_id`` its batch was reserved
+against; a scenario of one trainer names neither, so its records, checkpoint
+metadata and drop receipts keep the format they had before components. A scenario whose
 recipe builds one trainer per component runs those trainers as separate
 workers that meet at this commit boundary, where the scenario lock
 serializes their commits. Local workers of one scenario take turns for a

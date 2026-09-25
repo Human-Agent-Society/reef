@@ -202,6 +202,15 @@ class ScenarioCommitter:
     def trainer_for(self, component: str | None) -> Trainer:
         return self.bound_trainer(component).trainer
 
+    def component_on_record(self, component: str | None) -> str | None:
+        """The trainer a record or receipt names: ``component`` with several, none with one.
+
+        A scenario of one trainer writes its commit records, release metadata,
+        consumption receipts and tracking as it did before components, so
+        every write path names no component and no base release for it.
+        """
+        return component if len(self.trainers) > 1 else None
+
     def own_record(self, record: CommitRecord, component: str | None) -> bool:
         """Whether ``component``'s trainer made ``record``; a record naming no trainer belongs to the only one."""
         if record.component == component:
@@ -212,7 +221,7 @@ class ScenarioCommitter:
         """Drop ``component``'s reserved batch; with several trainers its consumption receipt names the component."""
         with self._lock:
             bound = self.bound_trainer(component)
-            bound.trainer.reject_pending(metrics, component=bound.component if len(self.trainers) > 1 else None)
+            bound.trainer.reject_pending(metrics, component=self.component_on_record(bound.component))
 
     def last_record_for(self, component: str | None) -> CommitRecord | None:
         """The newest durable commit made by ``component``'s trainer."""
@@ -758,8 +767,8 @@ class ScenarioCommitter:
                     ),
                     metrics=prepared.metrics,
                     training_job_id=prepared.training_job_id,
-                    component=component,
-                    base_release_id=prepared.base_release_id,
+                    component=self.component_on_record(component),
+                    base_release_id=self.base_release_on_record(prepared),
                 )
                 published_ref = artifacts.publish(
                     local_artifact,
@@ -1020,11 +1029,15 @@ class ScenarioCommitter:
             rollback_target_release_id=rollback_target_release_id,
             metrics=prepared.metrics,
             training_job_id=prepared.training_job_id,
-            component=component,
-            base_release_id=prepared.base_release_id if operation == "training" else None,
+            component=self.component_on_record(component),
+            base_release_id=self.base_release_on_record(prepared) if operation == "training" else None,
             components=components,
         )
         return self._store.commit_step(expected_step=self._step, commit=record)
+
+    def base_release_on_record(self, prepared: PreparedCommit) -> str | None:
+        """The release a batch was reserved against, recorded only where another trainer can replace it."""
+        return prepared.base_release_id if len(self.trainers) > 1 else None
 
     def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
         return self._releases.metrics_for_version(release_id)

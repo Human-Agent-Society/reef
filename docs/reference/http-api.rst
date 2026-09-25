@@ -1096,10 +1096,11 @@ A scenario whose recipe runs one trainer per release component adds a
 the ``base_release_id`` that step was prepared against), and
 ``stale_refusals_total``, how many of its results were refused because
 another trainer's commit had replaced their base since this process
-started. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. Every new training row from
+started. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
 ``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
 trainer that made it, and ``base_release_id``, the release its batch was
-reserved against; rows written before Reef named components carry neither.
+reserved against; a scenario of one trainer, and rows written before Reef
+named components, carry neither.
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
