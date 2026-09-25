@@ -101,5 +101,6 @@ so interrupted runs must not be presented as exact continuations of a paper run.
 SDFT retains its previous teacher-selected, renormalized top-K and sequence
 importance-weight defaults.
 
-See `the reproduction guide <../../../recipes/sdpo/examples/paper/README.md>`_
-for the pinned reference check and experiment protocol.
+`SDPO on an arithmetic grid <../../../recipes/sdpo/examples/arithmetic_grid/README.md>`_
+is the smallest complete run of the recipe. The paper reproduction, SciKnowEval
+Chemistry on OLMo-3-7B-Instruct, is Reef issue #428.

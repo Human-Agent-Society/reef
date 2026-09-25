@@ -1,11 +1,17 @@
-# Synthetic two-step training-cycle smoke test on 4 GPUs; not paper hyperparameters.
+# SDPO on a synthetic arithmetic grid, for run.sh (recipes/sdpo/examples/arithmetic_grid).
+#
+# Qwen3-0.6B on four GPUs, the actor (tensor parallel 4) colocated with four
+# rollout engines. The grid is two questions by two attempts and trains as one
+# optimizer step, so these are the recipe's contracts at the smallest size that
+# exercises them; they are not the paper's hyperparameters. run.sh mints
+# REEF_TOKEN per run directory.
 schema-version: 2
 reef:
   host: 127.0.0.1
   port: 28902
-  token: reef-local-smoke
+  token: ${REEF_TOKEN}
   ready-timeout: 1800
-  run-dir: /tmp/reef-sdpo-smoke/run
+  run-dir: /tmp/reef-sdpo-run/run
 inference:
   model-path: /tmp/models/Qwen3-0.6B
   timeout-s: 1200
@@ -37,7 +43,7 @@ training:
   ready-timeout: 1800
   timeout-s: 1800
   config:
-    checkpoint_dir: /tmp/reef-sdpo-smoke/checkpoints
+    checkpoint_dir: /tmp/reef-sdpo-run/checkpoints
     global_batch_size: 4
   options:
     megatron-to-hf-mode: bridge
@@ -89,10 +95,10 @@ training:
     n-samples-per-prompt: "1"
     rollout-temperature: "1.0"
 storage:
-  artifact-repository: /tmp/reef-sdpo-smoke/artifacts.git
-  artifact-work-dir: /tmp/reef-sdpo-smoke/artifact-work
-  artifact-cache-dir: /tmp/reef-sdpo-smoke/artifact-cache
-  agent-record-dir: /tmp/reef-sdpo-smoke/agent-record
+  artifact-repository: /tmp/reef-sdpo-run/artifacts.git
+  artifact-work-dir: /tmp/reef-sdpo-run/artifact-work
+  artifact-cache-dir: /tmp/reef-sdpo-run/artifact-cache
+  agent-record-dir: /tmp/reef-sdpo-run/agent-record
 execution:
   training: ray
   rollout: ray
