@@ -34,12 +34,18 @@ from reef.service.install_script import TOKEN_PLACEHOLDER, render_install_script
 from reef.service.release_page import before_release_id, build_release_page, result_of
 from reef.service.request_page import STATE_WORDS, build_request_page, request_state, settled_step
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
-from reef.surface.base import InferenceLease, LeasingInferenceHooks, Surface
+from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
+from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
+
+
+def request_family(record: bool) -> str:
+    """The operation metrics family of a call: served traffic keeps a record, an evaluation call does not."""
+    return "serve" if record else "evaluate"
 
 
 def page_headers(headers: Mapping[str, str], query: Mapping[str, str]) -> dict[str, str]:
@@ -117,6 +123,8 @@ class PendingInference:
     deferred_prepared: PreparedInference | None = None
     path: str | None = None
     measurement: OperationMeasurement | None = None
+    #: False for an evaluation call: served like any other, kept by nobody.
+    record: bool = True
 
 
 @dataclass(frozen=True)
@@ -125,6 +133,9 @@ class PreparedInference:
 
     parsed: RequestHeaders
     artifact: Artifact
+    #: What the handler serves: the runtime-loaded component's view of the
+    #: release, or the release itself when nothing is loaded or it is flat.
+    served: Artifact
     handler: InferenceHandler
     surface: Surface
     #: True when a training runtime serves the scenario: the recorded payload
@@ -134,6 +145,9 @@ class PreparedInference:
     #: Releases serving state the surface held for this attempt (an adapter
     #: lease); called exactly once when the attempt ends.
     lease: InferenceLease | None = None
+    #: The request hooks this attempt runs: the surface's, or on an evaluation
+    #: call every component's but the one the episode evaluates.
+    hooks: InferenceHooks | None = None
 
     def release(self) -> None:
         try:
@@ -163,6 +177,9 @@ class RequestService:
     def __init__(self, dispatcher: Dispatcher, *, retry_policy: InferenceRetryPolicy | None = None) -> None:
         self._dispatcher = dispatcher
         self._retry_policy = retry_policy or InferenceRetryPolicy()
+        # The harness head of a scenario with several components, by scenario step and served release: it is
+        # read on every inference answer and changes only when a commit lands.
+        self.harness_heads: dict[str, tuple[int, str, str]] = {}
 
     @property
     def dispatcher(self) -> Dispatcher:
@@ -244,9 +261,15 @@ class RequestService:
         payload: dict[str, Any],
         path: str,
         handler: InferenceHandler | None = None,
-    ) -> tuple[dict[str, Any], AgentRecord]:
-        operations = await self.inference_operations(headers)
-        measurement = operations.start("serve/request")
+        *,
+        record: bool = True,
+        evaluated: str | None = None,
+    ) -> tuple[dict[str, Any], AgentRecord | None]:
+        """Serve one inference; ``record`` False serves it without keeping a record, as an evaluation call of the
+        ``evaluated`` component (see ``Surface.inference_for_evaluation``)."""
+        operations = await self.inference_operations(headers, record=record)
+        # Evaluation traffic is measured apart, so a step's episodes do not read as served requests.
+        measurement = operations.start(f"{request_family(record)}/request")
         succeeded = False
         try:
             original_payload = dict(payload)
@@ -258,8 +281,10 @@ class RequestService:
             while True:
                 attempt += 1
                 if attempt > 1:
-                    operations.increment("serve/retries_total")
-                prepared, payload = await self._prepare_request(headers, original_payload, path, handler)
+                    operations.increment(f"{request_family(record)}/retries_total")
+                prepared, payload = await self._prepare_request(
+                    headers, original_payload, path, handler, record=record, evaluated=evaluated
+                )
                 try:
                     if prepared.durable:
                         payload = {**payload, "return_meta_info": True}
@@ -268,7 +293,7 @@ class RequestService:
                     started = loop.time()
                     try:
                         response = await asyncio.wait_for(
-                            prepared.handler.inference(prepared.artifact, path, payload),
+                            prepared.handler.inference(prepared.served, path, payload),
                             timeout=remaining_budget,
                         )
                     except TimeoutError as exc:
@@ -285,15 +310,17 @@ class RequestService:
                     if not interrupted:
                         # A completed response with invalid runtime-load-ID information is a
                         # handler contract error, not a retryable inference abort.
-                        if prepared.surface.inference is not None:
-                            prepared.surface.inference.verify_response(prepared.artifact, path, response)
+                        if prepared.hooks is not None:
+                            prepared.hooks.verify_response(prepared.artifact, path, response)
                         self._stamp_durable_runtime_load_id(prepared, payload, response)
-                        item = await asyncio.to_thread(
-                            self._accept,
-                            prepared.parsed,
-                            {**payload, "response": response},
-                            artifact_ref=prepared.artifact.ref,
-                        )
+                        item = None
+                        if record:
+                            item = await asyncio.to_thread(
+                                self._accept,
+                                prepared.parsed,
+                                {**payload, "response": response},
+                                artifact_ref=prepared.artifact.ref,
+                            )
                         succeeded = True
                         return client_inference_response(response), item
                     # A handler ``abort`` finish reason makes the attempt unusable.
@@ -315,10 +342,10 @@ class RequestService:
                 remaining_budget -= sleep_for
                 retry_delay = min(retry_delay * 2, self._retry_policy.max_s)
         except RuntimeLoadMismatch:
-            operations.increment("serve/version_mismatch_total")
+            operations.increment(f"{request_family(record)}/version_mismatch_total")
             raise
         except InferenceRetryTimeout:
-            operations.increment("serve/timeouts_total")
+            operations.increment(f"{request_family(record)}/timeouts_total")
             raise
         finally:
             measurement.finish(succeeded=succeeded)
@@ -329,20 +356,25 @@ class RequestService:
         payload: dict[str, Any],
         path: str,
         handler: InferenceHandler | None = None,
+        *,
+        record: bool = True,
+        evaluated: str | None = None,
     ) -> tuple[InferenceStream, PendingInference]:
-        operations = await self.inference_operations(headers)
-        measurement = operations.start("serve/request")
+        operations = await self.inference_operations(headers, record=record)
+        measurement = operations.start(f"{request_family(record)}/request")
         try:
-            prepared, payload = await self._prepare_request(headers, payload, path, handler)
+            prepared, payload = await self._prepare_request(
+                headers, payload, path, handler, record=record, evaluated=evaluated
+            )
             admission = prepared.admission
             lease = prepared.lease
             try:
-                stream = await prepared.handler.inference_stream(prepared.artifact, path, payload)
+                stream = await prepared.handler.inference_stream(prepared.served, path, payload)
                 record_response = stream.record_response
                 record_response_pending = stream.record_response_pending
                 if record_response is not None:
-                    if prepared.surface.inference is not None:
-                        prepared.surface.inference.verify_response(prepared.artifact, path, record_response)
+                    if prepared.hooks is not None:
+                        prepared.hooks.verify_response(prepared.artifact, path, record_response)
                     self._stamp_durable_runtime_load_id(prepared, payload, record_response)
                     # Buffered streaming backends have already finished model
                     # execution. Downstream client backpressure must not leave a
@@ -382,12 +414,13 @@ class RequestService:
                 lease=lease,
                 deferred_prepared=prepared if record_response_pending else None,
                 path=path if record_response_pending else None,
+                record=record,
             )
             return stream, pending
         except BaseException as exc:
             measurement.finish(succeeded=False)
             if isinstance(exc, RuntimeLoadMismatch):
-                operations.increment("serve/version_mismatch_total")
+                operations.increment(f"{request_family(record)}/version_mismatch_total")
             raise
 
     async def relay_multimodal(
@@ -421,7 +454,7 @@ class RequestService:
             if pending.deferred_prepared is not None and isinstance(response.get("training"), Mapping):
                 if pending.path is None:
                     raise ReefError("deferred inference response has no request path")
-                hooks = pending.deferred_prepared.surface.inference
+                hooks = pending.deferred_prepared.hooks
                 if hooks is not None:
                     hooks.verify_response(
                         pending.deferred_prepared.artifact,
@@ -433,9 +466,9 @@ class RequestService:
                 pending.item,
                 payload={**payload, "response": dict(response)},
             )
-            stored = self._dispatcher.accept_record(
-                item,
-                release_id=pending.release_id,
+            # An evaluation call is served like any other and kept by nobody.
+            stored = (
+                item if not pending.record else self._dispatcher.accept_record(item, release_id=pending.release_id)
             )
             delivery = response.get("stream_delivery", response)
             succeeded = (
@@ -444,7 +477,7 @@ class RequestService:
             return stored
         except Exception as exc:
             if isinstance(exc, RuntimeLoadMismatch) and pending.measurement is not None:
-                pending.measurement.metrics.increment("serve/version_mismatch_total")
+                pending.measurement.metrics.increment(f"{request_family(pending.record)}/version_mismatch_total")
             logger.exception(
                 "dispatcher rejected the stream record for scenario %r (record %s)",
                 pending.item.scenario,
@@ -461,17 +494,23 @@ class RequestService:
                 if pending.admission is not None:
                     pending.admission.release()
 
-    async def inference_operations(self, headers: Mapping[str, str]) -> OperationMetrics:
+    async def inference_operations(self, headers: Mapping[str, str], *, record: bool = True) -> OperationMetrics:
         """Resolve the scenario before measuring its inference request lifetime."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        scenario = await asyncio.to_thread(
-            self._dispatcher.get_or_create_scenario,
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
+        scenario = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
+        return scenario.operations
+
+    def inference_scenario(self, parsed: RequestHeaders, *, record: bool) -> Scenario:
+        """The scenario an inference serves. A recorded call may create it; an evaluation call (``record`` False)
+        reads the loaded instance only, never waiting for the scenario's lock and never creating it (see
+        ``ScenarioRegistry.get_loaded``)."""
+        if record:
+            scenario = self._dispatcher.get_or_create_scenario(parsed.scenario, release_id=parsed.release_id)
+        else:
+            scenario = self._dispatcher.loaded_scenario(parsed.scenario, release_id=parsed.release_id)
         if scenario is None:
             raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
-        return scenario.operations
+        return scenario
 
     async def _prepare_request(
         self,
@@ -479,20 +518,21 @@ class RequestService:
         payload: Mapping[str, Any],
         path: str,
         handler: InferenceHandler | None,
+        *,
+        record: bool = True,
+        evaluated: str | None = None,
     ) -> tuple[PreparedInference, dict[str, Any]]:
         """The shared first half of every inference: freeze the serving state
         (headers, scenario, artifact, handler, surface) and let the surface
-        transform the request payload."""
+        transform the request payload. ``record`` names the measurement family;
+        an evaluation call (``record`` False) runs every component's hooks but
+        the ``evaluated`` one's, whose candidate the episode runs."""
         parsed = parse_request_headers(headers, RequestType.INFERENCE)
-        initial = await asyncio.to_thread(
-            self._dispatcher.get_or_create_scenario,
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
-        if initial is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        initial = await asyncio.to_thread(self.inference_scenario, parsed, record=record)
+        if evaluated is not None and evaluated not in initial.surface.names:
+            raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
-            with initial.operations.measure("serve/admission"):
+            with initial.operations.measure(f"{request_family(record)}/admission"):
                 admission = await initial.runtime.acquire_inference()
         else:
             admission = None
@@ -500,8 +540,10 @@ class RequestService:
             # Re-resolve after admission: a queued request must freeze the head
             # committed by the weight update that released it, never the head it
             # observed before waiting.
-            prepared = await asyncio.to_thread(self._prepare_inference, parsed, handler, admission)
-            hooks = prepared.surface.inference
+            prepared = await asyncio.to_thread(
+                self._prepare_inference, parsed, handler, admission, record=record, evaluated=evaluated
+            )
+            hooks = prepared.hooks
             transformed = (
                 dict(payload)
                 if hooks is None
@@ -552,24 +594,35 @@ class RequestService:
         parsed: RequestHeaders,
         handler: InferenceHandler | None,
         admission: InferenceAdmissionHandle | None,
+        *,
+        record: bool = True,
+        evaluated: str | None = None,
     ) -> PreparedInference:
-        scenario = self._dispatcher.get_or_create_scenario(
-            parsed.scenario,
-            release_id=parsed.release_id,
-        )
-        if scenario is None:
-            raise UnknownScenario(f"unknown scenario {parsed.scenario!r}")
+        scenario = self.inference_scenario(parsed, record=record)
         selected_handler = handler if handler is not None else scenario.inference_handler
         if selected_handler is None:
             raise RecipeConfigError("the served recipe has no inference handler")
         ref = scenario.current_artifact_ref()
+        artifact = Artifact(ref, scenario.repository)
+        surface = scenario.surface
+        hooks = surface.inference if record else surface.inference_for_evaluation(evaluated)
+        # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
+        # loaded component, never a composed release whose root holds only component directories.
+        loaded_component = surface.loader_component
+        if not surface.single and (hooks is not None or loaded_component is not None):
+            # The release is frozen for the attempt: the loaded component's view and every
+            # component hook read this one materialized copy instead of materializing it again.
+            artifact = artifact.materialize()
+        served = artifact if loaded_component is None else surface.component_artifact(artifact, loaded_component)
         return PreparedInference(
             parsed=parsed,
-            artifact=Artifact(ref, scenario.repository),
+            artifact=artifact,
+            served=served,
             handler=selected_handler,
-            surface=scenario.surface,
+            surface=surface,
             durable=scenario.training_runtime is not None,
             admission=admission,
+            hooks=hooks,
         )
 
     def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
@@ -584,7 +637,12 @@ class RequestService:
         Read-only: never creates a scenario.
         """
         scenario = self._file_scenario(headers)
-        return self._harness_manifest_for_scenario(scenario, release_id)
+        return self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
+
+    @staticmethod
+    def files_trainer(scenario: Scenario) -> Trainer:
+        """The trainer evolving the component a client pulls; a flat scenario's only trainer."""
+        return scenario.trainer_for(scenario.surface.files_component)
 
     @staticmethod
     def _harness_manifest_for_scenario(
@@ -606,7 +664,7 @@ class RequestService:
                 "been published yet. The scenario's initial artifact carries no files "
                 "until the trainer publishes its first step (see docs/user-guide/evolve-your-harness)."
             )
-        return {
+        manifest = {
             "release_id": artifact.ref.release_id,
             "parent_release_id": artifact.ref.parent_release_id,
             "content_id": artifact.ref.content_id,
@@ -616,6 +674,115 @@ class RequestService:
             # The union over the chain, not this evaluation's list: a release whose request named nothing still installs an earlier extension.
             "requires": required_by(list(reversed(scenario.releases())), artifact.ref.release_id),
         }
+        components = artifact.materialize().components
+        if components is not None:
+            # The whole combination the pulled tree belongs to, by component content id.
+            manifest["components"] = components.content_ids
+        return manifest
+
+    @staticmethod
+    def harness_lineage(scenario: Scenario) -> tuple[list[dict[str, Any]], str | None]:
+        """The catalog rows a client pulls, newest first, and the head among them.
+
+        Another component's step carries the tree forward unchanged, so it is
+        no harness release: a client that compared release ids would pull the
+        same tree again and a person would be asked to install nothing. Nor
+        is a rollback or promote that restored other weights under the tree
+        served already. Each release is compared with the one served before
+        it by the content id of its files component, which its commit record
+        carries (the creation artifact's is read from the release). A row
+        that published no release (a rejected or skipped step) or was
+        recorded without a manifest counts when it names no other component.
+        The rows kept speak of listed releases only, so a client walking them
+        never meets a release that is not listed: ``parent_release_id``
+        names the previous kept release, the one the tree descends from; a
+        row that published nothing is named by the kept release it ran on;
+        and a rollback or promote whose target is not kept names the kept
+        release that target carried. The ids of the combination are kept
+        beside them as ``composed_release_id``, ``composed_parent_release_id``
+        and ``composed_rollback_target_release_id``. The head is the newest
+        kept row that is served and published a release. A flat scenario
+        lists every row and its head is the served release.
+        """
+        rows = list(scenario.releases())
+        files_component = scenario.surface.files_component
+        if scenario.surface.single or files_component is None:
+            return rows, next((str(row["release_id"]) for row in rows if not row.get("pending")), None)
+        creation = scenario.creation_components(scenario.scenario_step)
+        kept: list[dict[str, Any]] = []
+        kept_ids: set[str] = set()
+        carried_by: dict[str, str] = {}  # each release not kept, to the kept release whose tree it carried
+        previous: dict[str, Any] | None = None  # the newest older row that is served
+        previous_manifest: dict[str, Any] | None = None  # the newest older served row that names its components
+        lineage: str | None = None  # the newest kept release that is served
+        lineage_parent: str | None = None  # the parent that release lists
+        head: str | None = None
+        for row in reversed(rows):
+            if row.get("operation") == "creation" and creation is not None and "components" not in row:
+                row = {**row, "components": dict(creation)}
+            release_id = str(row["release_id"])
+            published = previous is None or previous["release_id"] != release_id
+            own = None if not published else (row.get("components") or {}).get(files_component)
+            # A step that published nothing carries no manifest; the tree it served is the last one named.
+            before = None if previous_manifest is None else previous_manifest["components"].get(files_component)
+            if own is not None and before is not None:
+                changed = own != before
+            else:
+                changed = row.get("component") in (None, files_component)
+            if changed:
+                listed = dict(row)
+                if lineage is not None and not published:
+                    # A step that published nothing reads as it does in a flat scenario: the head's release
+                    # and the head's parent.
+                    if release_id != lineage:
+                        listed["composed_release_id"] = release_id
+                        listed["release_id"] = lineage
+                    if listed.get("parent_release_id") != lineage_parent:
+                        listed["composed_parent_release_id"] = listed.get("parent_release_id")
+                        listed["parent_release_id"] = lineage_parent
+                elif lineage is not None and listed.get("parent_release_id") != lineage:
+                    listed["composed_parent_release_id"] = listed.get("parent_release_id")
+                    listed["parent_release_id"] = lineage
+                target = listed.get("rollback_target_release_id")
+                if isinstance(target, str) and target not in kept_ids and target in carried_by:
+                    listed["composed_rollback_target_release_id"] = target
+                    listed["rollback_target_release_id"] = carried_by[target]
+                kept.append(listed)
+                if row.get("pending"):
+                    kept_ids.add(release_id)
+                elif published:
+                    lineage = head = release_id
+                    lineage_parent = listed.get("parent_release_id")
+                    kept_ids.add(release_id)
+            if not row.get("pending"):
+                previous = row
+                if row.get("components"):
+                    previous_manifest = row
+            if lineage is not None and release_id not in kept_ids:
+                carried_by[release_id] = lineage
+        kept.reverse()
+        return kept, head
+
+    @classmethod
+    def harness_rows(cls, scenario: Scenario) -> list[dict[str, Any]]:
+        """The catalog rows a client pulls, newest first; see ``harness_lineage``."""
+        rows, _ = cls.harness_lineage(scenario)
+        return rows
+
+    def harness_release_id(self, scenario: Scenario) -> str:
+        """The newest served release that changed what a client pulls; a release held for review is not served."""
+        current = scenario.repository.require_current_artifact().release_id
+        if scenario.surface.single or scenario.surface.files_component is None:
+            return current
+        step = scenario.scenario_step
+        cached = self.harness_heads.get(scenario.name)
+        if cached is not None and cached[0] == step and cached[1] == current:
+            return cached[2]
+        _, head = self.harness_lineage(scenario)
+        if head is None:
+            head = current
+        self.harness_heads[scenario.name] = (step, current, head)
+        return head
 
     def harness_head(self, headers: Mapping[str, str]) -> str | None:
         """The release ``GET /reef/harness`` serves the request's scenario, or None when it serves no files."""
@@ -623,7 +790,7 @@ class RequestService:
             scenario = self._file_scenario(headers)
         except ArtifactNotFound:
             return None
-        return scenario.repository.require_current_artifact().release_id
+        return self.harness_release_id(scenario)
 
     def harness_propose(self, headers: Mapping[str, str], payload: Mapping[str, Any]) -> dict[str, Any]:
         """Admit one agent proposal against the head release's entries and hold it for the next evolve step.
@@ -636,16 +803,16 @@ class RequestService:
         """
         proposal = ProposalPayload.from_dict(payload)
         scenario = self._file_scenario(headers)
-        backend = scenario.trainer.candidate_backend
+        backend = self.files_trainer(scenario).candidate_backend
         if not isinstance(backend, ProposalValidator) or backend.proposals is None:
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} takes no proposals: the deployment's recipe is not a harness "
                 "evolution recipe with a proposal inbox"
             )
-        head = scenario.repository.require_current_artifact().release_id
+        head = self.harness_release_id(scenario)
         proposal_id = ProposalInbox.new_id()
         # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
-        if scenario.trainer.training_mode == "manual":
+        if self.files_trainer(scenario).training_mode == "manual":
             return {
                 "proposal_id": proposal_id,
                 "admitted": False,
@@ -674,23 +841,25 @@ class RequestService:
         The list side of the update channel: every committed release stays
         addressable through the manifest read's ``release_id``, and each
         training row carries the metrics of the step that published it, so an
-        update is a decision over numbers rather than a blind pull. Same
-        read-only rules as ``harness_manifest``.
+        update is a decision over numbers rather than a blind pull. A scenario
+        with several components lists the releases that changed the pulled
+        tree (see ``harness_lineage``); the others stay addressable by id.
+        Same read-only rules as ``harness_manifest``.
         """
         scenario = self._file_scenario(headers)
         return {
             "scenario": scenario.name,
-            "releases": list(reversed(scenario.releases())),
+            "releases": list(reversed(self.harness_rows(scenario))),
         }
 
     def harness_step_records(self, headers: Mapping[str, str], step: int, relative: str | None) -> dict[str, Any]:
         """Raw retained files for a catalog row; presentation belongs to the caller."""
         scenario = self._file_scenario(headers)
-        rows = list(reversed(scenario.releases()))
+        rows = list(reversed(self.harness_rows(scenario)))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no step {step}")
         directory = (rows[step].get("metrics") or {}).get("step_record")
-        backend = scenario.trainer.candidate_backend
+        backend = self.files_trainer(scenario).candidate_backend
         if not directory or not isinstance(backend, StepRecords):
             return {"status": "not_recorded", "files": []}
         if not isinstance(directory, str):
@@ -715,7 +884,7 @@ class RequestService:
         An unknown step raises ArtifactNotFound naming the range.
         """
         scenario = self._file_scenario(headers)
-        rows = list(reversed(scenario.releases()))
+        rows = list(reversed(self.harness_rows(scenario)))
         if not 0 <= step < len(rows):
             raise ArtifactNotFound(
                 f"scenario {scenario.name!r} has no step {step}: the catalog holds steps 0 to {len(rows) - 1}"
@@ -735,13 +904,13 @@ class RequestService:
                 before_files = None if tree is None else tree.read_files(artifact)
             except ArtifactError:
                 before_files = None
-        descriptor = getattr(scenario.trainer.candidate_backend, "descriptor", None)
+        backend = self.files_trainer(scenario).candidate_backend
         return build_release_page(
             step,
             rows,
             before_entries=before_entries,
             before_files=before_files,
-            node_paths=None if descriptor is None else descriptor.node_paths,
+            node_paths=None if backend is None else backend.harness_node_paths,
             link_query=link_query,
         )
 
@@ -764,10 +933,11 @@ class RequestService:
         record = self._dispatcher.read_record(scenario.name, record_id)
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
-        rows = list(reversed(scenario.releases()))
-        backend = scenario.trainer.candidate_backend
+        # The step a request settled as counts the catalog rows, the ones the release page opens.
+        rows = list(reversed(self.harness_rows(scenario)))
+        backend = self.files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = scenario.trainer.pending_batch
+        reserved = self.files_trainer(scenario).pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         return build_request_page(record, rows, progress=progress, consumed=consumed, link_query=link_query)
 
@@ -786,7 +956,7 @@ class RequestService:
         record = self._dispatcher.read_record(scenario.name, record_id)
         if record is None or record.get("request_type") != RequestType.TRAIN.value:
             raise ArtifactNotFound(f"scenario {scenario.name!r} has no harness request {record_id!r}")
-        rows = list(reversed(scenario.releases()))
+        rows = list(reversed(self.harness_rows(scenario)))
         step = settled_step(rows, record_id)
         if step is not None:
             return {
@@ -800,9 +970,9 @@ class RequestService:
                 "step_record": None,
                 "activity": [],
             }
-        backend = scenario.trainer.candidate_backend
+        backend = self.files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
-        reserved = scenario.trainer.pending_batch
+        reserved = self.files_trainer(scenario).pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
         state = request_state(record, progress, consumed)
         mine = progress if progress is not None and progress.request_id == record_id else None
@@ -829,7 +999,7 @@ class RequestService:
         """A self-contained install script over one served manifest.
 
         The manifest side is adapter-agnostic files, addressed exactly like
-        ``harness_manifest`` (head by default, any catalog release through
+        ``harness_manifest`` (the harness head by default, any release through
         ``release_id``); the named ``adapter`` contributes only its
         descriptor's install section, which the script uses to ensure the
         pinned binary through the vendor's own channel. An unknown adapter
@@ -849,7 +1019,7 @@ class RequestService:
             create_if_missing=True,
             release_id=release_id,
         )
-        manifest = self._harness_manifest_for_scenario(scenario, release_id)
+        manifest = self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
         descriptor = get_adapter(adapter)
         binding_files = self._install_binding(scenario, manifest, descriptor, headers)
         return render_install_script(
@@ -862,8 +1032,9 @@ class RequestService:
             # The install record keeps the address the binding names, for a wrapper whose binding a session changed.
             service_url=_install_service_url(headers) if binding_files else None,
             requires=manifest["requires"],
+            # The release the script names for a first install must be one the catalog lists.
             fallback_release_id=ancestor_requiring_nothing(
-                list(reversed(scenario.releases())), manifest["release_id"]
+                list(reversed(self.harness_rows(scenario))), manifest["release_id"]
             ),
         )
 

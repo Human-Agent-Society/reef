@@ -19,6 +19,7 @@ from reef.artifact.artifact import (
     ArtifactRef,
     ArtifactRepository,
 )
+from reef.artifact.composite import compose_release
 
 
 class RepositoryBackend(ArtifactRepository):
@@ -311,15 +312,31 @@ class Repository(ArtifactRepository):
         except OSError as exc:
             shutil.rmtree(destination, ignore_errors=True)
             raise ArtifactPublicationError(f"failed to stage artifact from {artifact.local_path}: {exc}") from exc
+        return self.register_staged(step, artifact, destination, parent=parent)
+
+    def stage_composed(
+        self,
+        step: int,
+        components: Mapping[str, Artifact],
+        *,
+        parent: ArtifactRef,
+    ) -> Artifact:
+        """Compose several components straight into a staged local release; one copy, not two."""
+        destination = self.local_root / self._process_id / uuid.uuid4().hex
+        composed = compose_release(components, directory=destination)
+        return self.register_staged(step, composed, destination, parent=parent)
+
+    def register_staged(self, step: int, source: Artifact, destination: Path, *, parent: ArtifactRef) -> Artifact:
+        """Record the tree staged at ``destination`` as a local release carrying ``source``'s content id and metadata."""
         staged = Artifact(
             ArtifactRef(
-                content_id=artifact.ref.content_id,
+                content_id=source.ref.content_id,
                 release_id=f"{LOCAL_RELEASE_PREFIX}{self._process_id}:{uuid.uuid4().hex}:{step}",
                 parent_release_id=parent.release_id,
             ),
             self,
             local_path=destination,
-            metadata=artifact.metadata,
+            metadata=source.metadata,
         )
         self._local_artifacts[staged.ref.release_id] = staged
         return staged

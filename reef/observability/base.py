@@ -21,6 +21,8 @@ class TrainingExperimentContext:
     run_step: int = 0
     backend: str | None = None
     backend_config: Mapping[str, Any] | None = None
+    #: The release component whose trainer made the step, when the scenario runs several trainers.
+    component: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
