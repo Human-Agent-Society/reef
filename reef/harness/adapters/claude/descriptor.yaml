@@ -20,6 +20,9 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
+# Keep interactive installs on the same pinned version as evaluation episodes.
+client_env:
+  DISABLE_AUTOUPDATER: "1"
 env:
   CLAUDE_CONFIG_DIR: "{root}/claude"
   DISABLE_AUTOUPDATER: "1"

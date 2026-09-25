@@ -28,9 +28,11 @@ from reef_service.test_reef_trainer_contracts import ExampleBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
+from reef.harness.adapters import get_adapter
 from reef.harness.client.wrapper import harness
 from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
+from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import Mutation
@@ -681,7 +683,11 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
     follows the promote to its target, so the served head lists what the pending release named."""
 
     def propose(nodes, samples, models, *, requests=()):
-        return MARKER if requests else None
+        return (
+            (MARKER, Mutation("create", "theme", {"name": "config", "config": {"data": {"theme": "light"}}}))
+            if requests
+            else None
+        )
 
     dispatcher = _seeded(tmp_path, _growing_recipe(tmp_path, propose, publish="review"))
     scenario = dispatcher.get_or_create_scenario("agents")
@@ -714,6 +720,21 @@ def test_a_promoted_release_needs_what_its_pending_release_named(tmp_path: Path)
             (row,) = [row for row in rows if row["release_id"] == promoted]
             assert row["operation"] == "promote" and row["rollback_target_release_id"] == pending["release_id"]
             assert "metrics" not in row
+            # The promote serves the pending release's tree, so its entries are that release's: what the install
+            # binding re-renders the config from, and the base release's seed is not what it falls back to.
+            assert scenario.entries_for_version(promoted) == scenario.entries_for_version(pending["release_id"])
+            assert any(entry["id"] == "r1" for entry in scenario.entries_for_version(promoted))
+            assert scenario.entries_for_version(base) is None and scenario.entries_for_version("nope") is None
+            # Installing a promoted or rolled-back release rebinds the model endpoint without losing evolved settings.
+            rolled_back = scenario.rollback(promoted).release_id
+            service = RequestService(dispatcher)
+            for release in (promoted, rolled_back):
+                manifest = service.harness_manifest(headers, release_id=release)
+                bound = service._install_binding(
+                    scenario, manifest, get_adapter("pi"), {**headers, "host": "localhost:8000"}
+                )
+                assert json.loads(bound["pi-agent/settings.json"])["theme"] == "light"
+
         finally:
             await client.close()
 

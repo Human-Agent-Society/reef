@@ -11,10 +11,14 @@ from reef.service.auth import page_query
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 
+#: The most a record import takes in one request. The app itself reads bodies of several MiB, the size of a coding
+#: agent's first inference call, so the import routes keep their existing limit.
+MAX_RECORD_IMPORT_BYTES = 1024 * 1024
+
 
 def register_record_routes(app: web.Application, *, request_service: RequestService) -> None:
     async def import_record(request: web.Request) -> web.Response:
-        body = await read_object(request)
+        body = await read_object(request.clone(client_max_size=MAX_RECORD_IMPORT_BYTES))
         item = await asyncio.to_thread(request_service.import_record, request.headers, body)
         return web.json_response(
             {
@@ -25,7 +29,7 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
         )
 
     async def import_records(request: web.Request) -> web.Response:
-        body = await read_object(request)
+        body = await read_object(request.clone(client_max_size=MAX_RECORD_IMPORT_BYTES))
         items = await asyncio.to_thread(request_service.import_records, request.headers, body)
         return web.json_response(
             {
