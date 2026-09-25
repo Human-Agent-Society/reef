@@ -415,7 +415,7 @@ def test_reef_coordinator_closes_backend_operations_before_local_cleanup():
         def prepare_training_step(self, batch, objective, algorithm_state, scheduling):
             raise AssertionError("unexpected prepare_training_step in this fixture")
 
-        def prepare(self, payload, *, job_id, rollout_id, prior_marker):
+        def prepare(self, payload, *, job_id, scenario_step, prior_marker):
             raise AssertionError("unexpected prepare in this fixture")
 
         def prepare_weights(self, runtime_load_id, *, force_full):

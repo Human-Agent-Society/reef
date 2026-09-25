@@ -81,7 +81,7 @@ def register_scenario_routes(app: web.Application, *, request_service: RequestSe
 
     async def list_releases(request: web.Request) -> web.Response:
         scenario = request.match_info["scenario"]
-        releases = request_service.dispatcher.list_releases(scenario)
+        releases = await asyncio.to_thread(request_service.dispatcher.list_releases, scenario)
         return web.json_response(
             {
                 "scenario": scenario,

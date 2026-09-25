@@ -617,6 +617,23 @@ def test_rollback_mints_a_new_load_without_changing_an_older_release(runtime, ob
     assert inference.activate_checkpoint(rollback) == latest
 
 
+def test_a_release_carrying_the_served_sampler_forward_serves_under_the_active_load(runtime, objective, tmp_path):
+    """A release another component minted with the same weights is never activated; it serves the active load."""
+    value, _ = runtime
+    inference = value.inference
+    base = empty_artifact(tmp_path)
+    first = inference.activate_checkpoint(base)
+    candidate = value.training.train_candidate(prepared(value, objective).payload)
+    inference.activate_candidate(candidate)
+    inference.activate_checkpoint(Artifact.local(Path(candidate.checkpoint_path)))
+    inference.acknowledge_publication(candidate.training_job_id)
+    latest = inference.activate_checkpoint(Artifact.local(base.local_path))
+    assert latest != first
+    carried = Artifact.local(base.local_path)
+    assert inference.snapshot(carried)[1] == latest == inference.serving_runtime_load_id()
+    assert inference.snapshot(base)[1] == first
+
+
 def test_configured_batch_size_respects_error_remainder(objective):
     scheduling = StepScheduling(batch_size="configured", remainder="error")
     with pytest.raises(ValueError, match="configured batch_size"):

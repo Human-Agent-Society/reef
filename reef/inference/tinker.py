@@ -234,7 +234,13 @@ class TinkerInferenceRuntime(InferenceRuntime):
                 raise ValueError("Tinker live snapshot belongs to an unavailable serving incarnation")
             if artifact.ref.release_id in self._releases:
                 return self._releases[artifact.ref.release_id]
-            selected = self._remember(checkpoint_sampler_path(artifact, self._model))
+            sampler_path = checkpoint_sampler_path(artifact, self._model)
+            # A release that carries the served sampler forward (a step of
+            # another component, a rollback to the same weights) was never
+            # activated; it serves under the load the engine reports now,
+            # not under the first load of that sampler.
+            carried = sampler_path == self._active
+            selected = (self._active, self._version) if carried else self._remember(sampler_path)
             self._releases[artifact.ref.release_id] = selected
             return selected
 
