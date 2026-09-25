@@ -62,10 +62,18 @@ How it works
    substitute in its place, such as a rule describing it. When the review
    is partial or finds a substitute, the model writes the answer again with
    the review's findings, up to three answers in all. The step keeps the
-   delivering answer with the fewest uncovered points; when no answer
-   delivers, it is skipped with the reason. The evaluation runs the
-   candidate on the health task: it publishes when the tree still works,
-   and the step's page carries the design and the review either way. A
+   delivering answer with the fewest uncovered points, and both pages say
+   which answer it kept when it wrote more than one; when no answer
+   delivers, it is skipped with the reason. A point the harness's facts say
+   no answer there can deliver (a hard tool lockout on a harness whose
+   commands cannot take a tool away) is a limit, listed apart from the
+   uncovered points: it starts no retry, and the loop ends when only limits
+   remain. The evaluation runs the candidate on the health task: it
+   publishes when the tree still works, and both pages say the health task
+   is no test of the requested behavior, which only the review reads; when
+   every candidate episode fails before it is scored (the runner was not
+   found, say), both pages say the evaluation could not run and quote the
+   cause. The step's page carries the design and the review either way. A
    review call that answers with no text is asked once more with room for
    both its reasoning and its reply; when it still gives none, the step
    records why and both pages say the review did not run, rather than
@@ -115,11 +123,120 @@ Behavior and configuration
   account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
   ``prompt`` is one sentence of at most 200 characters that setup shows when
   it asks for the item; the Setup table of the step's page has a prompt
-  column. An ``env`` item's value is read at run time from
+  column. On pi an ``env`` item's value is read at run time from
   ``process.env.NAME``: the proposer is told that an extension never asks
   you for it in the session, never stores it in a file of its own and never
   hardcodes it, and its review lists a value the extension asks for or
-  stores itself as uncovered.
+  stores itself as uncovered. On another adapter the value reaches the
+  harness's environment at run time, and the same holds for its entries.
+
+Adapters other than pi
+----------------------
+
+``evolution.adapter`` runs the profile on any bundled adapter. The update
+notice is a pi extension, so on another adapter the profile leaves it out
+and says so in the log; ``reef-<adapter> update`` installs a new release.
+The ``/reefine`` command is one command file there (the reserved entry
+``reef-requests``): the session's model files the request with
+``reef-<adapter> evolve``, gives you the request's page link, waits for the
+step with ``reef-<adapter> wait`` in pieces its shell tool allows, tells you
+the result and, on your yes, runs ``reef-<adapter> update``. Start the new
+version by starting ``reef-<adapter>`` again.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Adapter
+     - Start a session
+     - Type
+     - Serve with
+   * - ``claude``
+     - ``reef-claude``
+     - ``/reefine <request>``
+     - ``--inference.upstream-api anthropic``
+   * - ``codex``
+     - ``reef-codex``
+     - ``$reefine <request>`` (Codex has no custom slash commands)
+     - ``--inference.upstream-api responses``
+   * - ``opencode``
+     - ``reef-opencode``
+     - ``/reefine <request>``
+     - no flag (the default openai dialect)
+   * - ``hermes``
+     - ``reef-hermes``
+     - ``/reefine <request>``
+     - no flag (the default openai dialect)
+   * - ``dsh``
+     - ``reef-dsh web``
+     - ``/reefine <request>``
+     - no flag (the default openai dialect)
+
+``terminus`` has no session to type in and no install: a request comes
+through ``POST /reef/train``, and ``GET /reef/harness`` serves a published
+tree. The agent proposer runs on pi
+alone, so another adapter builds no agent and needs no proposer sandbox; on another adapter the served model answers a request with rules,
+skills and commands, and with a config entry where the harness's config
+enforces a behavior (an opencode agent with a permission map, Claude Code
+permissions that pre-approve only ``WebSearch`` and ``WebFetch``, Codex's
+``web_search``). It writes no ``code_extension``,
+since it knows pi's extension API and no other. The prompt tells it that
+harness's own facts from its adapter's ``harness_facts.yaml``: how you
+type a command there, which file holds the rules, which tools the harness
+has (web search among them, with what it needs: ``DEEPSEEK_API_KEY`` on
+dsh) and how the harness offers a mode. The review judges new commands by
+the same facts. Its design says when the request needs behavior these
+kinds cannot give. On ``claude``, ``codex``, ``hermes`` and ``dsh`` a
+command cannot take a tool away, so a mode there is guidance the model
+follows while every tool stays offered: the design and the command's reply
+say so, the mode's state lives in the conversation (the command's reply and
+the header on each reply) and never in a file a tool writes or reads, the
+model declines a skill the person's message loads while the mode is on and
+names the mode's off command rather than a way around it (Claude Code's
+``!`` line, say), and the review lists a request for a hard restriction
+under limits. On
+``opencode`` an agent with a permission map is the mode, and the model gets
+only the tools it allows: an answer whose agent has no permission map is
+written again, since that agent is offered every tool. A command's
+``agent:`` runs only that command's turn, so the person enters the mode with
+``/agents`` (or with its command as a new session's first message) and
+leaves it with ``/agents``, choosing build, together with a leave command
+whose text says every tool is back: opencode tells the model nothing when
+the agent changes. The permission map limits the model's own tool calls
+only; a skill the person types, a file attached with ``@`` and a ``!``
+command still run, and the review lists them under limits. On ``codex`` a
+``web_search`` config entry turns the hosted search on in every session of
+the release, which How to use says. A ``terminus`` run has no reply a
+person reads, so its design names the files the task leaves, the
+verifier's reward and the trajectory as the visible result, and its pages
+name no wrapper command: ``GET /reef/harness`` serves the published tree,
+and what the release requires must hold in the Harbor task a run uses.
+
+An answer whose form slipped is written again while attempts remain: JSON
+that does not parse (a list or an object that decodes inside a broken outer
+array is a fragment of it, not the answer), entries every one of which was
+dropped, or entries the harness's own admission refuses (the admission the
+step meets next runs on each answer). When admission refused the entries,
+the retry shows that answer's design and entries, so what it got right
+stays. Each dropped answer's reason is recorded
+(``proposal_notes.dropped_attempts``), shows in the request page's Activity
+while the step runs, and shows under Review on the request and step pages.
+A review reply whose JSON a stray quote broke is asked once more. The review
+reads the whole design; the step records it cut to 4000 characters with its
+last paragraph, the How to use, kept whole.
+
+Off pi, a design that says no entry this harness takes can deliver the
+request is an answer, not a failure: the review runs on it, the step
+records it under ``proposal_notes.declined`` with the design and what is
+out of reach, and the pages and the result line say it was answered with
+no change. When that review finds a point an entry could still deliver,
+the request is written again. On pi such a reply stays a proposal with
+nothing to apply, its reason under ``failure``.
+
+The result line after a published step carries the release's own How to
+use (``how to use: ...``, its first paragraph), and ``reef-<adapter>
+update`` prints it after the install, so the session tells the person the
+form the release takes (``$chat`` on codex) rather than one taken from the
+request. What the harness puts out of reach prints one point per line.
 
 The agent proposer
 ------------------
@@ -301,8 +418,9 @@ them:
   page's Design section.
 * ``review``: the second call's result, ``complete`` or ``partial``, with
   the points of the request the entries cover and the ones they leave
-  uncovered, as the Review section; the result line in the session and
-  from ``--wait`` names the uncovered points. Absent when the review call
+  uncovered, and the ``limits`` the harness puts out of reach, as the
+  Review section; the result line in the session and from ``--wait`` names
+  the uncovered points and the limits. Absent when the review call
   failed, which never blocks the step.
 * ``refused_requires``: the ``requires`` items the proposer wrote that could
   not be honored, each with the reason, under "refused by the step" in the

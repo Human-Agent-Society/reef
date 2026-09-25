@@ -399,14 +399,17 @@ export default function requests(pi) {
     return { "x-reef-scenario": scenario, ...(token ? { authorization: `Bearer ${token}` } : {}) };
   };
 
-  // A page a browser opens: the query carries what curl sends as headers, the scenario and the token.
-  const pageLink = (path) => {
-    const token = process.env.REEF_TOKEN;
-    const query = `scenario=${encodeURIComponent(scenario)}${token ? `&token=${encodeURIComponent(token)}` : ""}`;
-    return `${serviceUrl}${path}?${query}`;
-  };
-  const requestPageLink = (recordId) => pageLink(`/reef/harness/requests/${encodeURIComponent(recordId)}/page`);
-  const stepPageLink = (step) => pageLink(`/reef/harness/releases/${step}/page`);
+  // A page a browser opens: the page_path the service answers a filing and each catalog row with, whose query
+  // carries the scenario and, in place of the token, a key that opens this scenario's two pages alone. The model
+  // reads these links in tool results and prompts, so they must not carry the token. A service from before page
+  // paths gets the route with the scenario alone.
+  const requestPaths = new Map();
+  const pagePathOf = (answer) =>
+    answer && typeof answer.page_path === "string" && answer.page_path.startsWith("/") ? answer.page_path : null;
+  const pageLink = (path, route) => `${serviceUrl}${path ?? `${route}?scenario=${encodeURIComponent(scenario)}`}`;
+  const requestPageLink = (recordId) =>
+    pageLink(requestPaths.get(recordId) ?? null, `/reef/harness/requests/${encodeURIComponent(recordId)}/page`);
+  const stepPageLink = (step, rows) => pageLink(pagePathOf(rows[step]), `/reef/harness/releases/${step}/page`);
 
   const installedRelease = () => {
     const releaseInfo = readJson(join(destDir, RELEASE_FILE));
@@ -457,7 +460,10 @@ export default function requests(pi) {
     }
     if (!response.ok) throw new Error(`reef refused the request (HTTP ${response.status}): ${await response.text()}`);
     const answer = await response.json();
-    return String(answer.agent_record_id);
+    const recordId = String(answer.agent_record_id);
+    const path = pagePathOf(answer);
+    if (path) requestPaths.set(recordId, path);
+    return recordId;
   };
 
   // The catalog oldest first; a step is a row's position in it, the creation row being 0, which is the commit
@@ -565,7 +571,9 @@ export default function requests(pi) {
   };
   const rememberRequest = (recordId, text) => {
     const others = storedRequests().filter((entry) => entry.id !== recordId);
-    writeStoredRequests([...others, { id: recordId, text, filed_at: Date.now() / 1000 }]);
+    // The page path rides along, so a session that resumes the watch links the page as the filing did.
+    const entry = { id: recordId, text, filed_at: Date.now() / 1000, page_path: requestPaths.get(recordId) };
+    writeStoredRequests([...others, entry]);
   };
   const forgetRequest = (recordId) => writeStoredRequests(storedRequests().filter((entry) => entry.id !== recordId));
 
@@ -717,8 +725,8 @@ export default function requests(pi) {
     if (selectionResult !== "selected" && selectionResult !== "pending") return;
     const why =
       selectionResult === "pending"
-        ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step)} first.`
-        : `Read the change first: ${stepPageLink(step)}`;
+        ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step, rows)} first.`
+        : `Read the change first: ${stepPageLink(step, rows)}`;
     await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
   };
 
@@ -900,6 +908,8 @@ export default function requests(pi) {
   const resumeStored = async (rows, ctx) => {
     let running = null;
     for (const entry of storedRequests()) {
+      const stored = pagePathOf(entry);
+      if (stored) requestPaths.set(entry.id, stored);
       const step = rows.findIndex((row) => requestIdOf(row) === entry.id);
       if (step >= 0) {
         forgetRequest(entry.id);
@@ -1010,7 +1020,7 @@ export default function requests(pi) {
         {
           type: "text",
           text:
-            `filed request ${recordId}; reef is running the step, which usually takes one to three minutes, ` +
+            `filed request ${recordId}; reef is running the step, which usually takes a few minutes, ` +
             `and will report here when it settles. Watch it here: ${requestPageLink(recordId)}`,
         },
       ],
@@ -1220,7 +1230,7 @@ export default function requests(pi) {
         return;
       }
       ctx.ui.notify(
-        `Training request ${recordId} accepted; the step usually takes one to three minutes. ` +
+        `Training request ${recordId} accepted; the step usually takes a few minutes. ` +
           `Watch it here: ${requestPageLink(recordId)}`,
         "info",
       );
@@ -1343,13 +1353,13 @@ export default function requests(pi) {
         }
         const why =
           selectionResult === "pending"
-            ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step)} first.`
-            : `Read the change first: ${stepPageLink(step)}`;
+            ? `This release changes an extension, which runs in pi with your privileges. Read ${stepPageLink(step, rows)} first.`
+            : `Read the change first: ${stepPageLink(step, rows)}`;
         await offerInstall(String(row.release_id), why, ctx, { pending: selectionResult === "pending" });
         return;
       }
       // The page holds the design, the review and the numbers, so the command offers it rather than reprinting it.
-      const url = stepPageLink(step);
+      const url = stepPageLink(step, rows);
       const summary = stepSummary(step, rows);
       if (!ctx.hasUI) {
         ctx.ui.notify(`Harness v${step}: ${summary}\npage: ${url}`, "info");
