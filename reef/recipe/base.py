@@ -9,10 +9,12 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar
 
+from reef.artifact.artifact import Artifact, ArtifactValidator
+from reef.core.components import RECORDS_COMPONENT
 from reef.core.reports import ReportBase
 from reef.inference.http import resolve_proxy_runtime
 from reef.inference.model_config import ModelConfig
@@ -23,13 +25,52 @@ from reef.recipe.config_fields import config_field, parse_int, recipe_config_fie
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.surface.base import AcceptAnyArtifact, ArtifactValidator, Surface
+from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
-from reef.train.trainer import Trainer
+from reef.train.trainer import ComponentTrainer, Trainer
+
+
+@dataclass(frozen=True)
+class EveryCheck(ArtifactValidator):
+    """Admit an artifact only when every check admits it, in order."""
+
+    checks: tuple[ArtifactValidator, ...]
+
+    def validate(self, artifact: Artifact) -> None:
+        for check in self.checks:
+            check.validate(artifact)
+
+
+def every_check(*checks: ArtifactValidator) -> ArtifactValidator:
+    """One check that admits an artifact only when each of ``checks`` does; a check that admits anything is left out."""
+    kept = tuple(check for check in checks if not isinstance(check, AcceptAnyArtifact))
+    if not kept:
+        return AcceptAnyArtifact()
+    return kept[0] if len(kept) == 1 else EveryCheck(kept)
+
+
+@dataclass(frozen=True)
+class ServedEndpoint:
+    """Where this Reef answers inference itself: what a recipe's own evaluation calls target.
+
+    ``url`` is the service's base URL and ``token`` a bearer token it accepts.
+    ``component`` names the release component the recipe evolves when it is
+    one of several: its evaluation calls then leave that component's served
+    hooks out, since the episode runs a candidate of it.
+    """
+
+    url: str
+    token: str | None = None
+    component: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.url, str) or not self.url.strip():
+            raise ValueError("served endpoint requires a url")
+        object.__setattr__(self, "url", self.url.strip().rstrip("/"))
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -118,6 +159,22 @@ class Recipe:
         """Recipe-specific keyword arguments resolved from config sections."""
         return {}
 
+    @classmethod
+    def select_weight_training(
+        cls, config: Mapping[str, Any]
+    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
+        """The weight training recipe class a deployment of this class trains with, and that recipe's own config.
+
+        Read from ``config`` alone, before anything is constructed: the service
+        decides from it whether to connect a training runtime and launch a
+        training backend. ``None`` for a recipe that trains no weights.
+        """
+        return None
+
+    def with_served_endpoint(self, endpoint: ServedEndpoint) -> Recipe:
+        """This recipe told where the service answers inference; the default has no calls of its own to point there."""
+        return self
+
     @property
     def report_type(self) -> type[ReportBase] | None:
         """The typed external-report contract this recipe accepts.
@@ -147,6 +204,43 @@ class Recipe:
             training_mode=self.training_mode,
         )
 
+    def build_trainers(
+        self,
+        scenario: str,
+        records: RecordStore,
+        *,
+        surface: Surface,
+        algorithm_states: Mapping[str, Mapping[str, Any] | None],
+        experiment_logger: ExperimentLogger | None = None,
+    ) -> tuple[ComponentTrainer, ...]:
+        """Build every trainer of the named scenario, each bound to the component it evolves.
+
+        The default builds the one trainer :meth:`build` returns and binds it
+        to the surface's only component (``records`` when the surface serves
+        none). A recipe whose surface declares several components overrides
+        this to return one trainer per component; the scenario runs them as
+        independent workers that meet at the commit boundary, and
+        ``algorithm_states`` carries each one's recovered state under its
+        component name.
+        """
+        if len(surface.names) > 1:
+            raise RecipeConfigError(
+                f"{type(self).__name__} serves components {list(surface.names)}: override build_trainers "
+                "to bind one trainer per component"
+            )
+        component = surface.names[0] if surface.names else RECORDS_COMPONENT
+        return (
+            ComponentTrainer(
+                component,
+                self.build(
+                    scenario,
+                    records,
+                    algorithm_state=algorithm_states.get(component),
+                    experiment_logger=experiment_logger,
+                ),
+            ),
+        )
+
     @property
     def inference_handler(self) -> InferenceHandler | None:
         """The inference backend composed by this recipe's runtime, if any.
@@ -164,13 +258,51 @@ class Recipe:
     def build_surface(self, scenario: str) -> Surface:
         """Build the serving surface for the named scenario.
 
-        Most recipes ignore ``scenario``; recipes whose serving state is
-        scenario-specific (an adapter on a shared engine) route by it.
+        The surface names the release's components and binds each one's
+        capabilities, including the admission check run before that component
+        is published or restored. Most recipes ignore ``scenario``; recipes
+        whose serving state is scenario-specific (an adapter on a shared
+        engine) route by it.
         """
         return Surface()
 
+    def build_artifact_validator(self) -> ArtifactValidator:
+        """An admission check run beside the component's own before the recipe's release is published or restored.
+
+        Kept for recipes written before admission moved onto the component
+        surface (``ComponentSurface.validator``, where a new recipe binds it):
+        it joins the check of the one component the recipe serves, and on a
+        recipe that serves none it admits the release as a whole; inside a
+        composite that recipe's release is its component, so the check joins
+        that component's. A recipe that overrides it while serving several
+        components is refused at build, since the check could not say which
+        component it admits.
+        """
+        return AcceptAnyArtifact()
+
+    def serving_surface(self, scenario: str) -> Surface:
+        """``build_surface`` with ``build_artifact_validator`` joined to the served component's check."""
+        surface = self.build_surface(scenario)
+        if type(self).build_artifact_validator is Recipe.build_artifact_validator:
+            return surface
+        if not surface.components:
+            # A release with no component is admitted as a whole, as it was before components existed.
+            return replace(surface, validator=every_check(surface.validator, self.build_artifact_validator()))
+        if len(surface.components) != 1:
+            raise RecipeConfigError(
+                f"{type(self).__name__} overrides build_artifact_validator but serves components "
+                f"{list(surface.names)}: bind the check on each component's ComponentSurface.validator instead"
+            )
+        ((name, component),) = surface.components.items()
+        checks = every_check(component.validator, self.build_artifact_validator())
+        return replace(surface, components={name: replace(component, validator=checks)})
+
     def base_artifact_files(self) -> Mapping[str, str] | None:
         """The files a fresh scenario's base artifact starts with, or ``None`` for a recipe with no tree."""
+        return None
+
+    def bootstrap_artifact_component(self) -> str | None:
+        """The release component a bootstrap model snapshot belongs to; ``None`` places it at the release root."""
         return None
 
     def serving_status(self) -> Mapping[str, Any] | None:
@@ -180,10 +312,6 @@ class Recipe:
         state to report.
         """
         return None
-
-    def build_artifact_validator(self) -> ArtifactValidator:
-        """Build the artifact admission policy for one scenario."""
-        return AcceptAnyArtifact()
 
 
 @dataclass(frozen=True)
@@ -291,6 +419,12 @@ class WeightTrainingRecipe(Recipe):
         if not isinstance(runtime, TrainingRuntime):
             raise TypeError(f"{cls.__name__} requires a TrainingRuntime, got {type(runtime).__name__}")
         return runtime
+
+    @classmethod
+    def select_weight_training(
+        cls, config: Mapping[str, Any]
+    ) -> tuple[type[WeightTrainingRecipe], Mapping[str, Any]] | None:
+        return cls, config
 
     @classmethod
     def service_config(cls, settings: Mapping[str, Any], *, model_path: str) -> dict[str, Any]:

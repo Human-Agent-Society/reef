@@ -606,6 +606,7 @@ shown above; the repository examples all use version 2.
    reef.recipe | the recipe this deployment serves. Required.
    reef.host | 0.0.0.0 | bind address
    reef.port | 8900 | bind port
+   reef.served_url | | the URL a composite recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
    reef.console_origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.model_path | a local HF model directory or a repo id, downloaded on start
@@ -790,6 +791,60 @@ service can assemble their Ray training runtime; their fields are flat
 preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
 
+A composite recipe serves and evolves several release components in one
+scenario, one recipe per component. Its ``components`` object carries one
+recipe config per component name; each inherits the deployment's ``model``
+unless it names its own, and every component shares the deployment's
+runtime and training runtime. A composite whose component trains weights is
+deployed the way that recipe is: ``training.backend`` selects the training
+backend, the component's own ``data`` section sets its fields, and the
+runtime pair reaches every component. The repository base keeps one
+directory per component: the recipes' seeds are written there, a bootstrap
+model snapshot goes under the weight-training component's directory, and a
+component whose recipe seeds nothing starts empty. Each component's trainer
+runs as its own worker and commits into the same release chain, so every
+step checkpoints and the components share one ``training_mode``. A report
+is admitted when any component's contract accepts it, and each trainer
+keeps the reports its own contract parses:
+
+.. code:: yaml
+
+   implementation: reef.recipe.composite:CompositeRecipe
+   model:
+     path: qwen3-8b
+   components:
+     harness:
+       implementation: reef.recipe.cordis:CordisRecipe
+       evolution:
+         adapter: pi
+         propose: methods.mine:propose
+         evaluate: methods.mine:evaluate
+         tasks: ["..."]
+     config:
+       implementation: my_pkg.config:ConfigRecipe
+
+The same composite with a weight-training component is a deployment file:
+the composite is selected by its dotted class, ``training.backend`` picks the
+backend, and the weight component's fields live under its ``data``:
+
+.. code:: yaml
+
+   schema-version: 2
+   recipe:
+     implementation: reef.recipe.composite:CompositeRecipe
+     config:
+       components:
+         weights:
+           implementation: recipes.sao.recipe:SAORecipe
+           data: {batch_size: 8}
+         harness:
+           implementation: reef.recipe.cordis:CordisRecipe
+           evolution: {adapter: pi, propose: methods.mine:propose, evaluate: methods.mine:evaluate, tasks: ["..."]}
+   inference:
+     model-path: Qwen/Qwen3-8B
+   training:
+     backend: slime
+
 A preset's ``runtime.type: executor_training`` selects an executor-backed
 training coordinator. Its ``executor`` mapping accepts ``backend`` (default
 ``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend
@@ -878,6 +933,7 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
+   evolution.on_stale | merge | what a step's result becomes when another component's commit (a weights step, in a composite) replaced the release it was evaluated against: ``merge`` commits it onto the release served now, since each pairing compared candidate and current under the same conditions when it ran (the commit metrics then carry ``merged_onto``); ``reevaluate`` keeps the candidate and runs its episodes again against the new release, under the next attempt directory of the step record; ``refuse`` drops the result and proposes again
    evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
@@ -902,7 +958,7 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``data.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; ``pi`` only, other adapters refuse boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``data.training_mode: manual``
-   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
+   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``, and a kept candidate evaluated again under ``on_stale: reevaluate`` writes its ``episodes/`` under the next attempt directory with ``reevaluation.json`` naming the first; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
 
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
@@ -1083,7 +1139,15 @@ binds and another after each rollback. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A rollback
 finishes the current run, marks its summary with the source and target, and
 resets ``train/step`` to zero; the globally monotonic ``reef/step`` stays
-attached for joining a run back to the commit log.
+attached for joining a run back to the commit log. A scenario with several
+trainers shares the run: each step's metrics carry its component name as a
+prefix (``harness/train/loss``) on the same ``train/step`` axis with
+``reef/component`` on the row, its optimizer step rows land under
+``<component>/step/*`` on their own counter, and the run config lists each
+component's backend under ``reef.components`` and ``backend.<component>``
+with ``reef.backend`` null. The names ``train``, ``step``, ``reef`` and
+``operations`` are these prefixes, so a composite recipe refuses them as
+component names.
 
 Recipe and processor code logs through the same object without importing W&B:
 
@@ -1122,13 +1186,20 @@ The following names are relative to ``operations/``:
    * - ``serve/admission/*``
      - Time acquiring runtime admission. ``active`` is the number waiting for
        admission; immediate admissions also contribute to count and duration.
+   * - ``evaluate/request/*``, ``evaluate/admission/*``
+     - The same measurements for calls on the evaluation route, a step's
+       episodes and proposer calls, which keep no record; counted apart so a
+       step does not read as served traffic.
    * - ``serve/retries_total``, ``serve/timeouts_total``
      - Additional buffered inference attempts and requests that exhaust the
        inference retry deadline. Retries do not create extra request counts.
+       Calls on the evaluation route count under ``evaluate/retries_total``
+       and ``evaluate/timeouts_total``.
    * - ``serve/version_mismatch_total``
      - Responses rejected by runtime-load-ID verification, including missing
        engine version information and buffered or deferred streaming responses.
        This is a counter of observed rejections, not a background drift probe.
+       Calls on the evaluation route count under ``evaluate/version_mismatch_total``.
    * - ``ingest/accepted_total``, ``ingest/duplicates_total``
      - New records appended and identical retries acknowledged by the dispatcher.
        Accepted records include incomplete-stream diagnostics; acceptance does
@@ -1274,7 +1345,8 @@ A feedback record becomes a ``feedback`` span inside the trace of the first
 inference it references, with ``reef.score`` and ``reef.references``; further
 references are span links. A training instruction becomes a
 ``training request`` span. A committed step adds a ``training step N`` span
-with the commit's step, release, job id, consumed record counts
+with the commit's step, release, job id, consumed record counts,
+its component as ``reef.component`` when the scenario runs several trainers,
 and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
 child span below every record the step consumed, linked back to the commit
 span. Records carry one timestamp, so their spans have zero duration and start
