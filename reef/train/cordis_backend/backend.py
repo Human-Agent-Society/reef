@@ -37,6 +37,7 @@ from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
 from reef.harness.compose.loader import EntryOptions, Loader
+from reef.harness.episodes.e2b import E2BExecutor
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
@@ -812,7 +813,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # Evolution needs the binary at boot, just like the model binding.
         # Install failures propagate with the missing tool or vendor error.
         prefix = install_prefix(descriptor)
-        self._binary = binary if binary is not None else resolve_binary(descriptor, prefix=prefix)
+        if isinstance(self._executor, E2BExecutor):
+            self._executor = self._executor.for_adapter(descriptor, binary=binary)
+            self._executor.preflight()
+            self._binary = self._executor.binary
+        else:
+            self._binary = binary if binary is not None else resolve_binary(descriptor, prefix=prefix)
         if binary is None and descriptor.install is not None and isinstance(self._executor, SandboxExecutor):
             # Bind the whole install: npm launchers are symlinks into packages,
             # and git installs need both their editable source and their venv.
@@ -823,6 +829,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # The agent proposer runs the same installed binary as the episodes, under its own isolation.
         if binary is None and descriptor.install is not None and isinstance(agent_executor, SandboxExecutor):
             agent_executor = replace(agent_executor, base_paths=(*agent_executor.base_paths, str(prefix)))
+        if isinstance(agent_executor, E2BExecutor):
+            agent_executor = agent_executor.for_adapter(descriptor)
+            agent_executor.preflight()
         self._agent_executor = agent_executor
         self._agent_timeout_s = float(agent_timeout_s)
         self._agent_trial_timeout_s = float(agent_trial_timeout_s)

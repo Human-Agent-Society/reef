@@ -264,6 +264,55 @@ to forward, and missing variables fail configuration. This keeps remote sandbox
 credentials out of candidate compositions. ``egress_hosts`` currently enables
 network access; it does not enforce a hostname firewall.
 
+On macOS or a host without Linux namespaces, select ``e2b`` to run ordinary
+evaluation episodes in disposable cloud sandboxes. Cordis evaluations and GEPA
+minibatches use the same episode runner and trajectory readers::
+
+    evolution:
+      adapter: pi
+      executor: e2b
+      episode_timeout_s: 600
+      sandbox:
+        e2b_api_key_env: E2B_API_KEY
+        # Only needed for a model listening on this evaluation worker's localhost:
+        forward_ports: [8000]
+
+Install ``reef-infra[e2b]`` and supply the E2B key in the named environment
+variable. ``e2b_api_key`` can also supply it explicitly. Only variables named
+in ``env_from`` are forwarded; the E2B key is used by Reef, not passed to the
+agent. Public model endpoints need no forwarded port. Each configured port
+forwards the evaluation worker's ``127.0.0.1`` endpoint to the same port inside
+the VM. With workers on other machines, localhost names that worker, not the
+Reef HTTP host; use a reachable model URL or run the evaluation on the model's
+host. Forwarding is deployment configuration, never inferred from candidate
+files. The ordinary model binding still renders the upstream credential into
+the episode; general credential isolation remains tracked in issue #204.
+
+For an npm-installed adapter, Reef builds a pinned Node 22 template containing
+the agent and bubblewrap. Its name ends in ``-episodes-v1`` so older templates
+without the isolation dependency are not reused. ``e2b_template`` selects a
+custom template; non-npm adapters require one with their binary and bubblewrap
+already installed. ``evolution.binary`` names a binary in that template, not a
+path on the Reef host. Startup checks provider access, the template, the
+binary and namespace support using a short-lived sandbox. The host does not
+install the remote agent. Terminus retains its own Harbor hosted configuration.
+
+Every ordinary episode gets its own VM. The remote filesystem and rendered
+inputs are read-only; the workspace and the adapter's declared state directories
+are writable. Files are copied back before trajectory parsing and residue
+checks. Copy-back or cleanup failure fails the episode. Timeouts terminate the
+process and its children; the VM is destroyed when the episode finishes.
+E2B has outbound internet access and resources set by its template. Nonempty
+``egress_hosts`` or ``limits`` are rejected because these local-sandbox policies
+are not implemented by this provider. Pi and Codex have opt-in real E2B tests
+in ``tests/smoke/test_e2b_episode.py``; other adapters need their template and
+runtime-state paths validated with their own agent binaries.
+
+``evolution.proposer_agent.sandbox: e2b`` remains independent: it selects where
+the proposer and its trials run, reusing the same E2B implementation while
+keeping one VM open for that proposer run. Set ``evolution.executor: e2b`` to
+select cloud execution for the regular evaluation episodes as well.
+
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
 machine. A task must therefore state the whole problem in its prompt. A task

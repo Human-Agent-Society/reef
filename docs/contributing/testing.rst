@@ -104,6 +104,22 @@ validates coverage.
 Run one area
 ------------
 
+Hosted episode acceptance is opt-in and creates paid E2B sandboxes and small
+OpenRouter model requests. Set ``E2B_API_KEY`` and ``OPENROUTER_API_KEY`` in the
+test process (never commit them), then run::
+
+    REEF_TEST_E2B=1 REEF_E2B_TEST_MODEL=deepseek/deepseek-v4.1-flash \
+      .venv/bin/python -m pytest tests/smoke/test_e2b_episode.py -q
+
+The tests exercise pi and Codex through the ordinary executor factory, model
+traffic through a localhost tunnel, trajectory and residue read-back, immutable
+inputs, timeout cleanup, and Cordis/GEPA scoring. The selected model must support
+both Chat Completions and Responses through OpenRouter and be available to the
+account in its region. Provider credentials remain in a local test HTTP server;
+only a synthetic prompt and an episode token enter the sandbox. Default CI skips
+these paid tests; ``test_e2b_executor.py`` and ``test_e2b_tunnel.py`` cover the
+contracts and failure paths without provider access.
+
 Most tests under ``tests/reef_service`` need no GPU:
 
 .. code:: bash

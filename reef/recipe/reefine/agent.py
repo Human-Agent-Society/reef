@@ -35,7 +35,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from reef.harness.episodes.e2b import E2BExecutor, E2BSession, template_alias
+from reef.harness.episodes.e2b import E2BExecutor, E2BSession
 from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.requests import REQUESTS_SKILL_ID, request_entries
@@ -257,7 +257,8 @@ def launch_pi(
     session_env["HOME"] = str(root)
     # The harness's own binary first, so a nested `pi -p` finds the pinned one.
     session_env["PATH"] = os.pathsep.join([str(Path(host.binary).absolute().parent), os.environ.get("PATH", "")])
-    argv = [host.binary, *(token.replace("{prompt}", prompt) for token in host.descriptor.argv)]
+    binary = (executor.binary or host.descriptor.binary) if isinstance(executor, E2BSession) else host.binary
+    argv = [binary, *(token.replace("{prompt}", prompt) for token in host.descriptor.argv)]
     if script is not None:
         (root / "trial-script.json").write_text(json.dumps(script), encoding="utf-8")
         driver = root / "trial-driver.mjs"
@@ -598,14 +599,16 @@ def answer_with_agent(
             host.calls.note("proposer", f"the coding agent run failed: {error}", failed=True)
             return StepProposal((), {"failure": f"the agent run failed: {error}"})
         finally:
-            if run.session is not None:
-                run.session.close()
-            gateway.stop()
-            # Executor.launch copies the remote workspace back even after a timeout.
-            run.keep_workspace()
-            agent["seconds"] = round(time.monotonic() - started, 1)
-            agent["trials"] = run.trials
-            keep_session(root / host.descriptor.trajectory_path, host.step_dir)
+            try:
+                if run.session is not None:
+                    run.session.close()
+            finally:
+                gateway.stop()
+                # Executor.launch copies the remote workspace back even after a timeout.
+                run.keep_workspace()
+                agent["seconds"] = round(time.monotonic() - started, 1)
+                agent["trials"] = run.trials
+                keep_session(root / host.descriptor.trajectory_path, host.step_dir)
         ended = "ran past its limit" if agent.get("timed_out") else f"exited {agent.get('exit_code')}"
         host.calls.note(
             "proposer",
@@ -630,13 +633,7 @@ def open_session(host: AgentHost, port: int) -> E2BSession | None:
     executor = host.executor
     if not isinstance(executor, E2BExecutor):
         return None
-    install = host.descriptor.install
-    if not executor.template and install is not None and install.kind == "npm":
-        executor = replace(
-            executor,
-            template=template_alias(host.descriptor.name, install.version),
-            npm_package=f"{install.package}@{install.version}",
-        )
+    executor = executor.for_adapter(host.descriptor)
     host.calls.note("proposer", f"starting an E2B sandbox from the template {executor.template}")
     session = replace(executor, forward_ports=(port,), timeout_s=host.timeout_s).open()
     host.calls.note("proposer", "the E2B sandbox is up and reaches the gateway through its tunnel")
