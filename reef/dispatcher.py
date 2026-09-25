@@ -348,12 +348,7 @@ class Dispatcher:
         A loaded instance knows its reserved batch; the marker also covers a
         scenario whose turn failed and was rebuilt, or one not loaded yet,
         whose job the backend still holds. Every job's marker names the
-        scenario that owns it. One written before markers named an owner says
-        nothing about whose job is out until the owner's own job resumes and
-        writes its name in (``TrainingExecution.execute``): until then it
-        refuses no delete, as before, and the loaded scenario that holds the
-        job's reservation is still refused by the caller; refusing every
-        delete would leave an owner that cannot bind with no way out.
+        scenario that owns it.
         """
         runtime = self._recipe.training_runtime
         if runtime is None:
@@ -1393,10 +1388,6 @@ class Dispatcher:
         """The weight job the training runtime holds out, for an operator; ``None`` when none is out.
 
         ``owner`` names the scenario whose job it is, the one a delete refuses.
-        A marker an earlier Reef wrote names none until the owner's next
-        training turn writes it in; until then ``owner`` is ``None`` and no
-        delete on the runtime is safe, since deleting the owner would leave the
-        job with nothing to finish it.
         """
         runtime = self._recipe.training_runtime
         if runtime is None:

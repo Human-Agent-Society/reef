@@ -1049,10 +1049,6 @@ def test_deleting_a_scenario_is_refused_while_the_runtime_cannot_say_whether_its
         marker = {"status": "COMPLETE", "training_job_id": "job-1", "commit_acknowledged": False, "scenario": "agent"}
         with pytest.raises(ScenarioBusy, match="training job is out"):
             dispatcher.delete_scenario("agent")
-        # An earlier build's marker names no owner: it says nothing about whose job is out.
-        marker = {"status": "RUNNING", "training_job_id": "job-1"}
-        assert dispatcher.training_job_in_flight("agent") is False
-        assert dispatcher.training_job_in_flight("old") is False
         marker = {"status": "COMPLETE", "training_job_id": "job-1", "commit_acknowledged": True, "scenario": "agent"}
         assert dispatcher.delete_scenario("agent")["scenario"] == "agent"
     finally:
@@ -1065,8 +1061,7 @@ def test_after_a_restart_binds_a_stray_registration_its_delete_lets_the_jobs_own
 ) -> None:
     """b trains on a one scenario runtime; a create of a is refused but leaves a's registration. b's job is out when
     the process dies, and after the restart a binds first. The marker names b, so b cannot be deleted while its job
-    is out, and a, the stray, can: its delete and a restart let b bind again, the only log that can finish the job.
-    A marker an earlier build wrote names no owner and refuses neither delete, so the same way out stays open."""
+    is out, and a, the stray, can: its delete and a restart let b bind again, the only log that can finish the job."""
     initial = tmp_path / "initial"
     for component in (WEIGHTS, HARNESS):
         (initial / component).mkdir(parents=True)
@@ -1099,12 +1094,6 @@ def test_after_a_restart_binds_a_stray_registration_its_delete_lets_the_jobs_own
         with pytest.raises(ScenarioBusy, match="training job is out"):
             dispatcher.delete_scenario("b")
         assert dispatcher.delete_scenario("a")["scenario"] == "a"
-    finally:
-        dispatcher.close()
-    dispatcher = restarted({"status": "UPDATING_WEIGHTS", "training_job_id": "job-b"})
-    try:
-        assert dispatcher._registry.training_scenario_name == "b"
-        assert dispatcher.training_job_in_flight("b") is False
     finally:
         dispatcher.close()
 

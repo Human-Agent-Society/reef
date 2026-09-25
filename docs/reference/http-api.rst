@@ -452,19 +452,7 @@ scenario on the runtime. Retry once the job has committed or been rejected.
 The job's marker names the scenario that owns it, so deleting any other
 scenario goes through, a registration left by a create the runtime refused
 included: deleting that one and restarting lets the owner bind again and
-finish its job. A marker written by a Reef from before markers named their
-owner refuses no delete until the owner's own job resumes after the upgrade:
-the batch it resumes names the job, so Reef then writes the owner into the
-marker and a delete of the owner is refused from there on. Until then only
-the scenario that holds the job in the running service is refused. Deleting
-the owner in that window leaves the job with no scenario to finish it: the
-marker keeps inference admission closed and every later job is refused with
-``operator recovery required``. The service logs a warning at startup when
-it finds such a marker, and ``GET /reef/status`` shows the job under
-``training_job`` with ``owner`` ``null``. After upgrading with a job out,
-delete no scenario on that runtime while ``owner`` is ``null``: the window
-ends when ``owner`` names the scenario, or when ``training_job`` is ``null``
-because the job has committed or been rejected.
+finish its job.
 Only a local artifact repository can be archived; a remote one answers 501.
 
 For a scenario that trains weights the deletion is Reef-side: the training

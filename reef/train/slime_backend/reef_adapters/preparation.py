@@ -9,11 +9,9 @@ own wire tuples from a resolved signal.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import replace
 from typing import Any
 
 from reef.runtime.interfaces import PreparedTrainingStep
-from reef.runtime.scheduler import LEGACY_SCHEDULE_KEY
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
@@ -113,18 +111,4 @@ def _build_payload(
         payload["external_step_sizes"] = list(schedule.step_sizes)
     else:
         payload["external_remainder"] = scheduling.remainder
-    if scheduling.shuffle:
-        # An earlier Reef seeded the shuffle from the batch id, and its job marker names the rows in that order. The
-        # number in the id counted that process's batches, which a reload here starts again, so the legacy identity
-        # gets what it needs to shuffle again for any number: the rollout groups in batch order, before a shuffle.
-        plain = _materialize(batch, replace(scheduling, shuffle=False, epochs=1))
-        groups: dict[int, list[int]] = {}
-        for row, rollout_id in zip(plain.row_indices, plain.rollout_ids, strict=True):
-            groups.setdefault(rollout_id, []).append(row)
-        payload[LEGACY_SCHEDULE_KEY] = {
-            "head_rows": list(schedule.row_indices),
-            "groups": list(groups.values()),
-            "epochs": schedule.epochs,
-            "batch_id": batch.batch_id,
-        }
     return payload
