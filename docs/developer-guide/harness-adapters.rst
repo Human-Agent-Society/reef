@@ -631,6 +631,27 @@ Descriptor fields
   ``{root}``. For install scripts and ``reef-<adapter>`` wrappers, one
   variable must relocate a directory above the primary config file using
   ``{root}/<dir>``. Terminus relocates the root itself and has no wrapper.
+- ``client_env`` lists variables the ``reef-<adapter>`` wrapper adds when a
+  person runs the binary. That run gets only the relocating ``env`` entry,
+  so what an interactive run needs goes here. An example is turning off the
+  binary's own updater while Reef pins its version: ``PI_SKIP_VERSION_CHECK``
+  for ``pi``, and for ``claude`` both ``DISABLE_AUTOUPDATER`` (the background
+  updater) and ``DISABLE_UPDATES`` (its ``update``, ``upgrade``, and
+  ``install`` commands, which would otherwise install the latest release
+  over the person's own ``claude``). The ``claude`` episode ``env`` sets both
+  too. A variable the shell sets wins. Claude Code applies the ``env`` block
+  of ``settings.json`` over the environment, so the ``claude`` quirks reject
+  a tree that sets either one there.
+- ``client_args`` lists arguments the wrapper puts ahead of the person's own,
+  for a setting the rendered tree must not undo. ``claude`` passes
+  ``--settings '{"disableDeepLinkRegistration":"disable"}'``. Claude Code
+  skips a whole ``settings.json`` that fails its schema, and an interactive
+  run could then point the person's ``claude-cli://`` link handler at the
+  pinned binary. A ``--settings`` the person passes replaces it.
+- ``client_version_args`` lists first arguments that get no ``client_args``:
+  the binary's version flags, which start no session. ``claude`` names
+  ``--version``, ``-v``, and ``-V``, because Claude Code prints its version
+  early only when nothing is ahead of the flag, and takes ``-V`` only there.
 - ``install`` pins the vendor install: ``kind`` (``npm`` or editable-venv
   ``git``), ``package``, ``version`` (as reported by ``--version``), and
   ``binary_path`` below the install prefix. A git install also names

@@ -387,6 +387,32 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
         render_composition([("config", {"data": {"env": {"DISABLE_AUTOUPDATER": "0"}}})], get_adapter("claude"))
 
 
+@pytest.mark.parametrize("key", ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "disable_updates"])
+@pytest.mark.parametrize("value", ["x", "maybe", "2", "1"])
+def test_claude_quirk_refuses_a_tree_that_sets_the_updater_switches(key: str, value: str) -> None:
+    """Claude Code copies settings.env over its environment and reads the updater switches as on only for 1, true,
+    yes or on, so a tree must not set them at all: the episode env and reef-claude's client_env own them. Windows
+    matches env names in any case."""
+    with pytest.raises(RenderError, match=f"must not set {key} in settings.env"):
+        render_composition([("config", {"data": {"env": {key: value}}})], get_adapter("claude"))
+
+
+def test_claude_quirk_renders_a_tree_env_without_the_updater_switches() -> None:
+    assert "env" not in json.loads(render_composition([], get_adapter("claude"))["claude/settings.json"])
+    node = ("config", {"data": {"env": {"BASH_MAX_TIMEOUT_MS": "600000"}}})
+    rendered = json.loads(render_composition([node], get_adapter("claude"))["claude/settings.json"])
+    assert rendered["env"] == {"BASH_MAX_TIMEOUT_MS": "600000"}
+
+
+@pytest.mark.parametrize("value", [None, "enable", False])
+def test_claude_quirk_keeps_deep_link_registration_off(value: object) -> None:
+    """An interactive reef-claude run must not register the pinned binary as the person's claude-cli:// handler."""
+    rendered = json.loads(render_composition([], get_adapter("claude"))["claude/settings.json"])
+    assert rendered["disableDeepLinkRegistration"] == "disable"
+    with pytest.raises(RenderError, match="disableDeepLinkRegistration"):
+        render_composition([("config", {"data": {"disableDeepLinkRegistration": value}})], get_adapter("claude"))
+
+
 def test_bundled_adapters_are_discoverable() -> None:
     assert set(available_adapters()) >= {"claude", "codex", "dsh", "opencode", "pi"}
 
@@ -397,6 +423,31 @@ def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:
     assert descriptor.client_env == {"PI_SKIP_VERSION_CHECK": "1"}
     assert "PI_OFFLINE" not in descriptor.client_env  # an interactive run talks to reef
     assert descriptor.client_tools == (("rg", "ripgrep"), ("fd", "fd"))
+
+
+def test_claude_descriptor_turns_deep_link_registration_off_on_the_command_line() -> None:
+    """Claude Code skips a whole settings.json that fails its schema, so reef-claude passes the setting as flag
+    settings, which no tree can change."""
+    assert get_adapter("claude").client_args == ("--settings", '{"disableDeepLinkRegistration":"disable"}')
+
+
+def test_claude_descriptor_names_its_version_flags_and_turns_its_own_updater_off() -> None:
+    """A version flag gets nothing ahead of it. Claude Code's own update and install commands, and its background
+    updater, would install the latest release over the person's claude, so a reef-claude run turns them off."""
+    descriptor = get_adapter("claude")
+    assert descriptor.client_version_args == ("--version", "-v", "-V")
+    assert descriptor.client_env == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
+
+
+@pytest.mark.parametrize("key", ["client_args", "client_version_args"])
+@pytest.mark.parametrize("value", ["--settings", [1], [""]])
+def test_descriptor_client_argument_lists_are_lists_of_strings(tmp_path, key: str, value: object) -> None:
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "claude" / "descriptor.yaml").read_text())
+    data[key] = value
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=f"'{key}'"):
+        load_descriptor(target)
 
 
 def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:

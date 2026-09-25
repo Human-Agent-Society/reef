@@ -100,6 +100,21 @@ print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "t
 sys.exit(3 if prompt == "fail" else 0)
 """
 
+CLAUDE_FAKE = """\
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+assert args[0] == "-p" and args[2:4] == ["--output-format", "json"], args
+session = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "workspace" / "s1.jsonl"
+session.parent.mkdir(parents=True)
+# The shell commands an agent runs inherit this env.
+switches = {key: os.environ.get(key) for key in ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES")}
+session.write_text(json.dumps({"type": "user", "env": switches}) + "\\n")
+print(json.dumps({"type": "result", "result": "done"}))
+"""
+
 
 def fake_binary(tmp_path: Path, script: str) -> str:
     binary = tmp_path / "fake-harness"
@@ -179,6 +194,16 @@ def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_pat
     assert result.exit_code == 0
     assert json.loads(result.stdout)["item"]["text"] == "done"
     assert [event["type"] for event in result.trajectory] == ["session_meta", "event_msg"]
+    assert result.residue == ()
+
+
+def test_claude_episode_runs_with_the_updater_and_its_update_commands_off(tmp_path: Path) -> None:
+    """The episode env sets both updater switches, and the agent's shell commands inherit them, so a claude update
+    or claude install run there keeps the pinned version."""
+    files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("claude"))
+    result = run_episode(get_adapter("claude"), files, "list files", binary=fake_binary(tmp_path, CLAUDE_FAKE))
+    assert result.exit_code == 0
+    assert [event["env"] for event in result.trajectory] == [{"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}]
     assert result.residue == ()
 
 

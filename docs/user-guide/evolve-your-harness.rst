@@ -604,7 +604,17 @@ the tools on PATH, the installed release against the served head) and exits
 review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
 (``-h``, ``help``) prints the wrapper's own subcommands (``report``,
 ``evolve``, ``wait``, ``page``, ``doctor``, ``setup``, ``update``; anything
-else runs pi) before pi's help. Pinning,
+else runs pi) before pi's help. Reef pins Claude Code's version, so
+``reef-claude`` runs Claude Code with ``DISABLE_UPDATES=1`` unless your
+shell sets it:
+``reef-claude upgrade`` and ``reef-claude install`` reach Claude Code's own
+update and install commands, which print that updates are disabled, and
+``reef-claude update`` is Reef's own command, which installs the served
+release. Reef refuses a harness tree whose ``settings.json`` sets
+``DISABLE_UPDATES``, but a ``.claude/settings.json`` of your own in the
+project folder can still turn those commands back on: Claude Code applies
+that file's ``env`` over the environment, and it reads ``DISABLE_UPDATES``
+as on only for ``1``, ``true``, ``yes`` or ``on``. Pinning,
 rollback, and the raw manifest routes are in `HTTP API
 <../reference/http-api.rst#harness-artifacts>`__.
 
