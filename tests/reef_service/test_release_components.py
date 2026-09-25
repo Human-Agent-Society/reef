@@ -92,7 +92,6 @@ def test_manifest_derives_one_content_id_per_combination() -> None:
     assert both.content_id.startswith("composite:")
     reordered = ReleaseComponents({HARNESS: ComponentEntry("h1"), WEIGHTS: ComponentEntry("w1")})
     assert reordered.content_id == both.content_id
-    assert both.with_entry(HARNESS, ComponentEntry("h2")).content_id != both.content_id
     assert both.relative_path(HARNESS) == Path(HARNESS)
     assert ReleaseComponents.from_dict(both.to_dict()) == both
     assert release_components({COMPONENTS_METADATA_KEY: both.to_dict()}) == both

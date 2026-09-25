@@ -519,7 +519,7 @@ class RequestService:
         if evaluated is not None and evaluated not in initial.surface.names:
             raise UnknownScenario(f"scenario {parsed.scenario!r} serves no component {evaluated!r}")
         if initial.runtime is not None:
-            with initial.operations.measure("serve/admission" if record else "evaluate/admission"):
+            with initial.operations.measure(f"{request_family(record)}/admission"):
                 admission = await initial.runtime.acquire_inference()
         else:
             admission = None
@@ -527,9 +527,10 @@ class RequestService:
             # Re-resolve after admission: a queued request must freeze the head
             # committed by the weight update that released it, never the head it
             # observed before waiting.
-            prepared = await asyncio.to_thread(self._prepare_inference, parsed, handler, admission, record=record)
-            hooks = prepared.surface.inference if record else prepared.surface.inference_for_evaluation(evaluated)
-            prepared = replace(prepared, hooks=hooks)
+            prepared = await asyncio.to_thread(
+                self._prepare_inference, parsed, handler, admission, record=record, evaluated=evaluated
+            )
+            hooks = prepared.hooks
             transformed = (
                 dict(payload)
                 if hooks is None
@@ -582,6 +583,7 @@ class RequestService:
         admission: InferenceAdmissionHandle | None,
         *,
         record: bool = True,
+        evaluated: str | None = None,
     ) -> PreparedInference:
         scenario = self.inference_scenario(parsed, record=record)
         selected_handler = handler if handler is not None else scenario.inference_handler
@@ -590,9 +592,14 @@ class RequestService:
         ref = scenario.current_artifact_ref()
         artifact = Artifact(ref, scenario.repository)
         surface = scenario.surface
+        hooks = surface.inference if record else surface.inference_for_evaluation(evaluated)
         # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
         # loaded component, never a composed release whose root holds only component directories.
         loaded_component = surface.loader_component
+        if not surface.single and (hooks is not None or loaded_component is not None):
+            # The release is frozen for the attempt: the loaded component's view and every
+            # component hook read this one materialized copy instead of materializing it again.
+            artifact = artifact.materialize()
         served = artifact if loaded_component is None else surface.component_artifact(artifact, loaded_component)
         return PreparedInference(
             parsed=parsed,
@@ -602,6 +609,7 @@ class RequestService:
             surface=surface,
             durable=scenario.training_runtime is not None,
             admission=admission,
+            hooks=hooks,
         )
 
     def harness_manifest(self, headers: Mapping[str, str], release_id: str | None = None) -> dict[str, Any]:
@@ -656,7 +664,7 @@ class RequestService:
         components = artifact.materialize().components
         if components is not None:
             # The whole combination the pulled tree belongs to, by component content id.
-            manifest["components"] = {name: entry.content_id for name, entry in components.entries.items()}
+            manifest["components"] = components.content_ids
         return manifest
 
     @staticmethod

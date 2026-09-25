@@ -76,6 +76,11 @@ class ReleaseComponents:
         return tuple(self.entries)
 
     @property
+    def content_ids(self) -> dict[str, str]:
+        """The content id of each component, in declaration order."""
+        return {name: entry.content_id for name, entry in self.entries.items()}
+
+    @property
     def single(self) -> bool:
         """True when the release keeps the flat, one-component layout."""
         return len(self.entries) == 1
@@ -98,12 +103,6 @@ class ReleaseComponents:
             ).encode("utf-8")
         ).hexdigest()
         return f"{COMPOSITE_CONTENT_PREFIX}{digest}"
-
-    def with_entry(self, name: str, entry: ComponentEntry) -> ReleaseComponents:
-        """The same combination with one component replaced."""
-        if name not in self.entries:
-            raise KeyError(f"release binds no component {name!r}")
-        return ReleaseComponents({**self.entries, name: entry})
 
     def to_dict(self) -> dict[str, Any]:
         return {

@@ -331,18 +331,12 @@ class Surface:
     @property
     def inference(self) -> InferenceHooks | None:
         """The request hooks for a release: each component's, in declaration order."""
-        bound = tuple(
-            (name, component.inference)
-            for name, component in self.components.items()
-            if component.inference is not None
-        )
-        if not bound:
-            return None
         if self.single:
-            return bound[0][1]
-        if any(isinstance(hooks, LeasingInferenceHooks) for _, hooks in bound):
-            return LeasingChainedInferenceHooks(bound)
-        return ChainedInferenceHooks(bound)
+            return next(
+                (component.inference for component in self.components.values() if component.inference is not None),
+                None,
+            )
+        return self.inference_for_evaluation(None)
 
     def inference_for_evaluation(self, component: str | None) -> InferenceHooks | None:
         """The request hooks of an evaluation call that runs a candidate of ``component``: every other component's.

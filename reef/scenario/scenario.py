@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
@@ -141,39 +142,25 @@ class Scenario:
         watermarks, processor schema) is safe here; do not reserve batches
         or replace results through this handle.
         """
-        stepping = self.stepping_trainers()
-        for bound in stepping:
-            backend = bound.trainer.candidate_backend
-            if backend is not None and backend.dispatched:
-                return bound.trainer
-        return stepping[0].trainer
+        component = self.dispatched_component
+        if component is not None:
+            return self.trainer_for(component)
+        return self.stepping_trainers()[0].trainer
 
     @property
     def is_job_reserved(self) -> bool:
         """Whether a dispatched trainer holds a reserved batch: its job is out at the backend until commit or reject."""
-        for bound in self.trainers:
-            backend = bound.trainer.candidate_backend
-            if backend is not None and backend.dispatched and bound.trainer.pending_batch is not None:
-                return True
-        return False
+        component = self.dispatched_component
+        return component is not None and self.trainer_for(component).pending_batch is not None
 
     def trainer_for(self, component: str | None) -> Trainer:
         """The trainer evolving ``component``; ``None`` selects the first trainer, for scenario-wide operations."""
-        if component is None:
-            return self.trainers[0].trainer
-        for bound in self.trainers:
-            if bound.component == component:
-                return bound.trainer
-        raise ReefError(f"scenario {self._name!r} has no trainer for component {component!r}")
+        return self._committer.trainer_for(component)
 
     @property
     def dispatched_component(self) -> str | None:
         """The component whose trainer runs a dispatched backend on the training runtime, if any."""
-        for bound in self.trainers:
-            backend = bound.trainer.candidate_backend
-            if backend is not None and backend.dispatched:
-                return bound.component
-        return None
+        return next((bound.component for bound in self.trainers if bound.trainer.dispatched), None)
 
     @property
     def scenario_step(self) -> int:
@@ -227,10 +214,8 @@ class Scenario:
         a trainer at a time, as the dispatcher's cycle lock does.
         """
         trainer = self.trainer_for(component)
-        if len(self.component_trainers) == 1:
-            with self._committer.lock:
-                return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
-        return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+        with self._committer.lock if len(self.component_trainers) == 1 else nullcontext():
+            return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
@@ -392,11 +377,7 @@ def validate_component_trainers(
     unknown = [name for name in names if name not in surface.names]
     if unknown:
         raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")
-    dispatched = []
-    for bound in trainers:
-        backend = bound.trainer.candidate_backend
-        if backend is not None and backend.dispatched:
-            dispatched.append(bound.component)
+    dispatched = [bound.component for bound in trainers if bound.trainer.dispatched]
     if len(dispatched) > 1:
         raise ReefError(f"at most one component runs on the training runtime, not {dispatched}")
     return trainers

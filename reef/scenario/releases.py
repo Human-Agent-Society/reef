@@ -66,9 +66,7 @@ class ScenarioReleases:
                 return None
             self.creation_components_read = True
             if manifest is not None:
-                self.recorded_creation_components = {
-                    name: entry.content_id for name, entry in manifest.entries.items()
-                }
+                self.recorded_creation_components = manifest.content_ids
         return self.recorded_creation_components
 
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:

@@ -71,6 +71,7 @@ def _bind(
     )
     dispatcher._registry = SimpleNamespace(
         training_scenario_name="s",
+        training_scenario_names=("s",),
         training_status_scenario_names=("s",),
         get_optional=lambda name: scenario if name == "s" else None,
         preload_errors=(),

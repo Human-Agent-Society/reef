@@ -350,20 +350,23 @@ class Dispatcher:
         whose job the backend still holds. Every job's marker names the
         scenario that owns it.
         """
-        runtime = self._recipe.training_runtime
-        if runtime is None:
-            return False
         try:
-            marker = runtime.training_job_status()
+            marker = self.in_flight_job_marker()
         except Exception as exc:
             # A runtime that does not answer cannot say whether a job is out; a blind delete could orphan one.
             raise ScenarioBusy(
                 f"cannot delete scenario {scenario!r}: the training runtime does not say whether its job is out "
                 f"({self._error_text(exc)}); retry once it answers"
             ) from exc
-        if marker is None or not marker_in_flight(marker):
-            return False
-        return marker.get("scenario") == scenario
+        return marker is not None and marker.get("scenario") == scenario
+
+    def in_flight_job_marker(self) -> Mapping[str, Any] | None:
+        """The training runtime's durable job marker while it names a job still out; runtime failures propagate."""
+        runtime = self._recipe.training_runtime
+        if runtime is None:
+            return None
+        marker = runtime.training_job_status()
+        return marker if marker_in_flight(marker) else None
 
     def _archive_scenario_state(self, scenario: str) -> list[str]:
         """Move the scenario's own files and directories under an ``archived`` sibling, stamped so a name can be deleted twice."""
@@ -581,18 +584,14 @@ class Dispatcher:
 
     def process_accepted_records(self, current: Scenario) -> None:
         """Start consumption only after the accepted records are durable."""
-        if current.training_runtime is not None:
-            self._training.ready.set()
         # Every component's trainer sees the record: a dispatched backend wakes
         # the training thread, a local backend its own worker, and a trainer
         # without a backend consumes inline.
+        self._wake_training(current)
+        if current.training_runtime is not None:
+            return
         for bound in current.component_trainers:
-            backend = bound.trainer.candidate_backend
-            if backend is not None:
-                if not backend.dispatched:
-                    self._start_local_backend_worker(current.name, bound.component)
-                continue
-            if current.training_runtime is not None:
+            if bound.trainer.candidate_backend is not None:
                 continue
             result = current.prepare_training_step(bound.component)
             if result is not None:
@@ -1136,11 +1135,7 @@ class Dispatcher:
                 self._reload_after_training_failure(name, exc)
 
     def _training_scenario_names(self) -> tuple[str, ...]:
-        names = getattr(self._registry, "training_scenario_names", None)
-        if names is not None:
-            return tuple(names)
-        name = self._registry.training_scenario_name
-        return () if name is None else (name,)
+        return self._registry.training_scenario_names
 
     def _process_training(self) -> bool:
         """Give every training scenario one turn; True when any of them progressed.
@@ -1252,7 +1247,7 @@ class Dispatcher:
         # acknowledged: every scenario's local cycles take turns with it instead of timing out under it.
         # Loaded scenarios only: a scenario not loaded runs no local cycle, and the registry's durable
         # listing would consult the artifact repository on the training thread before every job.
-        names = set(self._registry.loaded_names())
+        names = {loaded.name for loaded in self._registry.loaded_scenarios()}
         with self._training.lock:
             names.update(self._training.local_cycle_locks)
         names.add(current.name)
@@ -1389,14 +1384,11 @@ class Dispatcher:
 
         ``owner`` names the scenario whose job it is, the one a delete refuses.
         """
-        runtime = self._recipe.training_runtime
-        if runtime is None:
-            return None
         try:
-            marker = runtime.training_job_status()
+            marker = self.in_flight_job_marker()
         except Exception as exc:
             return {"error": self._error_text(exc)}
-        if marker is None or not marker_in_flight(marker):
+        if marker is None:
             return None
         return {
             "status": marker.get("status"),
@@ -1414,13 +1406,16 @@ class Dispatcher:
         if current is None:
             return None
         runtime = current.runtime
-        batch_ready = current.trainer.batch_ready()
+        stepping_trainer = current.trainer
+        batch_ready = stepping_trainer.batch_ready()
         if batch_ready:
             self._warn_if_undrained(scenario_name, last_drain)
-        processor = dict(current.trainer.processor_status())
+        # The stepping trainer's status is read once and reported again in its component block.
+        stepping_processor_status = stepping_trainer.processor_status()
+        processor = dict(stepping_processor_status)
         if "buffered_requests" in processor:
             # Include instructions still unread in storage alongside the buffered ones.
-            processor["pending_instructions"] = current.trainer.pending_instructions()
+            processor["pending_instructions"] = stepping_trainer.pending_instructions()
         block: dict[str, Any] = {
             **current.commit_status,
             # A version is current only after Reef commits its head
@@ -1429,7 +1424,7 @@ class Dispatcher:
             "current_runtime_load_id": (runtime.current_runtime_load_id() if runtime is not None else None),
             "checkpoint_storage": storage_status,
             "batch_ready": batch_ready,
-            "training_mode": current.trainer.training_mode,
+            "training_mode": stepping_trainer.training_mode,
             "processor": processor,
             "inference_admission": runtime.inference_admission_status if runtime is not None else None,
         }
@@ -1447,7 +1442,11 @@ class Dispatcher:
                 components[str(bound.component)] = {
                     "batch_ready": bound.trainer.batch_ready(),
                     "training_mode": bound.trainer.training_mode,
-                    "processor": dict(bound.trainer.processor_status()),
+                    "processor": dict(
+                        stepping_processor_status
+                        if bound.trainer is stepping_trainer
+                        else bound.trainer.processor_status()
+                    ),
                     "stale_refusals_total": self.stale_refusals_total(scenario_name, bound.component),
                     "last_committed_step": (
                         None

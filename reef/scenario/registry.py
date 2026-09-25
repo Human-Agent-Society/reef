@@ -193,11 +193,6 @@ class ScenarioRegistry:
             raise UnknownScenario(f"unknown scenario {scenario!r}")
         return self._resolve(scenario, None)
 
-    def loaded_names(self) -> tuple[str, ...]:
-        """The scenarios loaded in this process, sorted; no repository is consulted."""
-        with self._lock:
-            return tuple(sorted(self._scenarios))
-
     def list(self) -> tuple[dict[str, Any], ...]:
         """Known scenarios: loaded ones with their binding, durable ones by name."""
         registered: tuple[str, ...] = ()

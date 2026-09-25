@@ -254,6 +254,11 @@ class Trainer:
         return self._candidate_backend
 
     @property
+    def dispatched(self) -> bool:
+        """Whether this trainer's candidate backend runs dispatched on the training runtime."""
+        return self._candidate_backend is not None and self._candidate_backend.dispatched
+
+    @property
     def candidate_evaluator(self) -> CandidateEvaluationPlugin | None:
         """The external or built-in candidate evaluator, when training."""
         return self._candidate_evaluator
@@ -363,7 +368,7 @@ class Trainer:
         ready to produce a batch. ``base_release_id`` names the release served
         now; a batch reserved by this call is prepared against it.
         """
-        if self._candidate_backend is not None and self._candidate_backend.dispatched:
+        if self.dispatched:
             raise RuntimeError("dispatched candidate backends must reserve a batch before execution")
         with self._lock:
             if self._candidate_backend is None:
@@ -406,12 +411,7 @@ class Trainer:
         candidate = prepared.candidate
         if not isinstance(candidate, UpdateCandidate):
             raise TypeError("a kept step must carry an UpdateCandidate")
-        try:
-            decision = self._evaluate_candidate(candidate)
-            return StepExecution("commit", backend.settle_step(prepared, decision), prepared=prepared)
-        except BaseException:
-            backend.abort_step(prepared)
-            raise
+        return self.settle_candidate(backend, prepared, candidate)
 
     def _execute_backend_step(self, batch: TrainingBatch, scenario_step: int) -> StepExecution:
         backend = self._candidate_backend
@@ -436,6 +436,12 @@ class Trainer:
         candidate = prepared.candidate
         if not isinstance(candidate, UpdateCandidate):
             raise TypeError("candidate preparation must carry an UpdateCandidate")
+        return self.settle_candidate(backend, prepared, candidate)
+
+    def settle_candidate(
+        self, backend: CandidateBackend, prepared: PreparedStep, candidate: UpdateCandidate
+    ) -> StepExecution:
+        """Evaluate ``prepared``'s candidate and settle the step; a failure aborts it at the backend."""
         try:
             decision = self._evaluate_candidate(candidate)
             return StepExecution("commit", backend.settle_step(prepared, decision), prepared=prepared)
@@ -467,8 +473,7 @@ class Trainer:
 
     def reserve_training_batch(self, *, base_release_id: str | None = None) -> TrainingBatch | None:
         """Reserve one batch for a dispatched backend, prepared against the release served now."""
-        backend = self._candidate_backend
-        if backend is None or not backend.dispatched:
+        if not self.dispatched:
             raise RuntimeError("trainer has no dispatched candidate backend")
         with self._lock:
             if self._pending is not None:

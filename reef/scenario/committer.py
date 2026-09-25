@@ -130,7 +130,6 @@ class ScenarioCommitter:
             else store.history()
         )
         #: The sibling record the running commit settled before its own, for the caller's event of that step.
-        # The sibling record the last commit settled before its own, or None.
         self.settled_sibling: CommitRecord | None = None
         self._latest_training_record = next(
             (record for record in reversed(records) if record.operation == "training"),
@@ -295,12 +294,7 @@ class ScenarioCommitter:
         surface = self._binding.surface
         if surface.single:
             return
-        manifest = artifact.components
-        if manifest is None:
-            raise ReefError(
-                f"scenario {self._name!r} serves components {list(surface.names)} but release "
-                f"{artifact.ref.release_id!r} carries no component manifest"
-            )
+        manifest = self.release_manifest(artifact)
         missing = [name for name in surface.names if name not in manifest.entries]
         if missing:
             raise ReefError(
@@ -312,7 +306,7 @@ class ScenarioCommitter:
         """The content id of each component a release binds, for its commit record; ``None`` for a flat release."""
         if self._binding.surface.single:
             return None
-        return {name: entry.content_id for name, entry in self.release_manifest(artifact).entries.items()}
+        return self.release_manifest(artifact).content_ids
 
     def held_component(self, release_id: str) -> str | None:
         """The component a release held for review changed; ``None`` when it is not such a release.
@@ -336,16 +330,13 @@ class ScenarioCommitter:
                 f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
                 "its commit record carries no manifest"
             )
-        carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
-        if carried is None and self._releases.creation_artifact.release_id == parent_id:
-            # A person asked for this promote: a read that failed before is tried again now.
-            carried = self._releases.creation_components(self._step, retry=True)
-        if carried is None:
+        # A person asked for this promote: a creation manifest read that failed before is tried again now.
+        changed = self.changed_components(record, records, retry=True)
+        if changed is None:
             raise ReleaseNotRestorable(
                 f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
                 f"the manifest of its parent {parent_id!r} is not available"
             )
-        changed = [name for name, content_id in record.components.items() if carried.get(name) != content_id]
         if len(changed) != 1:
             raise ReleaseNotRestorable(
                 f"scenario {self._name!r} cannot tell which component release {release_id!r} changed: "
@@ -510,16 +501,29 @@ class ScenarioCommitter:
         seed, for a release another operation minted, and when the manifests do not say."""
         records = self._store.history() if self._store.durable else ()
         record = next((item for item in records if item.artifact_ref.release_id == release_id), None)
-        if record is None or record.operation != "training" or record.components is None:
+        if record is None or record.operation != "training":
             return None
+        changed = self.changed_components(record, records, retry=False)
+        return changed[0] if changed is not None and len(changed) == 1 else None
+
+    def changed_components(
+        self, record: CommitRecord, records: tuple[CommitRecord, ...], *, retry: bool
+    ) -> list[str] | None:
+        """The components ``record``'s release changed against the release it was carried from.
+
+        The parent's manifest comes from its commit record, or from the
+        creation artifact when the parent is the seed. ``None`` when either
+        manifest is unknown.
+        """
         parent_id = record.artifact_ref.parent_release_id
+        if record.components is None or parent_id is None:
+            return None
         carried = next((row.components for row in records if row.artifact_ref.release_id == parent_id), None)
-        if carried is None and parent_id is not None and self._releases.creation_artifact.release_id == parent_id:
-            carried = self._releases.creation_components(self._step)
+        if carried is None and self._releases.creation_artifact.release_id == parent_id:
+            carried = self._releases.creation_components(self._step, retry=retry)
         if carried is None:
             return None
-        changed = [name for name, content_id in record.components.items() if carried.get(name) != content_id]
-        return changed[0] if len(changed) == 1 else None
+        return [name for name, content_id in record.components.items() if carried.get(name) != content_id]
 
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Commit the backend's update of the content this Reef ships, when the served release is stale.
@@ -611,8 +615,9 @@ class ScenarioCommitter:
                 and base != served
                 and trainer.pending_has_candidate
             ):
+                # A pending candidate comes from a local backend: a dispatched result carries none.
                 backend = trainer.candidate_backend
-                policy = "merge" if backend is None or backend.dispatched else backend.stale_result_policy
+                policy = "merge" if backend is None else backend.stale_result_policy
                 if policy != "merge":
                     raise StaleTrainingResultError(
                         f"scenario {self._name!r} component {component!r} prepared its result against release "

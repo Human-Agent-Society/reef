@@ -57,31 +57,6 @@ def committed_records(store: ScenarioStore, head_record: CommitRecord | None) ->
     return records
 
 
-def _consumed_by_committed_steps(
-    store: ScenarioStore,
-    head_record: CommitRecord | None,
-    scenario: str,
-    *,
-    component: str | None = None,
-) -> frozenset[str]:
-    """The rows every committed step's batch consumed.
-
-    Rehydration must skip these rows: retention may keep a consumed row stored
-    (audit-only retention is contract-legal), and re-ingesting one would train
-    it twice. Consumption is permanent, so the union over the whole log is the
-    exclusion set. ``component`` keeps one trainer's share of a scenario with
-    several: its own commits and the receipts of its own stale drops.
-    """
-    consumed: set[str] = set()
-    for record in committed_records(store, head_record):
-        if component is None or record.component == component:
-            consumed |= record.consumed_ids
-    for receipt in store.records.consumption_receipts(scenario):
-        if component is None or receipt["metadata"].get("component") == component:
-            consumed.update(receipt["consumed_ids"])
-    return frozenset(consumed)
-
-
 @dataclass(frozen=True)
 class RecoveredTrainerState:
     """What one component's trainer recovers from its own commits and drops: state, cursor, and consumed rows."""
@@ -100,12 +75,25 @@ def recovered_trainer_states(
     commit and consumption receipt: the ones made before they carried a
     component, and rollbacks, which carry its state. A drop is a step without a commit: its rows count as consumed, and
     the state and the cursor stay the last commit's.
+
+    Rehydration must skip consumed rows: retention may keep a consumed row
+    stored (audit-only retention is contract-legal), and re-ingesting one would
+    train it twice. Consumption is permanent, so the union over the whole log
+    and every receipt is the exclusion set; with several trainers each keeps
+    its own share, the rows of its own commits and of its own stale drops.
     """
     records = committed_records(store, head_record)
+    consumed_by_component: dict[str | None, set[str]] = {}
+    for record in records:
+        consumed_by_component.setdefault(record.component, set()).update(record.consumed_ids)
+    for receipt in store.records.consumption_receipts(scenario):
+        named = receipt["metadata"].get("component")
+        owner = named if isinstance(named, str) else None
+        consumed_by_component.setdefault(owner, set()).update(receipt["consumed_ids"])
     components = surface.names or (RECORDS_COMPONENT,)
+    alone = len(components) == 1
     states: dict[str, RecoveredTrainerState] = {}
     for component in components:
-        alone = len(components) == 1
         own = tuple(
             record for record in records if record.component == component or (alone and record.component is None)
         )
@@ -113,8 +101,10 @@ def recovered_trainer_states(
         states[component] = RecoveredTrainerState(
             algorithm_state=None if last is None else last.algorithm_state,
             high_water=None if last is None else (last.high_water_sequence, last.high_water_offset),
-            consumed_ids=_consumed_by_committed_steps(
-                store, head_record, scenario, component=None if alone else component
+            consumed_ids=(
+                frozenset().union(*consumed_by_component.values())
+                if alone
+                else frozenset(consumed_by_component.get(component, ()))
             ),
         )
     return states
@@ -296,11 +286,7 @@ class ScenarioFactory:
         registered_name, base_artifact, checkpoint = parse_scenario_metadata(
             registration,
             checkpoint_head=checkpoint_head,
-            components=(
-                None
-                if surface.single or registered_components is None
-                else {name: entry.content_id for name, entry in registered_components.entries.items()}
-            ),
+            components=None if surface.single or registered_components is None else registered_components.content_ids,
         )
         if registered_name != name:
             raise ValueError(f"scenario metadata is for {registered_name!r}, not {name!r}")
@@ -412,9 +398,8 @@ class ScenarioFactory:
             # before resuming its cursor. Retention may keep already-consumed
             # rows for audit.
             for bound in trainers:
-                recovered = recovered_states.get(bound.component)
-                if recovered is None:
-                    continue
+                # Scenario() checked that every trainer names a component the surface serves: each has a state.
+                recovered = recovered_states[bound.component]
                 if recovered.high_water is not None:
                     scenario.reingest(
                         up_to_sequence=recovered.high_water[0],
