@@ -4045,7 +4045,7 @@ runtime = [
 
 [package.metadata]
 requires-dist = [
-    { name = "aiohttp" },
+    { name = "aiohttp", specifier = ">=3.14" },
     { name = "alembic", specifier = ">=1.13,<2" },
     { name = "connectrpc", marker = "extra == 'e2b'", specifier = ">=0.11.1,<0.12" },
     { name = "e2b", marker = "extra == 'e2b'", specifier = ">=2.46" },

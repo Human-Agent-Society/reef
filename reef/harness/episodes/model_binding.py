@@ -241,6 +241,10 @@ class ModelBinding:
         """
         return getattr(self, "_last_response", None)
 
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """A line for the step's activity, where the caller runs inside a step that shows one (the request
+        page's Activity); a plain binding keeps none."""
+
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """POST one request in the binding's native dialect and return the
         response object: Chat Completions for ``openai``, Responses for
@@ -311,10 +315,17 @@ class ModelBinding:
 
         templates = descriptor.model_binding.get(self.api)
         if not templates:
-            known = ", ".join(sorted(descriptor.model_binding)) or "none"
+            declared = sorted(descriptor.model_binding)
+            known = ", ".join(declared) or "none"
+            # The dialect is the upstream's: reef serve takes it as --inference.upstream-api.
+            hint = (
+                f": serve with --inference.upstream-api {declared[0]} on an upstream that speaks it"
+                if declared
+                else ""
+            )
             raise ModelBindingError(
                 f"adapter {descriptor.name!r} declares no model_binding for the {self.api!r} api "
-                f"(declared: {known}); episodes cannot reach a model"
+                f"(declared: {known}); episodes cannot reach a model{hint}"
             )
         values: dict[str, Any] = {
             "base_url": self.base_url,
