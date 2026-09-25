@@ -29,7 +29,7 @@ from reef.harness.tree.render import RenderError
 _CONFIG = "codex/config.toml"
 _EXTENSIONS = "codex/extensions/"
 _SKILLS = "codex/skills/"
-_WEB_SEARCH_MODES = ("disabled", "cached", "indexed", "live")
+WEB_SEARCH_MODES = ("disabled", "cached", "indexed", "live")
 
 _ALLOWED_CONFIG_KEYS = {
     "analytics",
@@ -92,8 +92,8 @@ def _validate_config(config: dict[str, Any]) -> None:
     extra = sorted(set(config) - _ALLOWED_CONFIG_KEYS)
     if extra:
         raise RenderError(f"codex config keys are not admitted for benchmark episodes: {', '.join(extra)}")
-    if config.get("web_search") not in _WEB_SEARCH_MODES:
-        raise RenderError(f"codex web_search must be one of {', '.join(_WEB_SEARCH_MODES)}")
+    if config.get("web_search") not in WEB_SEARCH_MODES:
+        raise RenderError(f"codex web_search must be one of {', '.join(WEB_SEARCH_MODES)}")
     if config.get("check_for_update_on_startup") is not False:
         raise RenderError("codex composition must keep check_for_update_on_startup false")
     for section in ("analytics", "feedback"):

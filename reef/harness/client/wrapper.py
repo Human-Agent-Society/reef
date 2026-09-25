@@ -500,13 +500,13 @@ def _create_temp_composition(adapter: str, compose_dir: str, proxy_port: int) ->
 CODEX_TRUST_LEVELS = ("trusted", "untrusted")
 
 
-def _codex_trust_path(compose_dir: str) -> Path:
+def codex_trust_path(compose_dir: str) -> Path:
     """Where reef-codex keeps the folder trust of one install root: ``~/.reef/trust``, outside the install root."""
     install_root = str(Path(compose_dir).resolve().parent)
     return Path.home() / ".reef" / "trust" / f"{hashlib.sha256(install_root.encode()).hexdigest()}.json"
 
 
-def _codex_projects(config: Path) -> dict[str, Any]:
+def codex_projects(config: Path) -> dict[str, Any]:
     """The ``projects`` table of a Codex ``config.toml``; empty when the file does not parse."""
     try:
         projects = tomllib.loads(config.read_text(encoding="utf-8")).get("projects")
@@ -515,7 +515,7 @@ def _codex_projects(config: Path) -> dict[str, Any]:
     return projects if isinstance(projects, dict) else {}
 
 
-def _add_codex_trust(compose_dir: str, config: Path) -> None:
+def add_codex_trust(compose_dir: str, config: Path) -> None:
     """Add the folders the person trusted in earlier sessions to the temp ``config.toml`` Codex reads.
 
     Codex writes the answer to its trust prompt into ``$CODEX_HOME/config.toml``,
@@ -523,12 +523,12 @@ def _add_codex_trust(compose_dir: str, config: Path) -> None:
     session asks again. A folder the tree's config already names keeps the
     tree's entry, and a copy that would not parse is left as it was."""
     try:
-        stored = json.loads(_codex_trust_path(compose_dir).read_text(encoding="utf-8")).get("projects")
+        stored = json.loads(codex_trust_path(compose_dir).read_text(encoding="utf-8")).get("projects")
     except (OSError, ValueError, AttributeError):
         return
     if not isinstance(stored, dict):
         return
-    present = _codex_projects(config)
+    present = codex_projects(config)
     tables = "".join(
         f"\n[projects.{json.dumps(folder)}]\ntrust_level = {json.dumps(level)}\n"
         for folder, level in sorted(stored.items())
@@ -544,7 +544,7 @@ def _add_codex_trust(compose_dir: str, config: Path) -> None:
     config.write_text(text + tables, encoding="utf-8")
 
 
-def _keep_codex_trust(compose_dir: str, config: Path, cwd: Path) -> None:
+def keep_codex_trust(compose_dir: str, config: Path, cwd: Path) -> None:
     """Keep the trust Codex wrote for this session's folder, the working directory or the repository above it.
 
     Only those folders: a command in the session can write the temp copy,
@@ -556,12 +556,12 @@ def _keep_codex_trust(compose_dir: str, config: Path, cwd: Path) -> None:
         folders.add(str(repository))
     answered = {
         folder: entry["trust_level"]
-        for folder, entry in _codex_projects(config).items()
+        for folder, entry in codex_projects(config).items()
         if folder in folders and isinstance(entry, dict) and entry.get("trust_level") in CODEX_TRUST_LEVELS
     }
     if not answered:
         return
-    path = _codex_trust_path(compose_dir)
+    path = codex_trust_path(compose_dir)
     try:
         record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
@@ -928,7 +928,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
     cwd = Path.cwd().resolve()
     if adapter == "codex":
-        _add_codex_trust(compose_dir, Path(temp_dir) / "config.toml")
+        add_codex_trust(compose_dir, Path(temp_dir) / "config.toml")
     env = os.environ.copy()
     env[env_var] = temp_dir
     # What an interactive run needs beyond the episode env; the person's own setting wins.
@@ -974,7 +974,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
                 shutil.copy2(written, staging)  # with its mode: dsh refuses credentials readable beyond their owner
                 os.replace(staging, destination)
             if adapter == "codex":
-                _keep_codex_trust(compose_dir, Path(temp_dir) / "config.toml", cwd)
+                keep_codex_trust(compose_dir, Path(temp_dir) / "config.toml", cwd)
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
