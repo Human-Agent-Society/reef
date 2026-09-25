@@ -104,7 +104,7 @@ def test_harness_surface_ignores_repository_bookkeeping(tmp_path) -> None:
     assert surface.files.read_files(Artifact.local(root)) == {"skills/SKILL.md": "rule"}
 
 
-class _ClaudeHarnessRecipe(_HarnessRecipe):
+class ClaudeHarnessRecipe(_HarnessRecipe):
     @property
     def harness_adapter(self) -> str | None:
         return "claude"
@@ -113,7 +113,7 @@ class _ClaudeHarnessRecipe(_HarnessRecipe):
 def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
     (tmp_path / "harness").mkdir()
     (tmp_path / "weights").mkdir()
-    harness = _service(tmp_path / "harness", recipe=_ClaudeHarnessRecipe(), skill_text="x").dispatcher
+    harness = _service(tmp_path / "harness", recipe=ClaudeHarnessRecipe(), skill_text="x").dispatcher
     weights = _service(tmp_path / "weights", recipe=Recipe(), skill_text="x").dispatcher
     assert [(row["scenario"], row["adapter"]) for row in harness.list_scenarios()] == [("delivery", "claude")]
     assert all("adapter" not in row for row in weights.list_scenarios())
