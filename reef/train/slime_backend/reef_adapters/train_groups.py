@@ -154,12 +154,12 @@ class SlimeTrainGroup:
             for rank in range(self._world_size)
         ]
 
-    def save_model(self, rollout_id, force_sync=False, scenario_step=None):
-        kwargs = {"force_sync": force_sync}
-        if scenario_step is not None:
-            kwargs["scenario_step"] = scenario_step
+    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
         result = self.executor.collective_rpc(
-            "save_model", args=(rollout_id,), kwargs=kwargs, timeout=TRAIN_RPC_TIMEOUT_S
+            "save_model",
+            args=(rollout_id,),
+            kwargs={"force_sync": force_sync, "scenario_step": scenario_step},
+            timeout=TRAIN_RPC_TIMEOUT_S,
         )
         if self._release_train_enabled():
             self.args.load = self.args.save

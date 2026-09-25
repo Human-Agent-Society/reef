@@ -71,7 +71,7 @@ class DurableRuntime(StubTrainingRuntime):
     ):
         sample = batch.items[0]
         payload = {
-            "rollout_id": scenario_step,
+            "scenario_step": scenario_step,
             "loss": objective,
             "source": source_record_id(sample),
             "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
@@ -84,8 +84,8 @@ class DurableRuntime(StubTrainingRuntime):
         )
 
     def train_candidate(self, payload):
-        rollout_id = payload["rollout_id"]
-        existing = self.completed.get(rollout_id)
+        scenario_step = payload["scenario_step"]
+        existing = self.completed.get(scenario_step)
         if existing is not None:
             return existing
         if payload["expected_runtime_load_id"] != self.serving_version:
@@ -97,7 +97,7 @@ class DurableRuntime(StubTrainingRuntime):
         self.started.set()
         if self.block and not self.release.wait(5):
             raise TimeoutError("test did not release blocked training")
-        job_id = f"job-{rollout_id}"
+        job_id = f"job-{scenario_step}"
         checkpoint = self.checkpoint_root / job_id
         checkpoint.mkdir(parents=True)
         candidate = ModelCandidate(
@@ -107,7 +107,7 @@ class DurableRuntime(StubTrainingRuntime):
             current_runtime_load_id=self.serving_version,
             training_metrics=self.complete_metrics or {},
         )
-        self.completed[rollout_id] = candidate
+        self.completed[scenario_step] = candidate
         self.candidate_versions[job_id] = f"job:{job_id}"
         if self.fail_once:
             self.fail_once = False
@@ -359,7 +359,7 @@ def test_two_jobs_form_one_deterministic_release_chain(start_dispatcher) -> None
     _submit_pair(dispatcher, "2", runtime.serving_version)
     _wait_for_step(dispatcher, 2)
 
-    assert [call["rollout_id"] for call in runtime.calls] == [0, 1]
+    assert [call["scenario_step"] for call in runtime.calls] == [0, 1]
     assert [call["source"] for call in runtime.calls] == ["inference-1", "inference-2"]
     assert scenario.current_artifact_ref().parent_release_id == first.release_id
     with pytest.raises(ReefError, match="already bound"):
@@ -457,8 +457,8 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
     assert scenario.trainer.operational_metrics()["runtime/stale_batches_total"] == 1
     assert [call["source"] for call in runtime.calls] == ["inference-2"]
     # Rejecting the first batch consumes neither side's step counter, so the
-    # next valid batch reuses rollout 0 rather than wedging the bridge at 1.
-    assert runtime.calls[0]["rollout_id"] == 0
+    # next valid batch reuses scenario step 0 rather than wedging the bridge at 1.
+    assert runtime.calls[0]["scenario_step"] == 0
     assert scenario.scenario_step == 1
     assert scenario.records.count("math") == 4
     receipts = scenario.records.consumption_receipts("math")
@@ -484,7 +484,7 @@ def test_storage_block_preserves_pending_batch_and_retries(start_dispatcher, mon
     assert dispatcher.build_training_status()["scenarios"]["math"]["checkpoint_storage"]["reasons"] == ["test cap"]
     runtime.block_storage = False
     _wait_for_step(dispatcher, 1)
-    assert runtime.calls[0]["rollout_id"] == 0
+    assert runtime.calls[0]["scenario_step"] == 0
     assert runtime.calls[0]["source"] == "inference-1"
     assert dispatcher.build_training_status()["scenarios"]["math"]["checkpoint_storage"] is None
 

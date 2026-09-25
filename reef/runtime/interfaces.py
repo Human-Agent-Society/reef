@@ -218,17 +218,15 @@ class TrainingCheckpoint:
 
     rollout_id: int
     path: Path
+    scenario_step: int
     scenario: str | None = None
-    scenario_step: int | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.rollout_id, int) or isinstance(self.rollout_id, bool) or self.rollout_id < 0:
             raise ValueError("checkpoint rollout_id must be non-negative")
         if self.scenario is not None and (not isinstance(self.scenario, str) or not self.scenario):
             raise ValueError("checkpoint scenario must be non-empty")
-        if (self.scenario is not None or self.scenario_step is not None) and (
-            not isinstance(self.scenario_step, int) or isinstance(self.scenario_step, bool) or self.scenario_step < 0
-        ):
+        if not isinstance(self.scenario_step, int) or isinstance(self.scenario_step, bool) or self.scenario_step < 0:
             raise ValueError("checkpoint scenario_step must be non-negative")
 
 
@@ -762,7 +760,7 @@ class TrainingBackend(ABC):
         payload: Mapping[str, Any],
         *,
         job_id: str,
-        rollout_id: int,
+        scenario_step: int,
         prior_marker: Mapping[str, Any] | None,
     ) -> AbstractContextManager[PreparedTrainingJob | TrainingJobResult]:
         """Admit and prepare one job without changing model or optimizer state.
@@ -771,6 +769,8 @@ class TrainingBackend(ABC):
         the prepared job is yielded. The context retains resource reservations
         until Reef records the checkpoint (including on failure); it must not
         suppress exceptions. An early result may only be stale or storage-blocked.
+        ``scenario_step`` is the Reef scenario step the job trains; the backend
+        picks the checkpoint index from its own sequence.
         """
 
     @abstractmethod
