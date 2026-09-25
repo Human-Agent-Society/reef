@@ -109,6 +109,47 @@ async def wait_for_training(scenario, count):
     assert scenario.trainer.state["trained"] == count
 
 
+@pytest.mark.parametrize("endpoint", ("/v1/chat/completions", "/v1/messages"))
+def test_large_inference_context_reaches_the_handler(tmp_path, endpoint):
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+    handler = EchoHandler()
+    text = "x" * (3 * 1024 * 1024)
+
+    async def run():
+        async with TestClient(
+            TestServer(create_app(dispatcher, tokens="import-test-token", inference_handler=handler))
+        ) as client:
+            response = await client.post(
+                endpoint, headers=HEADERS, json={"messages": [{"role": "user", "content": text}]}
+            )
+            assert response.status == 200, await response.text()
+            assert (await response.json())["choices"][0]["message"]["content"] == f"answer:{text}"
+            assert handler.calls == 1
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.parametrize("bulk", (False, True))
+def test_record_import_keeps_its_body_limit(tmp_path, bulk):
+    dispatcher = dispatcher_for(tmp_path, LearningRecipe())
+    record = imported("too-large", {"text": "x" * (1024 * 1024)})
+
+    async def run():
+        async with TestClient(TestServer(create_app(dispatcher, tokens="import-test-token"))) as client:
+            endpoint = "/reef/records/batch" if bulk else "/reef/records"
+            body = {"records": [record]} if bulk else record
+            response = await client.post(endpoint, headers=HEADERS, json=body)
+            assert response.status == 413
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
 @pytest.mark.parametrize("bulk", (False, True))
 def test_import_then_chat_continue_with_the_same_reported_processor(tmp_path, bulk):
     recipe = LearningRecipe()

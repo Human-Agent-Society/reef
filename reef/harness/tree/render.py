@@ -27,17 +27,10 @@ class RenderError(ReefError):
 
 
 def _deep_merge(base: dict[str, Any], overlay: Mapping[str, Any]) -> dict[str, Any]:
-    """``overlay`` over ``base``, key by key: objects merge, lists join (an item already there is not repeated),
-    anything else is replaced. Two config nodes that each add a hook or a permission rule then both keep theirs."""
     merged = dict(base)
     for key, value in overlay.items():
         below = merged.get(key)
-        if isinstance(below, dict) and isinstance(value, Mapping):
-            merged[key] = _deep_merge(below, value)
-        elif isinstance(below, list) and isinstance(value, list):
-            merged[key] = [*below, *(item for item in value if item not in below)]
-        else:
-            merged[key] = value
+        merged[key] = _deep_merge(below, value) if isinstance(below, dict) and isinstance(value, Mapping) else value
     return merged
 
 

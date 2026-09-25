@@ -1,0 +1,20 @@
+# What reef's reefine proposer is told about DeepSeek Harness (dsh): see reef.harness.adapters.harness_facts.
+title: >-
+  DeepSeek Harness (dsh)
+command: >-
+  A person uses dsh through its web UI (reef-dsh web) and types an agent_command as /<id>. Its text is a SKILL.md:
+  YAML frontmatter with name and description, then the instructions, which dsh adds after the person's message;
+  that message holds what they typed after /<id>.
+tools: >-
+  ask_user_question, bash (it writes only inside the working directory and the temp directories), create_goal,
+  edit, exit_plan_mode, get_goal, glob, grep, interrupt_agent, job_kill, job_list, job_output, list_agents, ralph,
+  read, read_image, send_message, skill, subagent, subagent_fork, todo_write, update_goal, workflow, write,
+  web_fetch (reads one URL) and web_search, which needs DEEPSEEK_API_KEY on the person's machine: a change that
+  relies on web_search declares {"name": "DEEPSEEK_API_KEY", "kind": "env", "prompt": "<one sentence>"} as a
+  requires item, and its How to use names reef-dsh setup as the way to give the key
+conversation_mode:
+  name: dsh
+  skill: >-
+    dsh puts a typed skill into the message as a <skill_content name="<name>"> block
+  escape: >-
+    a command the person runs in a terminal

@@ -26,16 +26,19 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
 ``reef-pi evolve "..." --wait [--timeout SECONDS]``; ``harness`` remains a compatibility alias):
 
   Sends an explicit manual training instruction to ``POST /reef/train`` with
-  the installed release and the oldest pending session's id (or a fresh id
+  the installed release and a session id: inside a session the wrapper
+  started, that session's (``REEF_HARNESS_SESSION``, the tag every call of
+  the run carries); outside one, the oldest pending session's (or a fresh id
   when nothing is spooled). The scenario must use ``training_mode: manual``
   or ``hybrid``. Acceptance queues a step without inference receipts or a
   feedback report; the merged ``requires`` list rides ``training_request``
   in the commit's metrics. The accepted line is followed by a link to the
-  request's page (``GET /reef/harness/requests/<id>/page`` with the scenario
-  and the token as query parameters, so a browser opens it as is). With
+  request's page, the ``page_path`` the service answered with (its query
+  holds the scenario and a page key, never the token, so a browser opens it
+  as is). With
   ``--wait`` the wrapper polls the release catalog every 5 s for the step
   that consumed the request (``--timeout`` seconds, 1800 by default), says
-  once when the request's record shows a step took it, and prints the
+  once when the request's progress shows a step took it, and prints the
   result with the next action (a pending release says it is not installed
   until promoted and names its page link; a skipped step's line quotes why
   the proposer produced nothing): exit 0 for a selected or pending release,
@@ -46,6 +49,17 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
   to use it.``; a pending release names its page, asks ``Promote now?
   [y/N]`` and, on yes, posts the promote and installs the new head the same
   way. Declined, or without a terminal, the next commands are printed.
+
+When invoked with ``wait`` (e.g. ``reef-claude wait <request id> --timeout 500``):
+
+  Waits for the step that takes a request ``evolve`` already filed and
+  reports it as ``evolve --wait`` does, with the same exit statuses. The
+  shipped ``/reefine`` command of an adapter without its own extension
+  files the request with ``evolve`` and calls ``wait --poll`` until it
+  stops printing ``no result yet``, since the agent's shell tool stops a
+  command after a few minutes; ``--poll`` exits 0 while the step still
+  runs, where a plain ``wait`` exits 2, since a shell tool counts a
+  nonzero exit as a failed call.
 
 When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
 
@@ -187,6 +201,8 @@ from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
+from reef.harness.episodes.version_check import ships_version_check
+from reef.harness.step_result import design_sections, next_action, rejection_text
 
 
 def _captures_dir() -> Path:
@@ -433,6 +449,19 @@ def _reef_token(adapter: str, compose_dir: str) -> str | None:
         sys.exit(f"reef-{adapter}: {exc}")
 
 
+def session_tree_token(adapter: str, compose_dir: str, upstream: str) -> str | None:
+    """The tree's own token for a session whose tool environment lost ``REEF_TOKEN`` (dsh strips every variable
+    named like a token from what its tools run), when the tree's binding names the session's service; a binding
+    another install rewrote belongs to another service, and its token is never sent here."""
+    try:
+        bound = _extract_reef_url(adapter, Path(compose_dir))
+        if bound is None or _strip_v1(bound.rstrip("/")) != upstream:
+            return None
+        return _extract_reef_token(adapter, Path(compose_dir))
+    except WrapperError:
+        return None
+
+
 def _strip_v1(url: str) -> str:
     return url[:-3] if url.endswith("/v1") else url
 
@@ -589,7 +618,7 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
-class _QuietHTTPServer(ThreadingHTTPServer):
+class QuietHTTPServer(ThreadingHTTPServer):
     """The proxy's server, with a dropped connection kept off the terminal.
 
     ``ThreadingHTTPServer`` prints a traceback to stderr when a client closes
@@ -644,7 +673,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = _QuietHTTPServer((self.listen_host, 0), self._handler)
+        server = QuietHTTPServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):
@@ -878,8 +907,10 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
+    # The session tag every call of this run carries, so a request filed from inside the session names it.
+    env["REEF_HARNESS_SESSION"] = tags["session"]
     # An evolved tool that starts a second agent session finds this harness's own binary first, and a command
-    # or hook of the tree runs reef-<adapter> by name whether or not the person's shell has ~/.local/bin on PATH.
+    # that runs reef-<adapter> by name reaches this install's wrapper, not the one another install linked.
     env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), str(install_root), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
@@ -1004,29 +1035,36 @@ def _spooled_session(scenario: str) -> str | None:
     return None
 
 
+#: How much of a release's How to use a result line carries: its first paragraph, cut only when it runs long (entering
+#: and leaving a mode often share one).
+USAGE_CHARS = 1200
+
+
 def _clip(text: str, limit: int) -> str:
     """The first ``limit`` characters of a text, the cut marked."""
     return text if len(text) <= limit else f"{text[: limit - 3]}..."
 
 
-def _page_link(upstream: str, path: str, scenario: str, token: str | None) -> str:
-    """A page a browser opens: the query carries what the wrapper sends as headers, the scenario and the token."""
-    query = f"scenario={urllib.parse.quote(scenario, safe='')}"
-    if token:
-        query += f"&token={urllib.parse.quote(token, safe='')}"
-    return f"{upstream}{path}?{query}"
+def page_link(upstream: str, answer: Mapping[str, Any], route: str, scenario: str) -> str:
+    """The link a browser opens for a page: ``upstream`` and the ``page_path`` the service answered (a filed
+    request, a catalog row), whose query carries the scenario and a page key in place of the token, since a
+    session's model reads the link. A service from before page paths gets ``route`` with the scenario alone."""
+    path = answer.get("page_path")
+    if isinstance(path, str) and path.startswith("/"):
+        return f"{upstream}{path}"
+    return f"{upstream}{route}?scenario={urllib.parse.quote(scenario, safe='')}"
 
 
-def _request_page_link(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
-    """The link to a request's page, ``GET /reef/harness/requests/<id>/page``."""
-    return _page_link(
-        upstream, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario, token
+def _request_page_link(upstream: str, scenario: str, answer: Mapping[str, Any], record_id: str) -> str:
+    """The link to a request's page, ``GET /reef/harness/requests/<id>/page``, from the filing's answer."""
+    return page_link(
+        upstream, answer, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario
     )
 
 
-def _step_page_link(upstream: str, scenario: str, token: str | None, step: int) -> str:
-    """The link to a step's page, ``GET /reef/harness/releases/<step>/page``."""
-    return _page_link(upstream, f"/reef/harness/releases/{step}/page", scenario, token)
+def _step_page_link(upstream: str, scenario: str, rows: Sequence[Mapping[str, Any]], step: int) -> str:
+    """The link to a step's page, ``GET /reef/harness/releases/<step>/page``, from the step's catalog row."""
+    return page_link(upstream, rows[step], f"/reef/harness/releases/{step}/page", scenario)
 
 
 def _metrics_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1062,14 +1100,32 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
     return str(row.get("operation") or "unknown")
 
 
-def _uncovered(row: Mapping[str, Any]) -> list[str]:
-    """What the step's review left uncovered, when it recorded one."""
+def review_points(row: Mapping[str, Any], key: str) -> list[str]:
+    """One list the step's review recorded: ``uncovered`` for what the entries left uncovered, ``limits`` for what
+    the harness's notes put out of reach; empty when the review recorded none."""
     notes = _metrics_of(row).get("proposal_notes")
     review = notes.get("review") if isinstance(notes, Mapping) else None
-    items = review.get("uncovered") if isinstance(review, Mapping) else None
+    items = review.get(key) if isinstance(review, Mapping) else None
     if not isinstance(items, list):
         return []
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
+
+
+def declined_reason(row: Mapping[str, Any]) -> str:
+    """Why the proposer wrote no entry on purpose, when its design said no entry can deliver the request."""
+    notes = _metrics_of(row).get("proposal_notes")
+    reason = notes.get("declined") if isinstance(notes, Mapping) else None
+    return reason.strip() if isinstance(reason, str) else ""
+
+
+def release_usage(row: Mapping[str, Any]) -> str:
+    """The first paragraph of the release's How to use on one line, cut only when long: the form a person types,
+    from the release itself, never from the request's wording. Markdown backticks go, so a model that quotes the line
+    in its own inline code renders it whole. Empty when the design has none."""
+    notes = _metrics_of(row).get("proposal_notes")
+    _, usage = design_sections(notes if isinstance(notes, Mapping) else {})
+    first = usage.split("\n\n", 1)[0]
+    return _clip(" ".join(first.replace("`", "").split()), USAGE_CHARS)
 
 
 def _failure_of(row: Mapping[str, Any]) -> str:
@@ -1079,34 +1135,46 @@ def _failure_of(row: Mapping[str, Any]) -> str:
     return failure.strip() if isinstance(failure, str) else ""
 
 
-def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str) -> str:
+def result_line(
+    adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str, unmet: Sequence[str] = ()
+) -> str:
     """One line for a settled step: its result and the next action, quoting the request's first 60 characters.
 
     The extension's watch says the same in the session; ``evolve --wait``
     and ``doctor`` say it here. ``page`` is the step's page link, which the
-    pending line names as the review."""
+    pending line names as the review; ``unmet`` names the items the release still needs set up."""
     row = rows[step]
     metrics = _metrics_of(row)
     ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
     release = str(row.get("release_id") or "")[:8]
     selection_result = result_of(row, rows)
+    notice = ships_version_check(adapter)
     if selection_result == "selected":
-        return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
-    if selection_result == "pending":
-        if adapter == "pi":
+        if notice:
             return (
-                f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
-                f"runs: /versions v{step} opens the page, /versions v{step} install serves it. Page: {page}"
+                f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it "
+                "(the update notice offers it)."
             )
+        action = next_action(adapter, step, selection_result, str(_request_of(row).get("id") or ""), unmet)
+        commands = ", then ".join(action.terminal) if action is not None else f"reef-{adapter} update"
+        return f"'{ask}' is published as release {release}. Run {commands}, then restart reef-{adapter}."
+    if selection_result == "pending":
+        where = (
+            f"/versions v{step} opens the page, /versions v{step} install serves it"
+            if notice
+            else f"reef-{adapter} page {step} opens the page"
+        )
         return (
-            f"'{ask}' is ready as release {release}. This release changes what runs on your machine, so read it "
-            f"before it runs: reef-{adapter} page {step} opens the page, reef-{adapter} install --release {release} "
-            f"serves and installs it. Page: {page}"
+            f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
+            f"runs: {where}. Page: {page}"
         )
     if selection_result == "rejected":
-        selection = metrics.get("selection")
-        reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
-        return f"'{ask}' did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
+        return f"'{ask}' {rejection_text(metrics)}"
+    if selection_result == "skipped" and declined_reason(row):
+        return (
+            f"'{ask}' was answered with no change: {declined_reason(row)}. The design and what is out of reach are on "
+            f"the page: {page}"
+        )
     if selection_result == "skipped":
         # The proposer's own reason, when the step recorded one: a failed model call, a reply with no entry.
         failure = _failure_of(row)
@@ -1120,8 +1188,10 @@ def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
     return next((step for step, row in enumerate(rows) if _request_of(row).get("id") == record_id), None)
 
 
-def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
-    """Read the request's explicit progress: started, gone, or waiting.
+def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> tuple[str, Mapping[str, Any]]:
+    """Where the request stands by its progress (``GET /reef/harness/requests/<id>/progress``, the request page's
+    reading), and that reading: ``started`` once its state is past ``queued`` (a settled request's state is its
+    result), ``gone`` when the service answers 404 (its scenario was reset), else ``waiting``.
 
     A read that fails for any other reason is no reason to stop waiting, so
     it reads as waiting and the next poll asks again."""
@@ -1129,14 +1199,29 @@ def _request_state(upstream: str, scenario: str, token: str | None, record_id: s
     req = urllib.request.Request(f"{upstream}{path}", headers=_reef_headers(scenario, token))
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
-            record = json.loads(response.read())
+            progress = json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        return "gone" if exc.code == 404 else "waiting"
+        return ("gone" if exc.code == 404 else "waiting"), {}
     except (OSError, ValueError):
-        return "waiting"
-    if isinstance(record, Mapping) and isinstance(record.get("state"), str) and record["state"] != "queued":
-        return "started"
-    return "waiting"
+        return "waiting", {}
+    if isinstance(progress, Mapping) and isinstance(progress.get("state"), str) and progress["state"] != "queued":
+        return "started", progress
+    return "waiting", {}
+
+
+def step_words(progress: Mapping[str, Any]) -> str:
+    """Where a running step stands, for the line a wait ends with: its phase and its time so far, which grows with
+    every wait, so no two waits print the same line (a harness that stops an identical repeated call reads it
+    as a loop); empty before a step took the request."""
+    state = progress.get("state")
+    if not isinstance(state, str) or not state:
+        return ""
+    started_at = progress.get("started_at")
+    if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
+        whole = max(0, int(time.time() - started_at))
+        clock = f"{whole} s" if whole < 120 else f"{whole // 60} min {whole % 60:02d} s"
+        return f"; the step is {state}, {clock} in"
+    return f"; the step is {state}"
 
 
 def _await_step(
@@ -1156,22 +1241,29 @@ def _await_step(
     ``"gone"`` when two polls in a row find no record of the request (its
     scenario was reset; one missing read can be a record not written yet).
     One line says when the record shows a step took it, so the wait is seen
-    to move."""
+    to move; the timeout line names the phase the last progress read showed."""
     deadline = time.monotonic() + timeout_s
     started = False
     missing = 0
+    progress: Mapping[str, Any] = {}
     while True:
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
         if step is not None:
             return step, rows
         if time.monotonic() >= deadline:
-            print(
-                f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; /versions shows it when it settles"
+            later = (
+                "/versions shows it when it settles"
+                if ships_version_check(adapter)
+                else f"reef-{adapter} wait {record_id} waits again"
             )
+            print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s{step_words(progress)}; {later}")
             return "timeout"
+        # Read on every poll, so the line a timeout prints names the phase the step is in now.
+        state, reading = _request_state(upstream, scenario, token, record_id)
+        if reading:
+            progress = reading
         if not started:
-            state = _request_state(upstream, scenario, token, record_id)
             missing = missing + 1 if state == "gone" else 0
             if missing >= 2:
                 print(
@@ -1181,7 +1273,7 @@ def _await_step(
                 return "gone"
             if state == "started":
                 started = True
-                print(f"reef-{adapter}: the step started; usually one to three minutes")
+                print(f"reef-{adapter}: the step started; usually a few minutes")
         time.sleep(poll_s)
 
 
@@ -1222,13 +1314,31 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
     return head
 
 
-def _next_commands(adapter: str, step: int, selection_result: str, release: str = "") -> str:
-    """The commands that take the next step by hand, for a person who declined it or has no terminal."""
-    if selection_result == "pending":
-        if adapter == "pi":
-            return f"/versions v{step} install in a reef-pi session, or reef-pi setup and reef-pi update"
-        return f"reef-{adapter} install --release {release[:8]} (promotes it, then installs it)"
-    return f"reef-{adapter} setup, then reef-{adapter} update"
+def next_commands(adapter: str, step: int, selection_result: str, record_id: str, unmet: Sequence[str]) -> str:
+    """The commands that take the next step by hand, for a person who declined it or has no terminal: the terminal
+    commands of the step's :class:`NextAction`, setup named only while ``unmet`` names an item."""
+    action = next_action(adapter, step, selection_result, record_id, unmet)
+    if action is None:
+        return ""
+    terminal = ", then ".join(action.terminal)
+    if selection_result != "pending":
+        return terminal
+    if ships_version_check(adapter):
+        return f"{action.commands[0]} in a reef-{adapter} session, or {' and '.join(action.terminal)}"
+    return f"{terminal} in a terminal"
+
+
+def unmet_requires(compose_dir: str, rows: Sequence[Mapping[str, Any]], release: str) -> list[str]:
+    """The names of the items ``release`` requires that this machine has not met: its chain's union, read as update
+    reads it, an env item the environment or the env file sets counting as met; nothing is written."""
+    record = _read_release_info(compose_dir) or {}
+    recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
+    values = _read_env_file(compose_dir)
+    return [
+        item["name"]
+        for item in required_by(rows, release)
+        if not (_met(item, recorded.get(item["name"])) or _auto_met(item, values))
+    ]
 
 
 def _install(scenario: str, adapter: str, compose_dir: str, release: str) -> int:
@@ -1242,107 +1352,6 @@ def _install(scenario: str, adapter: str, compose_dir: str, release: str) -> int
     return 0
 
 
-def install(scenario: str, adapter: str, compose_dir: str, *, release: str | None = None) -> int:
-    """Install ``release`` here, promoting it first when it waits for review; without one, the served head.
-
-    ``release`` may be the id's first characters, as the result lines print
-    them. Setup is not asked for: what the release requires and is not met
-    is printed by the update, which exits 3, and ``setup`` takes it from
-    there. 0 once the tree is written, else the failing step's status."""
-    state = _load_setup(scenario, adapter, compose_dir, release, "install")
-    if state is None:
-        return 1
-    if state.row is None:
-        print(f"reef-{adapter} install: no served release yet", file=sys.stderr)
-        return 1
-    full = str(state.row.get("release_id") or "")
-    promoted = {row.get("rollback_target_release_id") for row in state.rows if row.get("operation") == "promote"}
-    if state.row.get("pending") and full not in promoted:
-        head = _promote(state.upstream, scenario, adapter, state.token, full)
-        if head is None:
-            return 1
-        full = head
-    status = update(scenario, adapter, compose_dir, release=full)
-    if status == 3:
-        print(f"reef-{adapter} install: then run reef-{adapter} install --release {full[:8]} again", file=sys.stderr)
-    if status != 0:
-        return status
-    print(f"reef-{adapter}: Installed release {full[:8]}. Restart reef-{adapter} to use it.")
-    return 0
-
-
-def notice_lines(scenario: str, adapter: str, compose_dir: str) -> list[str]:
-    """What a session should hear at its start, one line each: a served head this tree is behind, and every
-    release that waits for a review; nothing when the tree is current, and nothing when reef cannot be reached
-    (a session start is no place for an error)."""
-    installed = _installed_release(compose_dir)
-    if installed is None:
-        return []
-    try:
-        upstream = _extract_reef_url(adapter, Path(compose_dir))
-    except WrapperError:
-        return []
-    if upstream is None:
-        return []
-    token = _reef_token(adapter, compose_dir)
-    req = urllib.request.Request(f"{upstream}/reef/harness/releases", headers=_reef_headers(scenario, token))
-    try:
-        with urllib.request.urlopen(req, timeout=10) as response:
-            listed = json.loads(response.read()).get("releases")
-    except (OSError, ValueError):
-        return []
-    rows = [row for row in listed if isinstance(row, Mapping)] if isinstance(listed, list) else []
-    lines = []
-    head = next((row.get("release_id") for row in reversed(rows) if not row.get("pending")), None)
-    if isinstance(head, str) and head != installed:
-        lines.append(
-            f"reef: release {head[:8]} is served and this session runs {installed[:8]}; "
-            f"reef-{adapter} update installs it for the next session."
-        )
-    for step, waiting in _waiting_for_review(rows):
-        held = str(waiting.get("release_id") or "")
-        page = _step_page_link(upstream, scenario, token, step)
-        lines.append(
-            f"reef: release {held[:8]} waits for your review: {page} ; "
-            f"reef-{adapter} install --release {held[:8]} promotes and installs it."
-        )
-    return lines
-
-
-def notice(scenario: str, adapter: str, compose_dir: str, *, hook: str | None = None) -> int:
-    """Print the session start notice; with ``hook`` the shape that adapter's session start hook consumes.
-
-    ``claude``: one JSON object whose ``systemMessage`` Claude Code shows the
-    person and whose ``additionalContext`` tells the model what the person
-    can ask for through the wrapper's shell commands.
-    Silent, exit 0, when there is nothing to say."""
-    lines = notice_lines(scenario, adapter, compose_dir)
-    if not lines:
-        return 0
-    if hook is None:
-        print("\n".join(lines))
-        return 0
-    if hook != "claude":
-        print(f"reef-{adapter} notice: no hook shape named {hook!r}", file=sys.stderr)
-        return 2
-    text = "\n".join(lines)
-    print(
-        json.dumps(
-            {
-                "systemMessage": text,
-                "hookSpecificOutput": {
-                    "hookEventName": "SessionStart",
-                    "additionalContext": (
-                        f"{text}\nWhen the user asks for it, reef-{adapter} update installs the served release and "
-                        f"reef-{adapter} install --release <id> promotes and installs a release that waits for review."
-                    ),
-                },
-            }
-        )
-    )
-    return 0
-
-
 def _next_step(
     scenario: str,
     adapter: str,
@@ -1352,6 +1361,7 @@ def _next_step(
     row: Mapping[str, Any],
     step: int,
     selection_result: str,
+    unmet: Sequence[str],
 ) -> int:
     """After a release, hand the person the next step: install a selected one, promote then install a pending one.
 
@@ -1361,20 +1371,21 @@ def _next_step(
     release = str(row.get("release_id") or "")
     if selection_result not in ("selected", "pending") or not release:
         return 0
+    record_id = str(_request_of(row).get("id") or "")
     if not sys.stdin.isatty():
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result, release)}")
+        print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
     if selection_result == "pending":
         print(f"reef-{adapter}: read the change first: reef-{adapter} page {step}")
         if not _confirm(adapter, "Promote now? [y/N]", default_yes=False):
-            print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result, release)}")
+            print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
             return 0
         head = _promote(upstream, scenario, adapter, token, release)
         if head is None:
             return 1
         release = head
     elif not _confirm(adapter, "Install now? [Y/n]", default_yes=True):
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
+        print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
     return _install(scenario, adapter, compose_dir, release)
 
@@ -1407,8 +1418,9 @@ def harness(
         )
     upstream = _reef_url_of(adapter, compose_dir)
 
-    # Session and release identify where the request came from; they do not select an inference batch.
-    session = _spooled_session(scenario) or str(uuid.uuid4())
+    # Session and release identify where the request came from; they do not select an inference batch. Inside a
+    # session the wrapper named it; outside one, the oldest spooled run's.
+    session = os.environ.get("REEF_HARNESS_SESSION") or _spooled_session(scenario) or str(uuid.uuid4())
 
     body = {"text": text, "session": session, "release_id": release, "client": client_report()}
     token = _reef_token(adapter, compose_dir)
@@ -1431,25 +1443,105 @@ def harness(
         # A 200 without the id is a reef this wrapper does not know; say so instead of a traceback.
         sys.exit(f"reef-{adapter}: reef answered 200 without an agent_record_id: {json.dumps(answer)[:200]}")
     print(f"reef-{adapter}: training request {record_id} accepted")
-    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, token, record_id)}")
+    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, answer, record_id)}")
     if not wait:
-        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /versions later")
+        later = (
+            "check /versions later" if ships_version_check(adapter) else f"run reef-{adapter} wait {record_id} later"
+        )
+        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or {later}")
         return 0
-    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
-    settled = _await_step(
-        upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
+    return report_request(
+        scenario, adapter, compose_dir, upstream, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
+
+
+def wait_request(
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    record_id: str,
+    *,
+    timeout_s: float = 1800.0,
+    poll_s: float = 5.0,
+    poll: bool = False,
+) -> int:
+    """Wait for the step that takes the filed request ``record_id`` and report its result, as ``evolve --wait`` does.
+
+    A harness whose shell tool stops a command after a few minutes files
+    the request with ``evolve`` and calls this until it stops answering 2;
+    with ``poll`` a step that still runs answers 0 instead, since such a
+    tool counts a nonzero exit as a failed call, and the printed line says
+    the step still runs."""
+    record_id = record_id.strip()
+    if not record_id:
+        sys.exit(f"reef-{adapter} wait: name the request id evolve printed")
+    upstream = _reef_url_of(adapter, compose_dir)
+    token = _reef_token(adapter, compose_dir)
+    status = report_request(
+        scenario,
+        adapter,
+        compose_dir,
+        upstream,
+        token,
+        record_id,
+        f"request {record_id[:8]}",
+        timeout_s=timeout_s,
+        poll_s=poll_s,
+    )
+    return 0 if poll and status == 2 else status
+
+
+def report_request(
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    upstream: str,
+    token: str | None,
+    record_id: str,
+    ask: str,
+    *,
+    timeout_s: float,
+    poll_s: float,
+) -> int:
+    """Wait for the request's step and print its result; the status ``harness`` documents."""
+    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
+    settled = _await_step(upstream, scenario, adapter, token, record_id, ask, timeout_s=timeout_s, poll_s=poll_s)
     if isinstance(settled, str):
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
     step, rows = settled
-    print(f"reef-{adapter}: {result_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
-    uncovered = _uncovered(rows[step])
-    if uncovered:
-        print(f"reef-{adapter}: not covered: {'; '.join(uncovered)}")
+    release = str(rows[step].get("release_id") or "")
+    unmet = unmet_requires(compose_dir, rows, release) if release else []
+    page = _step_page_link(upstream, scenario, rows, step)
+    print(f"reef-{adapter}: {result_line(adapter, step, rows, page, unmet)}")
+    uncovered = review_points(rows[step], "uncovered")
     selection_result = result_of(rows[step], rows)
+    usage = release_usage(rows[step])
+    if usage and selection_result in ("selected", "pending"):
+        # The form the release is used by, so nobody guesses it from the request (codex takes $chat, not /chat).
+        print(f"reef-{adapter}: how to use: {usage}")
+    if uncovered:
+        # After a rejection the checks decided; the review's points are notes on the change, not the cause.
+        label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
+        print(f"reef-{adapter}: {label}: {joined_points(uncovered)}")
+    limits = review_points(rows[step], "limits")
+    if limits:
+        # One point per line: a point may hold a '; ' of its own.
+        print(f"reef-{adapter}: out of reach on this harness:")
+        for point in limits:
+            print(f"  - {point}")
     if selection_result in ("rejected", "skipped"):
         return 1
-    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result)
+    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result, unmet)
+
+
+def joined_points(points: Sequence[str]) -> str:
+    """Review points on one line: each point's own final period dropped, so no '.;' sits between them, and a
+    point after the first starting in lower case unless its first word is an acronym or a name in capitals."""
+    cleaned = [point.rstrip().rstrip(".") for point in points]
+    return "; ".join(
+        point if index == 0 or point[1:2].isupper() else point[:1].lower() + point[1:]
+        for index, point in enumerate(cleaned)
+    )
 
 
 def _page_cache_dir() -> Path:
@@ -1530,21 +1622,10 @@ def _catalog(upstream: str, scenario: str, adapter: str, token: str | None) -> l
 
 
 def _release_to_set_up(rows: Sequence[Mapping[str, Any]], release: str | None) -> Mapping[str, Any] | None:
-    """The row ``setup`` reads: the one named, else the newest that is not pending; a pending release waits for a promote.
-
-    A name may be the id's first characters, as the result lines print them, when they pick out one row."""
+    """The row ``setup`` reads: the one named, else the newest that is not pending; a pending release waits for a promote."""
     if release is not None:
-        return _row_named(rows, release)
+        return next((row for row in rows if row.get("release_id") == release), None)
     return next((row for row in reversed(rows) if not row.get("pending")), None)
-
-
-def _row_named(rows: Sequence[Mapping[str, Any]], release: str) -> Mapping[str, Any] | None:
-    """The catalog row whose release id is ``release`` or, when none is, the one row whose id starts with it."""
-    exact = next((row for row in rows if row.get("release_id") == release), None)
-    if exact is not None:
-        return exact
-    prefixed = [row for row in rows if str(row.get("release_id") or "").startswith(release)] if release else []
-    return prefixed[0] if len(prefixed) == 1 else None
 
 
 @dataclass
@@ -1554,8 +1635,7 @@ class _Setup:
     ``row`` is the catalog row to set up, None when nothing is served yet;
     ``requires`` its chain's union; ``recorded`` the check offs the release
     file holds and ``checked`` the working copy a form fills; ``values`` the
-    env file; ``upstream`` and ``token`` reach reef for what comes next;
-    ``rows`` is the catalog the row came from."""
+    env file; ``upstream`` and ``token`` reach reef for what comes next."""
 
     record: dict[str, Any]
     row: Mapping[str, Any] | None
@@ -1566,7 +1646,6 @@ class _Setup:
     scenario: str
     upstream: str
     token: str | None
-    rows: Sequence[Mapping[str, Any]] = ()
 
     @property
     def release_id(self) -> str | None:
@@ -1629,7 +1708,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     ):
         upstream = _strip_v1(session_service.rstrip("/"))
         scenario = session_scenario
-        token = os.environ.get("REEF_TOKEN") or None
+        token = os.environ.get("REEF_TOKEN") or session_tree_token(adapter, compose_dir, upstream)
     else:
         upstream = _reef_url_of(adapter, compose_dir)
         token = _reef_token(adapter, compose_dir)
@@ -1647,7 +1726,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
     requires = required_by(rows, release_id if isinstance(release_id, str) else None)
     recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
     return _Setup(
-        record, row, requires, recorded, dict(recorded), _read_env_file(compose_dir), scenario, upstream, token, rows
+        record, row, requires, recorded, dict(recorded), _read_env_file(compose_dir), scenario, upstream, token
     )
 
 
@@ -1888,22 +1967,38 @@ def setup_run(scenario: str, adapter: str, compose_dir: str, name: str, *, relea
     return 0 if met else 1
 
 
-def _run_install_script(script: bytes, install_root: Path, token: str | None) -> int:
+def binary_install_prefix(adapter: str) -> str | None:
+    """Where the first install put the binary (the script's ``PREFIX``): the baked ``REEF_HARNESS_BINARY`` with the
+    descriptor's ``install.binary_path`` taken off its end; ``None`` when it does not end that way (a binary of the
+    person's own, or an adapter reef does not install)."""
+    binary = os.environ.get("REEF_HARNESS_BINARY")
+    install = get_adapter(adapter).install
+    if not binary or install is None:
+        return None
+    tail = "/" + install.binary_path.strip("/")
+    return binary[: -len(tail)] if binary.endswith(tail) and len(binary) > len(tail) else None
+
+
+def _run_install_script(script: bytes, install_root: Path, token: str | None, prefix: str | None = None) -> int:
     """Run a fetched install script with ``bash`` for ``install_root``; its exit status, 127 when bash cannot run.
 
     ``REEF_TOKEN`` rides in the script's environment, so the binding it
-    writes keeps the token the wrapper reaches reef with; ``REEF_PYTHON`` is
-    this wrapper's own interpreter, so the script keeps it instead of the
-    python3 the calling shell happens to resolve."""
+    writes keeps the token the wrapper reaches reef with; ``prefix``, the
+    script's second argument, keeps the binary where the first install put
+    it."""
     env = os.environ.copy()
     if token:
         env["REEF_TOKEN"] = token
+    # Keep the exact interpreter, including when it has no python3 sibling on PATH.
     env["REEF_PYTHON"] = sys.executable
+    # Older services generate scripts that still resolve python3 on PATH.
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
     with tempfile.NamedTemporaryFile(prefix="reef-harness-install-", suffix=".sh", delete=False) as handle:
         handle.write(script)
         path = Path(handle.name)
     try:
-        return subprocess.run(["bash", str(path), str(install_root)], env=env).returncode
+        arguments = [str(install_root)] if prefix is None else [str(install_root), prefix]
+        return subprocess.run(["bash", str(path), *arguments], env=env).returncode
     except OSError as exc:
         print(f"reef-harness: cannot run bash: {exc}", file=sys.stderr)
         return 127
@@ -1951,11 +2046,16 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     except OSError as exc:
         print(f"reef-{adapter} update: reef unreachable at {state.upstream}: {exc}", file=sys.stderr)
         return 1
-    status = _run_install_script(script, Path(compose_dir).resolve().parent, state.token)
+    status = _run_install_script(
+        script, Path(compose_dir).resolve().parent, state.token, binary_install_prefix(adapter)
+    )
     if status != 0:
         print(f"reef-{adapter} update: the install script exited {status}", file=sys.stderr)
         return 1
     print(f"reef-{adapter} update: installed release {_installed_release(compose_dir) or state.release_id}")
+    usage = release_usage(state.row)
+    if usage:
+        print(f"reef-{adapter} update: how to use: {usage}")
     return 0
 
 
@@ -2053,7 +2153,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     # A release held for review is not something the install needs, but it is what the person is waiting on.
     if catalog is not None and upstream is not None:
         for step, waiting in _waiting_for_review(catalog):
-            page = _step_page_link(upstream, scenario, token, step)
+            page = _step_page_link(upstream, scenario, catalog, step)
             rows.append((True, "review", f"{str(waiting.get('release_id'))[:8]} waits for your review: {page}"))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))
@@ -2076,13 +2176,12 @@ def _usage(adapter: str) -> str:
             f"{prog}: run {adapter} through reef's capture proxy, or one of",
             f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
             f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
+            f"  {prog} wait <request id> [--timeout SECONDS] [--poll]            wait for a request's result",
             f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
             f"  {prog} doctor                                                     check what the install needs",
             f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
             f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
             f"  {prog} update [--release ID]                                       install the served release here",
-            f"  {prog} install [--release ID]                                      promote a release that waits for review, then install it",
-            f"  {prog} notice [--hook claude]                                      what a new session should hear: a newer release, a review that waits",
             f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.",
         ]
     )
@@ -2102,7 +2201,6 @@ def main() -> None:
 
     args = sys.argv[1:]
     if args and args[0] in ("--help", "-h", "help"):
-        # Flushed before the agent's own help, which the agent writes to the same pipe.
         print(_usage(adapter), flush=True)
         if args[0] == "help":
             return
@@ -2128,6 +2226,17 @@ def main() -> None:
         # Intermixed, so the flags read the same before and after the request.
         ns = parser.parse_intermixed_args(args[1:])
         sys.exit(harness(scenario, adapter, compose, " ".join(ns.request), wait=ns.wait, timeout_s=ns.timeout))
+    elif args and args[0] == "wait":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} wait")
+        parser.add_argument("request", help="the request id evolve printed")
+        parser.add_argument(
+            "--timeout", type=float, default=1800.0, metavar="SECONDS", help="how long to wait (default 1800)"
+        )
+        parser.add_argument(
+            "--poll", action="store_true", help="exit 0 while the step still runs (a plain wait exits 2)"
+        )
+        ns = parser.parse_args(args[1:])
+        sys.exit(wait_request(scenario, adapter, compose, ns.request, timeout_s=ns.timeout, poll=ns.poll))
     elif args and args[0] == "page":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} page")
         parser.add_argument("step", type=step_of_version, help="the version, as /versions lists it: v3 or 3")
@@ -2173,20 +2282,6 @@ def main() -> None:
         ns = parser.parse_args(args[1:])
         chosen = {"release": ns.release} if ns.release is not None else {}
         sys.exit(update(scenario, adapter, compose, **chosen))
-    elif args and args[0] == "install":
-        parser = argparse.ArgumentParser(prog=f"reef-{adapter} install")
-        parser.add_argument(
-            "--release", default=None, metavar="ID", help="the release to install, its first characters suffice"
-        )
-        ns = parser.parse_args(args[1:])
-        sys.exit(install(scenario, adapter, compose, release=ns.release))
-    elif args and args[0] == "notice":
-        parser = argparse.ArgumentParser(prog=f"reef-{adapter} notice")
-        parser.add_argument(
-            "--hook", default=None, metavar="ADAPTER", help="print the shape that adapter's hook reads"
-        )
-        ns = parser.parse_args(args[1:])
-        sys.exit(notice(scenario, adapter, compose, hook=ns.hook))
     else:
         run_agent(binary, compose, scenario, adapter, env_var, args)
 

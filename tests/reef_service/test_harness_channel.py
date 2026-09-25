@@ -1241,6 +1241,15 @@ def test_a_rerun_on_a_current_tree_rewrites_the_wrapper_only_when_its_text_chang
 
 
 @pytest.mark.unit
+def test_install_uses_the_explicit_interpreter_when_path_has_a_broken_python(tmp_path) -> None:
+    script, dest, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n")
+    _write_executable(tmp_path / "shim" / "python3", "#!/bin/sh\nexit 91\n")
+    result = _run_install(script, dest, prefix, {**env, "REEF_PYTHON": sys.executable})
+    assert result.returncode == 0, result.stderr
+    assert f'exec "{sys.executable}"' in (dest / "reef-pi").read_text()
+
+
+@pytest.mark.unit
 def test_install_refuses_a_python3_that_prints_at_startup_instead_of_baking_garbage(tmp_path) -> None:
     """A python3 that writes to stdout before running -c (a sitecustomize, a version manager banner) would leave
     the resolved path unrunnable; the install says so and writes nothing rather than dying later in a python step."""

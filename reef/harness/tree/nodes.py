@@ -113,9 +113,7 @@ _DIRECTIVE_TEXT = re.compile(
 
 def _holds_literal(value: Any) -> bool:
     if isinstance(value, str):
-        # A number is a limit, not a credential: Claude Code's CLAUDE_CODE_MAX_OUTPUT_TOKENS ends in the
-        # word the name check looks for and holds "32000".
-        return bool(value.strip()) and not value.strip().isdigit()
+        return bool(value.strip())
     if isinstance(value, (list, tuple)):
         return any(_holds_literal(item) for item in value)
     return False

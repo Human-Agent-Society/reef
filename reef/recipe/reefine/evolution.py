@@ -19,13 +19,19 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.adapters import get_adapter
+from reef.harness.adapters.harness_facts import harness_facts
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, ships_requests
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.episodes.trajectory import final_assistant_text
+from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_version_check
+from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
 from reef.train.types import TrajectoryItem
@@ -48,8 +54,86 @@ REQUEST_KINDS = {
     "rules": ("text",),
     "agent_command": ("name", "text"),
     "code_extension": ("name", "code"),
-    "config": ("data",),
+    "config": ("target", "data"),
 }
+
+#: The one adapter whose extension API this proposer knows; the others take rules, skills and commands from it.
+EXTENSION_ADAPTER = "pi"
+
+
+def request_kinds(adapter: str) -> tuple[str, ...]:
+    """The kinds a request may write on ``adapter``: skills, rules and commands everywhere, a code extension on pi,
+    and a config entry where the harness's own config can enforce a behavior (``HarnessFacts.config_keys``)."""
+    facts = harness_facts(adapter)
+    extra = ("code_extension",) if adapter == EXTENSION_ADAPTER else ("config",) if facts and facts.config_keys else ()
+    return ("skill", "rules", "agent_command", *extra)
+
+
+def request_config_keys(adapter: str) -> tuple[str, ...]:
+    """The top level keys a request's config entry may set in ``adapter``'s primary config; none off the list."""
+    facts = harness_facts(adapter)
+    return () if facts is None else facts.config_keys
+
+
+def file_name(adapter: str, path: str) -> str:
+    return path.rsplit("/", 1)[-1] if path else f"{adapter}'s rules file"
+
+
+def kind_lines(adapter: str) -> str:
+    """One prompt line per kind a request may write on ``adapter``, with the kind's config fields and the file each
+    lands in."""
+    descriptor = get_adapter(adapter)
+    rules = file_name(adapter, descriptor.node_paths.get("rules", ""))
+    primary = descriptor.config_targets.get("primary")
+    lines = {
+        "skill": (
+            '- skill: {"name": <id>, "text": <SKILL.md>}; the text must start with YAML frontmatter '
+            "(--- name: <id> / description: <one line> ---) followed by the skill's markdown\n"
+        ),
+        "rules": f'- rules: {{"text": <markdown appended to {rules}, which every session reads>}}\n',
+        "agent_command": (
+            '- agent_command: {"name": <id>, "text": <the prompt template of the /<id> command>}\n'
+            if adapter == EXTENSION_ADAPTER
+            else '- agent_command: {"name": <id>, "text": <the command file, as the harness notes below describe>}\n'
+        ),
+        "code_extension": '- code_extension: {"name": <id>, "code": <a complete pi extension module>}\n',
+        "config": (
+            '- config: {"target": "primary", "data": <an object merged into '
+            f"{file_name(adapter, primary.path if primary else '')}, "
+            f"with only the top level keys {', '.join(request_config_keys(adapter))}>}}\n"
+        ),
+    }
+    return "".join(lines[kind] for kind in request_kinds(adapter))
+
+
+#: What the prompt says about an adapter this proposer writes no extension for, from its facts.
+HARNESS_SECTION = (
+    "This harness is {title}, whose extension API this step does not know: write no code_extension. "
+    "Harness notes: {command} Its own tools: {tools}. {mode}{config} "
+    "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt. When these kinds cannot "
+    "deliver the behavior the request asks for, write the design saying why and no entry. "
+)
+
+#: What the prompt says about extensions on an adapter that takes none from this proposer and has no facts.
+NO_EXTENSIONS_SECTION = (
+    "This harness is {adapter}, whose extension API this step does not know: write no code_extension. "
+    "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt. When these kinds cannot "
+    "deliver the behavior the request asks for, write the design saying why and no entry. "
+)
+
+
+def harness_section(adapter: str) -> str:
+    """The request prompt's section on the harness's own surface, for an adapter other than pi."""
+    facts = harness_facts(adapter)
+    if facts is None:
+        return NO_EXTENSIONS_SECTION.format(adapter=adapter)
+    config = (
+        f" A config entry may set {', '.join(facts.config_keys)}: {facts.config_example}." if facts.config_keys else ""
+    )
+    return HARNESS_SECTION.format(
+        title=facts.title, command=facts.command, tools=facts.tools, mode=facts.mode, config=config
+    )
+
 
 #: The skill entry that carries the pi extension API reference; its text goes into a request prompt when present.
 API_SKILL_NAME = "reef-pi-extension-api"
@@ -60,6 +144,9 @@ _PREVIEW_CHARS = 240
 #: How much of a design the step records: a few paragraphs with its How to use section, never a second copy of
 #: the entries.
 _DESIGN_CHARS = 4000
+#: How much of each long text in a refused entry a retry shows (a command's body, an agent's prompt): the entry's
+#: keys all stay, so the model sees where a missing one belongs.
+EARLIER_TEXT_CHARS = 400
 
 #: The two words a review result may be.
 REVIEW_RESULTS = ("complete", "partial")
@@ -73,185 +160,23 @@ _PROMPT_CHARS = 200
 #: A shell variable name: what an env item's check (else its name) must be, and what an extension reads.
 _VARIABLE_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
-#: What every shell sets: left out of the review's list of the adapter's own variables, which names the rest.
-_SHELL_ENV = frozenset({"HOME", "PATH", "USER", "SHELL", "TMPDIR", "LANG", "TERM"})
-
 #: The ``$VAR`` and ``${VAR}`` references a shell check makes.
 _SHELL_VARIABLE = re.compile(r"\$\{?([A-Za-z_][A-Za-z0-9_]*)")
 
 #: A ``process.env.X`` or ``process.env["X"]`` read in an extension's code.
 _ENV_READ = re.compile(r"""process\.env(?:\.([A-Za-z_][A-Za-z0-9_]*)|\[\s*["']([A-Za-z_][A-Za-z0-9_]*)["']\s*\])""")
 
-
-#: What one harness adapter can carry, as the request and review prompts tell the served model.
-#:
-#: ``kinds`` lists the entry kinds with their config fields, ``guidance`` says how the adapter registers a
-#: command and enforces behavior, ``command_check`` is the review's test of a new slash command,
-#: ``tool_advice`` what to write for a step the plan found needs a tool, ``env_read`` how an entry reads an
-#: env item at run time, ``setup`` the wrapper command that asks the user for requires items,
-#: ``session_env`` the variables the adapter or the shell sets for every session, ``api_skill`` the reserved
-#: skill whose text is the adapter's API reference, and ``request_kinds`` the kinds a reply may carry.
-@dataclass(frozen=True)
-class HarnessSurface:
-    name: str
-    kinds: str
-    guidance: str
-    command_check: str
-    tool_advice: str
-    env_read: str
-    setup: str
-    session_env: frozenset[str]
-    api_skill: str | None
-    request_kinds: tuple[str, ...]
-    #: The kinds whose presence means the answer enforces behavior rather than describing it: a review that says
-    #: such an answer does not deliver is read as partial, and the answer stands for the person's review.
-    enforcing_kinds: tuple[str, ...] = ()
-
-
 #: Variables pi or the shell sets for every session: an extension reading one needs nothing from the user.
-_PI_SESSION_ENV = frozenset(
+_SESSION_ENV = frozenset(
     {"PI_OFFLINE", "PI_CODING_AGENT_DIR", "HOME", "PATH", "USER", "SHELL", "TMPDIR", "LANG", "TERM"}
 )
 
-#: Variables Claude Code or the shell sets for every session; a hook reading one needs nothing from the user.
-_CLAUDE_SESSION_ENV = frozenset(
-    {"CLAUDE_CONFIG_DIR", "CLAUDE_PROJECT_DIR", "HOME", "PATH", "USER", "SHELL", "TMPDIR", "LANG", "TERM"}
+#: The platforms a change serves on a harness that runs on the person's machine.
+PLATFORMS_SENTENCE = (
+    "The user may be on macOS, Linux or Windows under WSL 2: {platform}"
+    "prefer commands that exist on all three, and name anything platform specific the user "
+    "must set up in requires. "
 )
-
-PI_SURFACE = HarnessSurface(
-    name="pi",
-    kinds=(
-        "You may write entries of these kinds, with exactly these config fields:\n"
-        '- skill: {"name": <id>, "text": <SKILL.md>}; the text must start with YAML frontmatter '
-        "(--- name: <id> / description: <one line> ---) followed by the skill's markdown\n"
-        '- rules: {"text": <markdown appended to AGENTS.md>}\n'
-        '- agent_command: {"name": <id>, "text": <the prompt template of the /<id> command>}\n'
-        '- code_extension: {"name": <id>, "code": <a complete pi extension module>}\n'
-    ),
-    guidance=(
-        "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt and a "
-        "code_extension only when the request needs behavior a prompt cannot give. "
-        "Every new slash command must appear in the native / autocomplete dropdown alongside built-in commands, "
-        "with a concise description. For an agent_command, include description in YAML frontmatter; Reef renders "
-        "it as a native pi prompt template. For executable behavior, use pi.registerCommand with description "
-        "and handler at extension load, after the PI_OFFLINE guard, not inside an event handler or behind "
-        "ctx.hasUI. Guard only UI operations that need it. An input hook, a rule, a skill or a separate menu "
-        "alone does not register a slash command. Avoid duplicate names and built-in or Reef command collisions. "
-        "Menu selection and direct invocation must reach the same behavior; handle arguments, cancellation, "
-        "results and failures, and keep mode status in sync with its actual state. Preserve unrelated behavior. "
-        "Distinguish checks actually run from checks still needed: headless trials cannot verify the dropdown. "
-        "An extension must never write to the session's own stdout or stderr while it has a UI: the harness process "
-        "owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame "
-        "and leave the person without an input box, and admission refuses an unguarded write. Use ctx.ui.notify, "
-        "ctx.ui.setStatus and ctx.ui.setWidget, and keep console output for the no-UI path "
-        "(if (!ctx.hasUI) console.error(...)). A command the change runs, such as a speech, sound or notification "
-        "command, is a requires item with a check so reef-pi setup verifies it on the user's machine; branch on "
-        "process.platform, and when no command is available at run time say so through ctx.ui rather than falling "
-        "through to silence. "
-        "The user may be on macOS, Linux or Windows under WSL 2: branch on process.platform, "
-        "prefer commands that exist on all three, and name anything platform specific the user "
-        "must set up in requires. "
-    ),
-    command_check=(
-        "For each new slash command, check that the entries use a native prompt template or pi.registerCommand "
-        "with a concise description so it appears in the native / autocomplete dropdown alongside built-in "
-        "commands. "
-    ),
-    tool_advice=(
-        "For each of them write a code_extension in this same reply that registers a tool for it, beside the "
-        "rules or skill entry that tells the agent when to call the tool. "
-    ),
-    env_read="process.env.NAME",
-    setup="reef-pi setup",
-    session_env=_PI_SESSION_ENV,
-    api_skill=API_SKILL_NAME,
-    request_kinds=("skill", "rules", "agent_command", "code_extension"),
-)
-
-CLAUDE_SURFACE = HarnessSurface(
-    name="claude",
-    kinds=(
-        "You may write entries of these kinds, with exactly these config fields:\n"
-        '- skill: {"name": <id>, "text": <SKILL.md>}; the text must start with YAML frontmatter '
-        "(--- name: <id> / description: <one line> ---) followed by the skill's markdown\n"
-        '- rules: {"text": <markdown appended to CLAUDE.md>}\n'
-        '- agent_command: {"name": <id>, "text": <the file of the /<id> command: YAML frontmatter with '
-        "description (one line, shown in the / menu), optional argument-hint, allowed-tools (the tool rules "
-        "the command may use without a permission prompt, such as Bash(git status *)) and "
-        "disable-model-invocation, then the prompt the command sends; $ARGUMENTS stands for what the user typed "
-        "after the command>}\n"
-        '- config: {"target": "primary", "data": <a JSON object merged into settings.json>}; the keys that '
-        'carry behavior: permissions ({"allow": [...], "deny": [...], "ask": [...]}, lists of tool rules such '
-        'as "Bash(git *)", "WebFetch", "Edit"), hooks (an object keyed by event, PreToolUse, PostToolUse, '
-        'UserPromptSubmit, UserPromptExpansion, SessionStart or Stop, each a list of {"matcher": <a tool '
-        'name, a | list of names, or a regular expression such as "^(?!WebSearch$)"; for UserPromptExpansion '
-        'the slash command\'s name; omitted for every event>, "hooks": [{"type": "command", "command": <shell '
-        "command>}]}) and env (variables set for the session)\n"
-    ),
-    guidance=(
-        "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt or to give the user a "
-        "slash command, and a config entry only when the request needs behavior a prompt cannot give: a tool "
-        "the agent must never call is a permissions.deny rule, a check that must run at a point of the session "
-        "is a hook. Every new slash command must appear in the / menu alongside built-in commands, with a "
-        "concise description: a command exists only as an agent_command (or a skill) whose frontmatter carries "
-        "description; a rule or a hook alone registers no command. Avoid duplicate names and built-in or Reef "
-        "command collisions. A mode the user turns on and off needs state a hook can read, never the model's "
-        "memory alone, and hooks keep it: a UserPromptExpansion hook whose matcher is the command's name "
-        "(^chat$) writes a marker file under $CLAUDE_CONFIG_DIR when the user types /chat, one on the off "
-        "command removes it, a PreToolUse hook exits 2 while the marker exists and the tool is not allowed, and "
-        "a UserPromptExpansion hook on every other command name exits 2 while it exists. $CLAUDE_CONFIG_DIR is "
-        "the session's own copy of the harness, removed when the session ends, so a mode never outlives the "
-        "session; the command's prompt then tells the model the mode is on or off. A command file carries no "
-        "!`...` shell line: the permission check refuses one that expands a $VAR or writes a file outside the "
-        "working directory, so a command with one fails when the user types it; everything a command must do "
-        "beyond prompting is a hook on its name. A hook reads the event as JSON on stdin (tool_name and tool_input, or command_name, "
-        "with session_id and cwd), exits 0 to allow and exits 2 with the reason on stderr to block; a "
-        "UserPromptSubmit hook exits 2 to reject a prompt. A hook's stdout is context for the model, and a JSON "
-        'object {"systemMessage": "..."} on stdout is shown to the user. Hook commands run through the shell '
-        "with the session's environment; write them for sh, portable across macOS, Linux and Windows under WSL "
-        "2, keep every command on one line, and use no program the machine may lack (jq) when sh does. A hook "
-        "may not ask the user anything. A command the change runs, such as a speech, sound or notification "
-        "command, is a requires item with a check so reef-claude setup verifies it on the user's machine; branch "
-        "on uname, and when no command is available at run time say so through systemMessage rather than "
-        "falling through to silence. "
-        "The user may be on macOS, Linux or Windows under WSL 2: prefer commands that exist on all three, and "
-        "name anything platform specific the user must set up in requires. "
-        "Distinguish checks actually run from checks still needed: headless trials cannot verify the / menu. "
-    ),
-    command_check=(
-        "An agent_command's text is the command's file: YAML frontmatter between --- lines, whose description "
-        "line is what the / menu shows, then the prompt. A !`<shell>` line in it that expands a $VAR or writes "
-        "a file fails the permission check when the user types the command, so a command whose state or effect "
-        "depends on such a line is uncovered; state is written by hooks. A "
-        "UserPromptExpansion hook fires only when the user types a slash command, matched by the command's name, "
-        "never for a plain message; a PreToolUse hook fires for every tool call its matcher names. For each new "
-        "slash command, check that an agent_command or skill entry with a description in its frontmatter carries "
-        "it, so it appears in the / menu alongside built-in commands; for a mode, check that hooks write its "
-        "state when the user types the commands and enforce it while the state holds, not from the prompt alone. "
-        "Commands that turn the mode on and off and hooks that write and read its state deliver the mode; a case "
-        "the hooks miss is then uncovered, not undelivered. "
-    ),
-    tool_advice=(
-        "Claude Code takes no new tools from a harness: for each of them say in the design that the harness "
-        "cannot perform the step, name the closest thing it can do (a hook that runs a shell command at an "
-        "event, a command the user runs), and write no entry that pretends to perform it. "
-    ),
-    env_read="$NAME in the hook's or the command's shell line",
-    setup="reef-claude setup",
-    session_env=_CLAUDE_SESSION_ENV,
-    api_skill=None,
-    request_kinds=("skill", "rules", "agent_command", "config"),
-    enforcing_kinds=("config",),
-)
-
-_SURFACES = {surface.name: surface for surface in (PI_SURFACE, CLAUDE_SURFACE)}
-
-
-def surface_of(adapter: str | None) -> HarnessSurface:
-    """The prompt surface of ``adapter``; an adapter without one of its own gets pi's, the surface the prompts
-    were written for."""
-    return _SURFACES.get(adapter or "pi", PI_SURFACE)
-
 
 #: The prompt that answers a person's request. Braces doubled where the JSON shapes need them literally.
 REQUEST_PROMPT = (
@@ -268,20 +193,21 @@ REQUEST_PROMPT = (
     "an agent_command or a tool; never a rule that assumes the state holds.\n"
     "3. List what only the user can provide (a phone number, a credential, a permission, an account): each "
     "is a requires item, described below, with a prompt sentence that tells the user what to enter or "
-    "grant. The value of an env item is read at run time from {env_read}; an extension never asks "
-    "the user for it, never stores it in a file of its own and never hardcodes it.\n"
+    "grant. {env_value}\n"
     "4. Describe how the user discovers, invokes and sees the result through the existing UI, and how to "
     "check that path. For a mode, include visible state and a way to turn it off. End the design with a "
     "paragraph headed 'How to use', written for the user: the exact command or trigger, what they see, how "
     "to turn it off or undo it, and anything they must set up first.\n"
     "5. Then write the entries: complete for what the request implies, and nothing the request did not "
-    "ask for. When these kinds cannot deliver the behavior the request asks for, "
+    "ask for. When {means} cannot deliver the behavior the request asks for, "
     "write the design saying why and no entry: a rule, a note or a workaround that only imitates the "
     "behavior is not an answer.\n\n"
     "Current harness entries (id, kind, and the start of each body):\n{entries}\n\n"
+    "You may write entries of these kinds, with exactly these config fields:\n"
     "{kinds}"
-    "{guidance}"
-    "Never touch these reserved entries: {reserved}.\n\n"
+    "{extensions}"
+    "{platforms}"
+    "{reserved}"
     "{plan}"
     "{api}"
     "Respond with a JSON array and nothing else. Its first object is your design, points 1 to 4 in a few "
@@ -293,9 +219,8 @@ REQUEST_PROMPT = (
     "a lowercase name, a rules entry too.\n"
     "When the change needs something only the user can provide or set up on their machine, end the array "
     'with one more object, {{"requires": [...]}}, one item per need. Each item carries a prompt: one '
-    "sentence, under 200 characters, that {setup} shows when it asks the user for the value or the "
-    "permission, once, at install time; the extension itself never asks. The kinds, each with an example:\n"
-    "- env, a value the user enters, which the extension reads at run time from {env_read}; name is "
+    "sentence, under 200 characters, {setup} The kinds, each with an example:\n"
+    "- env, a value the user enters, {env_reader}; name is "
     "the variable name, there is no check, and the value is never written into the tree: "
     '{{"name": "REEF_AWAY_PHONE", "kind": "env", "prompt": "The phone number to text, with the country code"}}\n'
     "- permission, an OS permission the user grants; check is a shell command that exits 0 once granted: "
@@ -311,6 +236,66 @@ REQUEST_PROMPT = (
     "Omit the object when the change needs nothing."
 )
 
+#: Who reads a requires item's prompt: reef-<adapter> setup where Reef installs the harness.
+SETUP_SENTENCE = (
+    "that reef-{wrapper} setup shows when it asks the user for the value or the permission, once, at install time; "
+    "{asker}."
+)
+
+#: How the request prompt says an env item's value reaches the change: pi's extensions read process.env, another
+#: harness's entries find the value in its environment.
+ENV_WORDS = {
+    True: {
+        "env_value": "The value of an env item is read at run time from process.env.NAME; an extension never asks "
+        "the user for it, never stores it in a file of its own and never hardcodes it.",
+        "env_reader": "which the extension reads at run time from process.env.NAME",
+        "means": "these kinds and the extension API",
+        "asker": "the extension itself never asks",
+        "env_check": "a variable an extension reads that no requires item names (PI_OFFLINE, PI_CODING_AGENT_DIR and "
+        "the REEF_ variables are reef's own and need none), a value the user must provide that the extension asks for "
+        "or stores itself instead of declaring it as a requires item.",
+    },
+    False: {
+        "env_value": "The value of an env item reaches the harness's environment at run time; no entry asks the user "
+        "for it, stores it in a file of its own or hardcodes it.",
+        "env_reader": "which the harness finds in its environment at run time",
+        "means": "these kinds",
+        "asker": "no entry asks for it itself",
+        "env_check": "a variable an entry relies on that no requires item names (the REEF_ variables are reef's own "
+        "and need none), a value the user must provide that an entry asks for or stores itself instead of declaring "
+        "it as a requires item.",
+    },
+}
+
+#: The same on an adapter Reef installs nothing for (terminus), which has no setup command.
+NO_SETUP_SENTENCE = (
+    "that tells whoever runs this harness what to provide before a run; this harness has no setup command, and "
+    "nothing in the change asks for the value."
+)
+
+#: What the prompt says about extensions on pi: when to write one and how it must behave.
+EXTENSIONS_SECTION = (
+    "Prefer a skill or a rules entry; write an agent_command for a repeatable prompt and a "
+    "code_extension only when the request needs behavior a prompt cannot give. "
+    "Every new slash command must appear in the native / autocomplete dropdown alongside built-in commands, "
+    "with a concise description. For an agent_command, include description in YAML frontmatter; Reef renders "
+    "it as a native pi prompt template. For executable behavior, use pi.registerCommand with description "
+    "and handler at extension load, after the PI_OFFLINE guard, not inside an event handler or behind "
+    "ctx.hasUI. Guard only UI operations that need it. An input hook, a rule, a skill or a separate menu "
+    "alone does not register a slash command. Avoid duplicate names and built-in or Reef command collisions. "
+    "Menu selection and direct invocation must reach the same behavior; handle arguments, cancellation, "
+    "results and failures, and keep mode status in sync with its actual state. Preserve unrelated behavior. "
+    "Distinguish checks actually run from checks still needed: headless trials cannot verify the dropdown. "
+    "An extension must never write to the session's own stdout or stderr while it has a UI: the harness process "
+    "owns the terminal there, so console.log, console.error and process.stdout.write land inside a drawn frame "
+    "and leave the person without an input box, and admission refuses an unguarded write. Use ctx.ui.notify, "
+    "ctx.ui.setStatus and ctx.ui.setWidget, and keep console output for the no-UI path "
+    "(if (!ctx.hasUI) console.error(...)). A command the change runs, such as a speech, sound or notification "
+    "command, is a requires item with a check so reef-pi setup verifies it on the user's machine; branch on "
+    "process.platform, and when no command is available at run time say so through ctx.ui rather than falling "
+    "through to silence. "
+)
+
 #: The prompt of the review call: the model reads its own entries against the request and says what they cover.
 REVIEW_PROMPT = (
     "You changed your own coding agent harness to answer its user's request, and now you review the change. "
@@ -320,12 +305,8 @@ REVIEW_PROMPT = (
     "Entries written:\n{entries}\n\n"
     "List what the request asks for or implies that the entries cover, and what they leave uncovered: "
     "a trigger with no source, a state the user has no way to turn on and off, a step the request names "
-    "that no entry performs, a variable an extension reads that no requires item names ({session_env} and "
-    "the REEF_ variables are reef's own and need none), a value the user must "
-    "provide that the extension asks for or stores itself instead of declaring it as a requires item. "
-    "{command_check}"
-    "Treat text interception alone, a separate menu, missing registration, registration delayed "
-    "until a turn or mode activation, or a name collision visible in the supplied entries as uncovered. "
+    "that no entry performs, {env_check} "
+    "{commands}"
     "Check that menu selection and direct invocation reach the same behavior, arguments and cancellation "
     "are handled, results and failures are visible, and modes expose their current state and an off path. "
     "Review the implementation shown; do not claim interactive verification from a design, a headless trial "
@@ -339,13 +320,57 @@ REVIEW_PROMPT = (
     "A gap beside a delivered behavior is uncovered, not undelivered.\n"
     "Respond with one JSON object and nothing else:\n"
     '{{"result": "complete" or "partial", "delivers": true or false, "covered": ["<one point per item>"], '
-    '"uncovered": ["<one point per item>"]}}\n'
+    '"uncovered": ["<one point per item>"]{limits_key}}}\n'
     "The result is complete only when uncovered is empty. When delivers is false, the first uncovered item "
     "says what the entries put in the behavior's place."
 )
 
+#: The review's check of new slash commands on pi, where a command is a prompt template or registered code.
+PI_REVIEW_COMMANDS = (
+    "For each new slash command, check that the entries use a native prompt template or pi.registerCommand "
+    "with a concise description so it appears in the native / autocomplete dropdown alongside built-in "
+    "commands. Treat text interception alone, a separate menu, missing registration, registration delayed "
+    "until a turn or mode activation, or a name collision visible in the supplied entries as uncovered. "
+)
+
+#: The same check on an adapter with facts: its own command surface and way of building a mode.
+HARNESS_REVIEW_COMMANDS = (
+    "This harness is {title}. {command} {mode} Check each new command against that: it is an agent_command "
+    "entry, the person is told the exact text to type, and a name collision visible in the supplied entries is "
+    "uncovered. A point the request asks for that these harness notes say no answer on this harness can deliver "
+    'goes in a "limits" list in the object below, one item per point, and not in uncovered: a limit makes the '
+    "result neither partial nor undelivered, and uncovered keeps the gaps a better answer could close. "
+)
+
+
+def review_commands(adapter: str) -> str:
+    """The review prompt's check of new commands for ``adapter``."""
+    facts = harness_facts(adapter)
+    if adapter == EXTENSION_ADAPTER or facts is None:
+        return PI_REVIEW_COMMANDS
+    return HARNESS_REVIEW_COMMANDS.format(title=facts.title, command=facts.command, mode=facts.mode)
+
+
+#: What the review prompt gets when its first reply carried no result object.
+REVIEW_AGAIN = (
+    "\n\nYour previous reply held no JSON object this prompt could read. Answer with the one JSON object alone, "
+    "every double quote inside a string escaped."
+)
+
 #: How many answers a request may get: the first, then one more each time the review finds the last one short.
 REQUEST_ATTEMPTS = 3
+
+#: Why an answer is refused before its review on opencode: an agent it defines without a permission map is offered
+#: every tool, so a mode built on it restricts nothing.
+UNRESTRICTED_AGENT = (
+    "agent {name!r} has no permission map, so it is offered every tool: add agent.{name}.permission, for example "
+    '{{"*": "deny", "websearch": "allow"}}'
+)
+
+#: The Claude Code permission rules a request's config entry may add: tools that read the web and run no shell. A
+#: rule for a shell, a wildcard or a whole MCP server would let every session run it without asking the person.
+CLAUDE_PREAPPROVED = ("WebSearch", "WebFetch")
+CLAUDE_FETCH_DOMAIN = re.compile(r"WebFetch\(domain:[A-Za-z0-9.-]+\)")
 
 #: The prompt section a request gets again after a review found the previous answer short.
 RETRY_SECTION = (
@@ -354,10 +379,27 @@ RETRY_SECTION = (
     "Write the whole answer again, design first, so that it covers these points.\n\n"
 )
 
+#: The prompt section a request gets again after an answer that could not be used at all: JSON that does not parse,
+#: entries every one of which was dropped, or entries the harness's admission refuses.
+RETRY_UNUSABLE_SECTION = (
+    "An earlier answer to this request could not be used: {reason}. Write the whole answer again, design first, "
+    "as the one JSON array described above; escape every double quote inside a JSON string and close every object "
+    "and array.\n\n"
+)
+
+#: What the unusable retry adds when the refused answer parsed: its design and entries, so what it got right stays.
+RETRY_EARLIER_ANSWER = (
+    "The refused answer's design and entries were (keep what they got right and change what the reason names):\n"
+    "Design:\n{design}\nEntries:\n{entries}\n\n"
+)
+
+#: What a request step records under ``declined`` when the reply is a design saying no entry can deliver it.
+DECLINED = "the design says no entry this harness takes can deliver the request"
+
 #: What the retry section adds when the earlier answer only put a substitute in place of the behavior.
 RETRY_UNDELIVERED = (
     " It did not deliver the behavior at all: it put a substitute in its place. Deliver the behavior itself, "
-    "or, when these kinds cannot, write the design saying why and no entry."
+    "or, when these kinds and the extension API cannot, write the design saying why and no entry."
 )
 
 #: The prompt section carrying the failures a step in training_mode hybrid hands over beside the request.
@@ -373,6 +415,7 @@ PLAN_PROMPT = (
     "Request:\n{request}\n\n"
     "The harness can read and edit files, run shell commands, and call the tools these entries register:\n"
     "{entries}\n\n"
+    "{tools}"
     "List the steps the request names. For each step say whether the harness can perform it with what it has. "
     "It cannot when the step means starting a second agent, calling a service, reading the screen, sending a "
     "message, or anything else no listed tool and no shell command does.\n"
@@ -383,10 +426,18 @@ PLAN_PROMPT = (
 #: The prompt section a request gets when the plan found steps the harness cannot perform.
 PLAN_SECTION = (
     "These steps of the request need a tool the harness does not have:\n{steps}\n"
-    "{tool_advice}"
-    "A reply that carries only rules or "
+    "For each of them write a code_extension in this same reply that registers a tool for it, beside the "
+    "rules or skill entry that tells the agent when to call the tool. A reply that carries only rules or "
     "skills for this request is wrong: the agent would follow the rule up to that step and report that it "
     "has no tool.\n\n"
+)
+
+#: The same section on an adapter that takes no code extension: the harness's own tools are all there is.
+PLAN_NO_TOOL_SECTION = (
+    "These steps of the request need a tool the harness does not have:\n{steps}\n"
+    "No kind you may write adds a tool on this harness. Where one of the harness's own tools named in the "
+    "harness notes performs a step, the entries use it; otherwise the design says which step stays undone and "
+    "why, and the entries cover the rest.\n\n"
 )
 
 #: The prompt section carrying the extension API reference, filled from the tree's own skill entry.
@@ -402,7 +453,7 @@ def propose(
     *,
     requests: Sequence[Mapping[str, Any]] = (),
     entries: Sequence[Mapping[str, Any]] = (),
-    adapter: str | None = None,
+    adapter: str = EXTENSION_ADAPTER,
 ) -> Mutation | StepProposal | None:
     """Ask the served model for one skill improvement over its own failures, or for the change a request names.
 
@@ -411,8 +462,9 @@ def propose(
     them over, and ``samples`` the batched failing requests. ``requests`` is
     what the person asked for through ``POST /reef/train`` in ``manual`` or
     ``hybrid`` mode, one per step; when one is present the model designs the
-    change, writes mutations of the kinds ``adapter`` renders (pi's when the
-    step names no adapter) and reviews them, with the failures beside it as context (``hybrid`` hands over what
+    change, writes mutations of the kinds ``adapter`` takes from this
+    proposer (every kind on pi, no code extension elsewhere) and reviews
+    them, with the failures beside it as context (``hybrid`` hands over what
     an automatic batch would take next, ``manual`` none), and the step gets
     a :class:`StepProposal` whose notes carry the design and the review;
     else it learns from the failures as before. An endpoint or parse
@@ -422,7 +474,7 @@ def propose(
     the session's result line carry the reason.
     """
     if requests:
-        return _answer_request(nodes, requests[0], samples, models, entries, surface_of(adapter))
+        return _answer_request(nodes, requests[0], samples, models, entries, adapter)
     if not samples:
         return None
 
@@ -468,9 +520,9 @@ def _answer_request(
     samples: Sequence[TrajectoryItem],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
-    surface: HarnessSurface = PI_SURFACE,
+    adapter: str = EXTENSION_ADAPTER,
 ) -> StepProposal | None:
-    """The served model's answer to one request: mutations of the surface's kinds, reserved ids dropped,
+    """The served model's answer to one request: mutations of any of ``REQUEST_KINDS``, reserved ids dropped,
     with the notes the step records: the design written first, the review of the entries, the requires
     items that could not be honored and the variables the extensions read that no item names.
 
@@ -487,53 +539,173 @@ def _answer_request(
     A ``{"requires": [...]}`` object beside the kept entries is what the
     change needs from the user's machine; its items are appended to the
     request mapping's ``requires``, where the backend reads them back."""
-    prompt = _request_prompt(nodes, request, samples, models, entries, surface)
+    prompt = _request_prompt(nodes, request, samples, models, entries, adapter)
+    kinds = request_kinds(adapter)
     own = [dict(item) for item in request.get("requires") or () if isinstance(item, Mapping)]
-    kept: tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | None = None
-    undelivered: StepProposal | None = None
+    answers = RequestAnswers()
     retry = ""
     attempt = 0
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
-        answer = _answer_once(prompt + retry, request, models, nodes, entries, own, surface)
-        if isinstance(answer, StepProposal):
-            # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
-            # earlier substitute says more about the request than the failed call does.
-            if kept is None:
-                if undelivered is not None:
-                    return undelivered
-                return answer if attempt == 1 else StepProposal((), {**answer.notes, "attempts": attempt})
+        asked = prompt if not retry else prompt.rstrip("\n") + "\n\n" + retry
+        answer = _answer_once(asked, request, models, nodes, entries, own, kinds, adapter)
+        if isinstance(answer, UnusableAnswer):
+            retry = answers.take_unusable(answer, attempt, models.served)
+        elif isinstance(answer, DeclinedAnswer):
+            retry = answers.take_declined(answer, attempt)
+        elif isinstance(answer, StepProposal):
+            # A failed call or an empty reply ends the loop.
+            answers.failed = answer
+            retry = ""
+        else:
+            retry = answers.take_written(answer, attempt)
+        if not retry:
             break
-        mutations, added, notes = answer
-        review = notes.get("review")
-        if review is not None and review.get("delivers") is False and _enforces(mutations, surface):
-            # The entries carry a kind that enforces behavior (a hook, a permission rule), so the answer is no
-            # substitute whatever the reviewer called it; its points stay uncovered and the person reviews it.
-            review = {**review, "delivers": True}
-            notes["review"] = review
-        if review is not None and review.get("delivers") is False:
-            reason = review["uncovered"][0] if review["uncovered"] else "the entries only imitate the behavior"
-            undelivered = StepProposal(
-                (), {**notes, "failure": f"the change does not deliver the request: {reason}", "attempts": attempt}
-            )
-        elif kept is None or _uncovered_count(notes) < _uncovered_count(kept[2]):
-            kept = (mutations, added, notes)
-        if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
-            break
-        retry = RETRY_SECTION.format(
-            design=notes.get("design", "(none written)"),
-            findings="\n".join(f"- {point}" for point in review["uncovered"]) or "- (the review named no point)",
-            delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
-        )
-    if kept is None:
-        return undelivered
-    mutations, added, notes = kept
+    written = answers.kept
+    if written is None:
+        return answers.unanswered(attempt)
+    notes = written.notes
     if attempt > 1:
         notes["attempts"] = attempt
+        if answers.kept_attempt != attempt:
+            # An earlier answer covered more than the later ones: the pages say which one the step kept.
+            notes["kept_attempt"] = answers.kept_attempt
+    if answers.dropped_attempts:
+        notes["dropped_attempts"] = answers.dropped_attempts
     # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
-    if added and isinstance(request, dict):
-        request["requires"] = [*own, *added]
-    return StepProposal(tuple(mutations), notes)
+    if written.added and isinstance(request, dict):
+        request["requires"] = [*own, *written.added]
+    return StepProposal(tuple(written.mutations), notes)
+
+
+@dataclass(frozen=True)
+class WrittenAnswer:
+    """An answer whose entries the harness admits: its mutations, the requires items the reply added and the notes
+    the step records (the design, the review, what was refused or undeclared)."""
+
+    mutations: list[Mutation]
+    added: list[dict[str, Any]]
+    notes: dict[str, Any]
+
+
+@dataclass
+class RequestAnswers:
+    """What the answers to one request have left so far, and the retry section each one asks for next.
+
+    ``kept`` is the delivering answer with the fewest uncovered points and
+    ``kept_attempt`` the answer it was; ``undelivered`` the last answer whose
+    review found it only put a substitute in the behavior's place;
+    ``declined`` the last design that said no entry can deliver the request;
+    ``unusable`` the last answer that could not be used and ``failed`` the
+    call that ended the loop. ``dropped_attempts`` says why each unusable
+    answer was dropped, so the page says what the kept one replaced, and
+    ``reviewed`` holds the last review's findings, which stay in every later
+    retry: an unusable answer after it does not erase them."""
+
+    kept: WrittenAnswer | None = None
+    kept_attempt: int = 0
+    undelivered: StepProposal | None = None
+    declined: StepProposal | None = None
+    unusable: UnusableAnswer | None = None
+    failed: StepProposal | None = None
+    dropped_attempts: list[str] = field(default_factory=list)
+    reviewed: str = ""
+
+    def take_unusable(self, answer: UnusableAnswer, attempt: int, served: ModelBinding) -> str:
+        """A slip in the answer's form: the retry that names it, asked while attempts remain."""
+        self.unusable = answer
+        why = answer.reason if not answer.dropped else f"{answer.reason}: {'; '.join(answer.dropped)}"
+        self.dropped_attempts.append(f"answer {attempt}: {why}")
+        if attempt < REQUEST_ATTEMPTS:
+            # The request page shows it while the step runs, not only once the step settles.
+            served.note("check", f"answer {attempt} written again: {why}", failed=True)
+        retry = self.reviewed + RETRY_UNUSABLE_SECTION.format(reason=why)
+        if answer.entries is not None:
+            retry += RETRY_EARLIER_ANSWER.format(design=answer.design or "(none written)", entries=answer.entries)
+        return retry
+
+    def take_declined(self, answer: DeclinedAnswer, attempt: int) -> str:
+        """A design with no entry: asked again when its review found points an entry could deliver and nothing
+        is kept yet (the design gave up early); otherwise the loop ends."""
+        self.declined = answer.proposal
+        review = self.declined.notes.get("review")
+        if review is None or not review["uncovered"] or attempt >= REQUEST_ATTEMPTS or self.kept is not None:
+            return ""
+        self.reviewed = RETRY_SECTION.format(
+            design=self.declined.notes.get("design", "(none written)"),
+            findings="\n".join(f"- {point}" for point in review["uncovered"]),
+            delivered="",
+        )
+        return self.reviewed
+
+    def take_written(self, answer: WrittenAnswer, attempt: int) -> str:
+        """An answer with entries: kept when it delivers with fewer uncovered points than the one kept, and the
+        retry its review asks for; empty once the review finds nothing another answer could close."""
+        review = answer.notes.get("review")
+        if review is not None and review.get("delivers") is False:
+            reason = review["uncovered"][0] if review["uncovered"] else "the entries only imitate the behavior"
+            self.undelivered = StepProposal(
+                (),
+                {**answer.notes, "failure": f"the change does not deliver the request: {reason}", "attempts": attempt},
+            )
+        elif self.kept is None or _uncovered_count(answer.notes) < _uncovered_count(self.kept.notes):
+            self.kept = answer
+            self.kept_attempt = attempt
+        if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
+            return ""
+        if review.get("limits") and not review["uncovered"] and review.get("delivers") is not False:
+            # What remains is what the harness notes say no answer here can deliver: another answer changes nothing.
+            return ""
+        findings = [*review["uncovered"], *answer.notes.get("dropped", ())]
+        self.reviewed = RETRY_SECTION.format(
+            design=answer.notes.get("design", "(none written)"),
+            findings="\n".join(f"- {point}" for point in findings) or "- (the review named no point)",
+            delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
+        )
+        return self.reviewed
+
+    def unanswered(self, attempt: int) -> StepProposal:
+        """The step's proposal when no answer was kept, with the reasons earlier answers were dropped. After a
+        failed call an earlier substitute says more about the request than the failure does; otherwise a design
+        that declined, then a substitute, then the last unusable answer's reason with its design."""
+        if self.failed is not None:
+            proposal = self.undelivered or self.failed
+        elif self.declined is not None:
+            proposal = self.declined
+        elif self.undelivered is not None:
+            proposal = self.undelivered
+        else:
+            failure = "no answer was written" if self.unusable is None else self.unusable.reason
+            design = None if self.unusable is None else self.unusable.design
+            proposal = StepProposal(
+                (), {**({} if design is None else {"design": kept_design(design)}), "failure": failure}
+            )
+        notes = dict(proposal.notes)
+        if attempt > 1 and proposal is not self.undelivered:
+            notes["attempts"] = attempt
+        if self.dropped_attempts:
+            notes["dropped_attempts"] = list(self.dropped_attempts)
+        return StepProposal(proposal.mutations, notes)
+
+
+@dataclass(frozen=True)
+class UnusableAnswer:
+    """An answer the loop may ask again: why it could not be used, the design it carried and, when its entries
+    parsed and something refused them, those entries in short, for the retry to start from; ``dropped`` names why
+    the parser dropped each entry, for the retry alone (the step's failure keeps the reason)."""
+
+    reason: str
+    design: str | None = None
+    entries: str | None = None
+    dropped: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class DeclinedAnswer:
+    """A design that says no entry of the kinds this harness takes can deliver the request: an answer with no
+    change, its notes holding the design, ``declined`` and the review that names what is out of reach."""
+
+    proposal: StepProposal
 
 
 def _answer_once(
@@ -543,45 +715,182 @@ def _answer_once(
     nodes: Sequence[tuple[str, Any]],
     entries: Sequence[Mapping[str, Any]],
     own: Sequence[Mapping[str, Any]],
-    surface: HarnessSurface = PI_SURFACE,
-) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal:
-    """One answer and its review: the mutations, the requires items the reply added and the notes, or a
-    proposal without mutations whose notes say why there is nothing to apply."""
+    kinds: Sequence[str] = tuple(REQUEST_KINDS),
+    adapter: str = EXTENSION_ADAPTER,
+) -> WrittenAnswer | StepProposal | UnusableAnswer | DeclinedAnswer:
+    """One answer and its review: the mutations, the requires items the reply added and the notes; an
+    ``UnusableAnswer`` the loop asks again (JSON that does not parse, every entry dropped, entries the harness's
+    admission refuses); a ``DeclinedAnswer`` design that says no entry can deliver the request; or a proposal without
+    mutations whose notes say why there is nothing to apply (a failed call, a provider refusal)."""
     # An extension is longer than a skill, and a thinking model reasons for tens of thousands of tokens before
     # it writes one, answering with no text when the budget ends inside that reasoning; the request path pays
     # for the room and the minutes, the failure path and the review keep their shorter budgets.
     reply, failure = _ask(models, prompt, max_tokens=_max_tokens(65536), timeout_s=_timeout_s(600.0))
     if reply is None:
         return StepProposal((), {"failure": failure})
-    proposals = _parse_proposal(reply, kinds=surface.request_kinds)
+    # A value that decodes inside a broken outer one is a fragment of it (a list nested in an entry, say), never
+    # the answer: the reply is a slip, asked again.
+    slipped = slipped_json(reply)
+    proposals = (
+        None if slipped else _parse_proposal(reply, kinds=tuple(kinds), config_keys=request_config_keys(adapter))
+    )
+    design = design_text(reply)
     if proposals is None:
+        refusal = provider_refusal(models)
+        if refusal is not None:
+            return _nothing_to_apply(reply, f"the provider refused the reply ({refusal})")
+        if slipped is not None:
+            return UnusableAnswer(slipped, design)
+        if reply.strip() and not _items_in(reply):
+            # No JSON at all: a slip, asked again.
+            return UnusableAnswer("the reply holds no usable entry", design)
+        dropped = dropped_entry_reasons(reply, kinds, request_config_keys(adapter))
+        if dropped:
+            # Entries the parser dropped, one and all: an answer to write again, never a design that declined.
+            return UnusableAnswer("the reply holds no usable entry", design, dropped=tuple(dropped))
+        if design is not None and adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None:
+            return declined_answer(models, request, design, own, adapter)
         return _nothing_to_apply(reply, "the reply holds no usable entry")
     mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
     if not mutations:
-        return _nothing_to_apply(
-            reply, "every entry in the reply was dropped: a reserved id, or an id another kind holds"
+        return UnusableAnswer(
+            "every entry in the reply was dropped: a reserved id, or an id another kind holds", design
         )
+    written = entries_in_short(mutations)
+    if entries:
+        # The admission the step meets next, run here so a refused entry is written again instead of losing the step.
+        _, refusal = admit_mutations(entries, mutations, get_adapter(adapter))
+        if refusal is not None:
+            return UnusableAnswer(f"the harness refused the entries: {refusal}", design, written)
+    unrestricted = unrestricted_agents(mutations, nodes, entries)
+    if unrestricted:
+        return UnusableAnswer(
+            "; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design, written
+        )
+    widened = widened_permissions(mutations) if adapter == "claude" else []
+    if widened:
+        return UnusableAnswer("; ".join(widened), design, written)
     added, refused = _parse_requires(reply)
-    design = _parse_design(reply)
     notes: dict[str, Any] = {}
     if design is not None:
-        notes["design"] = design
-    review, review_failure = _review(models, str(request.get("text", "")), design, mutations, [*own, *added], surface)
+        notes["design"] = kept_design(design)
+    misnamed = misnamed_entries(reply, kinds)
+    if misnamed:
+        notes["dropped"] = misnamed
+    # The review reads the whole design; the step records it cut to the record's size.
+    review, review_failure = _review(
+        models, str(request.get("text", "")), design, mutations, [*own, *added], adapter=adapter
+    )
     if review is not None:
         notes["review"] = review
     else:
         notes["review_failure"] = review_failure or "the review did not run"
     if refused:
         notes["refused_requires"] = refused
-    undeclared = _undeclared_env(mutations, [*own, *added], surface.session_env)
+    undeclared = _undeclared_env(mutations, [*own, *added])
     if undeclared:
         notes["undeclared_env"] = undeclared
-    return mutations, added, notes
+    return WrittenAnswer(mutations, added, notes)
 
 
-def _enforces(mutations: Sequence[Mutation], surface: HarnessSurface) -> bool:
-    """Whether the answer carries an entry of one of the surface's enforcing kinds."""
-    return any((mutation.options or {}).get("name") in surface.enforcing_kinds for mutation in mutations)
+def declined_answer(
+    models: ModelBindings,
+    request: Mapping[str, Any],
+    design: str,
+    own: Sequence[Mapping[str, Any]],
+    adapter: str,
+) -> DeclinedAnswer:
+    """A design that writes no entry, on a harness whose notes name what no answer there can deliver: an answer
+    with no change, reviewed like one, so those limits reach the pages and a point an entry could still deliver
+    sends the request back. On pi such a reply stays a proposal with nothing to apply."""
+    notes: dict[str, Any] = {"design": kept_design(design), "declined": DECLINED}
+    review, review_failure = _review(models, str(request.get("text", "")), design, [], own, adapter=adapter)
+    if review is not None:
+        notes["review"] = review
+    else:
+        notes["review_failure"] = review_failure or "the review did not run"
+    return DeclinedAnswer(StepProposal((), notes))
+
+
+def entries_in_short(mutations: Sequence[Mutation]) -> str:
+    """The answer's entries for a retry prompt: each as JSON with every key it set, each long text in it cut, so the
+    model can rewrite from it and sees where a missing key belongs."""
+
+    def shortened(value: Any) -> Any:
+        if isinstance(value, str):
+            return value if len(value) <= EARLIER_TEXT_CHARS else value[:EARLIER_TEXT_CHARS] + " ..."
+        if isinstance(value, Mapping):
+            return {key: shortened(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [shortened(item) for item in value]
+        return value
+
+    return "\n".join(
+        f"- {json.dumps(shortened({'id': mutation.id, **(mutation.options or {})}), ensure_ascii=False)}"
+        for mutation in mutations
+    )
+
+
+def config_agents(config: Any) -> Mapping[str, Any]:
+    """The agents a config node's data defines under ``agent`` (opencode's key), by name; none for another node."""
+    data = config.get("data") if isinstance(config, Mapping) else None
+    agents = data.get("agent") if isinstance(data, Mapping) else None
+    return agents if isinstance(agents, Mapping) else {}
+
+
+def unrestricted_agents(
+    mutations: Sequence[Mutation], nodes: Sequence[tuple[str, Any]], entries: Sequence[Mapping[str, Any]]
+) -> list[str]:
+    """The agents the answer's config entries define with no permission map, unless the tree already gives that
+    agent one: opencode offers such an agent every tool. Only a request's answer is held to this; a tree of the
+    person's own may define an agent without a map."""
+    tree = [(str(entry.get("name")), entry.get("config")) for entry in entries] if entries else list(nodes)
+    mapped = {
+        name
+        for kind, config in tree
+        if kind == "config"
+        for name, agent in config_agents(config).items()
+        if isinstance(agent, Mapping) and isinstance(agent.get("permission"), Mapping) and agent["permission"]
+    }
+    names = []
+    for mutation in mutations:
+        options = mutation.options or {}
+        if options.get("name") != "config":
+            continue
+        for name, agent in config_agents(options.get("config")).items():
+            permission = agent.get("permission") if isinstance(agent, Mapping) else None
+            if not (isinstance(permission, Mapping) and permission) and name not in mapped:
+                names.append(str(name))
+    return names
+
+
+def widened_permissions(mutations: Sequence[Mutation]) -> list[str]:
+    """Why the answer's Claude Code permissions reach past what a request may grant: every session of the release
+    runs under them, so an entry may only add an allow rule for a tool in ``CLAUDE_PREAPPROVED`` (or a
+    ``WebFetch(domain:<host>)`` rule), never a mode, a directory, a deny or ask edit, a shell or a wildcard."""
+    reasons: list[str] = []
+    for mutation in mutations:
+        options = mutation.options or {}
+        config = options.get("config")
+        data = config.get("data") if options.get("name") == "config" and isinstance(config, Mapping) else None
+        if not isinstance(data, Mapping) or "permissions" not in data:
+            continue
+        permissions = data["permissions"]
+        if not isinstance(permissions, Mapping):
+            reasons.append("permissions must be an object holding an allow list")
+            continue
+        reasons.extend(
+            f"a request may not set permissions.{key}: it changes what every session does unasked"
+            for key in sorted(set(permissions) - {"allow"})
+        )
+        allow = permissions.get("allow", [])
+        rules = allow if isinstance(allow, list) else [allow]
+        reasons.extend(
+            f"permissions.allow may name only WebSearch, WebFetch or WebFetch(domain:<host>), not {rule!r}"
+            for rule in rules
+            if not (isinstance(rule, str) and (rule in CLAUDE_PREAPPROVED or CLAUDE_FETCH_DOMAIN.fullmatch(rule)))
+        )
+    return reasons
 
 
 def _uncovered_count(notes: Mapping[str, Any]) -> int:
@@ -627,52 +936,78 @@ def client_text(request: Mapping[str, Any]) -> str:
     )
 
 
+def reserved_sentence(adapter: str) -> str:
+    """The prompt's sentence naming the reserved entries the adapter's tree carries, the ones Reef ships there (the
+    /reefine command, pi's update notice and extension API); none when it ships none, as on terminus."""
+    shipped = (
+        (REQUESTS_ENTRY_ID, ships_requests(adapter)),
+        (VERSION_CHECK_ENTRY_ID, ships_version_check(adapter)),
+        (API_SKILL_NAME, adapter == EXTENSION_ADAPTER),
+    )
+    reserved = sorted(entry for entry, ships in shipped if ships)
+    return f"Never touch these reserved entries: {', '.join(reserved)}.\n\n" if reserved else ""
+
+
 def _request_prompt(
     nodes: Sequence[tuple[str, Any]],
     request: Mapping[str, Any],
     samples: Sequence[TrajectoryItem],
     models: ModelBindings,
     entries: Sequence[Mapping[str, Any]],
-    surface: HarnessSurface = PI_SURFACE,
+    adapter: str = EXTENSION_ADAPTER,
 ) -> str:
     """The request prompt: the request fenced as data, the failures beside it when the step handed any, every
-    entry of the tree with its id, the steps the plan call found need a tool, the reserved ids, the kinds and
-    the guidance of the adapter's surface, and its API reference when the tree carries the skill."""
+    entry of the tree with its id, the steps the plan call found need a tool, the reserved ids and the extension
+    API reference when the tree carries it."""
     views = (
         [_entry_view(str(entry.get("name")), entry.get("config"), entry.get("id")) for entry in entries]
         if entries
         else [_entry_view(kind, config) for kind, config in nodes]
     )
     api = next(
-        (
-            config.get("text")
-            for kind, config in nodes
-            if kind == "skill" and surface.api_skill is not None and config.get("name") == surface.api_skill
-        ),
+        (config.get("text") for kind, config in nodes if kind == "skill" and config.get("name") == API_SKILL_NAME),
         None,
     )
     # The failures are client text too, fenced the same way; a step in manual mode hands over none.
     failures = failures_text(samples) if samples else None
     request_text = untrusted_text(str(request.get("text", "")), "user request")
     entries_text = json.dumps(views, indent=2)
-    # The plan call first: the steps the harness cannot perform get a tool written beside their rule.
-    tool_steps = _tool_steps(models, request_text, entries_text)
-    plan = ""
-    if tool_steps:
-        plan = PLAN_SECTION.format(
-            steps="\n".join(f"- {step}" for step in tool_steps), tool_advice=surface.tool_advice
-        )
+    kinds = request_kinds(adapter)
+    extensions = "code_extension" in kinds
+    facts = harness_facts(adapter)
+    # The plan call first: the steps the harness cannot perform get a tool written beside their rule on pi, and
+    # off pi the harness's own tools, which the plan call is told about, before the step is called undone.
+    tool_steps = _tool_steps(models, request_text, entries_text, None if facts is None else facts.tools)
+    steps = "\n".join(f"- {step}" for step in tool_steps)
+    # pi's extensions read process.env; another harness's entries find a value in its environment.
+    words = ENV_WORDS[extensions]
     return REQUEST_PROMPT.format(
         request=request_text,
-        machine=client_text(request),
+        env_value=words["env_value"],
+        env_reader=words["env_reader"],
+        means=words["means"],
+        # A harness that runs away from the person's machine says where; the client's report is not that place.
+        machine="" if facts is not None and facts.machine else client_text(request),
+        kinds=kind_lines(adapter),
+        extensions=EXTENSIONS_SECTION if extensions else harness_section(adapter),
+        platforms=(
+            facts.machine + " "
+            if facts is not None and facts.machine
+            else PLATFORMS_SENTENCE.format(platform="branch on process.platform, " if extensions else "")
+        ),
+        setup=(
+            NO_SETUP_SENTENCE
+            if get_adapter(adapter).install is None
+            else SETUP_SENTENCE.format(wrapper=adapter, asker=words["asker"])
+        ),
         failures="" if failures is None else FAILURES_SECTION.format(text=untrusted_text(failures)),
         entries=entries_text,
-        kinds=surface.kinds,
-        guidance=surface.guidance,
-        env_read=surface.env_read,
-        setup=surface.setup,
-        reserved=", ".join(sorted(RESERVED_ENTRY_IDS)),
-        plan=plan,
+        reserved=reserved_sentence(adapter),
+        plan=(
+            ""
+            if not tool_steps
+            else PLAN_SECTION.format(steps=steps) if extensions else PLAN_NO_TOOL_SECTION.format(steps=steps)
+        ),
         api="" if api is None else API_SECTION.format(text=api),
     )
 
@@ -693,7 +1028,8 @@ def _request_mutations(
                     "propose: dropped %s %r: the id names another kind", kind, entry_id
                 )
                 continue
-            entry_id = _body_id(kind, config[REQUEST_KINDS[kind][-1]])
+            text = config["text"] if kind == "rules" else json.dumps(config.get("data"), sort_keys=True)
+            entry_id = _rules_id(text) if kind == "rules" else _rules_id(text).replace("rules-", "config-")
             op = "update" if (kind, entry_id) in held else "create"
         mutations.append(Mutation(op, entry_id, {"name": kind, "config": config}))
     return mutations
@@ -721,20 +1057,25 @@ def _review(
     design: str | None,
     mutations: Sequence[Mutation],
     requires: Sequence[Mapping[str, Any]],
-    surface: HarnessSurface = PI_SURFACE,
+    *,
+    adapter: str = EXTENSION_ADAPTER,
 ) -> tuple[dict[str, Any] | None, str | None]:
     """The served model's reading of its entries against the request, ``{result, covered, uncovered}``, and no
     reason; or ``None`` and the reason the step has no review, which the step records so the page says the one
-    check of whether the entries deliver the request did not run."""
+    check of whether the entries deliver the request did not run. New commands are judged by ``adapter``'s own
+    command surface."""
     written: list[dict[str, Any]] = [{"op": m.op, "id": m.id, **(m.options or {})} for m in mutations]
     if requires:
         written.append({"requires": [dict(item) for item in requires]})
+    notes_harness = adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None
     prompt = REVIEW_PROMPT.format(
         request=untrusted_text(request_text, "user request"),
         design="(none written)" if design is None else design,
-        entries=json.dumps(written, indent=2),
-        session_env=", ".join(sorted(surface.session_env - _SHELL_ENV)),
-        command_check=surface.command_check,
+        entries=json.dumps(written, indent=2, ensure_ascii=False),
+        env_check=ENV_WORDS["code_extension" in request_kinds(adapter)]["env_check"],
+        commands=review_commands(adapter),
+        # The harness notes send a point no answer can deliver to limits: the object has the key for it.
+        limits_key=', "limits": ["<one point per item>"]' if notes_harness else "",
     )
     # A reasoning model spends the budget on its reasoning first; 2048 and then 8192 came back with no text live,
     # and 16384 still does on a long change, so a reply the reasoning ate is asked once more with room for both.
@@ -744,6 +1085,13 @@ def _review(
     if reply is None:
         return None, reason
     review = _parse_review(reply)
+    if review is None and _json_in(reply, openers=("{",)) is None and '"result"' in reply:
+        # The model wrote the object but a stray quote broke its JSON: asked once more before the step records that
+        # no review ran.
+        reply, reason = _ask(models, prompt + REVIEW_AGAIN, max_tokens=_max_tokens(16384), timeout_s=_timeout_s(120.0))
+        if reply is None:
+            return None, reason
+        review = _parse_review(reply)
     if review is None:
         return None, "the review reply carried no result object"
     return review, None
@@ -762,6 +1110,10 @@ def _parse_review(reply: str) -> dict[str, Any] | None:
         "covered": _strings_of(value.get("covered")),
         "uncovered": _strings_of(value.get("uncovered")),
     }
+    # What the harness notes declare out of reach, kept apart from the gaps a better answer could close.
+    limits = _strings_of(value.get("limits"))
+    if limits:
+        review["limits"] = limits
     # Only an explicit boolean decides delivery; a review that says nothing about it keeps the change.
     if isinstance(value.get("delivers"), bool):
         review["delivers"] = value["delivers"]
@@ -775,54 +1127,49 @@ def _strings_of(value: Any) -> list[str]:
     return [item.strip() for item in value if isinstance(item, str) and item.strip()][:_REVIEW_ITEMS]
 
 
-def _parse_design(reply: str) -> str | None:
-    """The text of the reply's ``{"design": "..."}`` object, cut at ``_DESIGN_CHARS``; ``None`` when it wrote none."""
+def design_text(reply: str) -> str | None:
+    """The whole text of the reply's ``{"design": "..."}`` object; ``None`` when it wrote none."""
     for value in _items_in(reply):
         if isinstance(value, dict) and isinstance(value.get("design"), str) and value["design"].strip():
-            return value["design"].strip()[:_DESIGN_CHARS]
+            return value["design"].strip()
     return None
 
 
-def _undeclared_env(
-    mutations: Sequence[Mutation], requires: Sequence[Mapping[str, Any]], session_env: frozenset[str] = _PI_SESSION_ENV
-) -> list[str]:
-    """The variables the written entries read that no requires item names, in reading order: ``process.env``
-    reads of an extension, ``$VAR`` reads of a config entry's hook commands; the ones the adapter and the shell
-    set (``session_env``), and reef's own, are not needs of the user's."""
+def kept_design(design: str) -> str:
+    """The design as the step records it: whole up to ``_DESIGN_CHARS``, and past it the start cut so the last
+    paragraph, the How to use the person reads, stays whole."""
+    if len(design) <= _DESIGN_CHARS:
+        return design
+    head, _, last = design.rpartition("\n\n")
+    if not head or len(last) >= _DESIGN_CHARS // 2:
+        return design[:_DESIGN_CHARS]
+    marker = "\n\n[...]\n\n"
+    return head[: _DESIGN_CHARS - len(last) - len(marker)].rstrip() + marker + last
+
+
+def _parse_design(reply: str) -> str | None:
+    """The reply's design as the step records it (``kept_design``); ``None`` when it wrote none."""
+    design = design_text(reply)
+    return None if design is None else kept_design(design)
+
+
+def _undeclared_env(mutations: Sequence[Mutation], requires: Sequence[Mapping[str, Any]]) -> list[str]:
+    """The variables the written extensions read through ``process.env`` that no requires item names, in reading
+    order; the ones pi and the shell set, and reef's own, are not needs of the user's."""
     declared = {str(item.get(key)) for item in requires for key in ("name", "check")}
     found: list[str] = []
     for mutation in mutations:
         options = mutation.options or {}
+        if options.get("name") != "code_extension":
+            continue
         config = options.get("config")
-        if not isinstance(config, Mapping):
-            continue
-        if options.get("name") == "code_extension":
-            read = [dotted or bracketed for dotted, bracketed in _ENV_READ.findall(str(config.get("code") or ""))]
-        elif options.get("name") == "config":
-            read = [
-                name for command in _hook_commands(config.get("data")) for name in _SHELL_VARIABLE.findall(command)
-            ]
-        else:
-            continue
-        for variable in read:
-            if variable in declared or variable in found or variable in session_env or variable.startswith("REEF_"):
+        code = config.get("code") if isinstance(config, Mapping) else None
+        for dotted, bracketed in _ENV_READ.findall(str(code or "")):
+            variable = dotted or bracketed
+            if variable in declared or variable in found or variable in _SESSION_ENV or variable.startswith("REEF_"):
                 continue
             found.append(variable)
     return found
-
-
-def _hook_commands(data: Any) -> list[str]:
-    """The shell commands of a settings object's ``hooks`` section, in reading order; none when the shape is off."""
-    hooks = data.get("hooks") if isinstance(data, Mapping) else None
-    if not isinstance(hooks, Mapping):
-        return []
-    return [
-        hook["command"]
-        for groups in hooks.values()
-        for group in (groups if isinstance(groups, list) else ())
-        for hook in (group.get("hooks", ()) if isinstance(group, Mapping) else ())
-        if isinstance(hook, Mapping) and isinstance(hook.get("command"), str)
-    ]
 
 
 def _without_reefs_own(proposals: Sequence[Proposal]) -> list[Proposal]:
@@ -837,12 +1184,15 @@ def _without_reefs_own(proposals: Sequence[Proposal]) -> list[Proposal]:
     return kept
 
 
-def _tool_steps(models: ModelBindings, request_text: str, entries_text: str) -> list[str]:
-    """The steps of a request the harness cannot perform, as the served model lists them in a first, short call.
+def _tool_steps(models: ModelBindings, request_text: str, entries_text: str, tools: str | None = None) -> list[str]:
+    """The steps of a request the harness cannot perform, as the served model lists them in a first, short call;
+    ``tools`` names the harness's own tools where the proposer knows them (off pi).
 
     A call that fails or answers without the JSON shape yields no steps: the request is then answered as
     before, without the plan section."""
-    prompt = PLAN_PROMPT.format(request=request_text, entries=entries_text)
+    prompt = PLAN_PROMPT.format(
+        request=request_text, entries=entries_text, tools="" if tools is None else f"Its own tools: {tools}.\n\n"
+    )
     reply, _ = _ask(models, prompt, max_tokens=_max_tokens(4096), timeout_s=_timeout_s(60.0))
     if reply is None:
         return []
@@ -922,6 +1272,21 @@ def _ask(
     return reply, None
 
 
+def provider_refusal(models: ModelBindings) -> str | None:
+    """Why the provider cut the last reply short, when its response says a filter or a refusal stopped it: an
+    OpenAI ``finish_reason``, a Responses ``incomplete_details.reason`` or an Anthropic ``stop_reason``."""
+    response = models.served.last_response()
+    if not isinstance(response, Mapping):
+        return None
+    details = response.get("incomplete_details")
+    reasons = [
+        *(choice.get("finish_reason") for choice in response.get("choices") or () if isinstance(choice, Mapping)),
+        details.get("reason") if isinstance(details, Mapping) else None,
+        response.get("stop_reason"),
+    ]
+    return next((str(reason) for reason in reasons if reason in ("content_filter", "refusal")), None)
+
+
 def _entry_view(kind: str, config: Any, entry_id: Any = None) -> dict[str, Any]:
     """One entry as the request prompt shows it: its id (a named kind's name when the tree gave none), the kind,
     and the start of its body."""
@@ -948,10 +1313,17 @@ def grade_text(task: str, text: str | None) -> float:
     return 1.0 if lines and lines[-1] == expected else 0.0
 
 
-def _parse_proposal(reply: str, kinds: Sequence[str] = ("skill",)) -> list[Proposal] | None:
+def _parse_proposal(
+    reply: str, kinds: Sequence[str] = ("skill",), config_keys: Sequence[str] = ()
+) -> list[Proposal] | None:
     """The strict proposal objects dug out of the model's text, as (entry id, kind, config) triples in reply
-    order; ``None`` when the reply carries no usable proposal of one of ``kinds``."""
-    proposals = [triple for triple in (_parse_entry(item, kinds) for item in _items_in(reply)) if triple is not None]
+    order; ``None`` when the reply carries no usable proposal of one of ``kinds``. A config entry is kept only
+    when it sets the primary target and no top level key outside ``config_keys``."""
+    proposals = [
+        triple
+        for triple in (_parse_entry(item, kinds, config_keys) for item in _items_in(reply))
+        if triple is not None
+    ]
     return proposals or None
 
 
@@ -1022,93 +1394,106 @@ def _named_env_check(item: Any) -> Any:
 
 
 def _items_in(reply: str) -> list[Any]:
-    """The objects of every JSON array or object in the reply, in reading order, an array's members flattened;
-    empty when nothing parses. A model writes the design object and the entries array one after the other as
-    often as one array, and the design gets read either way."""
-    decoder = json.JSONDecoder()
-    items: list[Any] = []
-    at = 0
-    while at < len(reply):
-        start = next((i for i in range(at, len(reply)) if reply[i] in "[{"), None)
-        if start is None:
-            break
-        value, end = _decoded_at(decoder, reply, start)
-        if value is None:
-            at = start + 1
-            continue
-        # A citation like [1] parses as a list of numbers; only objects are entries, designs or requires.
-        items.extend(item for item in (value if isinstance(value, list) else [value]) if isinstance(item, dict))
-        at = end
-    return items
+    """The objects of the reply's JSON array, or the one object it holds; empty when nothing parses."""
+    parsed = _json_in(reply)
+    if parsed is None:
+        return []
+    return parsed if isinstance(parsed, list) else [parsed]
 
 
 def _json_in(reply: str, openers: Sequence[str] = ("[", "{")) -> Any:
     """The JSON array or object inside the model's text, fences and prose around it dropped; ``None`` when none
     parses. ``openers`` says which to look for and in what order."""
+    found = json_found(reply, openers)
+    return None if found is None else found[1]
+
+
+def json_found(reply: str, openers: Sequence[str] = ("[", "{")) -> tuple[int, Any] | None:
+    """Where ``_json_in``'s value starts in the reply, and the value; ``None`` when none parses."""
     decoder = json.JSONDecoder()
     # The first array, else the first object, decoded in place: prose after it (a bracketed citation, say) is ignored.
     for opener in openers:
-        decoded = (_decoded_at(decoder, reply, at)[0] for at, char in enumerate(reply) if char == opener)
-        value = next((item for item in decoded if item is not None), None)
-        if value is not None:
-            return value
+        for at, char in enumerate(reply):
+            if char == opener:
+                value = _decoded_at(decoder, reply, at)
+                if value is not None:
+                    return at, value
     return None
 
 
-#: How many stray closing brackets a decode forgives in one value: a model closes one brace too many now and then.
-_STRAY_CLOSERS = 3
+def slipped_json(reply: str) -> str | None:
+    """Why the reply's outermost JSON does not parse; ``None`` when it parses or the reply holds no bracket.
 
-
-def _decoded_at(decoder: json.JSONDecoder, reply: str, at: int) -> tuple[Any, int]:
-    """The JSON value starting at ``at`` and the index after it, or ``(None, at)`` when none parses there.
-
-    A closing bracket the value has no opening for, ``}}]`` where ``}]`` was meant, ends the decode with an
-    error at that bracket; the bracket is dropped and the decode tried again, a few times, since the value
-    before it is what the model wrote."""
-    text = reply
-    dropped = 0
-    while True:
-        try:
-            value, end = decoder.raw_decode(text, at)
-            return value, end + dropped
-        except json.JSONDecodeError as error:
-            if dropped >= _STRAY_CLOSERS or error.pos >= len(text) or text[error.pos] not in "}]":
-                return None, at
-            text = text[: error.pos] + text[error.pos + 1 :]
-            dropped += 1
-        except ValueError:
-            return None, at
-
-
-#: The keys of a flattened command or skill file that are not frontmatter: the body under one of these, the id.
-_FILE_BODY_KEYS = ("body", "prompt", "content", "markdown")
-
-
-def _assembled_file(config: Mapping[str, Any]) -> str | None:
-    """A command or skill file from a config a model flattened: the frontmatter fields it wrote as keys beside a
-    ``body`` (``prompt``, ``content``), as the prompt describes the file, put back into one text; None when there
-    is no body to put under them."""
-    body = next((config[key] for key in _FILE_BODY_KEYS if isinstance(config.get(key), str)), None)
-    if body is None or not body.strip():
+    The outermost value starts at the first bracket or brace. When it does not
+    decode, a value that decodes later stands for the answer only when the
+    text before it closed every bracket it opened (a stray bracket in prose),
+    never when it sits inside the broken value."""
+    starts = [at for at in (reply.find("["), reply.find("{")) if at >= 0]
+    if not starts:
         return None
-    fields = [
-        (key, value)
-        for key, value in config.items()
-        if key not in ("name", "id", *_FILE_BODY_KEYS) and isinstance(value, (str, bool, int)) and str(value).strip()
-    ]
-    if not fields:
-        return body
-    front = "\n".join(f"{key}: {json.dumps(value) if isinstance(value, bool) else value}" for key, value in fields)
-    return f"---\n{front}\n---\n{body.lstrip()}"
+    start = min(starts)
+    try:
+        json.JSONDecoder().raw_decode(reply, start)
+        return None
+    except json.JSONDecodeError as error:
+        failure = error
+    found = json_found(reply)
+    if found is not None and open_brackets(reply[start : found[0]]) <= 0:
+        return None
+    return f"the reply's JSON does not parse ({failure.msg} at line {failure.lineno} column {failure.colno})"
 
 
-def _body_id(kind: str, body: Any) -> str:
-    """The id of an unnamed entry (rules, config) that has none of its own: a stable name from its body."""
-    text = body if isinstance(body, str) else json.dumps(body, sort_keys=True, default=str)
-    return f"{kind}-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
+def open_brackets(text: str) -> int:
+    """How many brackets and braces ``text`` leaves open, the ones inside JSON strings not counted."""
+    depth = 0
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+    return depth
 
 
-def _parse_entry(item: Any, kinds: Sequence[str]) -> Proposal | None:
+def _decoded_at(decoder: json.JSONDecoder, reply: str, at: int) -> Any:
+    """The JSON value starting at ``at``, or ``None`` when none parses there."""
+    try:
+        return decoder.raw_decode(reply, at)[0]
+    except ValueError:
+        return None
+
+
+def _rules_id(text: str) -> str:
+    """The id of a rules entry that has none of its own: a stable name from its text."""
+    return f"rules-{hashlib.sha256(text.encode('utf-8')).hexdigest()[:8]}"
+
+
+def parse_config_entry(entry_id: Any, config: dict[str, Any], config_keys: Sequence[str]) -> Proposal | None:
+    """A config proposal as (entry id, "config", {target, data}), or ``None`` when it names another target or a
+    top level key outside ``config_keys``; an entry without an id takes one from its data."""
+    data = config.get("data")
+    if config.get("target", "primary") != "primary" or not isinstance(data, dict) or not data:
+        return None
+    if not set(data) <= set(config_keys):
+        logging.getLogger(__name__).warning("propose: dropped a config entry setting %s", ", ".join(sorted(data)))
+        return None
+    if entry_id is None:
+        entry_id = _rules_id(json.dumps(data, sort_keys=True)).replace("rules-", "config-")
+    if not isinstance(entry_id, str) or not _ENTRY_NAME.fullmatch(entry_id):
+        return None
+    return entry_id, "config", {"target": "primary", "data": data}
+
+
+def _parse_entry(item: Any, kinds: Sequence[str], config_keys: Sequence[str] = ()) -> Proposal | None:
     """One proposal object as (entry id, kind, config), or ``None`` when its shape is not one of ``kinds``."""
     if not isinstance(item, dict):
         return None
@@ -1124,80 +1509,63 @@ def _parse_entry(item: Any, kinds: Sequence[str]) -> Proposal | None:
         config = {field: item[field] for field in fields if field in item}
     if not isinstance(config, dict):
         return None
-    body = config.get(fields[-1])
     if kind == "config":
-        # A settings object: the one kind whose body is JSON rather than text, with its target beside it.
-        if not isinstance(body, dict) or not body:
-            return None
-    else:
-        if body is None and kind in ("agent_command", "skill"):
-            body = _assembled_file(config)
-        if not isinstance(body, str) or not body.strip():
-            return None
+        return parse_config_entry(entry_id, config, config_keys)
+    body = config.get(fields[-1])
+    if not isinstance(body, str) or not body.strip():
+        return None
     if entry_id is None and "name" not in fields:
         # A model may leave a rules entry without an id, as the tree listing once showed one; the entry still
-        # needs an id, so its body gives it one.
-        entry_id = _body_id(kind, body)
+        # needs an id, so its text gives it one.
+        entry_id = _rules_id(body)
     if not isinstance(entry_id, str) or not _ENTRY_NAME.fullmatch(entry_id):
         return None
     # The entry id names a named kind; a config that repeats the name must agree, one that omits it is fine.
     if "name" in fields and config.get("name", entry_id) != entry_id:
         return None
-    if isinstance(body, dict):
-        body = _unescaped_hook_commands(body)
-    elif kind in ("agent_command", "skill"):
-        body = _single_frontmatter(body)
-    parsed: dict[str, Any] = {field: (entry_id if field == "name" else body) for field in fields}
-    if kind == "config":
-        parsed["target"] = str(config.get("target") or "primary")
-    return entry_id, kind, parsed
+    return entry_id, kind, {field: (entry_id if field == "name" else body) for field in fields}
 
 
-#: A frontmatter block at the start of a command or skill file.
-_FRONTMATTER = re.compile(r"\A---\n(.*?\n)---\n", re.S)
-
-
-def _single_frontmatter(text: str) -> str:
-    """A command or skill file with one frontmatter block: a model that wrote the same block twice in a row (once
-    for the file, once for the prompt) gets the copy dropped, since Claude Code reads the first and shows the
-    second to the model as prompt text."""
-    first = _FRONTMATTER.match(text)
-    if first is None:
-        return text
-    rest = text[first.end() :]
-    second = _FRONTMATTER.match(rest)
-    if second is not None and second.group(1) == first.group(1):
-        return text[: first.end()] + rest[second.end() :]
-    return text
-
-
-def _unescaped_hook_commands(data: dict[str, Any]) -> dict[str, Any]:
-    """The settings object with a backslash before a double quote removed from every hook command: a model that
-    writes JSON inside JSON escapes the quotes once too often, and ``\\"`` in sh is a literal quote character
-    that puts quotes into the path the command names."""
-    hooks = data.get("hooks")
-    if not isinstance(hooks, dict):
-        return data
-    for groups in hooks.values():
-        for group in groups if isinstance(groups, list) else ():
-            for hook in group.get("hooks", ()) if isinstance(group, dict) else ():
-                if isinstance(hook, dict) and isinstance(hook.get("command"), str) and '\\"' in hook["command"]:
-                    hook["command"] = hook["command"].replace('\\"', '"')
-    return data
-
-
-def final_assistant_text(trajectory: Sequence[Mapping[str, Any]]) -> str | None:
-    """The final assistant text in a session log, tolerant of both flat
-    role/content events and pi's wrapped message events with text parts."""
-    for event in reversed(trajectory):
-        message = event.get("message") or event
-        if message.get("role") != "assistant":
+def dropped_entry_reasons(reply: str, kinds: Sequence[str], config_keys: Sequence[str]) -> list[str]:
+    """Why each entry shaped object in the reply was dropped, one line each: a kind this harness does not take, a
+    config entry that sets a key outside ``config_keys`` or another target, an empty body or an id that is no entry
+    name, an id that is not its config name. Empty when every entry parsed, or when the reply holds none."""
+    lines = []
+    for item in _items_in(reply):
+        if not isinstance(item, dict) or not ({"kind", "name"} & set(item)) or not ({"id", "config"} & set(item)):
             continue
-        content = message.get("content")
-        if isinstance(content, str):
-            return content
-        if isinstance(content, list):
-            texts = [part["text"] for part in content if part.get("type") == "text"]
-            if texts:
-                return "\n".join(texts)
-    return None
+        if _parse_entry(item, kinds, config_keys) is not None:
+            continue
+        kind = item["kind"] if item.get("kind") in REQUEST_KINDS else item.get("name")
+        label = f"{kind} {item.get('id')!r}" if item.get("id") is not None else str(kind)
+        config = item.get("config")
+        if kind not in kinds or kind not in REQUEST_KINDS:
+            lines.append(f"{label} was dropped: this harness takes {', '.join(kinds)}")
+        elif kind == "config" and isinstance(config, dict) and isinstance(config.get("data"), dict):
+            outside = sorted(set(config["data"]) - set(config_keys))
+            where = f"it sets {', '.join(outside)}" if outside else "it names another target"
+            allowed = ", ".join(config_keys) or "no key"
+            lines.append(f"{label} was dropped: {where}, and a request's config entry may set {allowed}")
+        elif (
+            isinstance(config, dict)
+            and "name" in REQUEST_KINDS[kind]
+            and config.get("name") not in (None, item.get("id"))
+        ):
+            lines.append(f"{label} was dropped: its id must equal its config name {config.get('name')!r}")
+        else:
+            lines.append(f"{label} was dropped: its body is empty or its id is not a lowercase entry name")
+    return lines
+
+
+def misnamed_entries(reply: str, kinds: Sequence[str]) -> list[str]:
+    """The named entries in the reply that were dropped because their id is not their config name, one line each,
+    so the retry tells the model which of its entries never reached the tree."""
+    lines = []
+    for item in _items_in(reply):
+        if not isinstance(item, dict) or not isinstance(item.get("config"), dict):
+            continue
+        kind = item["kind"] if item.get("kind") in REQUEST_KINDS else item.get("name")
+        name, entry_id = item["config"].get("name"), item.get("id")
+        if kind in kinds and kind in REQUEST_KINDS and "name" in REQUEST_KINDS[kind] and name not in (None, entry_id):
+            lines.append(f"{kind} {entry_id!r} was dropped: its id must equal its config name {name!r}")
+    return lines

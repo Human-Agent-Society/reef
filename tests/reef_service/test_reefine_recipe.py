@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.recipe.config_fields import recipe_config_fields
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine import ReefineRecipe
@@ -28,7 +29,7 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.name == "reefine"
     assert built.training_mode == "manual"
     assert built.propose.reads_requests
-    assert built.review_kinds == ("code_extension", "config")
+    assert built.review_kinds == ("code_extension",)
     # The floor: the candidate alone must pass every evaluation task; the current release is not run.
     assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
     assert built.candidate_plugin.floor_score == 1.0
@@ -122,3 +123,52 @@ assert recipe.model_binding().model == 'test-model'
         text=True,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_off_pi_no_agent_proposer_is_built_or_warned_about(caplog) -> None:
+    """The agent proposer answers requests on pi alone: another adapter builds no agent executor, so an unjailed
+    agent setting neither warns nor needs a sandbox there, while pi still warns."""
+    config = {"evolution": {"adapter": "dsh", "tasks": ["[health] x"]}}
+    with caplog.at_level("WARNING"):
+        built = ReefineRecipe.from_environment({"REEF_PROPOSER_SANDBOX": "none"}, config=config)
+    assert isinstance(built, ReefineRecipe) and built.agent_executor is None
+    assert "sandbox is none" not in caplog.text
+    # The step builds no agent host off pi, so its activity never says the agent proposer is off on this host.
+    assert not built.propose.runs_agent
+    with caplog.at_level("WARNING"):
+        pi = ReefineRecipe.from_environment({"REEF_PROPOSER_SANDBOX": "none"}, config={"evolution": {"tasks": ["x"]}})
+    assert isinstance(pi, ReefineRecipe) and pi.agent_executor is not None
+    assert "sandbox is none" in caplog.text
+    assert pi.propose.runs_agent
+
+
+def test_the_profile_seeds_the_shipped_entries_only_on_the_adapter_that_ships_them(caplog) -> None:
+    """dsh and hermes get the /reefine command file and no update notice; terminus, with no command surface and no
+    install, gets neither and takes requests through POST /reef/train. The pi entries would refuse them at startup."""
+    for adapter in ("dsh", "hermes"):
+        with caplog.at_level("INFO", logger="reef.recipe.reefine"):
+            built = ReefineRecipe.from_environment(
+                {}, config={"evolution": {"adapter": adapter, "tasks": ["[health] x"]}}
+            )
+        assert isinstance(built, ReefineRecipe)
+        assert built.adapter == adapter and built.propose.adapter == adapter
+        assert [(options["id"], options["name"]) for options in built.seed] == [(REQUESTS_ENTRY_ID, "agent_command")]
+        assert f"reef-{adapter} update installs a release" in caplog.text
+    # The profile names both entries; on an adapter that ships none they are off, with a log line for each.
+    caplog.clear()
+    with caplog.at_level("INFO", logger="reef.recipe.reefine"):
+        built = ReefineRecipe.from_environment(
+            {},
+            config={
+                "evolution": {"adapter": "terminus", "tasks": ["[health] x"], "requests": True, "version_check": True}
+            },
+        )
+    assert isinstance(built, ReefineRecipe) and built.seed == ()
+    # terminus has no wrapper, so the log names the routes, never a reef-terminus command that does not exist.
+    assert caplog.text.count("requests come through POST /reef/train; GET /reef/harness serves a published tree") == 2
+    assert "reef-terminus" not in caplog.text
+    # Shown in the startup log, as the docs say: info lines never were.
+    assert {record.levelname for record in caplog.records if "ships no" in record.getMessage()} == {"WARNING"}
+    pi = ReefineRecipe.from_environment({}, config={"evolution": {"tasks": ["[health] x"]}})
+    assert isinstance(pi, ReefineRecipe)
+    assert [entry["id"] for entry in pi.seed] == ["reef-version-check", "reef-requests", "reef-pi-extension-api"]

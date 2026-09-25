@@ -1,0 +1,24 @@
+# What reef's reefine proposer is told about Codex CLI: see reef.harness.adapters.harness_facts.
+title: Codex CLI
+command: >-
+  Codex has no custom slash commands: a typed /<word> that is not one of its own commands is refused before the
+  model sees it. An agent_command renders as a skill, which a person types as $<id> in the session, so every place
+  that tells the person how to use it says $<id>, never /<id>. Its text is a SKILL.md: YAML frontmatter with name
+  and description, then the instructions; what the person typed after $<id> stays in their message.
+tools: >-
+  exec_command (a shell, sandboxed to the workspace without network), write_stdin, request_user_input, view_image,
+  multi_agent_v1, the goal tools and web_search (the hosted web search, off unless the config sets web_search)
+conversation_mode:
+  name: Codex
+  skill: >-
+    Codex puts a typed $<name> skill into the message as a <skill> block with its <name>
+  escape: >-
+    Codex runs a line that starts with ! in the person's shell
+  toggle: skill
+config_keys: [web_search]
+config_example: >-
+  {"target": "primary", "data": {"web_search": "live"}} gives sessions the web_search tool (evaluation episodes
+  keep it off). Web search comes only from this entry: it takes effect in a new reef-codex session after
+  reef-codex update, and the person never edits a config file, since every install writes it again. The entry
+  turns the hosted search on in every session of the release, not only while a mode is on: How to use says so, and
+  the review lists that point under limits
