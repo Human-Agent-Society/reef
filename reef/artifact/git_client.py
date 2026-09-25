@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 
 from reef.artifact.artifact import ArtifactPublicationError, ArtifactSourceError
@@ -24,6 +25,8 @@ class GitClient:
         *,
         cwd: Path | None = None,
         source_error: bool = False,
+        input_text: str | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> str:
         try:
             return subprocess.run(
@@ -32,6 +35,8 @@ class GitClient:
                 check=True,
                 capture_output=True,
                 text=True,
+                input=input_text,
+                env=None if environment is None else {**os.environ, **environment},
             ).stdout.strip()
         except (OSError, subprocess.CalledProcessError) as exc:
             stderr = getattr(exc, "stderr", "") or str(exc)

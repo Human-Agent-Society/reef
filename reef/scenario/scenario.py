@@ -3,29 +3,32 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from contextlib import nullcontext
 from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef
 from reef.artifact.release_chain import ArtifactReleaseChain, ReleaseNotRestorable
 from reef.artifact.repository import Repository
+from reef.core.components import RECORDS_COMPONENT
+from reef.core.errors import ReefError
 from reef.core.reports import ReportBase
 from reef.inference.model_config import ModelConfig
 from reef.observability.operations import OperationMetrics
 from reef.recipe.checkpoint_strategy import CheckpointStrategy
 from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, TrainingRuntime
 from reef.scenario.binding import ScenarioBinding
-from reef.scenario.committer import ScenarioCommitter
+from reef.scenario.committer import ScenarioCommitter, SettledTrainingResultError, StaleTrainingResultError
 from reef.storage.commits import SCENARIO_METADATA_KEY, CommitRecord, scenario_metadata_for
 from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
 from reef.train.backend import StepExecution
-from reef.train.trainer import Trainer
+from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainingBatch, TrainStepResult
 
 
 class Scenario:
-    """Scenario aggregate owning one runtime binding and release chain."""
+    """Scenario aggregate owning one runtime binding, one release chain, and one trainer per component."""
 
     def __init__(
         self,
@@ -35,18 +38,21 @@ class Scenario:
         repository: Repository,
         checkpoint_strategy: CheckpointStrategy,
         store: ScenarioStore,
-        trainer: Trainer,
+        trainers: tuple[ComponentTrainer, ...],
         model_config: ModelConfig | None = None,
         scenario_step: int = 0,
         process_id: str | None = None,
         recovered_head_record: CommitRecord | None = None,
     ) -> None:
         self.operations = OperationMetrics(
-            ("serve/request", "serve/admission", "ingest/write"),
+            ("serve/request", "serve/admission", "evaluate/request", "evaluate/admission", "ingest/write"),
             counters=(
                 "serve/retries_total",
                 "serve/version_mismatch_total",
                 "serve/timeouts_total",
+                "evaluate/retries_total",
+                "evaluate/version_mismatch_total",
+                "evaluate/timeouts_total",
                 "ingest/accepted_total",
                 "ingest/duplicates_total",
                 "ingest/rejected_report_total",
@@ -60,14 +66,14 @@ class Scenario:
         self._surface = binding.surface
         self._store = store
         self._closed = False
-        self._trainer = trainer
+        self.trainers = validate_component_trainers(trainers, binding.surface)
         self._artifact_chain = ArtifactReleaseChain(repository, process_id=process_id)
         self._committer = ScenarioCommitter(
             name=name,
             binding=binding,
             artifacts=self._artifact_chain,
             checkpoint_strategy=checkpoint_strategy,
-            trainer=trainer,
+            trainers=self.trainers,
             scenario_step=scenario_step,
             store=store,
             recovered_head_record=recovered_head_record,
@@ -116,16 +122,45 @@ class Scenario:
         return self._store
 
     @property
-    def trainer(self) -> Trainer:
-        """Inspection-only view of the trainer.
+    def component_trainers(self) -> tuple[ComponentTrainer, ...]:
+        """Every trainer of this scenario with the component it evolves, in recipe order."""
+        return self.trainers
 
-        Every mutating path goes through a Scenario method so it is serialized
-        against rollback and commit by the committer lock. Reading state
-        that is not part of a transaction (objective identity, consumption
-        watermarks, processor schema) is safe here; do not reserve batches,
+    @property
+    def trainer(self) -> Trainer:
+        """Inspection-only view of the trainer that steps the scenario; the only one of a flat scenario.
+
+        The dispatched trainer when there is one, else the first with a
+        candidate backend, else the first: the status, the contract and the
+        undrained batch warning speak of the trainer that runs steps, not of
+        a component that only carries files. Every mutating path goes
+        through a Scenario method so it is serialized against rollback and
+        commit by the committer lock; the one exception is a local step of a
+        scenario with several trainers, which runs outside it and meets the
+        commits made meanwhile at the commit boundary. Reading state that is
+        not part of a transaction (objective identity, consumption
+        watermarks, processor schema) is safe here; do not reserve batches
         or replace results through this handle.
         """
-        return self._trainer
+        component = self.dispatched_component
+        if component is not None:
+            return self.trainer_for(component)
+        return self.stepping_trainers()[0].trainer
+
+    @property
+    def is_job_reserved(self) -> bool:
+        """Whether a dispatched trainer holds a reserved batch: its job is out at the backend until commit or reject."""
+        component = self.dispatched_component
+        return component is not None and self.trainer_for(component).pending_batch is not None
+
+    def trainer_for(self, component: str | None) -> Trainer:
+        """The trainer evolving ``component``; ``None`` selects the first trainer, for scenario-wide operations."""
+        return self._committer.trainer_for(component)
+
+    @property
+    def dispatched_component(self) -> str | None:
+        """The component whose trainer runs a dispatched backend on the training runtime, if any."""
+        return next((bound.component for bound in self.trainers if bound.trainer.dispatched), None)
 
     @property
     def scenario_step(self) -> int:
@@ -136,38 +171,82 @@ class Scenario:
         """The serving surface built for this scenario."""
         return self._surface
 
+    @property
+    def training_mode(self) -> str:
+        """The mode the scenario's stepping trainers run in; a trainer that runs no step keeps none."""
+        return self.stepping_trainers()[0].trainer.training_mode
+
+    def stepping_trainers(self) -> tuple[ComponentTrainer, ...]:
+        """The trainers with a candidate backend; the first trainer when none has one."""
+        stepping = tuple(bound for bound in self.trainers if bound.trainer.candidate_backend is not None)
+        return stepping or self.trainers[:1]
+
     def set_training_mode(self, training_mode: str) -> None:
-        """Select future batches without waiting for a running backend step."""
-        self._trainer.set_training_mode(training_mode)
+        """Select future batches without waiting for a running backend step.
 
-    def prepare_training_step(self) -> TrainStepResult | None:
-        """Prepare one local-backend step while excluding rollback and commit."""
-        with self._committer.lock:
-            return self._trainer.run_once(self.scenario_step)
+        Every trainer that runs a step switches or none does: a scenario whose
+        components run in different modes would accept instructions for some
+        and drop them for others. A trainer without a step builds no batch,
+        so it has no mode to switch.
+        """
+        if training_mode not in ("auto", "manual", "hybrid"):
+            raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        stepping = self.stepping_trainers()
+        unsupported = [
+            f"{bound.component} ({type(bound.trainer.processor).__name__})"
+            for bound in stepping
+            if not bound.trainer.supports_training_mode(training_mode)
+        ]
+        if unsupported:
+            raise NotImplementedError(f"{', '.join(unsupported)} does not implement training_mode={training_mode!r}")
+        for bound in stepping:
+            bound.trainer.set_training_mode(training_mode)
 
-    def reserve_training_batch(self) -> TrainingBatch | None:
+    def prepare_training_step(self, component: str | None = None) -> TrainStepResult | None:
+        """Prepare one local-backend step.
+
+        A lone trainer runs its step under the commit lock, excluding rollback
+        and commit. With several trainers the step runs outside it: another
+        trainer's commit lands meanwhile and the result meets it at the commit
+        boundary, where the backend's stale policy decides; a dispatched
+        trainer still reserves its batch and the status stays readable while
+        a local evaluation takes its minutes. Callers run one preparation of
+        a trainer at a time, as the dispatcher's cycle lock does.
+        """
+        trainer = self.trainer_for(component)
+        with self._committer.lock if len(self.component_trainers) == 1 else nullcontext():
+            return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+
+    def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""
         with self._committer.lock:
-            return self._trainer.reserve_training_batch()
+            return self.trainer_for(component).reserve_training_batch(
+                base_release_id=self.current_artifact_ref().release_id
+            )
 
-    def execute_reserved_training_step(self) -> StepExecution:
+    def execute_reserved_training_step(self, component: str | None = None) -> StepExecution:
         """Run the bound dispatched backend for the reserved batch."""
-        return self._trainer.execute_reserved_step(self.scenario_step)
+        return self.trainer_for(component).execute_reserved_step(self.scenario_step)
 
-    def reject_pending(self, metrics: Mapping[str, Any] | None = None) -> None:
+    def reject_pending(self, metrics: Mapping[str, Any] | None = None, *, component: str | None = None) -> None:
         """Drop the reserved batch and persist its consumption."""
         with self._committer.lock:
-            self._trainer.reject_pending(metrics)
+            self._committer.reject_pending(component, metrics)
 
-    def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str]) -> None:
+    def retry_pending(self, component: str | None = None, *, keep_candidate: bool = False) -> None:
+        """Keep the reserved batch, and with ``keep_candidate`` its candidate, for another try against the served release."""
+        with self._committer.lock:
+            self.trainer_for(component).retry_pending(keep_candidate=keep_candidate)
+
+    def reingest(self, *, up_to_sequence: int, consumed_ids: frozenset[str], component: str | None = None) -> None:
         """Rebuild processor memory from retained rows behind a recovered watermark."""
         with self._committer.lock:
-            self._trainer.reingest(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
+            self.trainer_for(component).reingest(up_to_sequence=up_to_sequence, consumed_ids=consumed_ids)
 
-    def restore_record_progress(self, *, after_sequence: int, offset: int) -> None:
+    def restore_record_progress(self, *, after_sequence: int, offset: int, component: str | None = None) -> None:
         """Resume record consumption at a recovered commit's high-water mark."""
         with self._committer.lock:
-            self._trainer.restore_record_progress(after_sequence=after_sequence, offset=offset)
+            self.trainer_for(component).restore_record_progress(after_sequence=after_sequence, offset=offset)
 
     @property
     def commit_status(self) -> Mapping[str, Any]:
@@ -176,22 +255,29 @@ class Scenario:
 
     @property
     def committed_training_job_id(self) -> str | None:
-        """Training-job identity proven by the current durable commit."""
+        """Training-job identity proven by the dispatched component's newest durable commit.
+
+        Another trainer's commit after it moves the scenario step but does not
+        unmake the proof: the backend still has to finish that job.
+        """
         with self._committer.lock:
-            records = self._store.history() if self._store.durable else ()
-            if not records or records[-1].step != self.scenario_step:
+            record = self._committer.last_record_for(self.dispatched_component)
+            if record is None or not self._committer.record_is_current(record):
                 return None
-            return records[-1].training_job_id
+            return record.training_job_id
 
     @property
     def committed_training_without_job_id(self) -> bool:
-        """Whether the current head is a pre-identity training commit."""
+        """Whether the dispatched component's newest commit is a pre-identity training commit."""
         with self._committer.lock:
-            records = self._store.history() if self._store.durable else ()
-            if not records or records[-1].step != self.scenario_step:
+            record = self._committer.last_record_for(self.dispatched_component)
+            if record is None or not self._committer.record_is_current(record):
                 return False
-            record = records[-1]
             return record.operation == "training" and record.operation_verified and record.training_job_id is None
+
+    def last_commit_for(self, component: str | None) -> CommitRecord | None:
+        """The newest durable commit made by ``component``'s trainer, read from the log without waiting on a commit."""
+        return self._committer.last_record_for(component)
 
     def metrics_for_version(self, release_id: str) -> Mapping[str, Any] | None:
         """Metrics of the training step that published ``release_id``, if logged."""
@@ -199,6 +285,10 @@ class Scenario:
 
     def releases(self) -> tuple[dict[str, Any], ...]:
         return self._committer.releases()
+
+    def creation_components(self, scenario_step: int) -> Mapping[str, str] | None:
+        """The content id of each component the creation artifact binds; ``None`` when it has no manifest."""
+        return self._committer.creation_components(scenario_step)
 
     def artifact_for_version(self, release_id: str) -> Artifact:
         """Materialize a scenario release for read-only serving; absence raises ArtifactNotFound."""
@@ -221,20 +311,33 @@ class Scenario:
     def rollback(self, release_id: str, *, operation: str = "rollback") -> ArtifactRef:
         return self._committer.rollback(release_id, operation=operation)
 
-    def commit(self, result: TrainStepResult) -> Any:
-        return self._committer.commit(result)
+    def commit(self, result: TrainStepResult, *, component: str | None = None) -> Any:
+        """Commit ``component``'s pending result as one atomic version record.
+
+        Raises :class:`StaleTrainingResultError` when the result was prepared
+        against a release another component has since replaced; the caller
+        then calls :meth:`retry_pending` and prepares the batch again. Raises
+        :class:`SettledTrainingResultError` when another trainer's commit has
+        already put the result on record.
+        """
+        return self._committer.commit(result, component=component)
+
+    @property
+    def settled_sibling_record(self) -> CommitRecord | None:
+        """The sibling record the last commit settled before its own: that step is the sibling's."""
+        return self._committer.settled_sibling
 
     def publish_shipped_content(self) -> ArtifactRef | None:
         """Republish the head with the content this Reef ships when it is stale; the new head, or ``None``."""
         return self._committer.publish_shipped_content()
 
     def close(self) -> None:
-        """Tear down what this scenario instance owns: trainer, then its storage session.
+        """Tear down what this scenario instance owns: trainers, then its storage session.
 
         The dispatcher calls this on shutdown and when a durable reload
         replaces the instance — the one guarantee processors with background
         workers rely on (see :meth:`DataProcessor.close`). Safe to call more
-        than once; the trainer closes first so no processor thread can touch
+        than once; the trainers close first so no processor thread can touch
         the record store after it closes.
         """
         with self._committer.lock:
@@ -242,7 +345,8 @@ class Scenario:
                 return
             self._closed = True
             try:
-                self._trainer.close()
+                for bound in self.trainers:
+                    bound.trainer.close()
             finally:
                 self._store.close()
 
@@ -254,8 +358,36 @@ class Scenario:
         )
 
 
+def validate_component_trainers(
+    trainers: tuple[ComponentTrainer, ...], surface: Surface
+) -> tuple[ComponentTrainer, ...]:
+    """Check that the trainers match the surface: each names a component it serves, and a surface serving
+    no component has exactly one trainer, bound to ``records``."""
+    if not trainers or any(not isinstance(bound, ComponentTrainer) for bound in trainers):
+        raise ReefError("a scenario requires at least one ComponentTrainer")
+    names = [bound.component for bound in trainers]
+    if len(set(names)) != len(names):
+        raise ReefError(f"scenario trainers must evolve distinct components, not {names}")
+    if not surface.names:
+        if names != [RECORDS_COMPONENT]:
+            raise ReefError(
+                f"a scenario serving no component has one trainer bound to {RECORDS_COMPONENT!r}, not {names}"
+            )
+        return trainers
+    unknown = [name for name in names if name not in surface.names]
+    if unknown:
+        raise ReefError(f"scenario trainers name components the surface does not serve: {unknown}")
+    dispatched = [bound.component for bound in trainers if bound.trainer.dispatched]
+    if len(dispatched) > 1:
+        raise ReefError(f"at most one component runs on the training runtime, not {dispatched}")
+    return trainers
+
+
 __all__ = [
     "SCENARIO_METADATA_KEY",
     "ReleaseNotRestorable",
     "Scenario",
+    "SettledTrainingResultError",
+    "StaleTrainingResultError",
+    "validate_component_trainers",
 ]
