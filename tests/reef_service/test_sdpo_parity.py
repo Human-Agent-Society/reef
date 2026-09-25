@@ -63,7 +63,7 @@ def test_token_importance_weights_are_detached_and_clipped_independently():
 
 @pytest.mark.unit
 def test_student_support_survives_teacher_packing_and_duplicate_sequences(monkeypatch):
-    """The teacher must score each student's chosen IDs, even for identical prompts."""
+    """The teacher scores each student's chosen ids, through packing and for identical teacher prompts."""
     import sys
     from types import SimpleNamespace
 
@@ -79,7 +79,8 @@ def test_student_support_survives_teacher_packing_and_duplicate_sequences(monkey
     monkeypatch.setattr(torch.cuda, "current_device", lambda: "cpu")
     monkeypatch.setattr(teacher, "_TEACHER", None)
     settings = SdpoSettings(top_k=1, teacher_update_rate=1)
-    args = SimpleNamespace(seq_length=32, max_tokens_per_gpu=3, rollout_temperature=1.0)
+    # A six-token budget packs both three-token sequences into one microbatch.
+    args = SimpleNamespace(seq_length=32, max_tokens_per_gpu=6, rollout_temperature=1.0)
     SdpoAlgorithm().apply_driver_options(args, settings)
 
     class Iterator:
@@ -87,28 +88,37 @@ def test_student_support_survives_teacher_packing_and_duplicate_sequences(monkey
             self.data = data
             self.indices = indices
 
-    calls = []
+    passes = []
 
     def forward_only(callback, args, model, iterators, num_microbatches):
+        """Slime's pass: the callback sees the microbatches in schedule order, their samples packed end to end."""
         data = iterators[0].data
-        student_pass = not calls
-        calls.append(student_pass)
+        student_pass = not passes
+        passes.append([])
         collected = {}
-        # Deliberately visit microbatches in reverse and restore sample order,
-        # as the real runtime does for its packing schedule.
-        for index in reversed(range(len(data["tokens"]))):
-            token_ids = data["tokens"][index]
-            logits = torch.zeros(1, len(token_ids), 7)
-            if student_pass:
-                logits[0, 1, int(token_ids[0])] = 3.0
-            else:
-                logits[0, 1] = torch.arange(7).float()
+        for sample_indices in iterators[0].indices:
+            unconcat_tokens = [data["tokens"][index] for index in sample_indices]
+            total_lengths = [len(tokens) for tokens in unconcat_tokens]
+            logits = torch.zeros(1, sum(total_lengths), 7)
+            offset = 0
+            for tokens, length in zip(unconcat_tokens, total_lengths, strict=True):
+                # The row predicting a sequence's one response token is its second to last.
+                if student_pass:
+                    logits[0, offset + length - 2, int(tokens[0])] = 3.0
+                else:
+                    logits[0, offset + length - 2] = torch.arange(7).float()
+                offset += length
+            passes[-1].append(list(sample_indices))
             _, output = callback(
-                logits, args=args, unconcat_tokens=[token_ids], total_lengths=[len(token_ids)], response_lengths=[1]
+                logits,
+                args=args,
+                unconcat_tokens=unconcat_tokens,
+                total_lengths=total_lengths,
+                response_lengths=[1] * len(unconcat_tokens),
             )
             for key, rows in output.items():
-                collected.setdefault(key, {})[index] = rows[0]
-        return {key: [by_index[i] for i in range(len(data["tokens"]))] for key, by_index in collected.items()}
+                collected.setdefault(key, []).extend(rows)
+        return collected
 
     monkeypatch.setitem(sys.modules, "slime.backends.megatron_utils.data", SimpleNamespace(DataIterator=Iterator))
     monkeypatch.setitem(sys.modules, "slime.backends.megatron_utils.model", SimpleNamespace(forward_only=forward_only))
@@ -120,8 +130,24 @@ def test_student_support_survives_teacher_packing_and_duplicate_sequences(monkey
         "loss_masks": [torch.ones(1), torch.ones(1)],
     }
     teacher.compute_teacher_rows(SimpleNamespace(args=args, model=object()), batch, settings)
-    assert calls == [True, False]
+    # One student pass and one teacher pass, each one packed microbatch of both samples.
+    assert passes == [[[0, 1]], [[0, 1]]]
     assert [ids.item() for ids in batch["distill_teacher_topk_ids"]] == [1, 2]
     expected = torch.arange(7).float().log_softmax(-1)
     for index, log_probs in enumerate(batch["distill_teacher_topk_log_probs"]):
         assert log_probs.item() == pytest.approx(expected[index + 1].item())
+
+
+@pytest.mark.unit
+def test_selected_ids_follow_the_packing_schedule():
+    from reef.train.slime_backend.distill.teacher import TeacherTopKAtSelectedIds
+
+    callback = TeacherTopKAtSelectedIds([[0, 1], [2]], [torch.zeros(1, 1, dtype=torch.long)] * 3)
+    with pytest.raises(ValueError, match="packing schedule"):
+        callback(
+            torch.zeros(1, 3, 7),
+            args=None,
+            unconcat_tokens=[torch.tensor([1, 2, 3])],
+            total_lengths=[3],
+            response_lengths=[1],
+        )

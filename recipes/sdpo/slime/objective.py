@@ -1,4 +1,12 @@
-"""SDPO worker hooks; the shared backend owns the teacher and divergence kernels."""
+"""SDPO's worker hooks: the backend's distillation loss and teacher pass under this family's names.
+
+Slime's Megatron workers resolve the hooks by path; the base's
+``reef.train.slime_backend.distill.objective`` does the work, and these entry
+points exist so the family's hooks carry its name, as the loss-family
+contract asks. Torch is imported only when a hook runs.
+"""
+
+from __future__ import annotations
 
 from argparse import Namespace
 from collections.abc import Callable
@@ -11,27 +19,15 @@ from reef.train.slime_backend.algorithm import objective
 def sdpo_loss(
     args: Namespace, batch: dict[str, Any], logits: Any, sum_of_sample_mean: Callable[[Any], Any]
 ) -> tuple[Any, dict[str, Any]]:
-    """Distil the feedback-conditioned teacher at the student's original response positions."""
-    import torch
-
+    """``--custom-loss-function-path`` entry point: the weighted per-sample mean token divergence to the self-teacher."""
     from reef.train.slime_backend.distill.objective import distill_loss
 
-    factors = torch.cat(
-        [
-            logits.new_full((length,), weight, dtype=torch.float32)
-            for length, weight in zip(batch["response_lengths"], batch["distill_sample_weights"], strict=True)
-        ]
-    )
-
-    def masked_sample_sum(values):
-        return sum_of_sample_mean(values * factors)
-
-    return distill_loss(args, batch, logits, masked_sample_sum)
+    return distill_loss(args, batch, logits, sum_of_sample_mean)
 
 
 @objective("reef_actor_pre_train_hook_path")
 def sdpo_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
-    """Score the complete batch before its single optimizer step."""
+    """Move the teacher toward the policy, select the student's top-K ids, then score every teacher sequence."""
     from reef.train.slime_backend.distill.objective import distill_actor_pre_train
 
     distill_actor_pre_train(actor, rollout_data)

@@ -7,18 +7,22 @@ loss follows ``distil_trainer.py`` of the SDFT reference
 position of the student's on-policy sample, the divergence between the
 teacher's next-token distribution and the student's; the per-sample mean
 over the trained response tokens, weighted by the truncated
-importance-sampling ratio against the rollout engine's log-probs.
+importance-sampling ratio against the rollout engine's log-probs (averaged
+over the response, or applied per token as the SDPO reference does) and by
+the sample's own weight from the wire row.
 
 Two representations of the teacher meet the student here. In the exact
 representation the teacher's whole next-token distribution is known at every
 response position, as ``[R, V_local]`` rows of this rank's shard normalized
 over the full vocabulary, and :func:`token_divergence` puts the student's
 logit rows against them. In the top-K representation the teacher kept its
-top-K log-probs and its log-prob at the sampled token; the student's
-log-probs at those ids are gathered across the shards
-(:func:`gather_log_probs_at_ids`) and :func:`restricted_divergence` compares
-the two distributions restricted to the K ids and renormalized, while the
-reverse KL is estimated at the sampled token (:func:`sampled_reverse_kl`).
+log-probs at K ids per position (its own top-K, or the current student's)
+and at the sampled token; the student's log-probs at those ids are gathered
+across the shards (:func:`gather_log_probs_at_ids`) and
+:func:`restricted_divergence` compares the two distributions on them, either
+renormalized over the K ids, the reverse KL then estimated at the sampled
+token (:func:`sampled_reverse_kl`), or with one bucket for the rest of the
+vocabulary (:func:`append_tail_log_probability`).
 
 A divergence is a sum of per-shard terms that all depend on the student's
 global log-sum-exp. Letting autograd differentiate a shard's term alone
@@ -397,7 +401,7 @@ def _exact_divergences(
 def _topk_divergences(
     settings: DistillSettings, batch: dict[str, Any], student_rows_per_sample: Any
 ) -> list[torch.Tensor]:
-    """Per sample, the per-token divergence on the teacher's top-K ids, or the reverse KL at the sampled token."""
+    """Per sample, the per-token divergence on the selected top-K ids, or the reverse KL at the sampled token."""
     from megatron.core import mpu
 
     for key in ("distill_teacher_topk_ids", "distill_teacher_topk_log_probs", "distill_teacher_sampled_log_probs"):
@@ -451,9 +455,11 @@ def distill_loss(
     """``--custom-loss-function-path`` entry point: the per-sample mean token divergence to the teacher.
 
     ``batch`` carries the ``distill_teacher_*`` keys the pre-train hook
-    filled; ``logits`` is the training forward over the plain request.
-    Slime's outer ``loss_function`` divides the returned sum of per-sample
-    means by the step's global batch size, which yields the batch mean.
+    filled and the wire row's ``distill_sample_weights``; ``logits`` is the
+    training forward over the plain request. Slime's outer ``loss_function``
+    divides the returned sum of weighted per-sample means by the step's
+    global batch size, which yields the batch mean. The metrics stay
+    unweighted: they describe every sample the step saw.
     """
     from megatron.core import mpu
     from slime.backends.megatron_utils.cp_utils import get_sum_of_sample_mean
@@ -490,8 +496,11 @@ def distill_loss(
             total_lengths, response_lengths, loss_masks, None, args.calculate_per_token_loss
         )
 
+    sample_weights = batch.get("distill_sample_weights")
+    if sample_weights is None:
+        raise RuntimeError("distill_sample_weights is missing: the driver did not build this batch from the wire row")
     divergence = torch.cat(per_sample_divergence, dim=0)
-    weighted = divergence
+    scaled = per_sample_divergence
     metrics: dict[str, torch.Tensor] = {}
     if settings.importance_sampling_cap > 0:
         rollout_log_probs = batch.get("rollout_log_probs")
@@ -521,7 +530,7 @@ def distill_loss(
                 ]
             student_log_probs = torch.cat(outputs["log_probs"], dim=0).float()
             engine_log_probs = torch.cat(rollout_log_probs, dim=0).float()
-        weighted = torch.cat([sample * weight for sample, weight in zip(per_sample_divergence, weights, strict=True)])
+        scaled = [sample * weight for sample, weight in zip(per_sample_divergence, weights, strict=True)]
         # Slime sums a micro-batch's metrics over its samples and divides the
         # step's total by the global batch size, so every value here is a sum
         # of per-sample means, as ``sum_of_sample_mean`` produces.
@@ -535,11 +544,15 @@ def distill_loss(
         metrics["distill_rollout_log_prob"] = sum_of_sample_mean(engine_log_probs)
         metrics["distill_log_prob_abs_diff"] = sum_of_sample_mean((student_log_probs - engine_log_probs).abs())
 
+    weighted = torch.cat(
+        [sample * float(sample_weight) for sample, sample_weight in zip(scaled, sample_weights, strict=True)], dim=0
+    )
     loss = sum_of_sample_mean(weighted)
     if weighted.numel() == 0:
         loss = loss + 0 * logits.sum()
     metrics["loss"] = loss.detach().clone()
     metrics["distill_divergence"] = sum_of_sample_mean(divergence.detach())
+    metrics["distill_sample_weight"] = divergence.new_tensor([float(value) for value in sample_weights]).sum()
     return loss, metrics
 
 

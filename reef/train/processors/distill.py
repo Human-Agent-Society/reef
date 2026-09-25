@@ -5,7 +5,10 @@ the teacher reads beyond the student's request is the recipe's policy
 (:meth:`DistillProcessor.teacher_request`: a demonstration,
 environment feedback, nothing); rendering it with the served model's chat
 template and shipping it as ``teacher_tokens`` beside the student's policy
-tensors is the mechanism they share.
+tensors is the mechanism they share, :meth:`DistillProcessor.recorded_sample`
+and :meth:`DistillProcessor.teacher_tokens`. A recipe whose teacher context
+comes from other samples of the same batch, as SDPO's does, composes the
+request in ``make_batch`` and renders it with the same two methods.
 """
 
 from __future__ import annotations
@@ -13,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Hashable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 from reef.core.reports import TeacherContextReport
@@ -53,6 +57,23 @@ def normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
                 function["arguments"] = {}
         normalized["function"] = function
     return normalized
+
+
+@dataclass(frozen=True)
+class RecordedSample:
+    """The student's policy sample with the report it answers and the request and response text its inference recorded."""
+
+    sample: TrajectoryItem
+    report: TeacherContextReport
+    messages: list[Any]
+    tools: list[Any] | None
+    response: str
+
+    @property
+    def response_ids(self) -> list[int]:
+        """The student's response ids: the tail of its tokens that the loss mask covers."""
+        response_length = len(self.sample.training["loss_mask"])
+        return [int(token) for token in self.sample.training["tokens"][-response_length:]]
 
 
 class DistillProcessor(ReportedFeedbackProcessor):
@@ -104,7 +125,12 @@ class DistillProcessor(ReportedFeedbackProcessor):
     def operational_metrics(self) -> Mapping[str, float | int]:
         return {**super().operational_metrics(), "teacher_overflow_reports": self._overflow_count}
 
-    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+    def recorded_sample(self, context: ReportContext, score: float) -> RecordedSample:
+        """The student's policy sample from the report's one recorded inference, with its request and response text.
+
+        Checks what a teacher sequence needs: the ``TeacherContextReport``
+        schema, one inference, and its recorded prompt and response tokens.
+        """
         parsed = context.parsed_report
         if not isinstance(parsed, TeacherContextReport):
             raise ValueError(f"{type(self).__name__} requires the TeacherContextReport schema")
@@ -113,21 +139,53 @@ class DistillProcessor(ReportedFeedbackProcessor):
                 f"a teacher sequence covers one recorded request per report; report "
                 f"{context.report.agent_record_id} references {len(context.inferences)}"
             )
-        # The teacher's distribution is the signal; a reported score is metadata only.
-        sample = self._assembly.build(context, 0.0 if context.score is None else context.score)
+        sample = self._assembly.build(context, score)
         tokens = [int(token) for token in sample.training.get("tokens", [])]
         response_length = len(sample.training.get("loss_mask", []))
         if not 0 < response_length < len(tokens):
             raise ValueError("a teacher sequence requires the recorded prompt and response tokens of the inference")
         payload = context.inferences[0].payload
         messages, tools = recorded_request(payload)
-        teacher_messages, teacher_tools = self.teacher_request(
-            messages, tools, recorded_response(payload), parsed.teacher_context
-        )
+        return RecordedSample(sample, parsed, messages, tools, recorded_response(payload))
+
+    def teacher_tokens(
+        self,
+        messages: Sequence[Any],
+        tools: Sequence[Any] | None,
+        response_ids: Sequence[int],
+        *,
+        max_prompt_tokens: int = 0,
+        enable_thinking: bool | None = None,
+    ) -> list[int]:
+        """The teacher sequence: ``messages`` rendered with the served model's chat template, then ``response_ids`` verbatim.
+
+        ``max_prompt_tokens`` keeps only the first that many rendered prompt
+        ids (0 keeps them all). ``enable_thinking`` is handed to the template
+        when set, for templates that render a thinking switch into the
+        generation prompt, so the teacher reads what the engine rendered.
+        """
+        template_options: dict[str, Any] = {}
+        if enable_thinking is not None:
+            template_options["enable_thinking"] = enable_thinking
         prompt_ids = self._tokenizer.apply_chat_template(
-            teacher_messages, tools=teacher_tools or None, tokenize=True, add_generation_prompt=True, return_dict=False
+            list(messages),
+            tools=list(tools) if tools else None,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=False,
+            **template_options,
         )
-        teacher_tokens = [*prompt_ids, *tokens[-response_length:]]
+        if max_prompt_tokens > 0:
+            prompt_ids = prompt_ids[:max_prompt_tokens]
+        return [*prompt_ids, *(int(token) for token in response_ids)]
+
+    def make_sample(self, context: ReportContext) -> TrajectoryItem:
+        # The teacher's distribution is the signal; a reported score is metadata only.
+        recorded = self.recorded_sample(context, 0.0 if context.score is None else context.score)
+        teacher_messages, teacher_tools = self.teacher_request(
+            recorded.messages, recorded.tools, recorded.response, recorded.report.teacher_context
+        )
+        teacher_tokens = self.teacher_tokens(teacher_messages, teacher_tools, recorded.response_ids)
         if self._max_teacher_tokens and len(teacher_tokens) > self._max_teacher_tokens:
             self._overflow_reports.add(context.report.agent_record_id)
             logger.warning(
@@ -136,7 +194,7 @@ class DistillProcessor(ReportedFeedbackProcessor):
                 len(teacher_tokens),
                 self._max_teacher_tokens,
             )
-        return sample.with_training(teacher_tokens=teacher_tokens)
+        return recorded.sample.with_training(teacher_tokens=teacher_tokens)
 
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         # An overflowing report is its own group, so the group decision can release it.
@@ -154,4 +212,4 @@ class DistillProcessor(ReportedFeedbackProcessor):
         return TrainingBatch(f"{self.scenario}:{self.batch_label}:{batch_number}", items)
 
 
-__all__ = ["DistillProcessor"]
+__all__ = ["DistillProcessor", "RecordedSample", "normalize_messages_for_template", "normalize_tool_call"]

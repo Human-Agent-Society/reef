@@ -133,13 +133,6 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--expert-tensor-parallel-size",
         "--group-query-attention",
         "--hidden-dropout",
-        "--num-layers",
-        "--hidden-size",
-        "--ffn-hidden-size",
-        "--num-attention-heads",
-        "--num-query-groups",
-        "--kv-channels",
-        "--norm-epsilon",
         "--lr-decay-iters",
         "--lr-decay-style",
         "--lr-warmup-iters",
@@ -323,8 +316,8 @@ def _parse_config(config_path: Path):
     # The full parser adds these bootstrap flags before its Slime option provider.
     parser.add_argument("--debug-train-only", action="store_true")
     parser.add_argument("--debug-rollout-only", action="store_true")
-    # SDPO validates these Megatron options because its cached student support
-    # must match the gradient forward. Parse their real values on CPU too.
+    # The distillation base refuses dropout while the student selects the
+    # top-K support before the step. Parse the real values on CPU too.
     parser.add_argument("--attention-dropout", type=float, default=0.1)
     parser.add_argument("--hidden-dropout", type=float, default=0.1)
     args, leftover = parser.parse_known_args(tokens, namespace=SlimeArguments())

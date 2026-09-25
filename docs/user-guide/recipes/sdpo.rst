@@ -1,5 +1,5 @@
 Self-Distillation Policy Optimization (SDPO)
-==========================================
+============================================
 
 SDPO (arXiv:2601.20802) improves a policy by letting its teacher read privileged
 feedback while the student continues to read the original question. The
@@ -35,21 +35,24 @@ the processor's ``failed_steps`` status. Wait for the training release before
 sampling the next step; set ``max-staleness: 0``.
 
 The teacher sees the first successful sibling in rollout order, excluding the
-sample itself by default. Success means score >= 0.5, matching the author's
-resolved actor configuration. Thinking blocks in demonstrations are removed.
+sample itself unless ``allow-own-success-as-demonstration`` is set. Success
+means score >= 0.5, matching the author's resolved actor configuration.
+Thinking blocks in demonstrations are removed.
 Section 3 disables environment feedback, so a score alone does not invent a
 textual answer or make a failed group trainable. Enable
 ``include-environment-feedback`` to consume ``teacher_context``; by default a
 successful solution takes precedence over environment feedback.
 
-Inactive rows carry zero distillation weight. They remain structurally valid
-policy rows, and even an entirely inactive batch performs its zero-gradient
-optimizer step. The reference token-means each one-sample microbatch and then averages all
-samples, including inactive rows. Reef preserves that effective sequence mean
-independently of its packing and device partitioning. Teacher prompts are
-right-truncated at ``max-teacher-prompt-tokens`` (10240), then the student's
-response token IDs are appended verbatim. An overlong total teacher sequence
-fails the batch rather than silently dropping part of the grid.
+A rollout whose teacher read nothing privileged stays in the batch with the
+plain request and a sample weight of 0 in the shared distillation row, so
+even an entirely inactive step performs its zero-gradient optimizer step. The
+reference token-means each one-sample microbatch and then averages all
+samples, inactive rows included; the weight reproduces that sequence mean
+whatever the trainer's packing, and the step's ``distill_sample_weight``
+metric is the active fraction. Teacher prompts are right-truncated at
+``max-teacher-prompt-tokens`` (10240), then the student's response token IDs
+are appended verbatim. An overlong total teacher sequence fails the batch
+rather than silently dropping part of the grid.
 
 Configuration
 -------------

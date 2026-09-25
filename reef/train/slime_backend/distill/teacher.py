@@ -293,12 +293,93 @@ def gather_teacher_topk(
     }
 
 
+class TeacherTopKAtSelectedIds:
+    """``forward_only`` callback that scores the teacher at ids selected before the pass, microbatch by microbatch.
+
+    ``forward_only`` hands the callback the microbatches in the order of the
+    packing schedule and unpermutes its outputs by that same schedule, so the
+    cursor here names the samples of the microbatch being scored and their
+    pre-selected ids go to :func:`gather_teacher_topk`.
+    """
+
+    def __init__(self, schedule: list[list[int]], topk_ids: list[torch.Tensor]) -> None:
+        self._schedule = schedule
+        self._topk_ids = topk_ids
+        self._next_microbatch = 0
+
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        *,
+        args: Any,
+        unconcat_tokens: list[torch.Tensor],
+        total_lengths: list[int],
+        response_lengths: list[int],
+        with_entropy: bool = False,
+    ) -> tuple[torch.Tensor, dict[str, list[torch.Tensor]]]:
+        if self._next_microbatch >= len(self._schedule):
+            raise RuntimeError("the teacher pass scored more microbatches than its packing schedule holds")
+        sample_indices = self._schedule[self._next_microbatch]
+        self._next_microbatch += 1
+        if len(sample_indices) != len(unconcat_tokens):
+            raise ValueError(
+                f"teacher microbatch {self._next_microbatch - 1} carries {len(unconcat_tokens)} samples, "
+                f"the packing schedule {len(sample_indices)}"
+            )
+        return gather_teacher_topk(
+            logits,
+            args=args,
+            unconcat_tokens=unconcat_tokens,
+            total_lengths=total_lengths,
+            response_lengths=response_lengths,
+            with_entropy=with_entropy,
+            topk_indices=[self._topk_ids[index] for index in sample_indices],
+        )
+
+
+def student_topk_ids(actor: Any, rollout_data: dict[str, Any], budget: int) -> list[torch.Tensor]:
+    """The current student's top-K ids at every response position of every sample, ``[R, K]`` each.
+
+    One forward-only pass over the students' own sequences on the weights the
+    step starts from, packed under ``budget`` tokens per microbatch. Empty on
+    a pipeline stage that is not the last: the callback never runs there.
+    """
+    from megatron.core import mpu
+    from slime.backends.megatron_utils.data import DataIterator
+    from slime.backends.megatron_utils.model import forward_only
+
+    device = torch.cuda.current_device()
+    vpp = mpu.get_virtual_pipeline_model_parallel_world_size() or 1
+    student_tokens: list[torch.Tensor] = rollout_data["tokens"]
+    lengths = [int(tokens.numel()) for tokens in student_tokens]
+    schedule = pack_forward_schedule(lengths, budget)
+    view = {
+        "tokens": [tokens.to(device=device, dtype=torch.long) for tokens in student_tokens],
+        "loss_masks": rollout_data["loss_masks"],
+        "total_lengths": lengths,
+        "response_lengths": [int(value) for value in rollout_data["response_lengths"]],
+        "micro_batch_indices": schedule,
+    }
+    result = forward_only(
+        gather_teacher_topk,
+        actor.args,
+        actor.model,
+        [DataIterator(view, schedule) for _ in range(vpp)],
+        [len(schedule)],
+    )
+    if not result:
+        return []
+    return list(result["distill_teacher_topk_ids"])
+
+
 def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: DistillSettings | None = None) -> None:
     """Score every sample's teacher sequence with the teacher and fill the batch's ``distill_teacher_*`` keys.
 
     The teacher's weights (:mod:`.weights`) are switched in for the pass and
     the actor's switched back afterwards; a copy that moves toward the
-    policy moves before the pass.
+    policy moves before the pass. When the settings select the top-K ids
+    with the student, :func:`student_topk_ids` runs first, on the actor's
+    weights, and the teacher pass scores those ids.
     """
     from megatron.core import mpu
     from slime.backends.megatron_utils.data import DataIterator
@@ -324,10 +405,7 @@ def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: Dis
     device = torch.cuda.current_device()
     vpp = mpu.get_virtual_pipeline_model_parallel_world_size() or 1
 
-    # Each sequence is a distinct tensor: Slime's DataIterator preserves those
-    # objects as unconcat_tokens, which lets the callback carry selected ids
-    # through its packing without matching on potentially duplicated text.
-    pass_tokens = [tokens.to(device=device, dtype=torch.long).clone() for tokens in teacher_tokens]
+    pass_tokens = [tokens.to(device=device, dtype=torch.long) for tokens in teacher_tokens]
     schedule = pack_forward_schedule(lengths, budget)
     view = {
         "tokens": pass_tokens,
@@ -338,51 +416,11 @@ def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: Dis
     }
     if _TEACHER is None:
         _TEACHER = teacher_weights(settings)
-    callback = gather_teacher_log_probs if settings.exact else gather_teacher_topk
+    callback: Any = gather_teacher_log_probs if settings.exact else gather_teacher_topk
     if not settings.exact and settings.top_k_source == "student":
-        student_tokens = rollout_data["tokens"]
-        student_lengths = [int(tokens.numel()) for tokens in student_tokens]
-        student_schedule = pack_forward_schedule(student_lengths, budget)
-        student_view = {
-            "tokens": [tokens.to(device=device, dtype=torch.long) for tokens in student_tokens],
-            "loss_masks": rollout_data["loss_masks"],
-            "total_lengths": student_lengths,
-            "response_lengths": response_lengths,
-            "micro_batch_indices": student_schedule,
-        }
-        selected = forward_only(
-            gather_teacher_topk,
-            args,
-            actor.model,
-            [DataIterator(student_view, student_schedule) for _ in range(vpp)],
-            [len(student_schedule)],
-        )
+        selected = student_topk_ids(actor, rollout_data, budget)
         if selected:
-            indices_by_sequence = {
-                id(tokens): indices
-                for tokens, indices in zip(pass_tokens, selected["distill_teacher_topk_ids"], strict=True)
-            }
-
-            def gather_selected(
-                logits: torch.Tensor,
-                *,
-                args: Any,
-                unconcat_tokens: list[torch.Tensor],
-                total_lengths: list[int],
-                response_lengths: list[int],
-                with_entropy: bool = False,
-            ) -> tuple[torch.Tensor, dict[str, list[torch.Tensor]]]:
-                return gather_teacher_topk(
-                    logits,
-                    args=args,
-                    unconcat_tokens=unconcat_tokens,
-                    total_lengths=total_lengths,
-                    response_lengths=response_lengths,
-                    with_entropy=with_entropy,
-                    topk_indices=[indices_by_sequence[id(tokens)] for tokens in unconcat_tokens],
-                )
-
-            callback = gather_selected
+            callback = TeacherTopKAtSelectedIds(schedule, selected)
     _TEACHER.switch_in(actor)
     try:
         result = forward_only(
@@ -406,11 +444,13 @@ __all__ = [
     "CurrentWeights",
     "MovingCopy",
     "SeparateCheckpoint",
+    "TeacherTopKAtSelectedIds",
     "TeacherWeights",
     "compute_teacher_rows",
     "gather_teacher_log_probs",
     "gather_teacher_topk",
     "mix_teacher_weights",
     "pack_forward_schedule",
+    "student_topk_ids",
     "teacher_weights",
 ]
