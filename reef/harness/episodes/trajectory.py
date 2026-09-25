@@ -1,9 +1,9 @@
 """Session-log readers: one per harness trajectory format.
 
-Both surveyed harnesses persist trajectories as plain files, so a reader is
-a pure function from the descriptor's trajectory directory to an ordered
-tuple of event objects. A missing directory reads as an empty trajectory (a
-crashed episode still yields a result); corruption raises, except for one
+A reader is a pure function from the descriptor's trajectory directory to an
+ordered tuple of event objects; most harnesses keep plain files there, and
+opencode a SQLite database. A missing directory reads as an empty trajectory
+(a crashed episode still yields a result); corruption raises, except for one
 torn final JSONL line per file, which a mid-write crash legitimately leaves
 behind (the same tolerance the commit log applies).
 
@@ -289,27 +289,62 @@ class TerminusAtifReader(TrajectoryReader):
 
 
 @register_trajectory_reader
-class OpencodeStorageReader(TrajectoryReader):
-    """Read opencode storage JSON trees: every ``*.json`` under ``path``.
+class OpencodeSessionReader(TrajectoryReader):
+    """Read opencode's session database: ``opencode.db`` under ``path``, one event per message.
 
-    Sessions, messages, and parts are one JSON object per file under the
-    storage directory; ids are lexicographically ordered, so sorting by
-    relative path yields creation order within each subtree.
+    opencode 1.18 keeps its sessions in SQLite in its data directory. A
+    ``message`` row holds a message's facts (``role`` among them) and each
+    ``part`` row one piece of a message (a text, a tool call, a step
+    boundary), both as a JSON object in the ``data`` column. Each message
+    becomes a ``message`` event with its ``id``, its ``sessionID`` and its
+    facts, and its parts in id order as ``content``, so the final assistant
+    text reads as a list of text parts, as in a pi session. opencode's ids
+    grow with time, so id order is the order the run created them in, across
+    every session of the run. The database opens read only, and a missing one
+    reads as an empty trajectory.
     """
 
-    format = "opencode-storage-json"
+    format = "opencode-session-sqlite"
 
     def __call__(self, path: Path) -> tuple[dict[str, Any], ...]:
-        events: list[dict[str, Any]] = []
-        for file in sorted(Path(path).rglob("*.json")):
+        # Here, not at the top: importing reef loads this module, and the record contracts load no database module.
+        import sqlite3
+
+        database = Path(path).resolve() / "opencode.db"
+        if not database.is_file():
+            return ()
+
+        def decoded(table: str, row_id: str, data: str) -> dict[str, Any]:
             try:
-                event = json.loads(file.read_text(encoding="utf-8"))
+                value = json.loads(data)
             except json.JSONDecodeError as exc:
-                raise TrajectoryError(f"opencode storage file {file} is not valid JSON") from exc
-            if not isinstance(event, dict):
-                raise TrajectoryError(f"opencode storage file {file} is not an event object")
-            events.append(event)
-        return tuple(events)
+                raise TrajectoryError(f"opencode {table} {row_id} in {database} is not valid JSON") from exc
+            if not isinstance(value, dict):
+                raise TrajectoryError(f"opencode {table} {row_id} in {database} is not an object")
+            return value
+
+        try:
+            connection = sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True)
+            try:
+                messages = connection.execute("SELECT id, session_id, data FROM message ORDER BY id").fetchall()
+                parts = connection.execute("SELECT id, message_id, data FROM part ORDER BY id").fetchall()
+            finally:
+                connection.close()
+        except sqlite3.Error as exc:
+            raise TrajectoryError(f"opencode session database {database} cannot be read: {exc}") from exc
+        content: dict[str, list[dict[str, Any]]] = {}
+        for part_id, message_id, data in parts:
+            content.setdefault(message_id, []).append({"id": part_id, **decoded("part", part_id, data)})
+        return tuple(
+            {
+                "type": "message",
+                "id": message_id,
+                "sessionID": session_id,
+                **decoded("message", message_id, data),
+                "content": content.get(message_id, []),
+            }
+            for message_id, session_id, data in messages
+        )
 
 
 # Module-level instances for backward-compatible call syntax.
@@ -318,7 +353,7 @@ read_claude_session = ClaudeSessionReader()
 read_codex_session = CodexSessionReader()
 read_deepseek_session = DeepseekSessionReader()
 read_hermes_session = HermesSessionReader()
-read_opencode_storage = OpencodeStorageReader()
+read_opencode_session = OpencodeSessionReader()
 read_terminus_atif = TerminusAtifReader()
 
 

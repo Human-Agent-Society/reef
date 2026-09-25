@@ -77,6 +77,77 @@ tree and configured executor before Reef writes episode files. It raises
 ``self_isolating`` nesting restriction. Execution, timeout, cleanup, and
 trajectory handling still use the shared episode code.
 
+opencode
+~~~~~~~~
+
+The ``opencode`` adapter runs ``opencode run --format json --auto "<task>"``
+headless. ``OPENCODE_CONFIG_DIR`` relocates its config directory, the XDG
+variables relocate its data, cache, and state, and ``npm_config_cache``
+relocates the npm cache of its boot install, so an episode keeps its files
+inside those directories. The ``opencode-session-sqlite`` reader reads an
+episode back from ``opencode.db`` in the data directory: one event per
+message, with the message's parts, its text among them, as ``content``.
+
+The defaults keep autoupdate and sharing off, allow every permission, and
+set ``enabled_providers`` to ``["reef"]``, so opencode offers only the
+provider the model binding writes and not its own zen provider. Rendering
+rejects a tree that turns autoupdate or sharing back on or changes that
+list.
+
+The model binding is the only writer of ``provider`` and ``model``. It
+renders after the tree, replaces every value it writes, and always writes a
+non-empty ``apiKey``, which a tree cannot hold because admission rejects an
+inline credential. Rendering therefore rejects a tree that sets
+``provider`` or ``model`` at all, sets ``disabled_providers``, or chooses a
+model elsewhere (``small_model``, or the ``model`` of an agent or a
+command).
+
+Command and skill files must write their frontmatter in the plain form: a
+``---`` line, a YAML mapping with no tags, and a closing ``---`` line.
+opencode reads frontmatter with gray-matter, which also takes a byte order
+mark, another engine named after the opening ``---`` (JSON, JavaScript), and
+a block with no closing line. A check that read those forms another way
+could miss the agent or the model opencode sees, so rendering rejects them.
+
+When js-yaml, the YAML reader in gray-matter, cannot read a block, opencode
+rewrites each unquoted top-level value that holds ``': '`` as a block scalar
+and reads the file again. Rendering does the same, so it admits a file such
+as ``description: Chat mode: web search only``. It rejects a block the
+rewrite does not repair, which opencode reads with no keys or skips, and an
+unreadable block that holds a tab, since js-yaml reads a tab after a colon
+as a space where PyYAML fails. Rendering reads each plain value with the
+js-yaml types, so ``1e5`` is a number and ``yes`` a string, as opencode
+reads them, and it rejects a date that does not exist, such as
+``2001-13-45``.
+
+Rendering also checks what opencode needs to load each file:
+
+- opencode lists only a skill whose ``SKILL.md`` carries ``name`` and
+  ``description``. A skill file with no frontmatter gets both, as quoted
+  strings: the name of its directory and its first line. A frontmatter block
+  of its own without both is rejected.
+- A command file's frontmatter ``name``, when set, must be its file name.
+  opencode files the command under that name, in place of the command
+  already named so, ``/reefine`` included.
+- A command's ``agent`` must name an agent that the tree defines under
+  ``agent`` (or the older ``mode``) and does not disable, or one of
+  opencode's built-in agents: ``build``, ``plan``, ``general``, ``explore``,
+  and the hidden ``title``, ``summary``, and ``compaction``.
+- A command's ``description``, ``agent``, ``variant``, and ``subtask`` must
+  have the types opencode reads, and so must an agent's ``disable`` and
+  ``hidden`` (true or false) and ``mode`` (``subagent``, ``primary``, or
+  ``all``).
+- ``default_agent`` must name such an agent that is neither a subagent nor
+  hidden, and a tree with no ``default_agent`` must keep at least one such
+  agent. An agent must not set a ``name`` other than its own.
+
+Otherwise opencode fails the command, or every run, with an unexplained
+error or a rejection of its whole configuration.
+
+``reef-opencode`` sets ``OPENCODE_ENABLE_EXA=1``, which registers opencode's
+``websearch`` tool (Exa, no key needed) for provider ``reef``. Episodes do
+not set it, so a benchmark episode does not search the web.
+
 DeepSeek Harness
 ~~~~~~~~~~~~~~~~
 
