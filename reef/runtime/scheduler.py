@@ -59,6 +59,7 @@ from reef.runtime.recovery import (
     TrainingRecovery,
     marker_checkpoint_result,
     marker_disposition,
+    marker_in_flight,
     marker_path,
     marker_result,
 )
@@ -418,7 +419,7 @@ def training_job_id(payload: Mapping[str, Any]) -> str:
     identity.pop("max_staleness", None)
     identity.pop(JOB_OWNER_KEY, None)
     # The other components of a composite advance the scenario step while a job is out; its retry must replay.
-    identity.pop("rollout_id", None)
+    identity.pop("scenario_step", None)
     # The processor numbers batches per process; a reload numbers the same rows again.
     identity.pop("batch_id", None)
     if uses_staleness_admission(payload):
@@ -428,11 +429,12 @@ def training_job_id(payload: Mapping[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def _rollout_id(payload: Mapping[str, Any]) -> int:
-    rollout_id = payload.get("rollout_id")
-    if not isinstance(rollout_id, int) or isinstance(rollout_id, bool) or rollout_id < 0:
-        raise ValueError("training job rollout_id must be non-negative")
-    return rollout_id
+def job_scenario_step(payload: Mapping[str, Any]) -> int:
+    """The scenario step a training payload trains, validated as a non-negative integer."""
+    scenario_step = payload.get("scenario_step")
+    if not isinstance(scenario_step, int) or isinstance(scenario_step, bool) or scenario_step < 0:
+        raise ValueError("training job scenario_step must be non-negative")
+    return scenario_step
 
 
 class TrainingExecution:
@@ -471,7 +473,7 @@ class TrainingExecution:
 
     def execute(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         job_id = training_job_id(payload)
-        rollout_id = _rollout_id(payload)
+        scenario_step = job_scenario_step(payload)
         if self._store is None:
             raise RuntimeError("training job checkpoint path is not configured")
         marker = self._store.read()
@@ -496,7 +498,9 @@ class TrainingExecution:
                 )
             if decision is not None:
                 admission_metrics = decision.metrics
-        with self._backend.prepare(payload, job_id=job_id, rollout_id=rollout_id, prior_marker=marker) as prepared:
+        with self._backend.prepare(
+            payload, job_id=job_id, scenario_step=scenario_step, prior_marker=marker
+        ) as prepared:
             if isinstance(prepared, TrainingJobResult):
                 if prepared.outcome not in {"stale", "storage_blocked"}:
                     raise RuntimeError("training preparation may only return stale or storage_blocked")
@@ -514,7 +518,13 @@ class TrainingExecution:
     ) -> TrainingJobResult:
         """Train and checkpoint one admitted job, recording RUNNING then CHECKPOINT."""
         checkpoint = prepared.checkpoint
-        running: dict[str, Any] = {"status": "RUNNING", "job_id": job_id, "rollout_id": checkpoint.rollout_id}
+        # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
+        running: dict[str, Any] = {
+            "status": "RUNNING",
+            "job_id": job_id,
+            "rollout_id": checkpoint.rollout_id,
+            "scenario_step": checkpoint.scenario_step,
+        }
         parent_runtime_load_id = payload.get("expected_runtime_load_id")
         if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
             running["parent_runtime_load_id"] = parent_runtime_load_id
@@ -522,9 +532,6 @@ class TrainingExecution:
         owner = checkpoint.scenario if checkpoint.scenario is not None else payload.get(JOB_OWNER_KEY)
         if isinstance(owner, str) and owner:
             running["scenario"] = owner
-        if checkpoint.scenario_step is not None:
-            # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index.
-            running["scenario_step"] = checkpoint.scenario_step
         store.write(running)
         self._state.phase = "training"
         try:
@@ -732,14 +739,17 @@ class RuntimeScheduler:
             return
         if status not in COMMIT_PENDING_STATES:
             return
-        rollout_id, training_job_id = _pending_job_identity(training_job)
+        if "scenario_step" not in training_job and not marker_in_flight(training_job):
+            # A settled job an earlier release recorded without its scenario step has nothing left to finish.
+            return
+        job_scenario_step, training_job_id = _pending_job_identity(training_job)
         if status == "UPDATING_WEIGHTS":
             with self.operations.measure("weight_sync"):
                 self.inference_runtime.resume_weight_update(training_job_id)
         if (
             status == "COMPLETE"
             and training_job.get("commit_acknowledged") is not True
-            and scenario_step == rollout_id + 1
+            and scenario_step == job_scenario_step + 1
             and committed_training_job_id is None
             and committed_training_without_job_id
         ):
@@ -749,7 +759,7 @@ class RuntimeScheduler:
             # proof available; rollback/non-training commits are excluded.
             self._finish_committed_training_job(training_job_id)
             return
-        if scenario_step > rollout_id and committed_training_job_id == training_job_id:
+        if scenario_step > job_scenario_step and committed_training_job_id == training_job_id:
             self._finish_committed_training_job(training_job_id)
 
     def acknowledge_commit(self, scenario_step: int, training_job_id: str, *, scenario: str | None = None) -> None:
@@ -790,16 +800,16 @@ class RuntimeScheduler:
 
 
 def _pending_job_identity(training_job: Mapping[str, Any]) -> tuple[int, str]:
-    rollout_id = training_job.get("rollout_id")
+    job_scenario_step = training_job.get("scenario_step")
     training_job_id = training_job.get("training_job_id")
     if (
-        not isinstance(rollout_id, int)
-        or isinstance(rollout_id, bool)
+        not isinstance(job_scenario_step, int)
+        or isinstance(job_scenario_step, bool)
         or not isinstance(training_job_id, str)
         or not training_job_id
     ):
         raise TrainingRuntimeError("training-job status is missing its durable identity")
-    return rollout_id, training_job_id
+    return job_scenario_step, training_job_id
 
 
 # -- Worker-side coordination -------------------------------------------------
@@ -897,14 +907,15 @@ class TrainingCoordinator:
         training_job.update(
             status=marker["status"],
             training_job_id=marker["job_id"],
-            # Reef reasons in scenario steps; the marker's rollout id is the
-            # backend's own checkpoint index (older markers carry only that).
-            rollout_id=marker.get("scenario_step", marker["rollout_id"]),
             runtime_load_id=marker.get("runtime_load_id"),
             commit_acknowledged=marker.get("commit_acknowledged", False),
         )
         if "scenario" in marker:
             training_job["scenario"] = marker["scenario"]
+        if "scenario_step" in marker:
+            # Reef reasons in scenario steps; the marker's rollout_id is the backend's own checkpoint index. Every
+            # job still out names its step; only a settled marker an earlier release wrote has none.
+            training_job["scenario_step"] = marker["scenario_step"]
         return training_job
 
     def start_rollout_id(self) -> int:

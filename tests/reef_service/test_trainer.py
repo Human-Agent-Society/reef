@@ -805,14 +805,14 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             self.calls.append(("prepare", batch, objective))
             return PreparedTrainingStep(
                 action="train",
-                payload={**prepared.payload, "rollout_id": scenario_step},
+                payload={**prepared.payload, "scenario_step": scenario_step},
                 next_algorithm_state=prepared.next_algorithm_state,
                 metrics=prepared.metrics,
             )
 
         def train_candidate(self, payload):
             self.calls.append(("execute", payload))
-            job_id = f"job-{payload['rollout_id']}"
+            job_id = f"job-{payload['scenario_step']}"
             return ModelCandidate(
                 candidate_id=job_id,
                 training_job_id=job_id,
