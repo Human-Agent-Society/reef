@@ -65,31 +65,12 @@ event = {"type": "agent_end", "rules": rules_path.read_text() if rules_path.exis
 RULES = {"name": "rules", "config": {"text": "Answer briefly."}}
 SKILL = {"name": "skill", "config": {"name": "notes", "text": "# notes"}}
 
-# The b200 first-boot baseline shape: without these nodes the tree renders
-# an empty models.json, no episode reaches a model, and every comparison ties.
-# The seed carries no credential; admission refuses key-named fields (#476)
-# and the episode binding is injected at render time.
-SEED_MODELS = {
-    "id": "models",
-    "name": "config",
-    "config": {
-        "target": "models",
-        "data": {
-            "providers": {
-                "qwen": {
-                    "api": "openai-completions",
-                    "baseUrl": "http://localhost:8000/v1",
-                    "models": [{"id": "qwen3-8b"}],
-                }
-            }
-        },
-    },
-}
-SEED_SETTINGS = {
-    "id": "settings",
-    "name": "config",
-    "config": {"data": {"defaultModel": "qwen/qwen3-8b", "defaultProvider": "qwen"}},
-}
+# One config entry per pi target. The seed carries no provider and no
+# credential: the episode binding writes both at render time, and the pi
+# quirk refuses a tree that names a provider or a model (admission refuses
+# key-named fields, #476).
+SEED_MODELS = {"id": "models", "name": "config", "config": {"target": "models", "data": {"providers": {}}}}
+SEED_SETTINGS = {"id": "settings", "name": "config", "config": {"data": {"defaultThinkingLevel": "off"}}}
 
 
 def evaluate(task: str, result: EpisodeResult) -> float:
@@ -1048,7 +1029,7 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
     # entry names the key inline. This file is the only one with key bytes.
     log_path = agent_record_dir / f"{hashlib.sha256(b'pregate-476').hexdigest()}.commits.jsonl"
     record = json.loads(log_path.read_bytes().splitlines()[-1])
-    record["algorithm_state"]["entries"][0]["config"]["data"]["providers"]["qwen"]["apiKey"] = key
+    record["algorithm_state"]["entries"][0]["config"]["data"]["providers"]["qwen"] = {"apiKey": key}
     log_path.write_bytes(json.dumps(record, separators=(",", ":"), sort_keys=True).encode() + b"\n")
     before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
 

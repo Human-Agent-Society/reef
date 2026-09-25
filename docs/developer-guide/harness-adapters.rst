@@ -731,6 +731,80 @@ Descriptor fields
 - ``quirks`` names an optional module for adapter-specific render checks
   and boot mutations.
 
+Model binding checks
+~~~~~~~~~~~~~~~~~~~~
+
+For the ``claude``, ``dsh``, ``hermes``, ``pi``, and ``terminus`` adapters,
+Reef's model binding is the only source of a model call's endpoint,
+credential, and model. The binding renders after the tree and replaces
+every value it writes. One value it writes is the key
+(``ANTHROPIC_AUTH_TOKEN``, hermes ``model.api_key``, dsh ``REEF_API_KEY``,
+pi ``providers.reef.apiKey``, terminus ``llm_kwargs.api_key``), and a tree
+cannot hold a key because admission rejects an inline credential. A key the
+binding writes therefore passes rendering only beside the binding's key,
+and a tree that sets one alone is rejected. Rendering also rejects every
+other key the pinned binary reads to choose the endpoint, the provider, the
+credential, or the model:
+
+- ``claude``: in the ``settings.json`` ``env``, every ``ANTHROPIC_`` name,
+  the cloud provider switches and their credentials (Bedrock, Vertex,
+  Foundry, and the others), proxies, endpoints, and model names, matched
+  without case as Windows reads the environment; the settings ``model``,
+  ``fallbackModel``, ``availableModels``, ``modelOverrides``,
+  ``advisorModel``, and the other model choices, the credential helpers
+  (``apiKeyHelper``, ``awsAuthRefresh``, ``awsCredentialExport``,
+  ``gcpAuthRefresh``, ``proxyAuthHelper``), and the login method; and a
+  ``model`` in the frontmatter of a command or a skill. A frontmatter block
+  that rendering cannot read the way Claude Code does counts when it holds
+  the word ``model`` or an escape.
+- ``hermes``: ``providers``, ``custom_providers``, ``fallback_model``,
+  ``fallback_providers``, the ``moa`` presets (``presets``, and the older
+  ``reference_models`` and ``aggregator``), ``auxiliary.openrouter_model``,
+  the model aliases (``model_aliases``, ``model.aliases``), and the other
+  names Hermes reads for the model, the endpoint, or the key
+  (``model.model``, ``model.name``, ``model.api_base``, the key names such as
+  ``model.key_env``, and a top-level ``provider``, ``base_url``, or
+  ``api_base``, which Hermes moves into ``model``). Also ``model.api_mode``
+  and ``model.openai_runtime``, which choose the transport the binding does
+  not set: for its ``custom`` provider, ``bedrock_converse`` calls AWS
+  Bedrock and ``codex_app_server`` hands the turn to a ``codex app-server``
+  subprocess. Also a provider, an endpoint, a credential, an ``api_mode``, a
+  model, a ``fallback_chain``, or ``prefer_fast_model`` for an auxiliary
+  task, for delegation, for cron, or for the curator
+  (``curator.auxiliary``). An auxiliary task may keep the provider ``auto``
+  or ``main``, which run it on the main model.
+- ``dsh``: a route in ``llm-pi-ai`` other than the binding's ``reef``, a key
+  on that route the binding does not write, ``agent-default-model``,
+  ``llm-deepseek`` (DeepSeek's own endpoint), the web search endpoint and
+  model, and a provider or a model for the title call, a subagent, a
+  declared agent, or the compaction summary. A patch entry may not name
+  another package, and those plugins may not hold a js expression, which
+  rendering cannot read.
+- ``pi``: a provider in ``models.json`` other than ``reef`` (a new one, or
+  pi's own with another endpoint), a key on ``reef`` the binding does not
+  write, ``enabledModels``, and ``httpProxy``, which sends every call
+  through another host.
+- ``terminus``: a ``llm_kwargs`` key the binding does not write, and a
+  litellm argument in ``llm_call_kwargs`` that sets the endpoint, the
+  provider, a credential, the model, a fallback model, or a logging callback
+  (``base_url``, ``api_base``, ``custom_llm_provider``, ``model``,
+  ``fallbacks``, and the others the quirk lists).
+
+A request body that a tree passes to the bound endpoint reaches the
+provider with the bound key, so rendering rejects one that names a model:
+``model``, or ``models``, which OpenRouter reads as fallback models. These
+bodies are the ``claude`` ``CLAUDE_CODE_EXTRA_BODY`` env value (which must
+be a JSON object), the hermes ``extra_body`` of an auxiliary task or of the
+curator, ``delegation.request_overrides`` with its ``extra_body``, and the
+terminus ``llm_call_kwargs`` (litellm sends a key it does not read in the
+body) with its ``extra_body``. Other body fields, such as OpenRouter's
+``provider`` preferences, stay admitted.
+
+These checks cover the config the tree renders. Reef's proxy forwards the
+``model`` and ``models`` a request sends as they are, so a request that
+other code builds with the rendered key, such as a tool the model runs, can
+still name another model.
+
 Connect a new agent
 ~~~~~~~~~~~~~~~~~~~
 
