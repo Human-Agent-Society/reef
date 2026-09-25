@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import json
+import os
 import shutil
 import tempfile
 import time
@@ -27,6 +28,7 @@ from reef.core.components import validate_component_name
 
 _MANIFEST = "reef-artifact.json"
 _LFS_PATTERNS = ("*.safetensors", "*.bin", "*.pt", "*.pth", "*.ckpt")
+_LFS_ATTRIBUTES = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
 
 
 def _check_tools() -> None:
@@ -81,6 +83,11 @@ class _GitWorkspace:
         self.git("config", "user.name", "Reef Repository Backend")
         self.git("config", "user.email", "reef-artifacts@localhost")
         self._install_lfs(self.clone_dir)
+        # A publish indexes a staged tree that has no .gitattributes of Reef's own, so the LFS
+        # patterns also live in the repository's attributes, which take precedence over the tree's.
+        repository_attributes = self.clone_dir / ".git" / "info" / "attributes"
+        repository_attributes.parent.mkdir(exist_ok=True)
+        write_fresh(repository_attributes, _LFS_ATTRIBUTES)
 
     def _install_lfs(self, repository: Path) -> None:
         # Keep LFS hooks separate from global hooks and hooks copied by Git templates.
@@ -144,8 +151,86 @@ class _GitWorkspace:
                     raise ArtifactSourceError(f"artifact contains a broken symlink: {child}") from exc
 
     def write_lfs_attributes(self) -> None:
-        attributes = "".join(f"{pattern} filter=lfs diff=lfs merge=lfs -text\n" for pattern in _LFS_PATTERNS)
-        write_fresh(self.clone_dir / ".gitattributes", attributes)
+        write_fresh(self.clone_dir / ".gitattributes", _LFS_ATTRIBUTES)
+
+    def source_files(self, source: Path) -> tuple[str, ...]:
+        """The files ``git add -A`` would take from ``source``, relative to it; nothing is hashed."""
+        index = self.work_dir / "source-index"
+        index.unlink(missing_ok=True)
+        output = self._run(
+            ("git", f"--work-tree={source.resolve()}", "ls-files", "-z", "--others", "--exclude-standard"),
+            cwd=self.clone_dir,
+            environment={"GIT_INDEX_FILE": str(index)},
+        )
+        return tuple(path for path in output.split("\0") if path)
+
+    def commit_files(
+        self,
+        source: Path,
+        paths: Sequence[str],
+        *,
+        parent: str,
+        carried_from: Path | None,
+        files: Mapping[str, str],
+        message: str,
+    ) -> str:
+        """Commit ``paths`` from ``source`` plus ``files`` as the child of ``parent`` without checking it out.
+
+        The index starts from the parent's tree, so a file that is a hard link
+        to the same path in ``carried_from`` (the parent's materialized tree)
+        keeps the parent's blob instead of being read and hashed again; only
+        the other paths go through the LFS clean filter. The work tree is left
+        untouched.
+        """
+        index = self.work_dir / "publish-index"
+        index.unlink(missing_ok=True)
+        environment = {"GIT_INDEX_FILE": str(index)}
+        try:
+            self.git("fetch", "origin", parent)
+            self._run(("git", "read-tree", parent), cwd=self.clone_dir, environment=environment)
+            parent_paths = {
+                path
+                for path in self._run(("git", "ls-files", "-z"), cwd=self.clone_dir, environment=environment).split(
+                    "\0"
+                )
+                if path
+            }
+            removed = parent_paths.difference(paths, files)
+            if removed:
+                self._run(
+                    ("git", "update-index", "-z", "--force-remove", "--stdin"),
+                    cwd=self.clone_dir,
+                    environment=environment,
+                    input_text="\0".join(sorted(removed)),
+                )
+            changed = [
+                path
+                for path in paths
+                if path not in parent_paths
+                or carried_from is None
+                or not same_file(source / path, carried_from / path)
+            ]
+            if changed:
+                self._run(
+                    ("git", f"--work-tree={source.resolve()}", "update-index", "-z", "--add", "--stdin"),
+                    cwd=self.clone_dir,
+                    environment=environment,
+                    input_text="\0".join(changed),
+                )
+            entries = []
+            for path, text in files.items():
+                blob = self._run(("git", "hash-object", "-w", "--stdin"), cwd=self.clone_dir, input_text=text)
+                entries.append(f"100644 {blob}\t{path}\n")
+            self._run(
+                ("git", "update-index", "--index-info"),
+                cwd=self.clone_dir,
+                environment=environment,
+                input_text="".join(entries),
+            )
+            tree = self._run(("git", "write-tree"), cwd=self.clone_dir, environment=environment)
+            return self.git("commit-tree", tree, "-p", parent, "-m", message)
+        finally:
+            index.unlink(missing_ok=True)
 
     def commit(self, message: str) -> str:
         self.git("add", "-A")
@@ -194,8 +279,20 @@ class _GitWorkspace:
         *,
         cwd: Path | None = None,
         source_error: bool = False,
+        input_text: str | None = None,
+        environment: Mapping[str, str] | None = None,
     ) -> str:
-        return self._git_client.run(command, cwd=cwd, source_error=source_error)
+        return self._git_client.run(
+            command, cwd=cwd, source_error=source_error, input_text=input_text, environment=environment
+        )
+
+
+def same_file(first: Path, second: Path) -> bool:
+    """Whether both paths name one file; a missing path names none."""
+    try:
+        return os.path.samefile(first, second)
+    except OSError:
+        return False
 
 
 def write_fresh(path: Path, text: str) -> None:
@@ -225,6 +322,22 @@ class _ArtifactManifest:
     def __init__(self, workspace: _GitWorkspace) -> None:
         self._workspace = workspace
 
+    @staticmethod
+    def text(
+        *,
+        content_id: str,
+        parent_release_id: str | None,
+        source: Mapping[str, object],
+        metadata: Mapping[str, object],
+    ) -> str:
+        manifest = {
+            "content_id": content_id,
+            "parent_release_id": parent_release_id,
+            "source": dict(source),
+            "metadata": dict(metadata),
+        }
+        return json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+
     def write(
         self,
         *,
@@ -233,13 +346,10 @@ class _ArtifactManifest:
         source: Mapping[str, object],
         metadata: Mapping[str, object],
     ) -> None:
-        manifest = {
-            "content_id": content_id,
-            "parent_release_id": parent_release_id,
-            "source": dict(source),
-            "metadata": dict(metadata),
-        }
-        write_fresh(self._workspace.clone_dir / _MANIFEST, json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+        write_fresh(
+            self._workspace.clone_dir / _MANIFEST,
+            self.text(content_id=content_id, parent_release_id=parent_release_id, source=source, metadata=metadata),
+        )
 
     def read(self, version: str) -> Mapping[str, object]:
         raw = self._workspace.show_file(version, _MANIFEST)
@@ -447,19 +557,38 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
             current = self._workspace.ls_remote(self.ref_name)
             if current != expected_parent.release_id:
                 raise ArtifactConflict(f"repository is at {current}, not expected parent {expected_parent.release_id}")
-            self._workspace.checkout(expected_parent.release_id)
-            self._workspace.replace_tree(artifact.local_path)
-            self._workspace.write_lfs_attributes()
-            self._manifest.write(
-                content_id=artifact.ref.content_id,
-                parent_release_id=expected_parent.release_id,
-                source={"kind": "training"},
-                metadata=artifact.metadata,
-            )
-            commit = self._workspace.commit("publish artifact")
+            files = {
+                ".gitattributes": _LFS_ATTRIBUTES,
+                _MANIFEST: _ArtifactManifest.text(
+                    content_id=artifact.ref.content_id,
+                    parent_release_id=expected_parent.release_id,
+                    source={"kind": "training"},
+                    metadata=artifact.metadata,
+                ),
+            }
+            paths = tuple(path for path in self._workspace.source_files(artifact.local_path) if path not in files)
+            linked = any((artifact.local_path / path).is_symlink() for path in paths)
+            if linked:
+                # A symlinked tree is published by its targets' bytes, which only a copy into the work tree resolves.
+                self._workspace.checkout(expected_parent.release_id)
+                self._workspace.replace_tree(artifact.local_path)
+                for path, text in files.items():
+                    write_fresh(self._workspace.clone_dir / path, text)
+                commit = self._workspace.commit("publish artifact")
+            else:
+                commit = self._workspace.commit_files(
+                    artifact.local_path,
+                    paths,
+                    parent=expected_parent.release_id,
+                    carried_from=self.cache_dir / expected_parent.release_id,
+                    files=files,
+                    message="publish artifact",
+                )
             if not advance_head:
                 # A pending release lives under the releases namespace; the branch and refs/reef/head stay put.
                 self._workspace.push(f"+{commit}:refs/reef/releases/{commit}")
+                if not linked:
+                    self._cache_release(commit, artifact.local_path, paths, files)
                 return self._manifest.artifact_ref(commit)
             try:
                 self._workspace.force_push_with_lease(
@@ -472,7 +601,34 @@ class GitLFSRepositoryBackend(StagedReleaseRepositoryBackend):
                 if current != expected_parent.release_id:
                     raise ArtifactConflict(f"repository advanced from {expected_parent.release_id}") from exc
                 raise
+            if not linked:
+                self._cache_release(commit, artifact.local_path, paths, files)
             return self._manifest.artifact_ref(commit)
+
+    def _cache_release(self, release_id: str, source: Path, paths: Sequence[str], files: Mapping[str, str]) -> None:
+        """Fill a just-published release's cache entry from the staged tree it was committed from.
+
+        The staged files hold the committed bytes, so the entry links them
+        instead of cloning the release and pulling its LFS objects back. An
+        entry that cannot be filled is cloned by the first ``materialize``.
+        """
+        destination = self.cache_dir / release_id
+        if destination.is_dir():
+            return
+        temporary = Path(tempfile.mkdtemp(prefix=f".{release_id}-", dir=self.cache_dir))
+        tree = temporary / "artifact"
+        try:
+            tree.mkdir()
+            for path in paths:
+                (tree / path).parent.mkdir(parents=True, exist_ok=True)
+                link_or_copy(str(source / path), str(tree / path))
+            for path, text in files.items():
+                (tree / path).write_text(text, encoding="utf-8")
+            tree.rename(destination)
+        except OSError:
+            pass
+        finally:
+            shutil.rmtree(temporary, ignore_errors=True)
 
     def commit_release(self, ref: ArtifactRef, *, expected_parent: ArtifactRef) -> None:
         with self._workspace.lock:

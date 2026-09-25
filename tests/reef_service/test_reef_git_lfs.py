@@ -384,17 +384,79 @@ def test_bootstrap_snapshot_goes_under_its_component_beside_the_seed_files(
 
 
 @pytest.mark.integration
-def test_a_published_file_is_linked_into_the_work_tree_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
-    """Released files are immutable, so a publish links them into the clone instead of copying a checkpoint per step."""
+def test_a_published_file_is_linked_into_the_release_cache_not_copied(tmp_path: Path, fake_git_lfs: None) -> None:
+    """Released files are immutable, so a publish links them into the release's cache entry instead of cloning it."""
     remote = tmp_path / "artifacts.git"
     backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
     head = backend.fork()
     source = tmp_path / "release"
     source.mkdir()
     (source / "weights.bin").write_bytes(b"\x00" * 64)
-    backend.publish(Artifact.local(source), expected_parent=head)
-    assert (source / "weights.bin").stat().st_nlink == 2
-    assert (tmp_path / "work" / "repository" / "weights.bin").read_bytes() == b"\x00" * 64
+    published = backend.publish(Artifact.local(source), expected_parent=head)
+    cached = tmp_path / "cache" / published.release_id
+    assert (cached / "weights.bin").samefile(source / "weights.bin")
+    assert not (tmp_path / "work" / "repository" / "weights.bin").exists()
+    materialized = backend.materialize(published)
+    assert materialized.local_path == cached
+    assert json.loads((cached / "reef-artifact.json").read_text())["parent_release_id"] == head.release_id
+
+
+@pytest.mark.integration
+def test_a_carried_component_is_neither_hashed_nor_copied_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A release that carries the parent's files forward as links reuses their blobs; only the changed files are read."""
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "artifacts.git"
+    backend = GitLFSRepositoryBackend("agent", remote, work_dir=tmp_path / "work", cache_dir=tmp_path / "cache")
+    head = backend.fork()
+    first = tmp_path / "first"
+    (first / "weights").mkdir(parents=True)
+    (first / "harness").mkdir()
+    (first / "weights" / "model.safetensors").write_bytes(b"weights v1")
+    (first / "harness" / "AGENTS.md").write_text("rules v1\n")
+    (first / "harness" / "old.md").write_text("dropped\n")
+    parent = backend.publish(Artifact.local(first), expected_parent=head)
+    parent_tree = backend.materialize(parent).local_path
+    assert parent_tree is not None
+
+    second = tmp_path / "second"
+    shutil.copytree(parent_tree / "weights", second / "weights", copy_function=os.link)
+    (second / "harness").mkdir()
+    (second / "harness" / "AGENTS.md").write_text("rules v2\n")
+    carried = second / "weights" / "model.safetensors"
+    # A carried file that were hashed again would fail to read.
+    carried.chmod(0)
+    try:
+        published = backend.publish(Artifact.local(second), expected_parent=parent)
+    finally:
+        carried.chmod(0o644)
+
+    def blob(release: str, path: str) -> str:
+        return run_git("--git-dir", str(remote), "rev-parse", f"{release}:{path}")
+
+    assert blob(published.release_id, "weights/model.safetensors") == blob(
+        parent.release_id, "weights/model.safetensors"
+    )
+    assert run_git("--git-dir", str(remote), "show", f"{published.release_id}:weights/model.safetensors").startswith(
+        "version https://git-lfs.github.com/spec/v1"
+    )
+    cached = backend.materialize(published).local_path
+    assert cached is not None
+    assert (cached / "weights" / "model.safetensors").samefile(parent_tree / "weights" / "model.safetensors")
+    # The linked cache entry holds what a clone of the release holds.
+    cloned = GitLFSRepositoryBackend(
+        "agent", remote, work_dir=tmp_path / "fresh-work", cache_dir=tmp_path / "fresh-cache"
+    ).materialize(published)
+    assert cloned.local_path is not None
+
+    def tree(root: Path) -> dict[str, bytes]:
+        return {str(path.relative_to(root)): path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+    assert tree(cached) == tree(cloned.local_path)
+    assert tree(cached)["harness/AGENTS.md"] == b"rules v2\n"
+    assert "harness/old.md" not in tree(cached)
 
 
 @pytest.mark.integration
