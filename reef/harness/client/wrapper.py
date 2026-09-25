@@ -829,6 +829,24 @@ def _item_line(item: Mapping[str, Any]) -> str:
     return f"{item['name']} ({item.get('kind', 'unknown')})" + (f": {check}" if check else "")
 
 
+#: Where an adapter's binary keeps the sessions a person resumes, and the file name around a session's id. The
+#: binary's own exit hint names the bare vendor command, which runs outside this install and its proxy.
+RESUMABLE_SESSIONS = {"hermes": ("sessions", "session_", ".json")}
+
+
+def resumable_sessions(adapter: str, compose_dir: str) -> dict[str, float]:
+    """The ids of the sessions the adapter's binary keeps in the installed tree, each with its file's mtime."""
+    spec = RESUMABLE_SESSIONS.get(adapter)
+    if spec is None:
+        return {}
+    directory, prefix, suffix = spec
+    return {
+        path.name[len(prefix) : -len(suffix)]: path.stat().st_mtime
+        for path in (Path(compose_dir) / directory).glob(f"{prefix}*{suffix}")
+        if path.is_file()
+    }
+
+
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
     upstream = _reef_url_of(adapter, compose_dir)
 
@@ -918,6 +936,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
+    sessions_before = resumable_sessions(adapter, compose_dir)
     try:
         result = subprocess.run([binary, *args], env=env)
     finally:
@@ -938,6 +957,14 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         finally:
             shutil.rmtree(temp_dir, ignore_errors=True)
 
+    # The one session this run wrote, by its file: the newest row would pick a session another run keeps open.
+    touched = [
+        session
+        for session, mtime in resumable_sessions(adapter, compose_dir).items()
+        if sessions_before.get(session) != mtime
+    ]
+    if len(touched) == 1:
+        print(f"reef-{adapter}: resume this session with: reef-{adapter} --resume {touched[0]}", file=sys.stderr)
     sys.exit(result.returncode)
 
 

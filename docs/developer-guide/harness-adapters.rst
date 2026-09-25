@@ -161,7 +161,10 @@ list of strings.
 
 A ``reef-hermes`` session keeps ``state.db``, the session snapshots under
 ``sessions/``, and the logs under ``logs/`` in the installed tree, so a
-later session finds what an earlier one wrote. Hermes also writes files of
+later session finds what an earlier one wrote. Hermes ends a session by
+naming ``hermes --resume <id>``, which runs outside the install, so
+``reef-hermes`` then names ``reef-hermes --resume <id>`` for the one session
+the run wrote. Hermes also writes files of
 its own into ``skills/`` that no config key turns off: the bundled skill
 manifest it rewrites at every start, the one essential skill it seeds
 (``autonomous-ai-agents/hermes-agent``), and the usage counts it updates
