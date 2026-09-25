@@ -1,4 +1,4 @@
-"""A Harbor agent harness that runs the SDPO grid runner in the task's container.
+"""A Harbor agent harness that runs the SDPO Chemistry stage in the task's container.
 
 The export is lazy: importing this package must not require Harbor.
 """

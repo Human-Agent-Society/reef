@@ -101,6 +101,7 @@ so interrupted runs must not be presented as exact continuations of a paper run.
 SDFT retains its previous teacher-selected, renormalized top-K and sequence
 importance-weight defaults.
 
-`SDPO on an arithmetic grid <../../../recipes/sdpo/examples/arithmetic_grid/README.md>`_
-is the smallest complete run of the recipe. The paper reproduction, SciKnowEval
-Chemistry on OLMo-3-7B-Instruct, is Reef issue #428.
+`SDPO on SciKnowEval Chemistry <../../../recipes/sdpo/examples/sciknoweval/README.md>`_
+runs the paper's generalization sweep through Reef on Qwen3-8B. The paper also
+reports OLMo-3-7B-Instruct, which needs OLMo support in the training backend
+first; Reef issue #428 tracks the benchmark work.

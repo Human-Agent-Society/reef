@@ -50,7 +50,7 @@ learns from each score before the next task arrives.
 |---|---|---|---|---|
 | SAO | model weights | [`recipes/sao/`](sao/) | [SAO](../docs/user-guide/recipes/sao.rst) | [SAO on IMOAnswerBench](sao/examples/imo_answerbench/README.md), [SAO on CEO-Bench](sao/examples/ceobench/README.md) |
 | SDFT | model weights | [`recipes/sdft/`](sdft/) | [SDFT](../docs/user-guide/recipes/sdft.rst) | [SDFT on a skill stream](sdft/examples/skill_stream/README.md) |
-| SDPO | model weights | [`recipes/sdpo/`](sdpo/) | [SDPO](../docs/user-guide/recipes/sdpo.rst) | [SDPO on an arithmetic grid](sdpo/examples/arithmetic_grid/README.md) |
+| SDPO | model weights | [`recipes/sdpo/`](sdpo/) | [SDPO](../docs/user-guide/recipes/sdpo.rst) | [SDPO on SciKnowEval Chemistry](sdpo/examples/sciknoweval/README.md) |
 | GEPA | harness tree: rules, skills, and agent commands | [`recipes/gepa/`](gepa/) | [GEPA](../docs/user-guide/recipes/gepa.rst) | [GEPA on AIME 2025](gepa/examples/aime/README.md) |
 | Meta-Harness | harness: complete compositions | [`recipes/meta_harness/`](meta_harness/) | [Meta-Harness](meta_harness/README.md) | Meta-Harness on Terminal-Bench: [example](meta_harness/examples/terminal_bench/README.md), [results](meta_harness/RESULTS.md) |
 

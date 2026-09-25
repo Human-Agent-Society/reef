@@ -176,6 +176,8 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
     "REEF_TOKEN": "config-test-token",
+    "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
+    "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
     "SDFT_LR_DECAY_ITERS": "252",
     "SDFT_MODEL_PATH": "/root/models/Qwen2.5-7B-Instruct",
     "REEF_UPSTREAM_URL": "http://127.0.0.1:8000/v1",
@@ -391,7 +393,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
-        "recipes/sdpo/examples/arithmetic_grid/serve.yaml",
+        "recipes/sdpo/examples/sciknoweval/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -417,7 +419,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve-30b-multi.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
-        "recipes/sdpo/examples/arithmetic_grid/serve.yaml",
+        "recipes/sdpo/examples/sciknoweval/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

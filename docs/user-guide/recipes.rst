@@ -66,7 +66,7 @@ learns from each score before the next task arrives.
      - model weights
      - ``recipes/sdpo/``
      - `SDPO <recipes/sdpo.rst>`__
-     - `SDPO on an arithmetic grid <../../recipes/sdpo/examples/arithmetic_grid/README.md>`__
+     - `SDPO on SciKnowEval Chemistry <../../recipes/sdpo/examples/sciknoweval/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``
