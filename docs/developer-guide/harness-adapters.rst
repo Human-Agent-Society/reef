@@ -718,10 +718,9 @@ Harness requests on other adapters
 
 On ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh``,
 ``evolution.requests: true`` seeds one ``agent_command`` named ``reefine``
-under the id ``reef-requests``. Its shared template
-(`reef/harness/episodes/reefine_command.md
-<../../reef/harness/episodes/reefine_command.md>`__) is filled per adapter
-by ``reef/harness/episodes/requests.py``. The session's model files requests
+under the id ``reef-requests``. Its shared template, ``COMMAND_TEXT`` in
+``reef/harness/episodes/requests.py``, is filled per adapter there. The
+session's model files requests
 with ``reef-<adapter> evolve`` and polls with ``reef-<adapter> wait``.
 
 Claude Code invokes the wrapper by name; the other adapters use
