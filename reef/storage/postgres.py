@@ -160,7 +160,7 @@ class PostgresRecordDatabase:
                 connection.execute(select(func.pg_advisory_xact_lock(key)))
                 connection.execute(CreateSchema(schema, if_not_exists=True))
                 version.create(connection, checkfirst=True)
-                versions: Sequence[int] = connection.execute(select(version.c.version)).scalars().all()
+                versions: list[int] = list(connection.execute(select(version.c.version)).scalars().all())
                 if versions and versions not in ([1], [2], [3]):
                     raise ReefError("unsupported PostgreSQL record schema version")
                 metadata.create_all(connection)

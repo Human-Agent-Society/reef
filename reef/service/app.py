@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import logging
 from collections.abc import Iterable
+from urllib.parse import urlsplit
 
 from aiohttp import web
 
@@ -41,17 +43,26 @@ def create_app(
     dispatcher: Dispatcher,
     *,
     tokens: str | Iterable[str] | None = None,
+    evaluation_tokens: str | Iterable[str] | None = None,
     console_origins: Iterable[str] = (),
     inference_handler: InferenceHandler | None = None,
     inference_retry_policy: InferenceRetryPolicy | None = None,
     close_dispatcher: bool = False,
     record_retention: RecordRetention | None = None,
+    open_local_cycles_at: str | None = None,
 ) -> web.Application:
-    """Build the HTTP app around an existing dispatcher; close it only when requested."""
+    """Build the HTTP app around an existing dispatcher; close it only when requested.
+
+    ``open_local_cycles_at``: the address this app answers at; once it accepts
+    a connection, the dispatcher's held local cycles open (see
+    ``Dispatcher(hold_local_cycles=True)``). ``evaluation_tokens`` open the
+    evaluation routes only (see ``create_authentication_middleware``).
+    """
     request_service = RequestService(dispatcher, retry_policy=inference_retry_policy)
     request_service_key = web.AppKey("reef_request_service", RequestService)
     app = web.Application(
-        middlewares=[create_authentication_middleware(tokens), translate_errors], client_max_size=MAX_REQUEST_BYTES
+        middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens), translate_errors],
+        client_max_size=MAX_REQUEST_BYTES,
     )
     configure_browser_access(app, console_origins)
     app[request_service_key] = request_service
@@ -73,11 +84,42 @@ def create_app(
                 await task
 
         app.cleanup_ctx.append(maintain_records)
+    if open_local_cycles_at is not None:
+        address = urlsplit(open_local_cycles_at)
+        host, port = address.hostname or "127.0.0.1", address.port or 80
+
+        async def open_local_cycles(app: web.Application):
+            async def once_listening() -> None:
+                while True:
+                    try:
+                        _reader, writer = await asyncio.open_connection(host, port)
+                    except OSError:
+                        await asyncio.sleep(0.1)
+                        continue
+                    writer.close()
+                    break
+                await asyncio.to_thread(app[request_service_key].dispatcher.open_local_cycles)
+
+            # on_startup runs before the site listens: wait for the socket, off the startup path.
+            task = asyncio.create_task(once_listening())
+            try:
+                yield
+            finally:
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await task
+
+        app.cleanup_ctx.append(open_local_cycles)
     if close_dispatcher:
+
+        async def stop_local_cycles(app: web.Application) -> None:
+            # The listening socket is closed by now: a harness cycle's calls through Reef fail from here on.
+            app[request_service_key].dispatcher.stop_local_cycles()
 
         async def cleanup(app: web.Application) -> None:
             await asyncio.to_thread(app[request_service_key].dispatcher.close)
 
+        app.on_shutdown.append(stop_local_cycles)
         app.on_cleanup.append(cleanup)
     return app
 
