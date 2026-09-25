@@ -14,7 +14,7 @@ from typing import Any
 from reef.runtime.interfaces import PreparedTrainingStep
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
-from reef.train.algos.schedule import MaterializedSchedule, materialize_schedule, schedule_seed
+from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
@@ -73,7 +73,7 @@ def _materialize(batch: TrainingBatch, scheduling: StepScheduling) -> Materializ
                 else ("sample", index)
             )
             source_rollout_ids.append(group_ids.setdefault(key, len(group_ids)))
-    return materialize_schedule(source_rollout_ids, scheduling, seed=schedule_seed(batch.batch_id))
+    return materialize_schedule(source_rollout_ids, scheduling, seed=batch_schedule_seed(batch))
 
 
 def _build_payload(

@@ -374,7 +374,7 @@ def test_example_yaml_boots_the_recipe_with_the_paper_wiring(example, tmp_path, 
     assert type(surface) is Surface
     assert isinstance(surface.inference, SkillInferenceHooks)
     assert [layer.layer for layer in surface.inference.layers] == ["pi-agent"]
-    assert [layer.layer for layer in built.build_artifact_validator().layers] == ["pi-agent"]
+    assert [layer.layer for layer in surface.components["skills"].validator.layers] == ["pi-agent"]
     assert isinstance(built.build("demo", SQLiteRecordStore()), Trainer)  # loads the seed; no episodes
 
 
