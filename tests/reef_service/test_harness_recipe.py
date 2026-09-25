@@ -699,8 +699,9 @@ def test_a_native_turn_that_ended_on_an_error_ranks_as_an_episode_that_could_not
 
 
 def test_an_episode_whose_log_the_reader_found_empty_says_no_transcript_was_read() -> None:
-    """A reader that found no session log leaves a text grader nothing to read: the score stands, and the episode
-    names why, so a step rejected on it does not blame the request. The reply a grader reads rides the result."""
+    """A reader that found no session log leaves a text grader nothing to read: the score stands and the episode is
+    no failure (a grader that reads files judged the run), but it says no transcript was read, so a step rejected
+    on it does not blame the request. The reply a grader reads rides the result."""
     episode_worker = EpisodeEvaluationWorker(
         descriptor=get_adapter("pi"),
         scorer=resolve_episode_scorer(lambda task, result: 0.0),
@@ -712,8 +713,7 @@ def test_an_episode_whose_log_the_reader_found_empty_says_no_transcript_was_read
     empty = EpisodeResult(exit_code=0, stdout="reef-ok", stderr="", trajectory=(), residue=())
     scored = episode_worker._score_result(empty, "task one")
     assert scored.score == 0.0 and scored.reply is None
-    assert scored.failure is not None and scored.failure.stage == "trajectory"
-    assert scored.failure.cause == "no transcript was read from the episode's session log"
+    assert scored.failure is None and scored.transcript_read is False
     answered = ({"role": "assistant", "content": "reef-ok"},)
     scored = episode_worker._score_result(
         EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=answered, residue=()), "task one"

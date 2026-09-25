@@ -643,10 +643,11 @@ next action, quoting the request: a selected release to restart ``reef-pi``
 for; a pending one with ``This release changes an extension, so read it before
 it runs: /versions <version> opens the page, /versions <version> install
 serves it. Page: <link>``; a rejected step with the evaluation's reason and
-the first task it missed, with why the episode failed (``no transcript was
-read from the episode's session log`` when the harness's log could not be
-read) or its score and the reply that was graded, and ``rephrase or split
-the request`` only when the episodes ran and scored low; a skipped step with
+the first task it missed, with why the episode failed or its score and the
+reply that was graded (``no transcript was read from the episode's session
+log`` when the harness's log could not be read, which is no failure: a grader
+that reads files still judged the run), and ``rephrase or split the request``
+only when the episodes ran, left a transcript and scored low; a skipped step with
 why (the proposer's own reason when the step recorded one, such as a failed
 model call); ``not covered: ...`` follows when the step's review lists
 points the change left out, and after a rejection the same points read as

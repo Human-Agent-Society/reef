@@ -193,14 +193,9 @@ class EpisodeEvaluationWorker:
             return _ScoredEpisode(
                 score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path, reply
             )
-        if not result.trajectory:
-            # The reader found no session log where the adapter writes one: a grader that reads the reply scored
-            # nothing, which is the harness's record and not the answer's fault, so the episode says so.
-            cause = "no transcript was read from the episode's session log"
-            return _ScoredEpisode(
-                score, FailureObservation(task=task, stage="trajectory", cause=cause), residue, agents, path, reply
-            )
-        return _ScoredEpisode(score, None, residue, agents, path, reply)
+        # An empty trajectory is no failure: a grader that reads files scored the run as it stands. The summary
+        # still says no transcript was read, so a low score a text grader gave is not blamed on the request.
+        return _ScoredEpisode(score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory))
 
 
 def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
@@ -1310,6 +1305,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                         None if run.failure is None else clip_redacted(run.failure.cause, EPISODE_SUMMARY_CHARS)
                     ),
                     "reply": None if run.reply is None else clip_redacted(run.reply, EPISODE_SUMMARY_CHARS),
+                    # Only when missing, so a summary of an ordinary episode keeps its shape.
+                    **({} if run.transcript_read else {"transcript_read": False}),
                 }
                 for task, run in list(zip(tasks["candidate"], runs["candidate"], strict=True))[:EPISODE_SUMMARIES]
             ]
@@ -1724,6 +1721,8 @@ class _ScoredEpisode:
     path: dict[str, Any] | None = None
     #: The final assistant text the trajectory holds, the reply a text grader reads; ``None`` when it holds none.
     reply: str | None = None
+    #: Whether the reader found a session log; a scored episode without one left a text grader nothing to read.
+    transcript_read: bool = True
     #: Remote workers return the kept trajectory; the driver owns its durable path.
     record_archive: bytes | None = field(default=None, repr=False)
 

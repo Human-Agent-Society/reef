@@ -1225,7 +1225,7 @@ def _await_step(
     ``"gone"`` when two polls in a row find no record of the request (its
     scenario was reset; one missing read can be a record not written yet).
     One line says when the record shows a step took it, so the wait is seen
-    to move."""
+    to move; the timeout line names the phase the last progress read showed."""
     deadline = time.monotonic() + timeout_s
     started = False
     missing = 0
@@ -1243,8 +1243,11 @@ def _await_step(
             )
             print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s{step_words(progress)}; {later}")
             return "timeout"
+        # Read on every poll, so the line a timeout prints names the phase the step is in now.
+        state, reading = _request_state(upstream, scenario, token, record_id)
+        if reading:
+            progress = reading
         if not started:
-            state, progress = _request_state(upstream, scenario, token, record_id)
             missing = missing + 1 if state == "gone" else 0
             if missing >= 2:
                 print(

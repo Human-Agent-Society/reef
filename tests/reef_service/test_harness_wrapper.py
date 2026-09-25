@@ -37,6 +37,7 @@ from reef.harness.client.wrapper import (
     update,
     wait_request,
 )
+from reef.harness.step_result import missed_episodes
 
 
 class _Response:
@@ -1077,7 +1078,8 @@ def test_wrapper_captures_the_beta_messages_path_claude_code_posts(tmp_path) -> 
 class _FakeReef:
     """A reef that records every call: inference answers with a receipt, the request route with ``answer``,
     ``GET /reef/harness/releases`` with ``rows``, the request's progress route with ``progress`` (404 without
-    one) and the scenario's promote route with ``promote``."""
+    one; a list is answered in order, its last reading repeated) and the scenario's promote route with
+    ``promote``."""
 
     def __init__(
         self,
@@ -1086,7 +1088,7 @@ class _FakeReef:
         status: int = 200,
         receipt: str = "ask-receipt",
         rows: list[dict] | None = None,
-        progress: dict | None = None,
+        progress: dict | list[dict] | None = None,
         promote: dict | None = None,
     ) -> None:
         import http.server
@@ -1094,6 +1096,8 @@ class _FakeReef:
 
         self.seen: list[dict] = []
         seen = self.seen
+        readings = progress if isinstance(progress, list) else [] if progress is None else [progress]
+        progress_path = "/reef/harness/requests/q-1/progress"
 
         class Handler(http.server.BaseHTTPRequestHandler):
             def _answer(self, code: int, payload: dict, extra: dict | None = None) -> None:
@@ -1110,8 +1114,9 @@ class _FakeReef:
                 seen.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()}})
                 if self.path == "/reef/harness/releases":
                     self._answer(200, {"scenario": "ask-scenario", "releases": rows or []})
-                elif self.path == "/reef/harness/requests/q-1/progress" and progress is not None:
-                    self._answer(200, progress)
+                elif self.path == progress_path and readings:
+                    read = len([call for call in seen if call["path"] == progress_path])
+                    self._answer(200, readings[min(read, len(readings)) - 1])
                 else:
                     self._answer(404, {})
 
@@ -1410,6 +1415,15 @@ def test_a_pending_release_off_pi_names_the_wait_command_with_its_request() -> N
 
 
 @pytest.mark.unit
+def test_an_episode_that_passed_without_a_transcript_is_not_missed() -> None:
+    """A missing session log is no failure: an episode a grader passed on its files is not named as the cause."""
+    passed = {"task": "t", "score": 1.0, "failure": None, "reply": None, "transcript_read": False}
+    metrics = {"selection": {"metrics": {"floor_score": 1.0}}, "candidate_episodes": [passed]}
+    assert missed_episodes(metrics) == []
+    assert missed_episodes({**metrics, "candidate_episodes": [{**passed, "score": 0.0}]}) != []
+
+
+@pytest.mark.unit
 def test_a_published_release_that_requires_setup_names_setup_before_update() -> None:
     """The install refuses a release whose chain requires items not set up, so the result line off pi names
     reef-<adapter> setup first while an item is unmet; once every item is met it names update alone."""
@@ -1525,14 +1539,14 @@ def test_a_rejection_names_the_missed_task_and_drops_the_rephrase_advice_when_th
     review = {"proposal_notes": {"review": {"result": "partial", "uncovered": ["no off switch"]}}}
     cases = [
         (
-            {
-                "task": "[health] echo",
-                "score": 0.0,
-                "failure": "no transcript was read from the episode's session log",
-                "reply": None,
-            },
-            "the task '[health] echo' failed: no transcript was read from the episode's session log. Nothing changed; "
-            "the episode failed, so the change itself was not judged.",
+            {"task": "[health] echo", "score": 0.0, "failure": "exit 1: boom", "reply": None},
+            "the task '[health] echo' failed: exit 1: boom. Nothing changed; the episode failed, so the change itself "
+            "was not judged.",
+        ),
+        (
+            {"task": "[health] echo", "score": 0.0, "failure": None, "reply": None, "transcript_read": False},
+            "the task '[health] echo' scored 0.0; no transcript was read from the episode's session log, so no reply "
+            "was graded. Nothing changed; no transcript was read, so the change itself was not judged.",
         ),
         (
             {"task": "[health] echo", "score": 0.0, "failure": None, "reply": "hello"},
@@ -1683,8 +1697,8 @@ def test_harness_wait_gives_up_at_the_timeout_and_without_it_says_how_to_follow(
 @pytest.mark.unit
 def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path, capsys) -> None:
     """Until a step takes the request its progress reads queued; once a step works on it (a backend phase such as
-    proposing, or the trainer's reserved batch, running) the wait says so, once, and stops reading it. A progress
-    the service does not answer is no reason to stop waiting."""
+    proposing, or the trainer's reserved batch, running) the wait says so, once, and keeps reading it for the phase
+    its timeout line names. A progress the service does not answer is no reason to stop waiting."""
     rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
     answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
     record_path = "/reef/harness/requests/q-1/progress"
@@ -1699,7 +1713,7 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
         assert out[3] == "reef-pi: the step started; usually a few minutes"
         assert out[4].startswith("reef-pi: no result yet for 'text me' after 0.1 s") and len(out) == 5
         record_reads = [call for call in reef.seen if call["path"] == record_path]
-        assert len(record_reads) == 1 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
+        assert len(record_reads) >= 2 and record_reads[0]["headers"]["authorization"] == "Bearer dummy"
         assert len([call for call in reef.seen if call["path"] == "/reef/harness/releases"]) >= 3
     # Queued: no line, and the progress is read again at every poll.
     reef = _FakeReef(answer, rows=rows, progress={"state": "queued", "settled": False})
@@ -1722,6 +1736,24 @@ def test_harness_wait_says_once_when_the_record_shows_the_step_started(tmp_path,
     out = capsys.readouterr().out.splitlines()
     assert out[3] == "reef-pi: request q-1 is no longer on the service (its scenario was reset); ask again"
     assert len(out) == 4 and len([call for call in reef.seen if call["path"] == record_path]) == 2
+
+
+@pytest.mark.unit
+def test_the_timeout_line_names_the_phase_the_step_is_in_now(tmp_path, capsys) -> None:
+    """The phase a timeout names is the last progress read, not the one the step started in."""
+    rows = [CREATION_ROW, _step_row("rel-1111-selected", {"selected": True}, request_id="q-other")]
+    answer = {"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"}
+    started_at = time.time() - 30
+    progress = [
+        {"state": "proposing", "settled": False, "started_at": started_at},
+        {"state": "evaluating", "settled": False, "started_at": started_at},
+    ]
+    reef = _FakeReef(answer, rows=rows, progress=progress)
+    compose, captures = _claude_ask_tree(tmp_path, reef.port)
+    with patch.dict(os.environ, _ask_env(captures, compose), clear=True):
+        assert wait_request("ask-scenario", "claude", compose, "q-1", timeout_s=0.1, poll_s=0.01) == 2
+    reef.close()
+    assert "; the step is evaluating, " in capsys.readouterr().out.splitlines()[-1]
 
 
 @pytest.mark.unit

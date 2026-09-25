@@ -87,7 +87,12 @@ def missed_episode_text(episode: Mapping[str, Any]) -> str:
     if failure:
         return f"the task '{task}' failed: {failure}"
     reply = episode.get("reply")
-    graded = f"the reply graded was '{str(reply).strip()}'" if reply else "no reply was graded"
+    if episode.get("transcript_read") is False:
+        graded = "no transcript was read from the episode's session log, so no reply was graded"
+    elif reply:
+        graded = f"the reply graded was '{str(reply).strip()}'"
+    else:
+        graded = "no reply was graded"
     return f"the task '{task}' scored {episode.get('score')}; {graded}"
 
 
@@ -131,11 +136,12 @@ def rejection_text(metrics: Mapping[str, Any]) -> str:
     missed = missed_episodes(metrics)
     if not missed:
         return f"did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
-    advice = (
-        "the episode failed, so the change itself was not judged"
-        if any(episode.get("failure") for episode in missed)
-        else "rephrase or split the request"
-    )
+    if any(episode.get("failure") for episode in missed):
+        advice = "the episode failed, so the change itself was not judged"
+    elif any(episode.get("transcript_read") is False for episode in missed):
+        advice = "no transcript was read, so the change itself was not judged"
+    else:
+        advice = "rephrase or split the request"
     return f"did not pass the checks ({reason}): {missed_episode_text(missed[0])}. Nothing changed; {advice}."
 
 
