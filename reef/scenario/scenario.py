@@ -294,6 +294,10 @@ class Scenario:
         """Materialize a scenario release for read-only serving; absence raises ArtifactNotFound."""
         return self._committer.artifact_for_version(release_id)
 
+    def ref_for_version(self, release_id: str) -> ArtifactRef | None:
+        """The ref of a scenario release without materializing it; ``None`` when the catalog has no such release."""
+        return self._committer.ref_for_version(release_id)
+
     def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
         """The composition entries behind a scenario release, if its training commit logged them."""
         return self._committer.entries_for_version(release_id)

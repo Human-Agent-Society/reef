@@ -123,6 +123,8 @@ class PreparedInference:
     #: What the handler serves: the runtime-loaded component's view of the
     #: release, or the release itself when nothing is loaded or it is flat.
     served: Artifact
+    #: The release the attempt's record names: the served one, or the one the client runs (see recorded_ref).
+    record_ref: ArtifactRef
     handler: InferenceHandler
     surface: Surface
     #: True when a training runtime serves the scenario: the recorded payload
@@ -306,7 +308,7 @@ class RequestService:
                                 self._accept,
                                 prepared.parsed,
                                 {**payload, "response": response},
-                                artifact_ref=prepared.artifact.ref,
+                                artifact_ref=prepared.record_ref,
                             )
                         succeeded = True
                         return client_inference_response(response), item
@@ -393,7 +395,7 @@ class RequestService:
                     scenario=prepared.parsed.scenario,
                     request_type=RequestType.INFERENCE,
                     payload=_with_tags(payload, prepared.parsed),
-                    artifact_ref=prepared.artifact.ref,
+                    artifact_ref=prepared.record_ref,
                 ),
                 release_id=prepared.parsed.release_id,
                 measurement=measurement,
@@ -605,6 +607,7 @@ class RequestService:
             parsed=parsed,
             artifact=artifact,
             served=served,
+            record_ref=recorded_ref(scenario, parsed, ref),
             handler=selected_handler,
             surface=surface,
             durable=scenario.training_runtime is not None,
@@ -1145,13 +1148,37 @@ class RequestService:
             raise
 
 
+def recorded_ref(scenario: Scenario, parsed: RequestHeaders, served: ArtifactRef) -> ArtifactRef:
+    """The release an inference record names: the served one, or the release the client says it runs.
+
+    A ``reef-<adapter>`` session sends the release it installed as
+    ``x-reef-tag-release`` and keeps running it after a newer one is
+    published. Where the client pulls everything a release changes (a file
+    tree, with no request hooks and no served weights), a call answers the
+    same on every release, so the record names the client's release when the
+    scenario's catalog has it. A value the catalog does not have names the
+    served release, as does every call on a scenario that serves its release
+    itself."""
+    claimed = parsed.tags.get("release")
+    surface = scenario.surface
+    if (
+        claimed is None
+        or claimed == served.release_id
+        or surface.files is None
+        or surface.inference is not None
+        or scenario.training_runtime is not None
+    ):
+        return served
+    return scenario.ref_for_version(claimed) or served
+
+
 def _with_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
     """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
 
     Only inference: a tag is context about a served exchange, and the
-    processors that read one correlate on the inference side. The service
-    never interprets a value — it stores the pair and moves on
-    (method-integration RFC §3.2).
+    processors that read one correlate on the inference side. This stores
+    every pair as sent (method-integration RFC §3.2); only
+    :func:`recorded_ref` reads a value.
     """
     if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
         return payload

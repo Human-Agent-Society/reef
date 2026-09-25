@@ -128,7 +128,12 @@ Headers
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-tag-<name>``             | optional on inference: opaque key/value context stored  |
 |                                   | on the record under ``metadata.tags``, for a processor  |
-|                                   | to correlate on. Reef never reads a value.              |
+|                                   | to correlate on. Reef reads one value: on a scenario    |
+|                                   | whose clients pull its files, ``x-reef-tag-release``    |
+|                                   | names the release the client runs, and when the         |
+|                                   | scenario has that release the record's ``artifact_ref`` |
+|                                   | names it. Inference still answers from the current      |
+|                                   | release.                                                |
 +-----------------------------------+---------------------------------------------------------+
 
 Scenario model settings
@@ -1192,7 +1197,11 @@ defaults to 50 (1–100). Records are oldest first; ``next_after_sequence`` is
 null at the end. Each row contains ``sequence``, ``agent_record_id``,
 ``request_type``, ``created_at``, ``references``, the recorded
 ``artifact_ref``, and the payload's ``score`` field. No record payload or
-learning classification is included.
+learning classification is included. An inference record's ``artifact_ref``
+is the release that served the call, or, on a scenario whose clients pull its
+files, the release the client says it runs (``x-reef-tag-release``) when the
+scenario has it: a ``reef-<adapter>`` session keeps running the release it
+installed until the person updates.
 
 ``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
 and the stored ``payload``. A missing body returns 404: it may have expired or

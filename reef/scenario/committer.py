@@ -1048,6 +1048,11 @@ class ScenarioCommitter:
     def artifact_for_version(self, release_id: str) -> Artifact:
         return self._releases.artifact_for_version(release_id)
 
+    def ref_for_version(self, release_id: str) -> ArtifactRef | None:
+        with self._publication_lock:
+            found = self._releases.find_release(release_id)
+        return None if found is None else found[0]
+
     def artifact_with_metrics(
         self,
         release_id: str | None = None,
