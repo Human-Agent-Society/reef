@@ -22,7 +22,7 @@ classifiers = [
 # Reef core dependencies. Keep this list free of training and GPU packages:
 # `pip install reef-infra` must support the base `recipe` configuration on CPU.
 dependencies = [
-    "aiohttp",
+    "aiohttp>=3.14",  # web.RequestKey
     "alembic>=1.13,<2",
     "huggingface_hub",
     "pyyaml",
@@ -123,7 +123,7 @@ namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts", "recipe/reefine/trial_driver.mjs", "recipe/reefine/health/instruction.md", "recipe/reefine/health/task.toml", "recipe/reefine/health/environment/Dockerfile", "recipe/reefine/health/tests/test.sh"]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/harness_facts.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts", "recipe/reefine/trial_driver.mjs", "recipe/reefine/health/instruction.md", "recipe/reefine/health/task.toml", "recipe/reefine/health/environment/Dockerfile", "recipe/reefine/health/tests/test.sh"]
 
 [tool.isort]
 profile = "black"  # black-compatible
