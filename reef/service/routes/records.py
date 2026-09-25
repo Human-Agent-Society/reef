@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import quote
 
 from aiohttp import web
 
 from reef.core.records_types import RequestType
+
+from reef.service.auth import page_query
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 
@@ -55,13 +58,16 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
                 request_type=request_type,
                 agent_record_id=agent_record_id,
             )
-            return web.json_response(
-                {
-                    "agent_record_id": item.agent_record_id,
-                    "scenario": item.scenario,
-                    "request_type": item.request_type.value,
-                }
-            )
+            answer = {
+                "agent_record_id": item.agent_record_id,
+                "scenario": item.scenario,
+                "request_type": item.request_type.value,
+            }
+            if request_type is RequestType.TRAIN:
+                # A training request has a page; its link carries a page key in place of the token.
+                record = quote(item.agent_record_id, safe="")
+                answer["page_path"] = f"/reef/harness/requests/{record}/page?{page_query(request, item.scenario)}"
+            return web.json_response(answer)
 
         return accept
 

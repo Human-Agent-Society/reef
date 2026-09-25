@@ -132,8 +132,12 @@ def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(t
         "candidate_score",
         "candidate_agents",
         "candidate_paths",
+        # What each candidate episode was graded on, so a rejected step names the task and the reply.
+        "candidate_episodes",
         "evaluation_sides",
     }
+    (episode,) = evaluation.metrics["candidate_episodes"]
+    assert set(episode) == {"task", "score", "failure", "reply"} and episode["score"] == 1.0
     # The default pair is unchanged and records no evaluation_sides.
     paired = b.evaluate(candidate).metrics
     assert sides == ["candidate", "candidate", "current"] and "evaluation_sides" not in paired

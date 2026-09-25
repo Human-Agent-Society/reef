@@ -745,6 +745,25 @@ to load it now.`` Only the user can enter pi's ``/reload``; it reruns
 ``session_start`` on the installed tree. The contents of evolved ``config``
 nodes follow the selected adapter's schema.
 
+Harness requests on other adapters
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+On ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh``,
+``evolution.requests: true`` seeds one ``agent_command`` named ``reefine``
+under the id ``reef-requests``. Its shared template, ``COMMAND_TEXT`` in
+``reef/harness/episodes/requests.py``, is filled per adapter there. The
+session's model files requests
+with ``reef-<adapter> evolve`` and polls with ``reef-<adapter> wait``.
+
+Claude Code invokes the wrapper by name; the other adapters use
+``"$REEF_HARNESS_WRAPPER"``. Codex requests approval to run each call outside
+its network-restricted sandbox. Except on Claude Code, the template stops
+when ``REEF_HARNESS_WRAPPER`` is unset. On Claude Code that check would
+require a separate approval, and the command exists only in Reef's tree.
+See the `reefine recipe guide
+<../user-guide/recipes/reefine.rst#adapters-other-than-pi>`__ for each
+adapter's command form.
+
 Pi harness requests
 ~~~~~~~~~~~~~~~~~~~
 
@@ -801,11 +820,12 @@ The two request tools are:
 - ``reef_file_request`` files the request verbatim, followed by a
   ``Clarifications:`` block of ``- Q:`` and ``A:`` pairs when present. It
   caps the text at 4,000 characters and uses the same filing path as the
-  command. It returns the request id, an expected time of one to three
+  command. It returns the request id, an expected time of a few
   minutes, and a link to watch the step; filing errors are returned as
   command errors. The link opens
-  ``GET /reef/harness/requests/<id>/page`` with ``scenario`` and, when
-  ``REEF_TOKEN`` is set, ``token`` in the query string.
+  ``page_path`` the service answered the filing with: the request's page,
+  its query holding the scenario and a scenario-scoped page key. The service
+  token stays out of the link the model reads.
 Progress in pi
 ~~~~~~~~~~~~~~
 
