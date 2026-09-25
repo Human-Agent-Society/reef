@@ -4,13 +4,15 @@ import logging
 from collections.abc import Mapping
 from typing import Any
 
-from reef.artifact.artifact import Artifact, ArtifactRef, LiveWeightArtifactRef
+from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator, LiveWeightArtifactRef
 from reef.core.artifact_ref import RuntimeLoadSpan, parse_runtime_load_spans
 from reef.core.errors import ReefError
 from reef.surface.adapter import adapter_name
 from reef.surface.base import (
+    AcceptAnyArtifact,
     AdapterWeightRuntime,
     ArtifactActivator,
+    ComponentSurface,
     InferenceHooks,
     ServingRuntime,
     Surface,
@@ -219,15 +221,30 @@ class WeightInferenceHooks(InferenceHooks):
             )
 
 
-def create_weight_surface(adapter_name: str | None = None, *, scenario: str | None = None) -> Surface:
-    """Build weight loading and inference capabilities.
+#: The component name a weight surface binds.
+WEIGHTS_COMPONENT = "weights"
+
+
+def create_weight_surface(
+    adapter_name: str | None = None,
+    *,
+    scenario: str | None = None,
+    validator: ArtifactValidator | None = None,
+) -> Surface:
+    """Build weight loading and inference capabilities as the ``weights`` component.
 
     ``scenario`` selects per-scenario adapter routing on a runtime whose
-    training slot is shared by several scenarios.
+    training slot is shared by several scenarios. ``validator`` admits
+    published weights; the default accepts any.
     """
     return Surface(
-        loader=WeightLoader(scenario),
-        inference=WeightInferenceHooks(adapter_name, scenario=scenario),
+        components={
+            WEIGHTS_COMPONENT: ComponentSurface(
+                validator=AcceptAnyArtifact() if validator is None else validator,
+                loader=WeightLoader(scenario),
+                inference=WeightInferenceHooks(adapter_name, scenario=scenario),
+            )
+        }
     )
 
 
