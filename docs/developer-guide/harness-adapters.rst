@@ -126,6 +126,9 @@ Node paths and transformations are:
 
 - ``rules`` becomes the home-level ``SOUL.md`` that Hermes reads.
   ``AGENTS.md`` is project-scoped and read from the working-directory chain.
+  The rules follow Hermes's own default identity: Hermes treats ``SOUL.md``
+  as the agent's identity and writes its default there only while the file
+  is absent, so rules written alone would replace it.
 - ``skill`` becomes ``skills/<name>/SKILL.md``. The adapter adds the required
   ``name`` and ``description`` frontmatter if the node text lacks it.
 - ``agent_command`` becomes a skill under ``hermes-commands``, listed in
