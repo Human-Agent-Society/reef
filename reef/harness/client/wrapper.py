@@ -618,21 +618,6 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
-class QuietHTTPServer(ThreadingHTTPServer):
-    """The proxy's server, with a dropped connection kept off the terminal.
-
-    ``ThreadingHTTPServer`` prints a traceback to stderr when a client closes
-    a connection mid-request, which an agent does whenever it retries a call;
-    the wrapper shares the terminal with the agent's own UI, so that traceback
-    would land inside a drawn frame."""
-
-    def handle_error(self, request: Any, client_address: Any) -> None:
-        exc = sys.exc_info()[1]
-        if isinstance(exc, (ConnectionResetError, BrokenPipeError, ConnectionAbortedError, TimeoutError)):
-            return
-        super().handle_error(request, client_address)
-
-
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
@@ -673,7 +658,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = QuietHTTPServer((self.listen_host, 0), self._handler)
+        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):
