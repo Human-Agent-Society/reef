@@ -410,3 +410,56 @@ def test_step_progress_is_cleared_by_a_skip_or_a_failed_proposer_and_names_the_s
     assert prepared.metrics["step_record"] == progress.step_record
     recorded.abort_step(prepared)
     assert recorded.step_progress is None
+
+
+@pytest.mark.unit
+def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path) -> None:
+    """Told where Reef answers inference, episodes sample the release the scenario serves through it."""
+    from reef.recipe.base import ServedEndpoint
+
+    config = {
+        "model": {"path": "qwen3-8b"},
+        "evolution": {
+            "propose": "demo_floor:propose",
+            "evaluate": "demo_floor:evaluate",
+            "tasks": ["t"],
+            "binary": str(make_binary(tmp_path)),
+            "on_stale": "reevaluate",
+        },
+    }
+    recipe = CordisRecipe.from_environment({"REEF_UPSTREAM_URL": "http://upstream.test"}, config=config)
+    assert recipe.model_binding().base_url == "http://upstream.test"
+    served = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900/", token="reef-local"))
+    binding = served.model_binding("agent")
+    assert binding.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
+    assert binding.api_key == "reef-local" and binding.model == "qwen3-8b"
+    # A free form name is quoted as the wrapper quotes it: one path segment, whatever it holds.
+    assert (
+        served.model_binding("org/project").base_url == "http://127.0.0.1:8900/reef/scenarios/org%2Fproject/evaluation"
+    )
+    assert served.model_binding().base_url == "http://upstream.test"
+    # A component of a composite names itself, so its candidate's calls leave its own served hooks out.
+    component = recipe.with_served_endpoint(ServedEndpoint("http://127.0.0.1:8900", component="harness"))
+    assert (
+        component.model_binding("agent").base_url
+        == "http://127.0.0.1:8900/reef/scenarios/agent/components/harness/evaluation"
+    )
+    assert served._backend_kwargs("agent")["on_stale"] == "reevaluate"
+    # A scenario with its own model binds through the same route, whether resolved at build or at every step.
+    from reef.inference.model_config import ModelConfig
+    from reef.recipe.cordis import _ScenarioModels
+
+    configured = served.with_model_config(ModelConfig())
+    assert (
+        configured.model_bindings("agent").served.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
+    )
+    assert _ScenarioModels(ModelConfig(), configured, "agent").resolve().served.base_url.endswith("/agent/evaluation")
+    overridden = configured.with_model_config(
+        ModelConfig.from_value({"url": "http://other.test", "model": "other-model", "api_key": "k"})
+    )
+    resolved = overridden.model_bindings("agent").served
+    assert resolved.base_url == "http://127.0.0.1:8900/reef/scenarios/agent/evaluation"
+    assert resolved.model == "other-model" and resolved.api_key == "reef-local"
+    assert overridden.model_bindings().served.base_url == "http://other.test"
+    with pytest.raises(RecipeConfigError, match=r"evolution\.on_stale must be one of"):
+        CordisRecipe.from_environment({}, config={**config, "evolution": {**config["evolution"], "on_stale": "later"}})

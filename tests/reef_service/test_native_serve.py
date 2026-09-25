@@ -1053,6 +1053,9 @@ def test_the_release_client_poll_skips_rows_pending_review() -> None:
     assert _Catalog([]).poll() is None
     assert _Catalog([{"release_id": "r1"}, {"release_id": "r2", "pending": True}]).poll() == "r1"
     assert _Catalog([{"release_id": "r1"}, {"release_id": "r2", "pending": False}]).poll() == "r2"
+    # A rejected or skipped step carries the head's own id and names no new head.
+    assert _Catalog([{"release_id": "r1"}, {"release_id": "r2"}, {"release_id": "r2"}]).poll() == "r2"
+    assert _Catalog([{"release_id": "r1"}, {"release_id": "r1"}, {"release_id": "r2", "pending": True}]).poll() == "r1"
     assert _Catalog([{"release_id": "r1", "pending": True}]).poll() is None
 
 

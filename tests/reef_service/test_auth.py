@@ -8,10 +8,10 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 
-def _make_client(tokens) -> TestClient:
+def _make_client(tokens, evaluation_tokens=None) -> TestClient:
     from reef.service.auth import create_authentication_middleware
 
-    app = web.Application(middlewares=[create_authentication_middleware(tokens)])
+    app = web.Application(middlewares=[create_authentication_middleware(tokens, evaluation_tokens=evaluation_tokens)])
 
     async def _ok(request: web.Request) -> web.Response:
         del request
@@ -26,6 +26,11 @@ def _make_client(tokens) -> TestClient:
     app.router.add_get("/reef/harness/releases", _ok)
     app.router.add_get(r"/reef/harness/releases/{step:\d{1,9}}/records", _ok)
     app.router.add_get("/reef/harness/requests/{record_id}/progress", _ok)
+    app.router.add_post("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", _ok)
+    app.router.add_post("/reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route:.+}", _ok)
+    app.router.add_get("/reef/scenarios/{scenario}/evaluation/v1/{route:.+}", _ok)
+    app.router.add_post("/v1/chat/completions", _ok)
+    app.router.add_post("/reef/scenarios/{scenario}/rollback", _ok)
     return TestClient(TestServer(app))
 
 
@@ -36,6 +41,53 @@ def test_scheme_is_case_insensitive() -> None:
             for scheme in ("Bearer", "bearer", "BEARER", "BeArEr"):
                 resp = await client.get("/protected", headers={"Authorization": f"{scheme} secret"})
                 assert resp.status == 200, scheme
+
+    asyncio.run(run())
+
+
+def test_the_anthropic_dialect_presents_the_token_in_its_own_header() -> None:
+    """An evaluation episode or proposer bound through the Anthropic dialect sends x-api-key, not Bearer."""
+
+    async def run() -> None:
+        client = _make_client("secret")
+        async with client:
+            resp = await client.get("/protected", headers={"x-api-key": "secret"})
+            assert resp.status == 200
+            resp = await client.get("/protected", headers={"x-api-key": "wrong"})
+            assert resp.status == 401
+            # The Bearer header is judged when both are present.
+            resp = await client.get("/protected", headers={"Authorization": "Bearer wrong", "x-api-key": "secret"})
+            assert resp.status == 401
+
+    asyncio.run(run())
+
+
+def test_an_evaluation_token_opens_the_evaluation_routes_alone() -> None:
+    """The token a recipe's evaluation calls carry runs candidate code: it samples the served release through the
+    evaluation routes, in either header, and every other route refuses it."""
+
+    async def run() -> None:
+        client = _make_client("secret", evaluation_tokens="episode")
+        async with client:
+            for path in (
+                "/reef/scenarios/agent/evaluation/v1/chat/completions",
+                "/reef/scenarios/team%2Fagent/evaluation/v1/messages",
+                "/reef/scenarios/agent/components/harness/evaluation/v1/responses",
+            ):
+                resp = await client.post(path, headers={"Authorization": "Bearer episode"})
+                assert resp.status == 200, path
+                resp = await client.post(path, headers={"x-api-key": "episode"})
+                assert resp.status == 200, path
+                resp = await client.post(path, headers={"Authorization": "Bearer secret"})
+                assert resp.status == 200, path
+            for method, path in (
+                ("GET", "/protected"),
+                ("GET", "/reef/scenarios/agent/evaluation/v1/chat/completions"),
+                ("POST", "/v1/chat/completions"),
+                ("POST", "/reef/scenarios/agent/rollback"),
+            ):
+                resp = await client.request(method, path, headers={"Authorization": "Bearer episode"})
+                assert resp.status == 401, (method, path)
 
     asyncio.run(run())
 

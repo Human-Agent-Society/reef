@@ -62,7 +62,7 @@ from reef.harness.tree.nodes import (
 from reef.harness.tree.render import render_composition
 from reef.runtime.executor import Executor, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import CandidateBackend, PreparedStep
+from reef.train.backend import STALE_RESULT_POLICIES, CandidateBackend, PreparedStep, StaleResultPolicy
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
@@ -237,6 +237,8 @@ class HarnessCandidate(UpdateCandidate):
 
 #: Characters kept per text in the step record; a longer text ends in a clip marker.
 RECORD_TEXT_CAP = 20_000
+#: The record file of an attempt directory that re-evaluated a kept candidate; it names the first attempt.
+RECORD_REEVALUATION_FILE = "reevaluation.json"
 #: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
 RECORD_PROPOSER_FILE = "proposer.json"
 RECORD_MUTATIONS_FILE = "mutations.json"
@@ -720,6 +722,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_executor: EpisodeExecutor | None = None,
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
+        on_stale: StaleResultPolicy = "merge",
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
@@ -772,6 +775,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         Executor.get_class(self._worker_selection.settings.backend)
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
+        if on_stale not in STALE_RESULT_POLICIES:
+            raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
+        self.on_stale = on_stale
+        # Proposals a settlement already filed; a step evaluated again settles once.
+        self.settled_proposals: set[str] = set()
         self._forbid_residue = forbid_residue
         self._max_steps = max_steps
         self._max_failure_streak = max_failure_streak
@@ -812,6 +820,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._step_progress: StepProgress | None = None
         # The running step's calls, whose activity the progress reports; replaced by the next step's.
         self._step_calls: _StepCalls | None = None
+        self.step_request_id: str | None = None
         if self._step_record_dir is not None:
             try:
                 self._step_record_dir.mkdir(parents=True, exist_ok=True)
@@ -865,6 +874,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     @property
     def descriptor(self) -> AdapterDescriptor:
         return self._descriptor
+
+    @property
+    def harness_node_paths(self) -> Mapping[str, str] | None:
+        return self._descriptor.node_paths
 
     def admit(
         self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
@@ -1087,8 +1100,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["step_record"] = str(step_dir)
         # From here the step is under way for the request page; the proposer runs next.
         self._step_calls = None
+        self.step_request_id = None if batch.request is None else batch.request.id
         self._step_progress = StepProgress(
-            request_id=None if batch.request is None else batch.request.id,
+            request_id=self.step_request_id,
             phase="proposing",
             started_at=time.time(),
             step_record=None if step_dir is None else str(step_dir),
@@ -1397,8 +1411,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["mutations"] = [_mutation_record(mutation) for mutation in candidate.mutations]
 
         if candidate.proposal_id is not None and self.proposals is not None:
+            # Filed on every settlement: a candidate evaluated again after a stale refusal files its latest decision.
             selection_result = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
             self.proposals.settle(candidate.proposal_id, selection_result)
+            self.settled_proposals.add(candidate.proposal_id)
 
         if decision.selected:
             entries = [dict(entry) for entry in candidate.candidate_entries]
@@ -1423,6 +1439,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._loader.root.update([copy.deepcopy(entry) for entry in entries])
         return TrainStepResult({**state, "entries": entries}, metrics)
 
+    @property
+    def stale_result_policy(self) -> StaleResultPolicy:
+        """Episodes compare candidate and current under one set of weights, so a result survives a weights change
+        as the recipe's ``on_stale`` says: merged by default."""
+        return self.on_stale
+
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Discard this backend's render source after its commit is durable."""
         artifact = self._rendered_publications.pop(int(state["steps"]), None)
@@ -1430,6 +1452,31 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             artifact.discard()
         # The tree follows the durable state, whatever settlement or a subclass left in it.
         self._loader.root.update([copy.deepcopy(entry) for entry in state["entries"]])
+        # The step is over: no earlier settlement can be aborted any more.
+        self.settled_proposals.clear()
+
+    def prepare_reevaluation(self, prepared: PreparedStep) -> PreparedStep:
+        """The kept candidate with a fresh attempt directory for its episodes, shown as evaluating again.
+
+        The proposer files stay with the first attempt; the new directory
+        names it in ``reevaluation.json`` and receives the episodes.
+        """
+        candidate = self._candidate_from(prepared)
+        metrics = dict(prepared.metrics)
+        step_dir = None
+        if candidate.record_dir is not None:
+            step_dir = self._claim_step_dir(int(prepared.state["steps"]))
+            self._current_step_record = step_dir
+            metrics["step_record"] = str(step_dir)
+            self._write_record(step_dir, RECORD_REEVALUATION_FILE, {"first_attempt": str(candidate.record_dir)})
+        self._step_calls = None
+        self._step_progress = StepProgress(
+            request_id=self.step_request_id,
+            phase="evaluating",
+            started_at=time.time(),
+            step_record=None if step_dir is None else str(step_dir),
+        )
+        return replace(prepared, candidate=replace(candidate, record_dir=step_dir), metrics=metrics)
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self._step_progress = None
@@ -1442,9 +1489,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             **{key: prepared.metrics[key] for key in ("proposal_notes",) if key in prepared.metrics},
         }
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
-        if candidate.proposal_id is not None and self.proposals is not None:
-            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
+        if (
+            candidate.proposal_id is not None
+            and self.proposals is not None
+            and candidate.proposal_id not in self.settled_proposals
+        ):
+            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own. A
+            # proposal an earlier evaluation settled keeps that decision when its second evaluation fails.
             self.proposals.refuse(candidate.proposal_id, "step aborted before a result")
+        self.settled_proposals.clear()
 
     @classmethod
     def _candidate_from(cls, prepared: PreparedStep) -> HarnessCandidate:

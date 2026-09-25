@@ -38,8 +38,14 @@ def _digest(token: str) -> bytes:
 #: The harness pages a person opens by a link: the only routes that read a credential from the query string.
 PAGE_ROUTES = re.compile(r"^/reef/harness/(requests/[^/]+|releases/\d{1,9})/page$")
 
+#: The routes a recipe's own evaluation calls reach, matched on the raw path so an escaped scenario name stays one
+#: segment: the only routes an evaluation token opens.
+EVALUATION_ROUTES = re.compile(r"^/reef/scenarios/[^/]+(/components/[^/]+)?/evaluation/v1/.+$")
 
-def create_authentication_middleware(tokens: str | Iterable[str] | None):
+
+def create_authentication_middleware(
+    tokens: str | Iterable[str] | None, *, evaluation_tokens: str | Iterable[str] | None = None
+):
     """Bearer-token authentication against the accepted token set.
 
     The token is the service boundary: whoever presents an accepted token is
@@ -59,15 +65,23 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
     carry it. ``?token=`` still opens them too; that token sits in the URL,
     in the browser's history and in whatever logs request lines. Every other
     route, and any request that carries the header, is judged by the header
-    alone.
+    alone. A request with no Authorization header may present the token in
+    ``x-api-key`` instead, the header the Anthropic dialect's clients send.
+
+    ``evaluation_tokens`` open the evaluation routes (``EVALUATION_ROUTES``)
+    only, on POST. The service hands one to the recipe for its evaluation
+    episodes and proposer, which run candidate code: that code can sample the
+    served release, and nothing else of the service. With no ``tokens``,
+    authentication is off and these tokens change nothing.
     """
 
     # Compare digests in constant time so the response time leaks nothing
     # about how much of a token matched, and keep no plaintext tokens around.
     accepted = tuple(_digest(token) for token in normalize_tokens(tokens))
+    evaluation_accepted = tuple(_digest(token) for token in normalize_tokens(evaluation_tokens))
 
     def _presented(request: web.Request) -> str | None:
-        """The credential to judge: the Bearer header's, else ``?token=`` on a page route a browser opens."""
+        """The credential to judge: the Bearer header's, else the Anthropic dialect's ``x-api-key``, else ``?token=`` on a page route a browser opens."""
         authorization = request.headers.get("Authorization")
         if isinstance(authorization, str):
             # The auth-scheme is case-insensitive per RFC 9110 §11.1; only the
@@ -76,6 +90,11 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
             if not separator or scheme.lower() != "bearer" or not credential:
                 return None
             return credential
+        api_key = request.headers.get("x-api-key")
+        if isinstance(api_key, str) and api_key:
+            # A client speaking the Anthropic dialect (an evaluation episode, a
+            # proposer bound to this service) presents its key in this header.
+            return api_key
         if request.method == "GET" and PAGE_ROUTES.match(request.path):
             return request.query.get("token") or None
         return None
@@ -108,6 +127,9 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
         matched = False
         for digest in accepted:
             matched |= secrets.compare_digest(presented, digest)
+        if request.method == "POST" and EVALUATION_ROUTES.match(request.rel_url.raw_path):
+            for digest in evaluation_accepted:
+                matched |= secrets.compare_digest(presented, digest)
         return matched
 
     @web.middleware
@@ -121,4 +143,4 @@ def create_authentication_middleware(tokens: str | Iterable[str] | None):
     return authenticate
 
 
-__all__ = ["PAGE_ROUTES", "create_authentication_middleware", "normalize_tokens"]
+__all__ = ["EVALUATION_ROUTES", "PAGE_ROUTES", "create_authentication_middleware", "normalize_tokens"]
