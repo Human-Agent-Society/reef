@@ -37,8 +37,8 @@ cleanup_whitelist = (
 )
 
 _SKILLS = "pi-agent/skills/"
-_SETTINGS = "pi-agent/settings.json"
-_MODELS = "pi-agent/models.json"
+SETTINGS_PATH = "pi-agent/settings.json"
+MODELS_PATH = "pi-agent/models.json"
 
 #: The provider Reef's binding writes and its keys, among them its credential, and the settings that select it.
 BINDING_PROVIDER = "reef"
@@ -75,7 +75,7 @@ def check_model_route(settings: dict[str, Any], models: dict[str, Any]) -> None:
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     """Keep every model call on the binding, and give every skill the frontmatter pi requires when its text has none."""
-    check_model_route(json.loads(files[_SETTINGS]), json.loads(files[_MODELS]))
+    check_model_route(json.loads(files[SETTINGS_PATH]), json.loads(files[MODELS_PATH]))
     for path, text in list(files.items()):
         if path.startswith(_SKILLS) and path.endswith("/SKILL.md"):
             files[path] = _with_frontmatter(path, text)

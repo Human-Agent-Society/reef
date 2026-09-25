@@ -49,14 +49,14 @@ def golden_tree(adapter: str) -> dict[str, str]:
     return {path.relative_to(root).as_posix(): path.read_text() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
-def _pi_nodes():
+def pi_binding_nodes():
     # pi keeps every model call on the binding, so the provider and model choice in NODES are swapped for a setting.
     nodes = [node for node in NODES if node[0] != "config"]
     return [("config", {"data": {"defaultThinkingLevel": "off"}}), *nodes]
 
 
 def test_pi_render_matches_the_golden_tree() -> None:
-    assert render_composition(_pi_nodes(), get_adapter("pi")) == golden_tree("pi")
+    assert render_composition(pi_binding_nodes(), get_adapter("pi")) == golden_tree("pi")
 
 
 def test_opencode_render_matches_the_golden_tree() -> None:
