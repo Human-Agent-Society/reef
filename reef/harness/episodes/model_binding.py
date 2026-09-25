@@ -11,9 +11,11 @@ judge) are declared in the recipe config and resolved the same way.
 under test - what the HTTP service proxies to and what evaluation episodes
 run against - and the named ones are the method's own. Methods call
 :meth:`ModelBinding.chat`; the evolution backend renders
-:meth:`ModelBinding.compose_nodes` into each evaluation episode. Neither path
-goes through the HTTP service, so none of this traffic becomes a scenario
-record.
+:meth:`ModelBinding.compose_nodes` into each evaluation episode. A served
+binding points at this Reef's own evaluation route for the scenario when the
+service is known, so an episode samples the release the scenario serves;
+such calls are served without being recorded, so none of this traffic
+becomes a scenario record either way.
 """
 
 from __future__ import annotations
@@ -239,6 +241,10 @@ class ModelBinding:
         """
         return getattr(self, "_last_response", None)
 
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """A line for the step's activity, where the caller runs inside a step that shows one (the request
+        page's Activity); a plain binding keeps none."""
+
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """POST one request in the binding's native dialect and return the
         response object: Chat Completions for ``openai``, Responses for
@@ -309,10 +315,17 @@ class ModelBinding:
 
         templates = descriptor.model_binding.get(self.api)
         if not templates:
-            known = ", ".join(sorted(descriptor.model_binding)) or "none"
+            declared = sorted(descriptor.model_binding)
+            known = ", ".join(declared) or "none"
+            # The dialect is the upstream's: reef serve takes it as --inference.upstream-api.
+            hint = (
+                f": serve with --inference.upstream-api {declared[0]} on an upstream that speaks it"
+                if declared
+                else ""
+            )
             raise ModelBindingError(
                 f"adapter {descriptor.name!r} declares no model_binding for the {self.api!r} api "
-                f"(declared: {known}); episodes cannot reach a model"
+                f"(declared: {known}); episodes cannot reach a model{hint}"
             )
         values: dict[str, Any] = {
             "base_url": self.base_url,
@@ -362,10 +375,10 @@ class ModelBindings(Mapping[str, ModelBinding]):
 
 
 class ModelBindingsResolver(ABC):
-    """Freeze the model configuration once for an entire evolution step."""
+    """Freeze the model configuration once for an entire evolution step, for the scenario named."""
 
     @abstractmethod
-    def resolve(self) -> ModelBindings: ...
+    def resolve(self, scenario: str | None = None) -> ModelBindings: ...
 
 
 def _mentions_model(value: Any) -> bool:

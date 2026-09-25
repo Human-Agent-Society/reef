@@ -388,7 +388,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         assert prepared.payload is not None
         payload = {
             **prepared.payload,
-            "rollout_id": scenario_step,
+            "scenario_step": scenario_step,
             "reward": trajectory_reward(sample),
             "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
@@ -400,14 +400,14 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         )
 
     def train_candidate(self, payload):
-        rollout_id = payload["rollout_id"]
-        existing = self.completed.get(rollout_id)
+        scenario_step = payload["scenario_step"]
+        existing = self.completed.get(scenario_step)
         if existing is not None:
             return existing
         if payload["expected_runtime_load_id"] != self._served_version:
             raise StaleCandidate
         self.jobs.append(dict(payload))
-        job_id = f"job-{rollout_id}"
+        job_id = f"job-{scenario_step}"
         checkpoint = self.checkpoint_root / job_id
         checkpoint.mkdir(parents=True)
         result = ModelCandidate(
@@ -419,7 +419,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
             # rollout metrics here; the shapes are asserted in test_sao_bridge.
             training_metrics={"sao/critic_updates": 2, "sao/actor_trained": 1},
         )
-        self.completed[rollout_id] = result
+        self.completed[scenario_step] = result
         return result
 
     def activate_candidate(self, candidate):
@@ -463,7 +463,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
 
         assert len(runtime.jobs) == 1
         job = runtime.jobs[0]
-        assert job["rollout_id"] == 0
+        assert job["scenario_step"] == 0
         assert job["loss"] == "sao"
         # SAO defers advantages to the critic in the backend; reef ships none.
         assert "advantages" not in job

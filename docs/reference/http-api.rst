@@ -7,6 +7,9 @@ at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
+The service accepts request bodies up to 64 MiB so coding agents can send
+large contexts. Record import routes retain their 1 MiB limit.
+
 For a complete request, receipt, and feedback example, start with the
 `inference and feedback quickstart <../getting-started/quickstart.rst>`__.
 To put the release routes into practice, follow the `agent harness tutorial
@@ -21,75 +24,88 @@ To put the release routes into practice, follow the `agent harness tutorial
 Routes
 ------
 
-+--------------------------------------------------------+---------------------------------------------------+
-| Route                                                  | Response                                          |
-+========================================================+===================================================+
-| ``GET /healthz``                                       | readiness; the only unauthenticated route         |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/chat/completions``                          | OpenAI-format inference                           |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/responses``                                 | OpenAI Responses-format inference                 |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/messages``                                  | Anthropic-format inference                        |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/messages/count_tokens``                     | count request tokens; recorded like any inference |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/images``, ``/v1/embeddings``,               | multimodal call, relayed by the recipe to its     |
-| ``/v1/audio/speech``, ``/v1/decisions``                | gateway; not recorded, 501 when it offers none    |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/records``                                 | import one existing inference or report           |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/records/batch``                           | atomically import a batch of records              |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/report``                                  | submit feedback about one or more receipts        |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/train``                                   | enqueue one training instruction                  |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                                | every known scenario and current release          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios``                               | create a scenario explicitly                      |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``             | update the scenario training mode                 |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/contract``            | what this scenario accepts                        |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/records``             | retained record metadata                          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/commits``             | paginated committed metadata                      |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/records/{record_id}`` | one retained record and its trace payload         |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/releases``            | ``{scenario, releases}``, newest first            |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/rollback``           | republish an earlier release as the head          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/promote``            | serve a release held for review                   |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``                  | remove a scenario; its state is archived          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness``                                  | the served harness tree                           |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases``                         | the harness release catalog, oldest first         |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, design, what |
-|                                                        | changed, review, result, setup, chain             |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/requests/{record_id}/page``        | one HTML page per filed harness request: its      |
-|                                                        | step's state, then the result; reloads itself     |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/requests/{record_id}/progress``    | the same reading as JSON: the step's phase, for a |
-|                                                        | client with no browser to open the page           |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/records``          | retained raw step file inventory or file body     |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/harness/proposals``                       | an agent's proposed tree change, admitted or not  |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/install``                          | a shell script that installs the tree             |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/adapters``                         | every harness adapter this process resolves       |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/status``                                   | training, serving, and storage state              |
-+--------------------------------------------------------+---------------------------------------------------+
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| Route                                                                            | Response                                          |
++==================================================================================+===================================================+
+| ``GET /healthz``                                                                 | readiness; the only unauthenticated route         |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/chat/completions``                                                    | OpenAI-format inference                           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/responses``                                                           | OpenAI Responses-format inference                 |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/messages``                                                            | Anthropic-format inference                        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/messages/count_tokens``                                               | count request tokens; recorded like any inference |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
+|                                                                                  | the named scenario and kept by nobody: what a     |
+|                                                                                  | recipe's evaluation episodes call; a flat         |
+|                                                                                  | release's request hooks stay out, since the       |
+|                                                                                  | episode runs a candidate of it. It serves a       |
+|                                                                                  | scenario loaded in this process and never creates |
+|                                                                                  | one: 404 for a scenario deleted under its episode |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
+|                                                                                  | composed release: every other component's hooks   |
+|                                                                                  | run (weights, request defaults), the named one's  |
+|                                                                                  | stay out; 404 for a component it does not serve   |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/images``, ``/v1/embeddings``,                                         | multimodal call, relayed by the recipe to its     |
+| ``/v1/audio/speech``, ``/v1/decisions``                                          | gateway; not recorded, 501 when it offers none    |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records``                                                           | import one existing inference or report           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records/batch``                                                     | atomically import a batch of records              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/report``                                                            | submit feedback about one or more receipts        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/train``                                                             | enqueue one training instruction                  |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios``                                                          | every known scenario and current release          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/update``                                       | update the scenario training mode                 |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/contract``                                      | what this scenario accepts                        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/records``                                       | retained record metadata                          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/commits``                                       | paginated committed metadata                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/records/{record_id}``                           | one retained record and its trace payload         |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/releases``                                      | ``{scenario, releases}``, newest first            |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/rollback``                                     | republish an earlier release as the head          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/promote``                                      | serve a release held for review                   |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness``                                                            | the served harness tree                           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases``                                                   | the harness release catalog, oldest first         |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases/{step}/page``                                       | one HTML page per catalog step: why, design, what |
+|                                                                                  | changed, review, result, setup, chain             |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/requests/{record_id}/page``                                  | one HTML page per filed harness request: its      |
+|                                                                                  | step's state, then the result; reloads itself     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/requests/{record_id}/progress``                              | the same reading as JSON: the step's phase, for a |
+|                                                                                  | client with no browser to open the page           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases/{step}/records``                                    | retained raw step file inventory or file body     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/harness/proposals``                                                 | an agent's proposed tree change, admitted or not  |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/install``                                                    | a shell script that installs the tree             |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/adapters``                                                   | every harness adapter this process resolves       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/status``                                                             | training, serving, and storage state              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 
 Headers
 -------
@@ -102,7 +118,9 @@ Headers
 |                                   | workload a record belongs to.                           |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
-|                                   | configured.                                             |
+|                                   | configured; with no Authorization header, ``x-api-key`` |
+|                                   | carries the token. The evaluation routes also accept    |
+|                                   | the token the service issues the recipe at startup.     |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-release-id``             | optional: bind a new scenario to this starting release; |
 |                                   | on an existing scenario it must name the bound starting |
@@ -311,7 +329,9 @@ to them; with none queued the step batches as ``auto`` does.
      -H "Content-Type: application/json" \
      -d '{"agent_record_id":"change-001","text":"Add a skill that runs tests before answering", "session":"session-1", "release_id":"release-1"}'
 
-The response is ``{agent_record_id, scenario, request_type: "train"}``.
+The response is ``{agent_record_id, scenario, request_type: "train"}``,
+plus ``page_path``, the request's page with the query a browser opens it by
+(see Request page).
 HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
 do not change a step already in flight. A step that fails with an
@@ -430,7 +450,15 @@ log move under ``<agent_record_dir>/archived/``, the recipe's own directories
 scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every release it published stays reachable. The
 base artifact, the shared head and releases other scenarios may fork from
-stay where they are. A step in flight for the scenario ends without a commit.
+stay where they are. A local step in flight for the scenario ends without a
+commit. While a weight training job of the scenario is out at its backend the
+request answers 409: the job could neither commit nor be acknowledged without
+its scenario, and its marker would keep inference admission closed for every
+scenario on the runtime. Retry once the job has committed or been rejected.
+The job's marker names the scenario that owns it, so deleting any other
+scenario goes through, a registration left by a create the runtime refused
+included: deleting that one and restarting lets the owner bind again and
+finish its job.
 Only a local artifact repository can be archived; a remote one answers 501.
 
 For a scenario that trains weights the deletion is Reef-side: the training
@@ -514,7 +542,16 @@ carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves when
 the response is written, so a head that moves during the call shows on the
 next one. A resident ``reef-native serve`` process compares it with the
 release it mounted and learns of a new head on its next model call, with no
-extra request. A weight serving scenario sends no such header.
+extra request. A weight serving scenario sends no such header, and neither
+does the evaluation route, whose caller runs a candidate and follows no head.
+
+A composite recipe's evaluation calls come through these routes; a recipe of
+one component calls its runtime's endpoint directly, as before composites.
+The evaluation calls do not present a service token. When auth is configured,
+the service issues a random token at startup that opens the evaluation routes
+alone, and hands it to the recipe: the episodes and proposer run candidate
+code, which can then sample the served release but reach no other route. A
+restart issues a new one.
 
 Response
 ~~~~~~~~
@@ -643,11 +680,14 @@ Harness artifacts
 | Route                          | Response                                                      |
 +================================+===============================================================+
 | ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files,          |
-|                                | evaluation, requires}``, plus an ``x-reef-release-id``        |
-|                                | response header                                               |
+|                                | evaluation, requires}``, plus ``components`` (each component  |
+|                                | name to its content id) when the release binds several, and   |
+|                                | an ``x-reef-release-id`` response header                      |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
-|                                | carrying the evaluation metrics of the publishing step        |
+|                                | carrying the evaluation metrics of the publishing step and    |
+|                                | ``page_path``, its step's page with the query a browser opens |
+|                                | it by                                                         |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
 |                                | binary, writes the tree, and writes the adapter's model       |
@@ -821,7 +861,24 @@ install routes keep serving the previous head, and ``?release_id=`` can pull
 the pending tree for a trial install. ``POST /reef/scenarios/{scenario}/promote``
 with ``{"release_id": "..."}`` serves it by the same republish path as
 rollback, so the promotion is itself a commit record with
-``operation: promote`` and the promoted tree becomes a new release.
+``operation: promote`` and the promoted tree becomes a new release. In a
+scenario with several components the promote publishes the held release's
+changed component on the combination served now, and it is listed as a
+harness release only when the tree changed.
+
+In a scenario with several components, ``GET /reef/harness/releases``, the
+release pages and ``GET /reef/harness`` speak of the releases that changed the
+pulled tree: another component's step, or a rollback or promote that restored
+other weights under the same tree, is not listed and is no new head. In the
+rows listed, ``parent_release_id`` names the previous listed release, the one
+the tree descends from, and ``composed_parent_release_id`` the release the
+combination was published on; a rejected or skipped step, which published
+nothing, is named by the listed release it ran on (``composed_release_id``
+keeps the combination served then); and a rollback or promote whose target
+is not listed names the listed release that target carried
+(``composed_rollback_target_release_id`` keeps the target). Every release
+stays addressable by id through ``?release_id=`` on the manifest and install
+routes.
 
 Version page
 ~~~~~~~~~~~~
@@ -949,7 +1006,7 @@ step holds this request, ``started_at``, ``episodes_total``,
 empty otherwise) from the backend's progress. The phase is what the pi
 extension's spinner names while the step runs, and opening the spinner lists
 the latest four activity lines. Unlike the two pages this is
-an ordinary route: it reads the headers alone, and a ``?token=`` is HTTP
+an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
 401. An unknown id, or one that is not a training instruction, is HTTP 404
 naming it.
 
@@ -962,18 +1019,28 @@ phase ``evaluating``. Reviews and settled proposals store their outcome under
 for existing clients.
 
 Both pages are links a person opens in a browser, which sends no header, so
-they also take the scenario and the token as query parameters,
-``?scenario=<name>&token=<token>``, in place of ``x-reef-scenario`` and
+they also take the scenario and a credential as query parameters,
+``?scenario=<name>&key=<page key>``, in place of ``x-reef-scenario`` and
 ``Authorization: Bearer``; a header wins when present, and each page's links
-to the other carry the parameters it was opened with.
-The token then sits in the URL, in the browser's history and in whatever
-logs request lines, so a deployment that hands out such links is a local
-one. Every other route reads the headers alone; a ``?token=`` elsewhere is
-HTTP 401.
+to the other carry the parameters it was opened with. Clients never build
+these links: ``POST /reef/train`` answers ``page_path`` for the request's
+page and ``GET /reef/harness/releases`` one per row for its step's page,
+and a client prints its service URL followed by that path. The path's query
+holds the page key when the request presented a service token (an
+evaluation token gets none, and with authentication off the query names
+the scenario alone). The key opens these two pages of that one scenario and
+no other route, a request whose ``x-reef-scenario`` header names another
+scenario is HTTP 401, and the token cannot be read back from it (the
+service derives it as an HMAC SHA-256 of the scenario keyed by the token's
+digest). The links ``reef-<adapter>`` and pi's extension print carry it,
+since a session's model reads them and a session's traffic is captured.
+The token itself is never read from a query: ``?token=`` is HTTP 401 on
+every route, the pages included. Every other route reads the headers alone;
+a ``?key=`` elsewhere is HTTP 401.
 
 .. code:: text
 
-   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&token=<token>
+   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&key=<page key>
 
 Retained step files
 ~~~~~~~~~~~~~~~~~~~
@@ -1030,11 +1097,27 @@ an update is being trained or published.
          "inference_admission": {"...": "..."}
        }
      },
-     "serving": {"...": "..."}
+     "serving": {"...": "..."},
+     "training_job": {"status": "CHECKPOINT", "training_job_id": "9c41...", "owner": "hello-reef"}
    }
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
-failures. ``batch_ready`` says whether the processor has a batch waiting.
+failures. ``training_job`` is the weight job the training runtime holds out:
+its marker ``status``, its ``training_job_id`` and its ``owner``, the scenario
+a delete refuses (see Deleting a scenario). It is ``null`` when no job is out
+or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
+not be read. ``batch_ready`` says whether the processor has a batch waiting.
+A scenario whose recipe runs one trainer per release component adds a
+``components`` object: for each component, its own ``batch_ready``,
+``training_mode``, ``processor`` status, ``last_committed_step`` (with
+the ``base_release_id`` that step was prepared against), and
+``stale_refusals_total``, how many of its results were refused because
+another trainer's commit had replaced their base since this process
+started. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
+``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
+trainer that made it, and ``base_release_id``, the release its batch was
+reserved against; a scenario of one trainer, and rows written before Reef
+named components, carry neither.
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
@@ -1057,8 +1140,9 @@ Status codes
 |        | scenario-scoped route, or a report violating the recipe's   |
 |        | declared schema                                             |
 +--------+-------------------------------------------------------------+
-| 401    | missing or wrong bearer token; the two harness pages also   |
-|        | read ``?token=`` (see Request page)                         |
+| 401    | missing or wrong bearer token, or ``x-api-key`` when no     |
+|        | Authorization header is sent; the two harness pages also    |
+|        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
 | 403    | relayed from the upstream provider. Reef issues none of its |
 |        | own: an unaccepted token is 401, and per-scenario           |
