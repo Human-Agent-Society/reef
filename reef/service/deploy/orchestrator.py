@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shlex
 import signal
 import sys
 import tempfile
@@ -359,7 +360,10 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
 
     Printed when the stack is up so nobody copies it from a README: the
     address the service listens on (loopback when it binds every interface),
-    the adapter the deployment evolves, and the token the config holds."""
+    the adapter the deployment evolves, and the token the config holds, in
+    curl's header to fetch the script and in the script's environment, where
+    the binding it writes takes it from: a line run in a shell without
+    ``REEF_TOKEN`` would install a harness every call of which answers 401."""
     evolution = config.get("evolution")
     adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
     if not isinstance(adapter, str) or not adapter:
@@ -374,7 +378,8 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
         if isinstance(tokens, list) and tokens:
             token = str(tokens[0])
     header = f"-H 'Authorization: Bearer {token}' " if token else ""
-    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash"
+    runner = f"REEF_TOKEN={shlex.quote(str(token))} bash" if token else "bash"
+    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | {runner}"
 
 
 def _component_selection(

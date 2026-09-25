@@ -768,6 +768,116 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
 
 
 @pytest.mark.unit
+def test_the_binding_that_holds_the_token_is_readable_by_its_owner_alone(tmp_path) -> None:
+    """The token is a credential: the binding file that holds it is mode 600 on a first install and on a rerun over
+    a file an earlier install left readable, while a composition file keeps the ordinary mode."""
+    binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
+    bound = render_composition(
+        [("rules", {"text": "old rules"}), *binding.compose_nodes(get_adapter("pi"))], get_adapter("pi")
+    )
+    binding_files = {"pi-agent/models.json": bound["pi-agent/models.json"]}
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", binding_files=binding_files
+    )
+    models = dest / "pi-agent/models.json"
+    for attempt in range(2):
+        result = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-123"})
+        assert result.returncode == 0, result.stderr
+        assert "tok-123" in models.read_text(encoding="utf-8")
+        assert models.stat().st_mode & 0o777 == 0o600, attempt
+        models.chmod(0o644)  # as an install from before this change left it
+    assert (dest / "pi-agent/AGENTS.md").stat().st_mode & 0o077 != 0
+
+
+#: The bundled adapters whose descriptor declares an install section: the ones GET /reef/harness/install serves.
+INSTALLABLE_ADAPTERS = tuple(
+    name for name in reef.harness.adapters.BUILTIN_ADAPTERS if get_adapter(name).install is not None
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("adapter", INSTALLABLE_ADAPTERS)
+def test_a_rerun_of_the_same_release_is_current_when_the_binding_rewrites_a_served_file(
+    tmp_path, adapter: str
+) -> None:
+    """Every installable adapter's binding rewrites served config files on every run (claude settings.json, codex
+    config.toml, dsh .env and cordis.patch.yml, hermes config.yaml, opencode opencode.json, pi settings.json and
+    models.json), so those files never hold the served bytes again: a rerun of the same release still writes no
+    composition file and no release file, and writes the binding again with this run's token; another release is
+    still written."""
+    descriptor = get_adapter(adapter)
+    install = descriptor.install
+    assert install is not None
+    nodes = [("rules", {"text": "rules\n"})]
+    binding = ModelBinding(
+        base_url="http://reef.test:8901",
+        model="m1",
+        api_key=TOKEN_PLACEHOLDER,
+        api=next(iter(descriptor.model_binding)),
+    )
+    bound_nodes = binding.compose_nodes(descriptor)
+    files = render_composition(nodes, descriptor)
+    bound_files = render_composition([*nodes, *bound_nodes], descriptor)
+    # The binding files as the install route picks them: every config target a binding node writes.
+    targets = sorted(
+        {descriptor.config_targets[str(config.get("target", "primary"))].path for _, config in bound_nodes}
+    )
+    binding_files = {path: bound_files[path] for path in targets}
+    assert all(path in files and files[path] != binding_files[path] for path in targets)
+
+    def render(release_id: str) -> Path:
+        script = tmp_path / f"install-{release_id}.sh"
+        script.write_text(
+            render_install_script(
+                descriptor=descriptor,
+                files=files,
+                release_id=release_id,
+                content_id=f"content-{release_id}",
+                binding_files=binding_files,
+            )
+        )
+        return script
+
+    # The pinned binary is in place, so the vendor install never runs; a git install also records its pin.
+    prefix = tmp_path / "prefix"
+    _write_executable(prefix / install.binary_path, f"#!/bin/sh\necho {install.version}\n")
+    if install.kind == "git":
+        (prefix / ".reef-install-pin").write_text(f"{install.repository}@{install.ref}\n")
+    env = _source_env(tmp_path / "shim", tmp_path / "home")
+    dest = tmp_path / "dest"
+    script = render("v1")
+    first = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-1"})
+    assert first.returncode == 0, first.stderr
+    assert "already installed" in first.stdout
+    assert "writing the harness tree" in first.stdout
+    # Read-only bits make any write of a composition file or the release file a hard fail.
+    unbound = [dest / relative for relative in sorted(files) if relative not in binding_files]
+    assert unbound
+    for path in (*unbound, dest / HARNESS_RELEASE_FILE):
+        path.chmod(0o444)
+    before = {path: path.stat().st_mtime_ns for path in (*unbound, dest / HARNESS_RELEASE_FILE)}
+    second = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert second.returncode == 0, second.stderr
+    assert "composition already current" in second.stdout
+    assert {path: path.stat().st_mtime_ns for path in before} == before
+    for path in targets:
+        assert (dest / path).read_text(encoding="utf-8") == binding_files[path].replace(TOKEN_PLACEHOLDER, "tok-2")
+    for path in before:
+        path.chmod(0o644)
+    # A changed file the binding leaves alone is still caught, and so is another release of the same files.
+    changed = unbound[-1]
+    changed.write_text("changed\n", encoding="utf-8")
+    third = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert third.returncode == 0, third.stderr
+    assert "writing the harness tree" in third.stdout
+    assert changed.read_text(encoding="utf-8") == files[changed.relative_to(dest).as_posix()]
+    fourth = _run_install(render("v2"), dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert fourth.returncode == 0, fourth.stderr
+    assert "writing the harness tree" in fourth.stdout
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))["release_id"] == "v2"
+
+
+@pytest.mark.unit
 def test_install_script_golden_structure() -> None:
     """The full script for a one-file composition, byte for byte.
 
@@ -947,7 +1057,7 @@ compose_stream() {
 mkdir -p "$DEST"
 mkdir -p "$DEST/pi-agent"
 
-# A rerun on a current machine writes nothing at all, not even the release file.
+# A rerun of the same release on a current tree writes nothing here, not even the release file.
 current=""
 current_release_checksum=""
 if [ -f "$DEST/.reef-harness-release" ] && [ -f "$DEST/pi-agent/AGENTS.md" ]; then

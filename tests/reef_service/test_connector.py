@@ -7,6 +7,8 @@ import signal
 import socket
 import sys
 import uuid
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -444,6 +446,112 @@ def test_background_cli_stops_restarts_without_pairing_and_exits_on_revocation(t
                 os.kill(int((tmp_path / "connector.pid").read_text()), signal.SIGTERM)
                 await wait_for_running(False)
             state.close()
+
+    asyncio.run(run())
+
+
+def foreground_platform(polled: asyncio.Event, on_approval: Callable[[], object] = lambda: None) -> web.Application:
+    """A platform that approves the pairing at once and answers polls; it also answers as the Reef the connector checks."""
+
+    async def handler(request):
+        if request.path == "/api/connector/pair":
+            if request.method == "POST":
+                return web.json_response(
+                    {
+                        "device_token": "foreground-test-token",
+                        "user_code": "ABCD-EF12-3456",
+                        "verification_uri": str(request.url.with_path("/local/authorize")),
+                        "expires_in": 60,
+                    }
+                )
+            on_approval()
+            return web.json_response({"status": "approved", "runtime_id": "runtime-id"})
+        if request.path == "/api/connector/poll":
+            polled.set()
+            return web.json_response({"protocol": 1, "command": None})
+        if request.path == "/reef/scenarios":
+            return web.json_response({"scenarios": [{"scenario": "original"}]})
+        return web.json_response({"scenarios": {"original": {"training_mode": "manual"}}})
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", handler)
+    return app
+
+
+async def foreground_connect(tmp_path: Path, platform_url: str) -> asyncio.subprocess.Process:
+    """``reef connect --foreground`` against ``platform_url``, which also stands in for the Reef."""
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "reef.cli",
+        "connect",
+        "--no-browser",
+        "--foreground",
+        "--name",
+        "workstation",
+        "--platform",
+        platform_url,
+        "--url",
+        platform_url,
+        "--state-dir",
+        str(tmp_path),
+        cwd=Path(__file__).resolve().parents[2],
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process lifecycle")
+def test_foreground_cli_says_it_connected_once_the_pairing_is_approved(tmp_path):
+    """The foreground connector prints the line the background one prints, while it keeps running."""
+
+    async def run():
+        polled = asyncio.Event()
+        async with TestServer(foreground_platform(polled)) as server:
+            platform_url = str(server.make_url("")).rstrip("/")
+            process = await foreground_connect(tmp_path, platform_url)
+            try:
+                lines = []
+                while not lines or not lines[-1].startswith("Connected"):
+                    line = await asyncio.wait_for(process.stdout.readline(), 15)
+                    assert line, "the connector exited before it said it connected"
+                    lines.append(line.decode().rstrip("\n"))
+                assert lines[-1] == f"Connected workstation. Open {platform_url}/local"
+                # The connector is running: it polls after it said so, and stops cleanly on SIGTERM.
+                await asyncio.wait_for(polled.wait(), 15)
+                assert process.returncode is None
+            finally:
+                if process.returncode is None:
+                    process.send_signal(signal.SIGTERM)
+                _, stderr = await asyncio.wait_for(process.communicate(), 15)
+        assert process.returncode == 0, stderr.decode()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process lifecycle")
+def test_foreground_cli_never_says_connected_when_another_connector_took_the_lock(tmp_path):
+    """A connector that started while this one waited for approval holds the lock: this one says so and exits
+    without the Connected line, since it never runs."""
+
+    async def run():
+        polled = asyncio.Event()
+        other = ConnectorState(tmp_path)
+        held = ExitStack()
+        try:
+            # The other connector takes the lock after this one's start check, while the pairing waits.
+            platform = foreground_platform(polled, on_approval=lambda: held.enter_context(other.lock()))
+            async with TestServer(platform) as server:
+                process = await foreground_connect(tmp_path, str(server.make_url("")).rstrip("/"))
+                stdout, stderr = await asyncio.wait_for(process.communicate(), 15)
+        finally:
+            held.close()
+            other.close()
+        assert process.returncode == 1
+        assert "Device code: ABCD-EF12-3456" in stdout.decode()
+        assert "Connected" not in stdout.decode()
+        assert "reef connect: A connector is already running for this instance" in stderr.decode()
+        assert not polled.is_set()
 
     asyncio.run(run())
 
