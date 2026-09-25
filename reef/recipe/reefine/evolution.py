@@ -19,14 +19,14 @@ import os
 import re
 import time
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.harness_facts import harness_facts
-from reef.harness.episodes.model_binding import ModelBindings
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, ships_requests
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import final_assistant_text
@@ -542,106 +542,154 @@ def _answer_request(
     prompt = _request_prompt(nodes, request, samples, models, entries, adapter)
     kinds = request_kinds(adapter)
     own = [dict(item) for item in request.get("requires") or () if isinstance(item, Mapping)]
-    kept: tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | None = None
-    undelivered: StepProposal | None = None
-    unusable: _Unusable | None = None
-    # Why each answer that could not be used was dropped, so the page says what the kept one replaced.
-    dropped_attempts: list[str] = []
-    # The last review's findings stay in every later retry: an unusable answer after it does not erase them.
-    reviewed = ""
+    answers = RequestAnswers()
     retry = ""
     attempt = 0
-    kept_attempt = 0
-    declined: StepProposal | None = None
     while attempt < REQUEST_ATTEMPTS:
         attempt += 1
         asked = prompt if not retry else prompt.rstrip("\n") + "\n\n" + retry
         answer = _answer_once(asked, request, models, nodes, entries, own, kinds, adapter)
-        if isinstance(answer, _Unusable):
-            # A slip in the answer's form is asked again while attempts remain.
-            unusable = answer
-            why = answer.reason if not answer.dropped else f"{answer.reason}: {'; '.join(answer.dropped)}"
-            dropped_attempts.append(f"answer {attempt}: {why}")
-            if attempt < REQUEST_ATTEMPTS:
-                # The request page shows it while the step runs, not only once the step settles.
-                models.served.note("check", f"answer {attempt} written again: {why}", failed=True)
-            retry = reviewed + RETRY_UNUSABLE_SECTION.format(reason=why)
-            if answer.entries is not None:
-                retry += RETRY_EARLIER_ANSWER.format(design=answer.design or "(none written)", entries=answer.entries)
-            continue
-        if isinstance(answer, DeclinedAnswer):
-            declined = answer.proposal
-            review = declined.notes.get("review")
-            if review is not None and review["uncovered"] and attempt < REQUEST_ATTEMPTS and kept is None:
-                # The review found points an entry could deliver: the design gave up early, so it is asked again.
-                reviewed = RETRY_SECTION.format(
-                    design=declined.notes.get("design", "(none written)"),
-                    findings="\n".join(f"- {point}" for point in review["uncovered"]),
-                    delivered="",
-                )
-                retry = reviewed
-                continue
-            if kept is None:
-                notes = declined.notes if attempt == 1 else {**declined.notes, "attempts": attempt}
-                return _with_dropped(StepProposal((), notes), dropped_attempts)
+        if isinstance(answer, UnusableAnswer):
+            retry = answers.take_unusable(answer, attempt, models.served)
+        elif isinstance(answer, DeclinedAnswer):
+            retry = answers.take_declined(answer, attempt)
+        elif isinstance(answer, StepProposal):
+            # A failed call or an empty reply ends the loop.
+            answers.failed = answer
+            retry = ""
+        else:
+            retry = answers.take_written(answer, attempt)
+        if not retry:
             break
-        if isinstance(answer, StepProposal):
-            # A failed call or an empty reply ends the loop; an earlier answer that delivers still stands, and an
-            # earlier substitute says more about the request than the failed call does.
-            if kept is None:
-                if undelivered is not None:
-                    return _with_dropped(undelivered, dropped_attempts)
-                notes = answer.notes if attempt == 1 else {**answer.notes, "attempts": attempt}
-                return _with_dropped(StepProposal((), notes), dropped_attempts)
-            break
-        mutations, added, notes = answer
-        review = notes.get("review")
-        if review is not None and review.get("delivers") is False:
-            reason = review["uncovered"][0] if review["uncovered"] else "the entries only imitate the behavior"
-            undelivered = StepProposal(
-                (), {**notes, "failure": f"the change does not deliver the request: {reason}", "attempts": attempt}
-            )
-        elif kept is None or _uncovered_count(notes) < _uncovered_count(kept[2]):
-            kept = (mutations, added, notes)
-            kept_attempt = attempt
-        if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
-            break
-        if review.get("limits") and not review["uncovered"] and review.get("delivers") is not False:
-            # What remains is what the harness notes say no answer here can deliver: another answer changes nothing.
-            break
-        findings = [*review["uncovered"], *notes.get("dropped", ())]
-        reviewed = RETRY_SECTION.format(
-            design=notes.get("design", "(none written)"),
-            findings="\n".join(f"- {point}" for point in findings) or "- (the review named no point)",
-            delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
-        )
-        retry = reviewed
-    if kept is None:
-        if declined is not None:
-            return _with_dropped(StepProposal((), {**declined.notes, "attempts": attempt}), dropped_attempts)
-        if undelivered is not None:
-            return _with_dropped(undelivered, dropped_attempts)
-        # Every answer was unusable: the last one's reason, with its design when it wrote one.
-        notes = {"failure": "no answer was written" if unusable is None else unusable.reason, "attempts": attempt}
-        if unusable is not None and unusable.design is not None:
-            notes = {"design": _kept_design(unusable.design), **notes}
-        return _with_dropped(StepProposal((), notes), dropped_attempts)
-    mutations, added, notes = kept
+    written = answers.kept
+    if written is None:
+        return answers.unanswered(attempt)
+    notes = written.notes
     if attempt > 1:
         notes["attempts"] = attempt
-        if kept_attempt != attempt:
+        if answers.kept_attempt != attempt:
             # An earlier answer covered more than the later ones: the pages say which one the step kept.
-            notes["kept_attempt"] = kept_attempt
-    if dropped_attempts:
-        notes["dropped_attempts"] = dropped_attempts
+            notes["kept_attempt"] = answers.kept_attempt
+    if answers.dropped_attempts:
+        notes["dropped_attempts"] = answers.dropped_attempts
     # The mapping is the backend's dict; a read only mapping (a test's, say) just keeps the items out.
-    if added and isinstance(request, dict):
-        request["requires"] = [*own, *added]
-    return StepProposal(tuple(mutations), notes)
+    if written.added and isinstance(request, dict):
+        request["requires"] = [*own, *written.added]
+    return StepProposal(tuple(written.mutations), notes)
 
 
 @dataclass(frozen=True)
-class _Unusable:
+class WrittenAnswer:
+    """An answer whose entries the harness admits: its mutations, the requires items the reply added and the notes
+    the step records (the design, the review, what was refused or undeclared)."""
+
+    mutations: list[Mutation]
+    added: list[dict[str, Any]]
+    notes: dict[str, Any]
+
+
+@dataclass
+class RequestAnswers:
+    """What the answers to one request have left so far, and the retry section each one asks for next.
+
+    ``kept`` is the delivering answer with the fewest uncovered points and
+    ``kept_attempt`` the answer it was; ``undelivered`` the last answer whose
+    review found it only put a substitute in the behavior's place;
+    ``declined`` the last design that said no entry can deliver the request;
+    ``unusable`` the last answer that could not be used and ``failed`` the
+    call that ended the loop. ``dropped_attempts`` says why each unusable
+    answer was dropped, so the page says what the kept one replaced, and
+    ``reviewed`` holds the last review's findings, which stay in every later
+    retry: an unusable answer after it does not erase them."""
+
+    kept: WrittenAnswer | None = None
+    kept_attempt: int = 0
+    undelivered: StepProposal | None = None
+    declined: StepProposal | None = None
+    unusable: UnusableAnswer | None = None
+    failed: StepProposal | None = None
+    dropped_attempts: list[str] = field(default_factory=list)
+    reviewed: str = ""
+
+    def take_unusable(self, answer: UnusableAnswer, attempt: int, served: ModelBinding) -> str:
+        """A slip in the answer's form: the retry that names it, asked while attempts remain."""
+        self.unusable = answer
+        why = answer.reason if not answer.dropped else f"{answer.reason}: {'; '.join(answer.dropped)}"
+        self.dropped_attempts.append(f"answer {attempt}: {why}")
+        if attempt < REQUEST_ATTEMPTS:
+            # The request page shows it while the step runs, not only once the step settles.
+            served.note("check", f"answer {attempt} written again: {why}", failed=True)
+        retry = self.reviewed + RETRY_UNUSABLE_SECTION.format(reason=why)
+        if answer.entries is not None:
+            retry += RETRY_EARLIER_ANSWER.format(design=answer.design or "(none written)", entries=answer.entries)
+        return retry
+
+    def take_declined(self, answer: DeclinedAnswer, attempt: int) -> str:
+        """A design with no entry: asked again when its review found points an entry could deliver and nothing
+        is kept yet (the design gave up early); otherwise the loop ends."""
+        self.declined = answer.proposal
+        review = self.declined.notes.get("review")
+        if review is None or not review["uncovered"] or attempt >= REQUEST_ATTEMPTS or self.kept is not None:
+            return ""
+        self.reviewed = RETRY_SECTION.format(
+            design=self.declined.notes.get("design", "(none written)"),
+            findings="\n".join(f"- {point}" for point in review["uncovered"]),
+            delivered="",
+        )
+        return self.reviewed
+
+    def take_written(self, answer: WrittenAnswer, attempt: int) -> str:
+        """An answer with entries: kept when it delivers with fewer uncovered points than the one kept, and the
+        retry its review asks for; empty once the review finds nothing another answer could close."""
+        review = answer.notes.get("review")
+        if review is not None and review.get("delivers") is False:
+            reason = review["uncovered"][0] if review["uncovered"] else "the entries only imitate the behavior"
+            self.undelivered = StepProposal(
+                (),
+                {**answer.notes, "failure": f"the change does not deliver the request: {reason}", "attempts": attempt},
+            )
+        elif self.kept is None or _uncovered_count(answer.notes) < _uncovered_count(self.kept.notes):
+            self.kept = answer
+            self.kept_attempt = attempt
+        if review is None or (review["result"] == "complete" and review.get("delivers") is not False):
+            return ""
+        if review.get("limits") and not review["uncovered"] and review.get("delivers") is not False:
+            # What remains is what the harness notes say no answer here can deliver: another answer changes nothing.
+            return ""
+        findings = [*review["uncovered"], *answer.notes.get("dropped", ())]
+        self.reviewed = RETRY_SECTION.format(
+            design=answer.notes.get("design", "(none written)"),
+            findings="\n".join(f"- {point}" for point in findings) or "- (the review named no point)",
+            delivered="" if review.get("delivers") is not False else RETRY_UNDELIVERED,
+        )
+        return self.reviewed
+
+    def unanswered(self, attempt: int) -> StepProposal:
+        """The step's proposal when no answer was kept, with the reasons earlier answers were dropped. After a
+        failed call an earlier substitute says more about the request than the failure does; otherwise a design
+        that declined, then a substitute, then the last unusable answer's reason with its design."""
+        if self.failed is not None:
+            proposal = self.undelivered or self.failed
+        elif self.declined is not None:
+            proposal = self.declined
+        elif self.undelivered is not None:
+            proposal = self.undelivered
+        else:
+            failure = "no answer was written" if self.unusable is None else self.unusable.reason
+            design = None if self.unusable is None else self.unusable.design
+            proposal = StepProposal(
+                (), {**({} if design is None else {"design": _kept_design(design)}), "failure": failure}
+            )
+        notes = dict(proposal.notes)
+        if attempt > 1 and proposal is not self.undelivered:
+            notes["attempts"] = attempt
+        if self.dropped_attempts:
+            notes["dropped_attempts"] = list(self.dropped_attempts)
+        return StepProposal(proposal.mutations, notes)
+
+
+@dataclass(frozen=True)
+class UnusableAnswer:
     """An answer the loop may ask again: why it could not be used, the design it carried and, when its entries
     parsed and something refused them, those entries in short, for the retry to start from; ``dropped`` names why
     the parser dropped each entry, for the retry alone (the step's failure keeps the reason)."""
@@ -669,9 +717,9 @@ def _answer_once(
     own: Sequence[Mapping[str, Any]],
     kinds: Sequence[str] = tuple(REQUEST_KINDS),
     adapter: str = EXTENSION_ADAPTER,
-) -> tuple[list[Mutation], list[dict[str, Any]], dict[str, Any]] | StepProposal | _Unusable | DeclinedAnswer:
+) -> WrittenAnswer | StepProposal | UnusableAnswer | DeclinedAnswer:
     """One answer and its review: the mutations, the requires items the reply added and the notes; an
-    ``_Unusable`` the loop asks again (JSON that does not parse, every entry dropped, entries the harness's
+    ``UnusableAnswer`` the loop asks again (JSON that does not parse, every entry dropped, entries the harness's
     admission refuses); a ``DeclinedAnswer`` design that says no entry can deliver the request; or a proposal without
     mutations whose notes say why there is nothing to apply (a failed call, a provider refusal)."""
     # An extension is longer than a skill, and a thinking model reasons for tens of thousands of tokens before
@@ -692,32 +740,36 @@ def _answer_once(
         if refusal is not None:
             return _nothing_to_apply(reply, f"the provider refused the reply ({refusal})")
         if slipped is not None:
-            return _Unusable(slipped, design)
+            return UnusableAnswer(slipped, design)
         if reply.strip() and not _items_in(reply):
             # No JSON at all: a slip, asked again.
-            return _Unusable("the reply holds no usable entry", design)
+            return UnusableAnswer("the reply holds no usable entry", design)
         dropped = _dropped_entries(reply, kinds, request_config_keys(adapter))
         if dropped:
             # Entries the parser dropped, one and all: an answer to write again, never a design that declined.
-            return _Unusable("the reply holds no usable entry", design, dropped=tuple(dropped))
+            return UnusableAnswer("the reply holds no usable entry", design, dropped=tuple(dropped))
         if design is not None and adapter != EXTENSION_ADAPTER and harness_facts(adapter) is not None:
             return declined_answer(models, request, design, own, adapter)
         return _nothing_to_apply(reply, "the reply holds no usable entry")
     mutations = _request_mutations(_without_reefs_own(proposals), nodes, entries)
     if not mutations:
-        return _Unusable("every entry in the reply was dropped: a reserved id, or an id another kind holds", design)
+        return UnusableAnswer(
+            "every entry in the reply was dropped: a reserved id, or an id another kind holds", design
+        )
     written = entries_in_short(mutations)
     if entries:
         # The admission the step meets next, run here so a refused entry is written again instead of losing the step.
         _, refusal = admit_mutations(entries, mutations, get_adapter(adapter))
         if refusal is not None:
-            return _Unusable(f"the harness refused the entries: {refusal}", design, written)
+            return UnusableAnswer(f"the harness refused the entries: {refusal}", design, written)
     unrestricted = _unrestricted_agents(mutations, nodes, entries)
     if unrestricted:
-        return _Unusable("; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design, written)
+        return UnusableAnswer(
+            "; ".join(UNRESTRICTED_AGENT.format(name=name) for name in unrestricted), design, written
+        )
     widened = _widened_permissions(mutations) if adapter == "claude" else []
     if widened:
-        return _Unusable("; ".join(widened), design, written)
+        return UnusableAnswer("; ".join(widened), design, written)
     added, refused = _parse_requires(reply)
     notes: dict[str, Any] = {}
     if design is not None:
@@ -738,7 +790,7 @@ def _answer_once(
     undeclared = _undeclared_env(mutations, [*own, *added])
     if undeclared:
         notes["undeclared_env"] = undeclared
-    return mutations, added, notes
+    return WrittenAnswer(mutations, added, notes)
 
 
 def declined_answer(
@@ -839,13 +891,6 @@ def _widened_permissions(mutations: Sequence[Mutation]) -> list[str]:
             if not (isinstance(rule, str) and (rule in CLAUDE_PREAPPROVED or CLAUDE_FETCH_DOMAIN.fullmatch(rule)))
         )
     return reasons
-
-
-def _with_dropped(proposal: StepProposal, dropped_attempts: Sequence[str]) -> StepProposal:
-    """``proposal`` with the reasons earlier answers were dropped in its notes, when any were."""
-    if not dropped_attempts:
-        return proposal
-    return StepProposal(proposal.mutations, {**proposal.notes, "dropped_attempts": list(dropped_attempts)})
 
 
 def _uncovered_count(notes: Mapping[str, Any]) -> int:
