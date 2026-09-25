@@ -30,7 +30,7 @@ _CONFIG = "hermes/config.yaml"
 _MARKER = "hermes/.no-bundled-skills"
 _PLUGINS = "hermes/plugins/"
 _SKILL_ROOTS = ("hermes/skills/", "hermes-commands/")
-_SOUL = "hermes/SOUL.md"
+SOUL_PATH = "hermes/SOUL.md"
 #: The identity hermes writes to SOUL.md on first run when the file is absent (DEFAULT_SOUL_MD in
 #: hermes_cli/default_soul.py of the pinned v2026.8.31; the real hermes smoke checks it against the install).
 DEFAULT_IDENTITY = (
@@ -89,10 +89,10 @@ def _granted(config: dict[str, Any], plugins: list[str]) -> dict[str, Any]:
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     config = json.loads(files[_CONFIG])
-    soul = files.get(_SOUL)
+    soul = files.get(SOUL_PATH)
     if soul is not None and not soul.startswith(DEFAULT_IDENTITY):
         # A rules entry adds to the agent's identity; written alone, it would be all of it.
-        files[_SOUL] = f"{DEFAULT_IDENTITY}\n\n{soul}"
+        files[SOUL_PATH] = f"{DEFAULT_IDENTITY}\n\n{soul}"
     if (config.get("approval") or {}).get("tirith_enabled") is not False:
         raise RenderError("hermes composition must keep approval.tirith_enabled false for benchmark episodes")
     if ((config.get("auxiliary") or {}).get("title_generation") or {}).get("enabled") is not False:
