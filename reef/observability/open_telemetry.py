@@ -157,6 +157,8 @@ class OpenTelemetryRecordObserver(RecordObserver):
         }
         if commit.training_job_id is not None:
             attributes["reef.training_job_id"] = commit.training_job_id
+        if commit.component is not None:
+            attributes["reef.component"] = commit.component
         if commit.rollback_target_release_id is not None:
             attributes["reef.rollback_target_release_id"] = commit.rollback_target_release_id
         for key, value in (commit.metrics or {}).items():
@@ -181,6 +183,8 @@ class OpenTelemetryRecordObserver(RecordObserver):
         }
         if commit.training_job_id is not None:
             consumed_attributes["reef.training_job_id"] = commit.training_job_id
+        if commit.component is not None:
+            consumed_attributes["reef.component"] = commit.component
         for agent_record_id in sorted(commit.consumed_ids):
             self._emit(
                 f"trained in step {commit.step}",

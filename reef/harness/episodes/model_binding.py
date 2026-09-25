@@ -11,9 +11,11 @@ judge) are declared in the recipe config and resolved the same way.
 under test - what the HTTP service proxies to and what evaluation episodes
 run against - and the named ones are the method's own. Methods call
 :meth:`ModelBinding.chat`; the evolution backend renders
-:meth:`ModelBinding.compose_nodes` into each evaluation episode. Neither path
-goes through the HTTP service, so none of this traffic becomes a scenario
-record.
+:meth:`ModelBinding.compose_nodes` into each evaluation episode. A served
+binding points at this Reef's own evaluation route for the scenario when the
+service is known, so an episode samples the release the scenario serves;
+such calls are served without being recorded, so none of this traffic
+becomes a scenario record either way.
 """
 
 from __future__ import annotations
@@ -362,10 +364,10 @@ class ModelBindings(Mapping[str, ModelBinding]):
 
 
 class ModelBindingsResolver(ABC):
-    """Freeze the model configuration once for an entire evolution step."""
+    """Freeze the model configuration once for an entire evolution step, for the scenario named."""
 
     @abstractmethod
-    def resolve(self) -> ModelBindings: ...
+    def resolve(self, scenario: str | None = None) -> ModelBindings: ...
 
 
 def _mentions_model(value: Any) -> bool:

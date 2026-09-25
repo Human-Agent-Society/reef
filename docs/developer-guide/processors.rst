@@ -38,7 +38,12 @@ The processor controls its in-memory buffers. ``releasable_record_ids()``
 returns completed records with no remaining buffered dependents, and
 ``release_records(ids)`` frees their memory after a successful commit. New commits retain the stored bodies; consumption progress prevents
 retraining on restart. Storage can independently evict any body under capacity
-pressure, with warnings and durable loss totals. A batch the backend dropped as stale is
+pressure, with warnings and durable loss totals. In a scenario with one trainer
+per component, every trainer reads the same rows and keeps its own consumption,
+so a row one processor releases is still stored for the others. When the
+scenario admits a wider report contract than a processor's own,
+``admit_reports_of(report_type)`` names it, and the processor releases a report
+shaped for another component instead of failing it. A batch the backend dropped as stale is
 announced through ``dropped()`` before its acknowledgement, for a processor
 that paces work on what actually trained.
 Nothing numeric lives here. Advantages and the loss family are the step
