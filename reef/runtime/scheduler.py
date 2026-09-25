@@ -919,6 +919,7 @@ class TrainingCoordinator:
         with self._operation_lock:
             publication = self._publication.publish(training_job_id)
             marker = publication.marker
+            self._training.commit_training_candidate(training_job_id)
             if publication.published:
                 self._record_completed_step(marker)
             return marker_result(marker)
@@ -935,6 +936,7 @@ class TrainingCoordinator:
         """Finish a checkpointed job without changing the serving weights."""
         with self._operation_lock:
             marker = self._publication.reject(training_job_id)
+            self._training.reject_training_candidate(training_job_id)
             self._context.next_rollout_id = max(self._context.next_rollout_id, int(marker["rollout_id"]) + 1)
 
     def acknowledge_training_commit(self, training_job_id: str) -> None:

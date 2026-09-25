@@ -154,6 +154,12 @@ class SlimeTrainGroup:
             for rank in range(self._world_size)
         ]
 
+    def set_adaptive_kl_beta(self, beta: float):
+        """Set the reward-side reference-KL coefficient for the next batch."""
+        return self.executor.collective_rpc(
+            "set_adaptive_kl_beta", args=(float(beta),), timeout=TRAIN_RPC_TIMEOUT_S
+        )
+
     def save_model(self, rollout_id, force_sync=False):
         result = self.executor.collective_rpc(
             "save_model", args=(rollout_id,), kwargs={"force_sync": force_sync}, timeout=TRAIN_RPC_TIMEOUT_S
@@ -386,6 +392,12 @@ def prepare_critic_args(args: SlimeArguments) -> SlimeArguments:
         critic_args.megatron_lora_alpha = None
         critic_args.megatron_lora_target_modules = None
         critic_args.custom_model_provider_path = critic_args.reef_chained_model_provider_path
+    # Reference-policy KL is computed by the actor after the critic returns
+    # values. The critic path calls the shared advantage helper before that
+    # actor pass, so a non-zero coefficient would index a ref_log_probs field
+    # that does not exist yet.
+    critic_args.kl_coef = 0.0
+    critic_args.adaptive_kl_mode = "off"
     apply_critic_checkpoint_roots(critic_args)
     return critic_args
 
@@ -440,7 +452,11 @@ def create_train_groups(
         num_gpus_per_node=args.actor_num_gpus_per_node,
         pg=placement_groups["actor"],
         num_gpus_per_actor=0.4,
-        with_ref=actor_args.kl_coef != 0 or actor_args.use_kl_loss,
+        with_ref=(
+            actor_args.kl_coef != 0
+            or actor_args.use_kl_loss
+            or getattr(actor_args, "adaptive_kl_mode", "off") != "off"
+        ),
         with_opd_teacher=actor_args.use_opd and actor_args.opd_type == "megatron",
         actor_cls=actor_cls,
     )

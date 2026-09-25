@@ -61,3 +61,17 @@ class SlimeArguments(Namespace):
     reef_chained_megatron_init_path: str | None = None
     reef_chained_critic_args_hook_path: str | None = None
     reef_chained_model_provider_path: str | None = None
+    adaptive_kl_mode: str
+    adaptive_kl_controller: str
+    adaptive_kl_target: float
+    adaptive_kl_initial_beta: float | None
+    adaptive_kl_min_beta: float
+    adaptive_kl_max_beta: float
+    adaptive_kl_adaptation_rate: float
+    adaptive_kl_ema_decay: float
+    adaptive_kl_max_update_ratio: float
+    adaptive_kl_horizon: int
+    adaptive_kl_error_clip: float
+    adaptive_kl_cooldown_steps: int
+    adaptive_kl_spike_threshold: float | None
+    adaptive_kl_reference_policy_id: str | None

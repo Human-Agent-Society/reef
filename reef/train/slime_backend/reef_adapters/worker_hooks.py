@@ -89,6 +89,7 @@ def initialize_megatron_objective(args) -> None:
     _install_external_batch_keys(args)
     _install_step_batch_size()
     _install_metric_capture()
+    _install_adaptive_kl_telemetry(args)
     _install_rollout_logging()
     _install_critic_metrics(args)
     _install_critic_hf_bootstrap(args)
@@ -149,6 +150,33 @@ def _install_metric_capture() -> None:
     marked_log: Any = log
     marked_log._reef_metric_capture = True
     logging_utils.log = log
+
+
+def _install_adaptive_kl_telemetry(args) -> None:
+    """Observe Slime raw reference-policy ``rollout_data["kl"]``.
+
+    Slime commit ``045310b2`` (PR #2114) keeps this tensor unscaled while
+    constructing PPO reward-shaping rewards. Reef records it after the
+    advantage pass, so telemetry must not consume a beta-scaled reward tensor
+    as if it were raw KL.
+    """
+    if getattr(args, "adaptive_kl_mode", "off") == "off":
+        return
+
+    from slime.backends.megatron_utils import actor
+
+    current = actor.compute_advantages_and_returns
+    if getattr(current, "_reef_adaptive_kl_telemetry", False):
+        return
+
+    def compute_advantages_and_returns(slime_args, rollout_data):
+        result = current(slime_args, rollout_data)
+        _record_adaptive_kl_observation(rollout_data)
+        return result
+
+    marked: Any = compute_advantages_and_returns
+    marked._reef_adaptive_kl_telemetry = True
+    actor.compute_advantages_and_returns = marked
 
 
 def _install_rollout_logging() -> None:
@@ -370,3 +398,67 @@ def configure_critic_objective(args) -> None:
     spec = _loss_family_spec(args)
     if spec is not None:
         spec.configure_critic_args(args)
+
+
+def _record_adaptive_kl_observation(rollout_data) -> None:
+    """Reduce masked reference KL once over the data-parallel-with-CP group."""
+    import torch
+    import torch.distributed as dist
+    from megatron.core import mpu
+
+    kl_values = rollout_data.get("kl")
+    loss_masks = rollout_data.get("loss_masks")
+    if not kl_values or not loss_masks:
+        return
+    if len(kl_values) != len(loss_masks):
+        raise ValueError("adaptive KL telemetry requires one loss mask per KL tensor")
+
+    first = kl_values[0]
+    device = first.device
+    local_sum = torch.zeros((), dtype=torch.float64, device=device)
+    local_valid = torch.zeros((), dtype=torch.float64, device=device)
+    local_total = torch.zeros((), dtype=torch.float64, device=device)
+    local_sequence_sum = torch.zeros((), dtype=torch.float64, device=device)
+    local_sequence_count = torch.zeros((), dtype=torch.float64, device=device)
+    local_finite = True
+    for kl, mask in zip(kl_values, loss_masks, strict=True):
+        if kl.shape != mask.shape:
+            raise ValueError(f"adaptive KL and loss-mask shapes differ: {kl.shape} != {mask.shape}")
+        mask_float = mask.to(dtype=torch.float32)
+        valid = mask_float > 0
+        local_total += float(mask.numel())
+        local_valid += mask_float.sum(dtype=torch.float64)
+        valid_kl = kl.float()[valid]
+        if not bool(torch.isfinite(valid_kl).all().item()):
+            local_finite = False
+        local_sum += (kl.float() * mask_float).sum(dtype=torch.float64)
+        valid_tokens = mask_float.sum(dtype=torch.float64)
+        if valid_tokens.item() > 0:
+            # VERL computes a masked mean per response and then averages
+            # responses. Keep this separate from Reef's historical global
+            # token-weighted mean so the existing controller is unchanged.
+            local_sequence_sum += (kl.float() * mask_float).sum(dtype=torch.float64) / valid_tokens
+            local_sequence_count += 1
+
+    stats = torch.stack((local_sum, local_valid, local_total, local_sequence_sum, local_sequence_count))
+    dist.all_reduce(
+        stats,
+        op=dist.ReduceOp.SUM,
+        group=mpu.get_data_parallel_group(with_context_parallel=True),
+    )
+    if dist.get_rank() != mpu.get_data_parallel_src_rank(with_context_parallel=True):
+        return
+
+    metrics = {
+        "adaptive_kl/finite_observed": float(local_finite and bool(torch.isfinite(stats).all().item())),
+        "adaptive_kl/valid_token_count": float(stats[1].item()),
+        "adaptive_kl/valid_token_fraction": (
+            float((stats[1] / stats[2]).item()) if stats[2].item() > 0 else 0.0
+        ),
+        "adaptive_kl/n_steps": float(stats[4].item()),
+    }
+    if metrics["adaptive_kl/finite_observed"] and stats[1].item() > 0:
+        metrics["adaptive_kl/observed_kl"] = float((stats[0] / stats[1]).item())
+    if metrics["adaptive_kl/finite_observed"] and stats[4].item() > 0:
+        metrics["adaptive_kl/verl_observed_kl"] = float((stats[3] / stats[4]).item())
+    record_worker_metrics(metrics)

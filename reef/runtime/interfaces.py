@@ -799,6 +799,14 @@ class TrainingBackend(ABC):
         """
         return None
 
+    def commit_training_candidate(self, training_job_id: str) -> None:
+        """Finalize backend-local state after a durable training candidate is selected."""
+        return
+
+    def reject_training_candidate(self, training_job_id: str) -> None:
+        """Roll back backend-local state before a durable candidate is rejected."""
+        return
+
     @abstractmethod
     def close(self) -> None: ...
 
