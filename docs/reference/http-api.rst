@@ -7,6 +7,9 @@ at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
+The service accepts request bodies up to 64 MiB so coding agents can send
+large contexts. Record import routes retain their 1 MiB limit.
+
 For a complete request, receipt, and feedback example, start with the
 `inference and feedback quickstart <../getting-started/quickstart.rst>`__.
 To put the release routes into practice, follow the `agent harness tutorial
