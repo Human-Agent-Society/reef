@@ -153,3 +153,30 @@ also completed two OLMo-3-7B-Instruct updates on four H100s with the complete
 validation took 510.7 seconds. Its final avg@16 was 0.24970. There was no
 untrained evaluation in this short qualification, so it does not measure an
 accuracy improvement or reproduce the paper's 1h/5h results.
+
+## Chemistry reference result, seed 42
+
+The [completed reference result](results/2026-09-24/author-reference-chemistry-seed42.json)
+records the pinned author's OLMo-3-7B-Instruct implementation on four H100 80GB
+GPUs. Both methods completed a five-hour pure-training budget with an initial
+210×16 evaluation and further evaluations every five steps.
+
+| Method | Initial avg@16 | Best within 1h | Best within 5h |
+| --- | ---: | ---: | ---: |
+| SDPO, minibatch 32, LR 1e-5 | 24.49% | 65.57% | 77.41% |
+| Default GRPO, minibatch 8, LR 1e-6 | 23.63% | 39.94% | 58.36% |
+
+The five-hour difference is 19.05 percentage points for this seed and these
+configurations. This uses the default GRPO comparator, not a matched-learning-rate
+or matched-minibatch ablation. The initial sampled evaluations differ and are
+retained in the record. A single seed does not establish multi-seed uncertainty.
+
+SDPO finished at step 165 after 18201.8 training seconds; GRPO finished at step
+135 after 18255.5 seconds. Both stopped after the first scheduled evaluation
+past the budget. Those last evaluations are excluded from the reported five-hour
+scores. The record retains every evaluation with its cumulative training time,
+sampled token counts, and hashes of the source logs and resolved configurations.
+
+These are author-implementation reference curves, not Reef 7B benchmark curves.
+The H100 hardware and runtime differ from the paper's GH200 setup. Additional
+seeds, ToolAlpaca/Qwen3, and full benchmark training through Reef remain pending.
