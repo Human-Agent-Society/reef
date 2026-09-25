@@ -166,6 +166,27 @@ GPUs. Both methods completed a five-hour pure-training budget with an initial
 | SDPO, minibatch 32, LR 1e-5 | 24.49% | 65.57% | 77.41% |
 | Default GRPO, minibatch 8, LR 1e-6 | 23.63% | 39.94% | 58.36% |
 
+![SDPO and GRPO Chemistry learning curves](results/2026-09-24/chemistry-seed42-learning-curves.png)
+
+The figure plots every recorded test evaluation against cumulative training time,
+without smoothing. Hollow markers fall after the five-hour budget and are excluded
+from the selected peaks. GRPO fluctuates around 57–58% near the end; both methods
+stopped because of the time budget, so these curves do not establish convergence.
+The [SVG figure](results/2026-09-24/chemistry-seed42-learning-curves.svg) preserves
+vector graphics and selectable text. Recreate both formats from the checked-in JSON:
+
+```bash
+uv run --script recipes/sdpo/examples/paper/results/2026-09-24/plot_chemistry.py
+```
+
+The script pins Matplotlib separately from the training environment. The per-rollout
+sampling batch is identical: 32 questions × 8 responses. The minibatch values denote
+question-equivalent batch sizes: SDPO uses 32 (256 responses per optimizer update),
+while default GRPO uses 8 (64 responses per update, four updates per rollout).
+These settings match [Tables 12 and 13 in Appendix E.2](https://arxiv.org/html/2601.20802v1)
+and the pinned author's `sdpo.yaml` / `baseline_grpo.yaml`. The paper also reports
+on-policy GRPO with minibatch 32 and LR 1e-5; that additional comparator has not run.
+
 The five-hour difference is 19.05 percentage points for this seed and these
 configurations. This uses the default GRPO comparator, not a matched-learning-rate
 or matched-minibatch ablation. The initial sampled evaluations differ and are
