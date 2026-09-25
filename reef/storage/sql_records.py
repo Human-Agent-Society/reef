@@ -132,7 +132,7 @@ class SQLRecordRetention:
             scenario = key[-1]
             ids = [row["agent_record_id"] for row in members]
             hashes = tables.consumed
-            present = set(
+            present: set[str] = set(
                 connection.execute(
                     select(hashes.c.agent_record_id).where(
                         *(hashes.c[name] == value for name, value in scope.items()),

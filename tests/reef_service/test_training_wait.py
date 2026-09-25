@@ -61,6 +61,9 @@ def _bind(
     )
     scenario = SimpleNamespace(
         trainer=trainer,
+        component_trainers=(SimpleNamespace(component=None, trainer=trainer),),
+        trainer_for=lambda component: trainer,
+        dispatched_component=None,
         scenario_step=0,
         runtime=runtime,
         training_runtime=runtime,
@@ -68,6 +71,7 @@ def _bind(
     )
     dispatcher._registry = SimpleNamespace(
         training_scenario_name="s",
+        training_scenario_names=("s",),
         training_status_scenario_names=("s",),
         get_optional=lambda name: scenario if name == "s" else None,
         preload_errors=(),
