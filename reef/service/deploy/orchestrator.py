@@ -26,7 +26,6 @@ from typing import Any
 
 import yaml
 
-from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.deployment import RuntimeConfigError
@@ -55,6 +54,7 @@ from reef.service.deploy.deployment_config import (
     normalize_component_config,
     normalize_component_layout,
     reject_null_settings,
+    selected_weight_training,
     translate_layout,
     translate_references,
 )
@@ -428,7 +428,6 @@ def resolve_deployment_config(
     try:
         arguments = component_config_arguments(selected)
         recipe_type = recipe_class_for(config_value(selected, "reef", "recipe") or "recipe")
-        training = recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe)
         if versioned:
             config = normalize_component_layout(config, arguments)
         if versioned or standard:
@@ -444,6 +443,8 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
+        # A component named through ${VAR} is only known once the environment is applied.
+        training = recipe_type is not None and selected_weight_training(recipe_type, config) is not None
         if versioned or standard:
             reject_null_settings(config, arguments)
         if standard:

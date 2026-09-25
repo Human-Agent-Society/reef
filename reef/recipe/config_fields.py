@@ -82,9 +82,20 @@ def resolve_config_field_values(
     config: Mapping[str, Any],
     environ: Mapping[str, str],
 ) -> dict[str, Any]:
-    """Resolve a recipe's data section using the shared typed parser."""
+    """Resolve a recipe's data section using the shared typed parser.
+
+    A key is read in either spelling: a deployment file writes ``groups-per-step``
+    where the field is ``groups_per_step``; a field named in both is refused.
+    """
     if not isinstance(config, Mapping):
         raise RecipeConfigError("recipe data must be an object")
+    folded: dict[str, Any] = {}
+    for key, value in config.items():
+        name = str(key).replace("-", "_")
+        if name in folded:
+            raise RecipeConfigError(f"{recipe_class.__name__} config names the field {name!r} twice")
+        folded[name] = value
+    config = folded
     arguments = config_arguments(recipe_class)
     known = {argument.name for argument in arguments}
     unknown = sorted(set(config) - known, key=str)

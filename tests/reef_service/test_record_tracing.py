@@ -345,6 +345,7 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
         recorded_at=1_700_000_100.0,
         metrics={"loss": 0.5, "selected": True, "label": "ok", "nan": float("nan"), "nested": {"x": 1}},
         training_job_id="job-3",
+        component="harness",
     )
     observer.record_committed(commit)
     observer.close()
@@ -355,6 +356,7 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
     assert step.context.span_id == commit_span_context("math", 3).span_id
     assert step.parent is None
     assert step.attributes["reef.step"] == 3
+    assert step.attributes["reef.component"] == "harness"
     assert step.attributes["reef.release_id"] == "v3"
     assert step.attributes["reef.consumed_record_count"] == 2
     assert "reef.compacted_record_count" not in step.attributes
@@ -373,6 +375,7 @@ def test_committed_step_adds_a_child_span_below_every_consumed_record() -> None:
         assert span.parent.span_id == expected_parent.span_id
         assert [link.context.span_id for link in span.links] == [step.context.span_id]
         assert span.attributes["reef.release_id"] == "v3"
+        assert span.attributes["reef.component"] == "harness"
 
 
 # -- storage observer ---------------------------------------------------------
