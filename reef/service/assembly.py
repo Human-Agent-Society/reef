@@ -23,6 +23,7 @@ from reef.inference.http import InferenceProxyRuntime
 from reef.observability import build_experiment_tracker, build_record_observer
 from reef.recipe import Recipe, WeightTrainingRecipe
 from reef.recipe.base import ServedEndpoint
+from reef.recipe.composite import CompositeRecipe
 from reef.recipe.config_fields import resolve_config_field_values
 from reef.recipe.registry import build_named_recipe, build_recipe, recipe_class_for
 from reef.runtime.deployment import RuntimeConnectionConfig, RuntimeRegistry, runtime_pair
@@ -285,16 +286,22 @@ def build_dispatcher(
 ) -> Dispatcher:
     """Build the dispatcher of a service.
 
-    ``evaluation_token`` is the token the recipe's evaluation calls present:
-    one the app accepts on the evaluation routes alone, since those calls run
-    candidate code. ``None`` sends none.
+    A composite recipe's evaluation calls come back to this service, so a
+    candidate of one component is evaluated against the release the others
+    serve; ``evaluation_token`` is the token they present, one the app accepts
+    on the evaluation routes alone, since those calls run candidate code, and
+    ``hold_local_cycles`` holds its local cycles until the service answers. A
+    recipe of one component calls its runtime's endpoint directly, as it did
+    before composites, and neither applies to it.
     """
     selected_recipe = _require_non_empty(settings.recipe, "reef.recipe")
     env = os.environ if environ is None else environ
     recipe = _serving_recipe(selected_recipe, settings, env, connector)
-    # A recipe's own evaluation calls come back to this Reef, so they sample the release it serves.
-    served_url = settings.served_url or default_served_url(settings.host, settings.port)
-    recipe = recipe.with_served_endpoint(ServedEndpoint(url=served_url, token=evaluation_token))
+    calls_service = isinstance(recipe, CompositeRecipe)
+    if calls_service:
+        # A composite's evaluation calls come back to this Reef, so they sample the release it serves.
+        served_url = settings.served_url or default_served_url(settings.host, settings.port)
+        recipe = recipe.with_served_endpoint(ServedEndpoint(url=served_url, token=evaluation_token))
     experiment_tracker = None
     scenario_storage: ScenarioStorage | None = None
     try:
@@ -333,7 +340,7 @@ def build_dispatcher(
             scenario_storage=scenario_storage,
             allow_implicit_creation=settings.allow_implicit_scenario_creation,
             experiment_tracker=experiment_tracker,
-            hold_local_cycles=hold_local_cycles,
+            hold_local_cycles=hold_local_cycles and calls_service,
         )
     except BaseException:
         if scenario_storage is not None:
@@ -356,7 +363,7 @@ def build_app(settings: ServiceConfig, *, environ: Mapping[str, str] | None = No
         max_s=settings.inference_retry_max_s,
         timeout_s=settings.inference_retry_timeout_s,
     )
-    # A recipe's model calls come back to this service, which answers only once the app listens: its local
+    # A composite's model calls come back to this service, which answers only once the app listens: its local
     # cycles wait for that, so a harness step started by the preload never fails its calls into a skip.
     # Evaluation calls run candidate code, so they get a token of their own that opens the evaluation routes alone,
     # never a service token; a restart issues a new one with the recipe it rebuilds.

@@ -606,7 +606,7 @@ shown above; the repository examples all use version 2.
    reef.recipe | the recipe this deployment serves. Required.
    reef.host | 0.0.0.0 | bind address
    reef.port | 8900 | bind port
-   reef.served_url | | the URL the recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host
+   reef.served_url | | the URL a composite recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
    reef.console_origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.model_path | a local HF model directory or a repo id, downloaded on start

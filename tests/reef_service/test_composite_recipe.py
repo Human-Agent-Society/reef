@@ -893,6 +893,42 @@ class _EndpointTreeRecipe(_TreeRecipe):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("composite", [True, False])
+def test_only_a_composite_evaluates_through_the_service(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, composite: bool
+) -> None:
+    """A composite's evaluation calls come back to the service and hold its local cycles until it answers. A recipe of
+    one component keeps calling its runtime's endpoint directly: it gets no served endpoint and runs at once."""
+    from reef.service import assembly
+    from reef.service.deploy.service_config import ServiceConfig
+
+    flat = _EndpointTreeRecipe(label="harness")
+    recipe = (
+        CompositeRecipe(components={"harness": flat, "tools": _EndpointTreeRecipe(label="tools")})
+        if composite
+        else flat
+    )
+    built: dict[str, Any] = {}
+
+    def dispatcher(recipe: Recipe, *args: Any, **kwargs: Any) -> object:
+        built.update(recipe=recipe, hold=kwargs["hold_local_cycles"])
+        return object()
+
+    monkeypatch.setattr(assembly, "_serving_recipe", lambda *args: recipe)
+    monkeypatch.setattr(assembly, "Dispatcher", dispatcher)
+    monkeypatch.setattr(assembly.GitLFSRepositoryBackend, "factory", lambda *args, **kwargs: lambda name: object())
+    settings = ServiceConfig(recipe="recipe", agent_record_dir=str(tmp_path), port=8900)
+    assembly.build_dispatcher(settings, hold_local_cycles=True, evaluation_token="episode")
+    if composite:
+        assert built["hold"] is True
+        assert built["recipe"].components["harness"].endpoint == ServedEndpoint(
+            "http://127.0.0.1:8900", token="episode", component="harness"
+        )
+    else:
+        assert built["hold"] is False and built["recipe"].endpoint is None
+
+
+@pytest.mark.unit
 def test_a_composite_names_each_component_in_its_served_endpoint(tmp_path: Path) -> None:
     composite = CompositeRecipe(
         components={"harness": _EndpointTreeRecipe(label="harness"), "tools": _EndpointTreeRecipe(label="tools")}

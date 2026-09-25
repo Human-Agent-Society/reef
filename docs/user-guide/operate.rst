@@ -147,9 +147,9 @@ What survives a restart, provided the storage paths are persistent:
    * - a local cycle's batch (a harness step) when the service stops
      - kept: once shutdown begins, a local cycle commits nothing and no
        new one starts, since its model calls go through the stopping
-       service; after the next start the local cycles open once the
-       service answers on its own address, and the rows train then,
-       with no new record needed
+       service; after the next start the local cycles of a composite
+       recipe open once the service answers on its own address, and the
+       rows train then, with no new record needed
 
 After a step commits, ``/reef/status`` reports its scenario's
 ``artifact_head_sync`` with the checkpoint ``release_id`` and any ``error``.

@@ -540,11 +540,13 @@ release it mounted and learns of a new head on its next model call, with no
 extra request. A weight serving scenario sends no such header, and neither
 does the evaluation route, whose caller runs a candidate and follows no head.
 
-The recipe's evaluation calls do not present a service token. When auth is
-configured, the service issues a random token at startup that opens the
-evaluation routes alone, and hands it to the recipe: the episodes and
-proposer run candidate code, which can then sample the served release but
-reach no other route. A restart issues a new one.
+A composite recipe's evaluation calls come through these routes; a recipe of
+one component calls its runtime's endpoint directly, as before composites.
+The evaluation calls do not present a service token. When auth is configured,
+the service issues a random token at startup that opens the evaluation routes
+alone, and hands it to the recipe: the episodes and proposer run candidate
+code, which can then sample the served release but reach no other route. A
+restart issues a new one.
 
 Response
 ~~~~~~~~
