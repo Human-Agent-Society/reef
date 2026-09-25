@@ -702,8 +702,14 @@ class _Environment:
         return SimpleNamespace(return_code=0, stdout="", stderr="")
 
 
-def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(
+    tmp_path, monkeypatch, interrupted
+) -> None:
     agent_module = _harbor_agent_module(monkeypatch)
+    from dataclasses import replace
+
+    monkeypatch.setattr(agent_module, "CONFIG", replace(agent_module.CONFIG, state_dir=tmp_path))
 
     scores = iter([1_000_000.0, 2_000_000.0])
 
@@ -761,13 +767,13 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp
         "STEPS": 1,
         "MAX_TOKENS": 64,
         "MAX_WORKERS": 2,
-        "SEED_LIBRARY": SEED,
         "TASK_CONTRACT": CONTRACT_PATH,
         "RUN_DIR": tmp_path / "guidance-run",
         "STATE_DIR": tmp_path,
     }.items():
         monkeypatch.setattr(agent_module, name, value)
 
+    monkeypatch.setattr(agent_module, "prepare_seed", lambda config, scorer: SEED)
     agent = object.__new__(agent_module.HarborAgent)
     agent._client = _ReefClient()
     agent.model_name = "Qwen/Qwen3-8B"
@@ -775,9 +781,20 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp
     environment = _Environment()
     context = SimpleNamespace(metadata=None)
 
+    if interrupted:
+        store = GuidanceRunStateStore(tmp_path / "guidance-run", _identity())
+        store.working_library_path.parent.mkdir(parents=True, exist_ok=True)
+        prepare_library(seed_path=SEED, run_path=store.working_library_path, groups_per_step=1, rollouts_per_group=2)
+        store.commit_library()
+        store.working_library_path.write_text('{"interrupted_before_first_commit": true}')
+        assert not store.resume_path.exists()
+
     asyncio.run(agent.run(INSTRUCTION, environment, context))
 
-    assert environment.commands and "#include <iostream>" in environment.commands[0]
+    import base64
+
+    submitted = base64.b64decode(environment.commands[0].split()[2]).decode()
+    assert "#include <iostream>" in submitted
     assert "/workspace/solution.cpp" in environment.commands[0]
     reef = context.metadata["reef"]
     assert reef["agent_record_ids"] == ["receipt-1"]
@@ -788,3 +805,33 @@ def test_harbor_agent_runs_one_committed_step_and_submits_the_best_candidate(tmp
         tmp_path / "guidance-run", _identity(groups_per_step=1, rollouts_per_group=2, guidance_max_tokens=64)
     ).load()
     assert resumed is not None and resumed["next_step"] == 1
+
+
+def test_executor_outage_does_not_become_a_zero_reward(tmp_path: Path) -> None:
+    from recipes.tttd.examples.guidance_ttt.harness.execution import ExecutorUnavailableError
+
+    class UnavailableExecutor(_ExecutionClient):
+        def complete(self, request):
+            raise ExecutorUnavailableError("HTTP 402")
+
+    client = _ReefClient()
+    library = prepare_library(
+        seed_path=SEED, run_path=tmp_path / "library.json", groups_per_step=1, rollouts_per_group=2
+    )
+    harness = ReefGuidanceTTTHarness(
+        client,
+        UnavailableExecutor(),
+        library,
+        scenario="guidance-smoke",
+        model="test-guidance",
+        contract=_contract(),
+        scorer=_LengthScorer(),
+        groups_per_step=1,
+        rollouts_per_group=2,
+        max_workers=1,
+    )
+    with pytest.raises(ExecutorUnavailableError, match="HTTP 402"):
+        harness.run_step(0)
+    # The first malformed guidance legitimately gets zero. The failed service
+    # call for the second receipt must not complete the training batch.
+    assert len(client.reports) == 1

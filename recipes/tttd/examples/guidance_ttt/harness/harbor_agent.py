@@ -14,59 +14,42 @@ of the harness can be imported standalone (e.g. in tests).
 from __future__ import annotations
 
 import asyncio
-from pathlib import Path
+import base64
 
 import yaml
-
 from harbor.agents.base import BaseAgent
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
 from reef_client import ReefClient
 
 from .agent import ReefGuidanceTTTHarness, prepare_library
+from .bootstrap import prepare_seed
+from .config import RunConfig
 from .contract import TaskContract
-from .execution import OpenAICompatibleExecutionClient, gpt_oss_120b_backend
+from .execution import OpenAICompatibleExecutionClient
 from .run_controller import GuidanceRunController, GuidanceRunIdentity, GuidanceRunStateStore, RayTrainingBridge
 from .scorer import SOURCE_FILES, JudgeScorer
 
-# The Reef service run.sh starts, and this workload's isolated training lane.
-SERVICE_URL = "http://127.0.0.1:8900"
-SCENARIO = "guidance-ttt-polyomino-packing"
-TOKEN = "reef-local"  # matches serve.yaml
+CONFIG = RunConfig.load()
+SERVICE_URL = CONFIG.service_url
+SCENARIO = CONFIG.scenario
+TOKEN = CONFIG.token
 CLIENT_TIMEOUT_S = 28_800.0
-
-# The frozen execution model and the authoritative verifier. Neither is
-# trained: only the guidance response mask reaches the optimizer. Swap
-# gpt_oss_120b_backend for openrouter_glm_5_2_backend to use the API executor.
-EXECUTOR_BASE_URL = "http://127.0.0.1:8000/v1"
-REASONING_EFFORT = "high"
-JUDGE_URL = "http://127.0.0.1:8081"
-VERIFIER_TIMEOUT_S = 340
-
-# The qualification grid and model limits, read from the stack config rather
-# than repeated here: Reef trains only after exactly groups_per_step x
-# rollouts_per_group reports arrive, so a harness that disagreed with the stack
-# would fail on the training timeout rather than at the edit.
-EXAMPLE_DIR = Path(__file__).resolve().parents[1]
-TASK_DIR = EXAMPLE_DIR / "harbor" / "polyomino_packing"
-STATE_DIR = EXAMPLE_DIR / "work" / "polyomino_packing"  # checkpoints, artifacts, records, logs
+VERIFIER_TIMEOUT_S = CONFIG.verifier_timeout_s
+TASK_DIR = CONFIG.task_dir
+STATE_DIR = CONFIG.state_dir
 RUN_DIR = STATE_DIR / "guidance-run"
-
-_STACK = yaml.safe_load((EXAMPLE_DIR / "serve.yaml").read_text())
-GROUPS_PER_STEP = _STACK["recipe"]["config"]["groups-per-step"]
-ROLLOUTS_PER_GROUP = _STACK["recipe"]["config"]["rollouts-per-group"]
-STEPS = _STACK["training"]["config"]["steps"]
-MAX_TOKENS = _STACK["training"]["config"]["max_tokens"]
-SEQ_LENGTH = _STACK["training"]["config"]["seq_length"]
-LORA_RANK = _STACK["training"]["config"]["lora_rank"]
-TENSOR_PARALLEL_SIZE = _STACK["training"]["config"]["tensor_parallel_size"]
-MAX_WORKERS = 8  # host-side concurrency; the stack has no matching knob
-
+GROUPS_PER_STEP = CONFIG.groups
+ROLLOUTS_PER_GROUP = CONFIG.rollouts
+STEPS = CONFIG.steps
+MAX_TOKENS = CONFIG.max_tokens
+SEQ_LENGTH = CONFIG.sequence_length
+LORA_RANK = CONFIG.lora_rank
+TENSOR_PARALLEL_SIZE = CONFIG.tensor_parallel_size
+MAX_WORKERS = CONFIG.max_workers
 TRAIN_TIMEOUT_S = 14_400.0
 TRAIN_POLL_S = 2.0
-
-SEED_LIBRARY = TASK_DIR / "solution" / "gpt_oss_120b_bootstrap_library.json"
-TASK_CONTRACT = TASK_DIR / "contract.json"  # the task's prompt vocabulary
+TASK_CONTRACT = TASK_DIR / "contract.json"
 WORKSPACE = "/workspace"
 
 
@@ -93,11 +76,15 @@ class HarborAgent(BaseAgent):
         environment: BaseEnvironment,
         context: AgentContext,
     ) -> None:
+        CONFIG.validate_state()
         model = self.model_name or "reef"
-        backend = gpt_oss_120b_backend(
-            base_url=EXECUTOR_BASE_URL,
-            concurrency=MAX_WORKERS,
-            reasoning_effort=REASONING_EFFORT,
+        backend = CONFIG.backend
+        contract = TaskContract.load(TASK_CONTRACT, problem_prompt=instruction)
+        scorer = JudgeScorer(
+            CONFIG.judge_url,
+            problem_id=contract.judge_problem_id,
+            language=contract.solution_language,
+            timeout_s=VERIFIER_TIMEOUT_S,
         )
 
         RUN_DIR.mkdir(parents=True, exist_ok=True)
@@ -106,7 +93,7 @@ class HarborAgent(BaseAgent):
             GuidanceRunIdentity(
                 model=model,
                 executor=backend.name,
-                gpt_oss_reasoning_effort=REASONING_EFFORT,
+                gpt_oss_reasoning_effort="high",
                 groups_per_step=GROUPS_PER_STEP,
                 rollouts_per_group=ROLLOUTS_PER_GROUP,
                 guidance_max_tokens=MAX_TOKENS,
@@ -115,18 +102,23 @@ class HarborAgent(BaseAgent):
                 tensor_parallel_size=TENSOR_PARALLEL_SIZE,
             ),
         )
-        if state_store.resume_path.is_file():
+        if state_store.resume_path.is_file() or state_store.committed_library_path.is_file():
             state_store.restore_working_library()
+        seed_path = (
+            prepare_seed(CONFIG, scorer)
+            if not state_store.working_library_path.exists()
+            else state_store.working_library_path
+        )
         library = prepare_library(
-            seed_path=SEED_LIBRARY,
+            seed_path=seed_path,
             run_path=state_store.working_library_path,
             groups_per_step=GROUPS_PER_STEP,
             rollouts_per_group=ROLLOUTS_PER_GROUP,
+            score_direction=contract.score_direction,
         )
         if not state_store.committed_library_path.exists():
             state_store.commit_library()
 
-        contract = TaskContract.load(TASK_CONTRACT, problem_prompt=instruction)
         harness = ReefGuidanceTTTHarness(
             self._client,
             OpenAICompatibleExecutionClient(backend),
@@ -134,12 +126,7 @@ class HarborAgent(BaseAgent):
             scenario=SCENARIO,
             model=model,
             contract=contract,
-            scorer=JudgeScorer(
-                JUDGE_URL,
-                problem_id=contract.judge_problem_id,
-                language=contract.solution_language,
-                timeout_s=VERIFIER_TIMEOUT_S,
-            ),
+            scorer=scorer,
             groups_per_step=GROUPS_PER_STEP,
             rollouts_per_group=ROLLOUTS_PER_GROUP,
             guidance_max_tokens=MAX_TOKENS,
@@ -177,9 +164,8 @@ class HarborAgent(BaseAgent):
 
         # The file the task's verifier reads, named for the candidate's language.
         solution_path = f"{WORKSPACE}/{SOURCE_FILES[contract.solution_language.lower()][0]}"
-        result = await environment.exec(
-            f"cat > {solution_path} <<'REEF_GUIDANCE_EOF'\n{solution}\nREEF_GUIDANCE_EOF",
-        )
+        encoded = base64.b64encode(solution.encode()).decode()
+        result = await environment.exec(f"printf %s {encoded} | base64 -d > {solution_path}")
         if result.return_code != 0:
             raise RuntimeError(f"writing {solution_path} failed: {result.stderr}")
 

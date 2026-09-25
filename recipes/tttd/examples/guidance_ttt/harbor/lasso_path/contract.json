@@ -1,0 +1,9 @@
+{
+  "solution_language": "python",
+  "solution_contract": "The <solution> block must contain the complete Python wrapper in a ```python fenced block, with the official EVOLVE-BLOCK markers and a CPP_CODE raw string implementing the C++17 stdin/stdout solver; COMPILE_FLAGS is optional.",
+  "mechanism_constraint": "Use float64 throughout, preserve the binary wire format and correctness guarantee, avoid filesystem/network I/O in CPP_CODE, and do not alter the evaluator or cache answers across inputs.",
+  "objective": "Maximize the official SimpleTES inverse geometric-mean solve time after every official correctness case passes.",
+  "raw_score_label": "Official inverse geometric-mean solve time",
+  "score_direction": "max",
+  "judge_problem_id": "lasso_path"
+}

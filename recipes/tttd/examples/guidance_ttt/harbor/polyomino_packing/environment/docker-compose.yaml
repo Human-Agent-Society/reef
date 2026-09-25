@@ -7,5 +7,6 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
+      GUIDANCE_JUDGE_CONTAINER_URL: "${GUIDANCE_JUDGE_CONTAINER_URL:-http://host.docker.internal:8081}"
       FRONTIERCS_JUDGE_URL: "${FRONTIERCS_JUDGE_URL:-http://host.docker.internal:8081}"
       FRONTIERCS_PROBLEM_ID: "${FRONTIERCS_PROBLEM_ID:-0}"

@@ -16,6 +16,10 @@ from typing import Any
 from .state import LLMRequest, LLMResponse
 
 
+class ExecutorUnavailableError(RuntimeError):
+    """The model service failed before it returned a candidate."""
+
+
 @dataclass(frozen=True)
 class ExecutionBackend:
     """Serializable executor settings. API-key values are deliberately excluded."""
@@ -126,7 +130,7 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
         data, attempts, elapsed_s = self._post_json(payload)
         choices = data.get("choices") or []
         if not choices or not isinstance(choices[0], dict):
-            raise RuntimeError("executor response has no choice")
+            raise ExecutorUnavailableError("executor response has no choice")
         choice = choices[0]
         message = choice.get("message") or {}
         text = message.get("content") or choice.get("text") or ""
@@ -184,7 +188,7 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
                 retryable = exc.code in {408, 429, 500, 502, 503, 504}
                 if not retryable or attempt >= self.backend.max_retries:
                     body = exc.read().decode(errors="replace")[:1_000]
-                    raise RuntimeError(f"executor request failed with HTTP {exc.code}: {body}") from exc
+                    raise ExecutorUnavailableError(f"executor request failed with HTTP {exc.code}: {body}") from exc
                 self._backoff(attempt, exc.headers.get("Retry-After"))
             except (
                 http.client.HTTPException,
@@ -195,7 +199,7 @@ class OpenAICompatibleExecutionClient(ExecutionClient):
                 _RetryableExecutorResponse,
             ) as exc:
                 if attempt >= self.backend.max_retries:
-                    raise RuntimeError(
+                    raise ExecutorUnavailableError(
                         f"executor request failed after {attempt + 1} attempts: {type(exc).__name__}: {exc}"
                     ) from exc
                 self._backoff(attempt)

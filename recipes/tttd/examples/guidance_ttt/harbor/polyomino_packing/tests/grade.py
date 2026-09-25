@@ -1,11 +1,11 @@
-"""The verifier: re-submit the trial's candidate to FrontierCS and record it.
+"""The verifier: re-submit the trial's candidate to task judge and record it.
 
 The agent's own search already scored thousands of candidates through the same
 judge, but those scores reached Reef as training reports. This runs once, in
 the task environment, on whatever ``/workspace/solution.cpp`` the trial left
 behind, and writes the trusted trial reward:
 
-- ``/logs/verifier/reward.json`` — ``{"reward": <FrontierCS score>}``
+- ``/logs/verifier/reward.json`` — ``{"reward": <task judge score>}``
 - ``/logs/verifier/reason.txt``  — the judge's message
 
 An unreachable judge, a rejected program, or a missing candidate is reward
@@ -13,6 +13,7 @@ zero with the reason recorded, never a crash.
 """
 
 import json
+import math
 import os
 import time
 import urllib.error
@@ -24,7 +25,7 @@ from pathlib import Path
 SOLUTION_PATH = Path("/workspace/solution.cpp")
 VERIFIER_DIR = Path("/logs/verifier")
 POLL_INTERVAL_S = 2.0
-DEADLINE_S = 600.0
+DEADLINE_S = 1200.0
 
 
 def submit(judge_url: str, problem_id: str, code: str) -> str:
@@ -52,7 +53,7 @@ def submit(judge_url: str, problem_id: str, code: str) -> str:
     if isinstance(submission_id, int) and not isinstance(submission_id, bool):
         submission_id = str(submission_id)
     if not isinstance(submission_id, str) or not submission_id.strip():
-        raise RuntimeError(f"FrontierCS submission response has no sid: {payload!r}")
+        raise RuntimeError(f"task judge submission response has no sid: {payload!r}")
     return submission_id
 
 
@@ -69,15 +70,15 @@ def poll(judge_url: str, submission_id: str) -> dict:
             result = None
         except (OSError, ValueError):
             result = None
-        if isinstance(result, dict) and result.get("status") in {"done", "error"}:
+        if isinstance(result, dict) and result.get("status") in {"done", "error", "environment_error"}:
             return result
         time.sleep(POLL_INTERVAL_S)
     return {"status": "timeout", "message": f"judge did not finish within {DEADLINE_S:g}s"}
 
 
 def grade() -> dict:
-    judge_url = os.environ.get("FRONTIERCS_JUDGE_URL", "http://host.docker.internal:8081").rstrip("/")
-    problem_id = os.environ.get("FRONTIERCS_PROBLEM_ID", "0")
+    judge_url = os.environ.get("GUIDANCE_JUDGE_CONTAINER_URL", "http://host.docker.internal:8081").rstrip("/")
+    problem_id = "0"
     if not SOLUTION_PATH.is_file():
         return {"reward": 0.0, "reason": f"{SOLUTION_PATH} is missing"}
     code = SOLUTION_PATH.read_text(errors="replace")
@@ -87,12 +88,14 @@ def grade() -> dict:
         result = poll(judge_url, submit(judge_url, problem_id, code))
     except Exception as error:  # An unreachable judge is a zero, not a crash.
         return {"reward": 0.0, "reason": f"judge unreachable: {error!r}"}
-    if result.get("status") != "done":
+    if result.get("status") != "done" or result.get("valid", True) is not True:
         return {"reward": 0.0, "reason": str(result.get("message") or result.get("status") or "rejected")}
     try:
         reward = float(result.get("score", 0.0))
     except (TypeError, ValueError):
         return {"reward": 0.0, "reason": f"judge returned a non-numeric score: {result!r}"}
+    if not math.isfinite(reward) or reward < 0:
+        return {"reward": 0.0, "reason": "judge returned a non-finite or negative reward"}
     return {"reward": reward, "reason": str(result.get("message") or "accepted")}
 
 

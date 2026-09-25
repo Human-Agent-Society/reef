@@ -8,19 +8,19 @@ reef:
   host: 127.0.0.1
   port: 8900
   token: reef-local
-  run-dir: work/polyomino_packing/stack
+  run-dir: ${GUIDANCE_STATE_DIR}/stack
   ready-timeout: 120
 
 inference:
   num-gpus: "${training.config.num_gpus}"
   tensor-parallel-size: "1"
   options:
-    context-length: "12288"
+    context-length: "${training.config.seq_length}"
     router-port: "30000"
     mem-fraction-static: "0.5"
     disable-prefill-cuda-graph: true
     cuda-graph-max-bs-decode: "8"
-  model-path: work/model
+  model-path: ${GUIDANCE_MODEL_PATH}
   timeout-s: 7200
   handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
 recipe:
@@ -28,7 +28,7 @@ recipe:
   config:
     groups-per-step: 2
     rollouts-per-group: 4
-    checkpoint-every-n-versions: 2
+    checkpoint-every-n-versions: 1
 training:
   backend: slime
   colocate: true
@@ -45,7 +45,7 @@ training:
     seq_length: 12288
     lora_rank: 32
     tensor_parallel_size: 2
-    checkpoint_dir: work/polyomino_packing/checkpoints
+    checkpoint_dir: ${GUIDANCE_STATE_DIR}/checkpoints
 
   options:
     hf-checkpoint: "${inference.model-path}"
@@ -109,8 +109,8 @@ training:
     custom-advantage-function-path: "recipes.tttd.slime.objective.tttd_advantages"
     entropy-coef: "0"
     rollout-temperature: "1"
-    rollout-max-response-len: "8192"
-    rollout-max-context-len: "12288"
+    rollout-max-response-len: "${training.config.max_tokens}"
+    rollout-max-context-len: "${training.config.seq_length}"
     train-env-vars: "{\"PYTORCH_CUDA_ALLOC_CONF\":\"max_split_size_mb:512\"}"
     log-probs-chunk-size: "1024"
     attention-dropout: "0"
@@ -119,10 +119,10 @@ training:
     attention-softmax-in-fp32: true
     attention-backend: "flash"
 storage:
-  artifact-repository: work/polyomino_packing/artifacts.git
-  artifact-work-dir: work/polyomino_packing/artifact-work
-  artifact-cache-dir: work/polyomino_packing/artifact-cache
-  agent-record-dir: work/polyomino_packing/agent-record
+  artifact-repository: ${GUIDANCE_STATE_DIR}/artifacts.git
+  artifact-work-dir: ${GUIDANCE_STATE_DIR}/artifact-work
+  artifact-cache-dir: ${GUIDANCE_STATE_DIR}/artifact-cache
+  agent-record-dir: ${GUIDANCE_STATE_DIR}/agent-record
 
 # Service processes launch locally; Slime owns distributed GPU model workers.
 execution:
@@ -138,5 +138,5 @@ observability:
     # name_prefix: guidance-ttt
     tags: []
     mode: online                       # online, offline, or disabled
-    directory: work/polyomino_packing/wandb
+    directory: ${GUIDANCE_STATE_DIR}/wandb
     upload_checkpoints: false

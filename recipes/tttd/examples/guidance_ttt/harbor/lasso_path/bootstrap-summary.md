@@ -1,0 +1,1 @@
+The official baseline embeds a float64 C++ glmnet-style Lasso path solver with covariance and residual-maintaining coordinate-descent modes, warm starts, strong screening, active-set refinement, and KKT checks. It prioritizes correctness and leaves room for a different faster algorithm.

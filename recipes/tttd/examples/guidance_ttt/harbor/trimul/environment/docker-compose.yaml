@@ -1,0 +1,6 @@
+services:
+  main:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      GUIDANCE_JUDGE_CONTAINER_URL: "${GUIDANCE_JUDGE_CONTAINER_URL:-http://host.docker.internal:8082}"

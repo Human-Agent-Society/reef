@@ -1,0 +1,23 @@
+{
+  "ale_bench_commit": "f7d927906dc1dcd860ee086e4560d576438b1354",
+  "dataset_revision": "0f426173b4e4e73b09b2b3631ae0490f66b75f99",
+  "ttt_discover_commit": "6c40e82dab9d5de7416ac873ad5cd3106084aaed",
+  "ttt_discover_cache_sha256": "fc949b992aeb2db1c04075ea4bd515bcb2d7dff7635f20ecb8eeae302442a744",
+  "tasks": {
+    "ahc058": {
+      "suite": "ttt-discover-public-150",
+      "problem_type": "batch",
+      "score_direction": "max",
+      "time_limit_s": 2.0,
+      "memory_limit_bytes": 1073741824,
+      "public_cases": 150,
+      "score_aggregation": "mean",
+      "partial_reward_on_invalid": true,
+      "input_cache_file": "ahc058_abeaef4e6038cc60.json",
+      "input_cache_sha256": "604186e17ac9895460d6252a301f9056b509fc6221b45401021ea9639644b16f",
+      "tester_sha256": "70cc44d6a064fc7bd479bdea17fca527d292afc22743b42626cbe271e271c60b",
+      "reward_divisor": 3000000.0,
+      "reward_divisor_source": "TTT-Discover AHC058 reward definition: 1500 times 2000"
+    }
+  }
+}
