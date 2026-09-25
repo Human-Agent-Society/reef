@@ -49,11 +49,11 @@ def grade_text(task: str, text: str | None) -> float:
     return 1.0 if lines and lines[-1] == expected else 0.0
 
 
-def propose(nodes, samples, models, *, requests=(), entries=()):
+def propose(nodes, samples, models, *, requests=(), entries=(), adapter="pi"):
     """Delegate service-side proposals to the built-in recipe, the tree's entries included."""
     from reef.recipe.reefine.evolution import propose as reefine_propose
 
-    return reefine_propose(nodes, samples, models, requests=requests, entries=entries)
+    return reefine_propose(nodes, samples, models, requests=requests, entries=entries, adapter=adapter)
 
 
 def evaluate(task: str, result) -> float:

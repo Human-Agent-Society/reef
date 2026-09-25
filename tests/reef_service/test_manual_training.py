@@ -666,6 +666,37 @@ def _raising_proposer(calls, *, poison="poison", error="poison proposer"):
     return propose, entered, release
 
 
+def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_failed(tmp_path):
+    """The candidate reached its evaluation and the scorer raised: the skip row says the step failed during its
+    evaluation, and keeps the proposed change and the method's notes, so the pages show what was tried."""
+    from reef.harness.tree.mutations import Mutation
+    from reef.service.release_page import failed_words
+    from reef.train.cordis_backend.strategies import StepProposal, resolve_episode_scorer
+
+    marker = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
+
+    def propose(nodes, samples, models, *, requests=()):
+        return StepProposal((marker,), {"design": "one rules entry"})
+
+    def score(task, result):
+        raise ValueError("the scorer could not read the episode")
+
+    recipe = replace(_recipe(tmp_path, propose), score_episode=resolve_episode_scorer(score), training_mode="manual")
+    dispatcher = _dispatcher(tmp_path, recipe)
+    try:
+        dispatcher.get_or_create_scenario("s")
+        dispatcher.accept_record(instruction("broken scorer"))
+        assert _wait(lambda: _committed_skip(dispatcher, "broken scorer") == "instruction failed")
+        row = _committed_row(dispatcher, "broken scorer")
+        assert row["failed_stage"] == "evaluating"
+        assert row["error"] == "ValueError: the scorer could not read the episode"
+        assert row["proposal_notes"]["design"] == "one rules entry"
+        assert [mutation["id"] for mutation in row["mutations"]] == ["r1"]
+        assert failed_words(row).startswith("The step failed during its evaluation")
+    finally:
+        dispatcher.close()
+
+
 def test_a_failed_step_keeps_the_selected_mode_and_the_next_instruction_runs(tmp_path):
     calls = []
     propose, entered, release = _raising_proposer(calls, poison=None, error="poison proposer")
