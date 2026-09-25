@@ -62,6 +62,11 @@ learns from each score before the next task arrives.
      - ``recipes/sdft/``
      - `SDFT <recipes/sdft.rst>`__
      - `SDFT on a skill stream <../../recipes/sdft/examples/skill_stream/README.md>`__
+   * - SDPO
+     - model weights
+     - ``recipes/sdpo/``
+     - `SDPO <recipes/sdpo.rst>`__
+     - `SDPO on SciKnowEval Chemistry <../../recipes/sdpo/examples/sciknoweval/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``

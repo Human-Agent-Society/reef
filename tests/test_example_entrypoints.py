@@ -30,6 +30,7 @@ REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),
     ROOT / "recipes" / "skillclaw",
     ROOT / "recipes" / "openclawrl" / "examples" / "openclawrl",
+    ROOT / "recipes" / "sdpo" / "examples" / "sciknoweval",
 )
 
 

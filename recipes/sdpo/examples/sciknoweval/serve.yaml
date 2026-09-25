@@ -1,0 +1,144 @@
+# SciKnowEval Chemistry through Reef with the sdpo recipe, for run.py
+# (recipes/sdpo/examples/sciknoweval).
+#
+# Qwen3-8B fully fine-tuned with the settings of the reference implementation's
+# generalization sweep (lasgroup/SDPO at 7c457fc1b1f6: sdpo.yaml and user.yaml):
+# 32 questions per step with 8 on-policy samples each, one optimizer step per
+# grid, learning rate 1e-5 after 10 warmup steps, a 2048-token prompt window and
+# an 8192-token response window inside an 18944-token model window, the teacher
+# reprompt capped at 10240 tokens, an EMA teacher moving 5% toward the policy
+# per step, the generalized JSD over the student's top 100 ids plus the rest of
+# the vocabulary as one bucket, and detached per-token importance weights capped
+# at 2.
+#
+# GPU budget: four GPUs, the actor (tensor parallel 4) colocated with four
+# single-GPU rollout engines. A step runs three forwards over the batch (the
+# student's top-K selection, the teacher, and the training forward), so
+# max-tokens-per-gpu and mem-fraction-static are the knobs to tune first if a
+# step runs out of memory. run.sh mints REEF_TOKEN per run directory.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 28902
+  token: ${REEF_TOKEN}
+  ready-timeout: 3600
+  run-dir: ${SDPO_RUN_DIR}/run
+inference:
+  model-path: ${SDPO_MODEL_PATH}
+  timeout-s: 3600
+  # Four single-GPU engines colocated with the four actor ranks
+  # (training.colocate): the actor offloads to the host while the engines
+  # serve, the engines release their memory while the actor trains.
+  num-gpus: "4"
+  tensor-parallel-size: "1"
+  options:
+    router-port: "23002"
+    context-length: "18944"
+    mem-fraction-static: "0.55"
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
+    # The reference samples through vLLM with no nucleus, top-k or repetition
+    # penalty; each request sets its own temperature and window.
+    sampling_defaults:
+      top_k: -1
+      repetition_penalty: 1.0
+recipe:
+  implementation: recipes.sdpo.recipe:SDPORecipe
+  config:
+    tokenizer-path: ${SDPO_MODEL_PATH}
+    groups-per-step: 32              # MUST equal the stage's SDPO_GROUPS_PER_STEP
+    rollouts-per-group: 8            # MUST equal the stage's SDPO_ROLLOUTS_PER_GROUP
+    max-staleness: 0                 # on-policy: the stage waits for each step's release before sampling again
+    max-teacher-prompt-tokens: 10240 # the reference's max_reprompt_len
+    max-teacher-tokens: 18944        # the trainer's seq-length; a longer teacher sequence fails the step
+    success-reward-threshold: 0.5    # the task's reward is binary
+    include-environment-feedback: false  # Section 3's generalization sweep disables it
+    enable-thinking: false
+    checkpoint-every-n-versions: 1000    # the bridge's per-step HF export is what the engines load
+training:
+  backend: slime
+  colocate: true
+  ready-timeout: 3600
+  timeout-s: 7200
+  config:
+    checkpoint_dir: ${SDPO_RUN_DIR}/checkpoints
+    global_batch_size: 256           # the whole grid: 32 questions x 8 rollouts, one optimizer step
+  options:
+    megatron-to-hf-mode: bridge
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    save-interval: "1000"
+    no-save-optim: true
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "4"
+    num-gpus-per-node: "4"
+    tensor-model-parallel-size: "4"
+    pipeline-model-parallel-size: "1"
+    context-parallel-size: "1"       # the distillation loss and teacher pass support cp 1 only
+    seq-length: "18944"
+    rollout-max-response-len: "8192"
+    rollout-max-context-len: "18944"
+    # Qwen3 architecture flags beyond the sizes Reef reads from the HF config.
+    group-query-attention: true
+    padded-vocab-size: "151936"
+    position-embedding-type: rope
+    rotary-base: "1000000"
+    swiglu: true
+    disable-bias-linear: true
+    qk-layernorm: true
+    untie-embeddings-and-output-weights: true
+    normalization: RMSNorm
+    # The student selects the top-K support in a forward before the step, so
+    # the training forward must put the same distribution at those ids.
+    attention-dropout: "0.0"
+    hidden-dropout: "0.0"
+    attention-softmax-in-fp32: true
+    accumulate-allreduce-grads-in-fp32: true
+    attention-backend: flash
+    sequence-parallel: true
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "20480"
+    log-probs-chunk-size: "1024"
+    # The reference's optimizer: AdamW at 1e-5, constant after 10 warmup steps,
+    # weight decay 0.01, clipping at 1.
+    optimizer: adam
+    lr: "1e-5"
+    lr-decay-style: constant
+    lr-warmup-iters: "10"
+    weight-decay: "0.01"
+    clip-grad: "1.0"
+    # The sdpo loss family: the backend's distillation loss against an EMA
+    # teacher that rereads the question with a successful sibling's response.
+    loss-type: custom_loss
+    use-rollout-logprobs: true
+    disable-compute-advantages-and-returns: true
+    num-steps-per-rollout: "1"
+    n-samples-per-prompt: "1"
+    rollout-temperature: "1.0"
+    sdpo-teacher: self
+    sdpo-divergence: jsd
+    sdpo-jsd-beta: "0.5"
+    sdpo-top-k: "100"
+    sdpo-top-k-source: student
+    sdpo-top-k-distribution: tail
+    sdpo-teacher-update-rate: "0.05"
+    sdpo-importance-sampling-level: token
+    sdpo-importance-sampling-cap: "2.0"
+storage:
+  artifact-repository: ${SDPO_RUN_DIR}/artifacts.git
+  artifact-work-dir: ${SDPO_RUN_DIR}/artifact-work
+  artifact-cache-dir: ${SDPO_RUN_DIR}/artifact-cache
+  agent-record-dir: ${SDPO_RUN_DIR}/agent-record
+execution:
+  training: ray
+  rollout: ray
+observability:
+  wandb:
+    enabled: false
