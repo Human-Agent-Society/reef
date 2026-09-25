@@ -112,6 +112,12 @@ class Model:
             raise reply
         return reply
 
+    def last_response(self) -> None:
+        return None
+
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """The step activity a ModelBinding keeps; the stand-in keeps none."""
+
 
 def canned(reply: str) -> Model:
     return Model(reply)

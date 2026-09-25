@@ -25,7 +25,7 @@ from typing import Any
 from reef.core.requirements import parse_requires
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
+from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID, ships_requests
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import final_assistant_text
@@ -562,7 +562,7 @@ def _answer_request(
             unusable = answer
             why = answer.reason if not answer.dropped else f"{answer.reason}: {'; '.join(answer.dropped)}"
             dropped_attempts.append(f"answer {attempt}: {why}")
-            if attempt < REQUEST_ATTEMPTS and isinstance(models.served, ModelBinding):
+            if attempt < REQUEST_ATTEMPTS:
                 # The request page shows it while the step runs, not only once the step settles.
                 models.served.note("check", f"answer {attempt} written again: {why}", failed=True)
             retry = reviewed + RETRY_UNUSABLE_SECTION.format(reason=why)
@@ -1230,8 +1230,7 @@ def _ask(
 def _provider_refusal(models: ModelBindings) -> str | None:
     """Why the provider cut the last reply short, when its response says a filter or a refusal stopped it: an
     OpenAI ``finish_reason``, a Responses ``incomplete_details.reason`` or an Anthropic ``stop_reason``."""
-    served = models.served
-    response = served.last_response() if isinstance(served, ModelBinding) else None
+    response = models.served.last_response()
     if not isinstance(response, Mapping):
         return None
     details = response.get("incomplete_details")

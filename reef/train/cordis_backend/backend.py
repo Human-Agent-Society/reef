@@ -879,6 +879,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     def harness_node_paths(self) -> Mapping[str, str] | None:
         return self._descriptor.node_paths
 
+    @property
+    def harness_adapter(self) -> str | None:
+        return self._descriptor.name
+
     def admit(
         self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
     ) -> tuple[list[EntryOptions], str | None]:

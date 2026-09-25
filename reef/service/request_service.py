@@ -36,7 +36,7 @@ from reef.service.request_page import STATE_WORDS, build_request_page, request_s
 from reef.service.wire import SCENARIO_HEADER, ProposalPayload, ReportPayload, RequestHeaders, parse_request_headers
 from reef.surface.base import InferenceHooks, InferenceLease, LeasingInferenceHooks, Surface
 from reef.surface.weights import RuntimeLoadMismatch, reported_runtime_load_id, reported_runtime_load_spans
-from reef.train.cordis_backend.backend import CordisBackend
+from reef.train.backend import CandidateBackend
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgressReader, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
 from reef.train.trainer import Trainer
@@ -899,7 +899,6 @@ class RequestService:
             except ArtifactError:
                 before_files = None
         backend = self.files_trainer(scenario).candidate_backend
-        descriptor = backend.descriptor if isinstance(backend, CordisBackend) else None
         return build_release_page(
             step,
             rows,
@@ -907,8 +906,14 @@ class RequestService:
             before_files=before_files,
             node_paths=None if backend is None else backend.harness_node_paths,
             link_query=link_query,
-            adapter="pi" if descriptor is None else descriptor.name,
+            adapter=self.harness_adapter(backend),
         )
+
+    @staticmethod
+    def harness_adapter(backend: CandidateBackend | None) -> str:
+        """The adapter a harness page names in its commands: the backend's, pi for a backend that names none."""
+        adapter = None if backend is None else backend.harness_adapter
+        return "pi" if adapter is None else adapter
 
     @classmethod
     def _running_request_id(cls, scenario: Scenario) -> str | None:
@@ -946,14 +951,13 @@ class RequestService:
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
         reserved = self.files_trainer(scenario).pending_batch
         consumed = reserved is not None and reserved.request is not None and reserved.request.id == record_id
-        descriptor = backend.descriptor if isinstance(backend, CordisBackend) else None
         return build_request_page(
             record,
             rows,
             progress=progress,
             consumed=consumed,
             link_query=link_query,
-            adapter="pi" if descriptor is None else descriptor.name,
+            adapter=self.harness_adapter(backend),
         )
 
     def harness_request_progress(self, headers: Mapping[str, str], record_id: str) -> dict[str, Any]:

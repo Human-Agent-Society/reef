@@ -1089,9 +1089,9 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
     return str(row.get("operation") or "unknown")
 
 
-def _uncovered(row: Mapping[str, Any], key: str = "uncovered") -> list[str]:
-    """What the step's review left uncovered, when it recorded one; ``key="limits"`` for what the harness's notes
-    put out of reach."""
+def review_points(row: Mapping[str, Any], key: str) -> list[str]:
+    """One list the step's review recorded: ``uncovered`` for what the entries left uncovered, ``limits`` for what
+    the harness's notes put out of reach; empty when the review recorded none."""
     notes = _metrics_of(row).get("proposal_notes")
     review = notes.get("review") if isinstance(notes, Mapping) else None
     items = review.get(key) if isinstance(review, Mapping) else None
@@ -1512,7 +1512,7 @@ def _report_request(
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
     step, rows = settled
     print(f"reef-{adapter}: {result_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
-    uncovered = _uncovered(rows[step])
+    uncovered = review_points(rows[step], "uncovered")
     selection_result = result_of(rows[step], rows)
     usage = _usage_of(rows[step])
     if usage and selection_result in ("selected", "pending"):
@@ -1522,7 +1522,7 @@ def _report_request(
         # After a rejection the checks decided; the review's points are notes on the change, not the cause.
         label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
         print(f"reef-{adapter}: {label}: {_joined(uncovered)}")
-    limits = _uncovered(rows[step], "limits")
+    limits = review_points(rows[step], "limits")
     if limits:
         # One point per line: a point may hold a '; ' of its own.
         print(f"reef-{adapter}: out of reach on this harness:")
