@@ -26,8 +26,8 @@ the agent's tools (``native_tool``) and its responses to loop events
 | ``dsh``      | ``primary`` → ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
 |              | ``env`` → ``dsh/.env``                                    |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``hermes``   | ``primary`` → ``hermes/config.yaml``                      | git ``NousResearch/hermes-agent``         |
-|              |                                                           | at ``v2026.8.31`` (0.21.0)                |
+| ``hermes``   | ``primary`` → ``hermes/config.yaml``,                     | git ``NousResearch/hermes-agent``         |
+|              | ``env`` → ``hermes/.env``                                 | at ``v2026.8.31`` (0.21.0)                |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
 |              | ``models`` → ``native/models.json``                       |                                           |

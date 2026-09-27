@@ -1,0 +1,147 @@
+name: remind reviewers of idle pull requests
+
+on:
+  schedule:
+    - cron: "0 1 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  remind:
+    if: github.repository == 'Human-Agent-Society/reef'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - name: Post the list of idle pull requests every three days
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const marker = "<!-- reef-review-reminders -->";
+            const idleDays = 3;
+            const writeAssociations = new Set(["OWNER", "MEMBER", "COLLABORATOR"]);
+            const { owner, repo } = context.repo;
+            const now = Date.now();
+            // Cron cannot express an exact three-day interval across month
+            // boundaries, so the daily schedule posts on every third UTC day.
+            const reminderIntervalDays = 3;
+            if (context.eventName === "schedule" && Math.floor(now / 86400000) % reminderIntervalDays !== 0) {
+              core.info("Not a reminder day");
+              return;
+            }
+            const cutoffDate = new Date(now - idleDays * 86400000).toISOString().slice(0, 10);
+
+            const query = `query($search: String!, $cursor: String) {
+              search(query: $search, type: ISSUE, first: 50, after: $cursor) {
+                pageInfo { hasNextPage endCursor }
+                nodes {
+                  ... on PullRequest {
+                    number
+                    title
+                    updatedAt
+                    authorAssociation
+                    author { login }
+                    reviewRequests(first: 20) {
+                      nodes {
+                        requestedReviewer {
+                          ... on User { login }
+                          ... on Team { combinedSlug }
+                        }
+                      }
+                    }
+                    latestReviews(first: 20) {
+                      nodes { state author { login } }
+                    }
+                  }
+                }
+              }
+            }`;
+            const search = `repo:${owner}/${repo} is:pr is:open draft:false updated:<${cutoffDate}`;
+            const pullRequests = [];
+            let cursor = null;
+            do {
+              const result = await github.graphql(query, { search, cursor });
+              pullRequests.push(...result.search.nodes);
+              cursor = result.search.pageInfo.hasNextPage ? result.search.pageInfo.endCursor : null;
+            } while (cursor);
+
+            // Waiting on the author after requested changes; waiting on the
+            // author (with write access) or an approving code owner (for
+            // external contributions) to merge after approval; otherwise
+            // waiting on the requested reviewers, or on the author to request
+            // one when nobody is requested.
+            const sections = {
+              review: { title: "Waiting for review", lines: [] },
+              author: { title: "Waiting for the author", lines: [] },
+              merge: { title: "Approved, waiting to merge", lines: [] },
+            };
+            for (const pullRequest of pullRequests.sort((a, b) => a.number - b.number)) {
+              const author = pullRequest.author ? `@${pullRequest.author.login}` : "the author";
+              const reviews = pullRequest.latestReviews.nodes;
+              const approvers = reviews
+                .filter((review) => review.state === "APPROVED" && review.author)
+                .map((review) => `@${review.author.login}`);
+              let section;
+              let mentions;
+              if (reviews.some((review) => review.state === "CHANGES_REQUESTED")) {
+                section = sections.author;
+                mentions = [author];
+              } else if (approvers.length > 0) {
+                section = sections.merge;
+                mentions = writeAssociations.has(pullRequest.authorAssociation) ? [author] : approvers;
+              } else {
+                section = sections.review;
+                const requested = pullRequest.reviewRequests.nodes
+                  .map((request) => request.requestedReviewer)
+                  .filter((reviewer) => reviewer)
+                  .map((reviewer) => `@${reviewer.login ?? reviewer.combinedSlug}`);
+                mentions = requested.length > 0 ? requested : [author];
+              }
+              const idleDayCount = Math.floor((now - Date.parse(pullRequest.updatedAt)) / 86400000);
+              section.lines.push(
+                `- #${pullRequest.number} ${pullRequest.title} — ${mentions.join(" ")} ` +
+                  `(idle ${idleDayCount} days)`,
+              );
+            }
+
+            const lines = Object.values(sections).flatMap((section) =>
+              section.lines.length > 0 ? [`**${section.title}**`, "", ...section.lines, ""] : [],
+            );
+            if (lines.length === 0) {
+              core.info(`No ready pull request has been idle for ${idleDays} days`);
+              return;
+            }
+
+            const issues = await github.paginate(github.rest.issues.listForRepo, {
+              owner,
+              repo,
+              state: "open",
+              creator: "github-actions[bot]",
+              per_page: 100,
+            });
+            let issue = issues.find((candidate) => !candidate.pull_request && candidate.body?.includes(marker));
+            if (!issue) {
+              const created = await github.rest.issues.create({
+                owner,
+                repo,
+                title: "[Task] Pull request review reminders",
+                body:
+                  `${marker}\nEvery ${reminderIntervalDays} days, automation lists ready pull requests without ` +
+                  `activity for ${idleDays} days and mentions whoever the next step is ` +
+                  "waiting on. See the " +
+                  "[maintenance model](https://github.com/Human-Agent-Society/reef/blob/main/.github/MAINTAINER.md).",
+                labels: ["type: task", "status: keep-open"],
+              });
+              issue = created.data;
+            }
+
+            const today = new Date(now).toISOString().slice(0, 10);
+            await github.rest.issues.createComment({
+              owner,
+              repo,
+              issue_number: issue.number,
+              body: [`### Pull requests idle for ${idleDays}+ days (${today})`, "", ...lines].join("\n"),
+            });

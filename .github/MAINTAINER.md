@@ -8,16 +8,27 @@ of the project as it grows.
 Roles describe work, not status. One person may hold more than one role for a
 pull request.
 
-## Current Merge Oncall
+## Review routing
 
-The current Merge Oncall is configured in
-[`merge-oncall.json`](merge-oncall.json): **@BobbyZhouZijian**.
+Reef has no single on-call maintainer. [`CODEOWNERS`](CODEOWNERS) routes each
+pull request: GitHub requests review from the code owners of every changed
+path when the pull request is ready for review. Each area lists a primary owner
+and a backup owner, and an approval from either one satisfies that area.
+Changes outside a specific area fall back to the default owners listed at the
+top of that file.
 
-When a pull request is opened, reopened, or marked ready for review, the
-`assign merge oncall` workflow assigns the configured account and posts or
-updates a single on-call comment. The workflow uses `pull_request_target`
-without checking out or executing pull-request code, so assignment also works
-for contributions from forks without exposing a write token to their code.
+Who merges depends on the author:
+
+- An author with repository write access merges their own pull request after
+  receiving at least one approval and meeting the acceptance conditions below.
+- A pull request from an external contributor is merged by one of the code
+  owners who approved it.
+
+The `remind reviewers of idle pull requests` workflow runs every three days. It
+posts one comment on a fixed tracking issue listing ready pull requests without
+activity for three days and mentions whoever the next step waits on: the
+requested reviewers, the author when changes are requested or no reviewer is
+requested, or the merging person after approval.
 
 ## Roles
 
@@ -29,7 +40,8 @@ whole. They can merge and close pull requests and are responsible for:
 - deciding whether a contribution fits Reef's direction and maintenance
   budget;
 - identifying when an RFC is required;
-- selecting reviewers for affected areas;
+- requesting additional reviewers when path rules do not cover an affected
+  area;
 - resolving cross-area or project-level disagreements;
 - merging changes when the acceptance conditions are met; and
 - reverting or coordinating a fix when a merged change causes a regression.
@@ -37,21 +49,18 @@ whole. They can merge and close pull requests and are responsible for:
 An approval from a maintainer accepts responsibility for the change, not only
 its local implementation.
 
-### Merge Oncall
+### Code owner
 
-The Merge Oncall is the maintainer actively responsible for moving one pull
-request toward a clear outcome. The on-call:
+Code owners are the maintainers listed for an area in
+[`CODEOWNERS`](CODEOWNERS). For pull requests in their area, a code owner:
 
 - performs the initial scope and RFC check;
-- identifies affected areas and requests the right reviews;
+- reviews the change or hands the review to the backup owner;
 - distinguishes blocking feedback from optional follow-up work;
-- keeps the pull request state clear when review stalls or changes direction;
-- confirms that acceptance conditions are met; and
-- merges, closes, or hands the pull request to another maintainer.
+- requests review from other areas the change materially affects; and
+- merges or closes external contributions they approved.
 
-The Merge Oncall is an active coordination role. An area reviewer may protect
-a specific subsystem without being responsible for driving the entire pull
-request.
+Code owners must have repository write permission.
 
 ### Area reviewer
 
@@ -60,10 +69,9 @@ operational concern. They are responsible for reviewing changes in that area
 for correctness, compatibility, tests, documentation, and maintainability.
 
 Area reviewers do not need merge permission. Their approval is a technical
-signal to the Merge Oncall; the final repository decision remains with a
-maintainer. An area reviewer must have repository write permission before they
-can be listed in [`CODEOWNERS`](CODEOWNERS), but qualified reviewers may still
-be requested manually without being code owners.
+signal to the code owners; the final repository decision remains with a
+maintainer. Qualified reviewers may be requested manually without being code
+owners.
 
 Current primary area ownership is:
 
@@ -72,7 +80,9 @@ Current primary area ownership is:
 - **@hanfeiyu** — training execution, runtime integration, artifact handling,
   pipeline reliability, and their focused documentation; and
 - **@BobbyZhouZijian** — service and core boundaries, scenario lifecycle,
-  repository automation, packaging, and cross-cutting changes.
+  repository automation, and packaging.
+
+[`CODEOWNERS`](CODEOWNERS) lists the backup owner for each area.
 
 ## Issue process
 
@@ -166,19 +176,15 @@ The maintainer may ask the author to narrow the change, move design discussion
 to the appropriate issue form, or close work that does not fit project
 direction. The reason should be stated clearly.
 
-### 3. On-call assignment and review routing
+### 3. Review routing
 
-The assignment workflow makes the configured Merge Oncall the pull request
-assignee. The Merge Oncall requests reviews for every materially affected area.
-GitHub also requests reviewers using [`CODEOWNERS`](CODEOWNERS). Its current
-area-specific entries route harness-facing work to @Benjamin-eecs and training
-and reliability work to @hanfeiyu, while cross-cutting work stays with the
-Merge Oncall. The pull-request labeler applies the corresponding `area:*`,
-`dependencies`, and `type: tests` labels from
+GitHub requests reviewers using [`CODEOWNERS`](CODEOWNERS), as described in
+[Review routing](#review-routing). The pull-request labeler applies the
+corresponding `area:*`, `dependencies`, and `type: tests` labels from
 [`labeler.yml`](labeler.yml), including when the changed-file set is updated.
-Labels are routing hints rather than approvals. The on-call remains responsible
-for checking that every affected area has a qualified reviewer and requesting
-additional reviews when path rules are insufficient.
+Labels are routing hints rather than approvals. The author and the requested
+code owners request additional reviews when path rules do not cover an
+affected area.
 
 ### 4. Technical review
 
@@ -231,8 +237,8 @@ run the full matrix. Manual dispatches are diagnostic runs; use the original
 PR workflow's full rerun to satisfy merge checks for that PR.
 
 Required checks must pass on the reviewed revision. CI is a gate, not a
-substitute for review. The Merge Oncall may request focused or environment-
-specific validation when the standard checks do not cover the affected path.
+substitute for review. Reviewers may request focused or environment-specific
+validation when the standard checks do not cover the affected path.
 Dependabot groups weekly GitHub Actions, Python, documentation-site, and Docker
 updates into bounded pull-request queues. Dependency pull requests follow the
 same ownership, review, and required-check rules as author-submitted changes;
@@ -243,9 +249,8 @@ they are not merged automatically.
 A pull request is ready to merge when:
 
 - an RFC is accepted if the change requires one;
-- at least one maintainer approves the pull request;
-- every materially affected area has an approval from a maintainer or an area
-  reviewer selected by the Merge Oncall;
+- at least one code owner of an affected area or another maintainer approves
+  the pull request;
 - all required checks pass;
 - no blocking review or design discussion remains;
 - tests cover the behavior change; and
@@ -258,8 +263,9 @@ and rationale should be recorded on the pull request.
 
 ### 7. Merge and follow-up
 
-A maintainer merges the accepted revision and ensures linked issues are closed
-or updated. Deferred work should be captured in explicit follow-up issues
+An author with repository write access merges their own accepted pull
+request; for an external contribution, an approving code owner merges it. The
+person who merges ensures linked issues are closed or updated. Deferred work should be captured in explicit follow-up issues
 rather than left only in review comments.
 
 If a merge causes a serious regression, restoring a known-good state takes
@@ -270,16 +276,17 @@ design or debugging in a follow-up pull request.
 
 Small documentation fixes, clear test-only changes, reversions, release
 blockers, and fixes for active regressions may receive an expedited review. The
-Merge Oncall must state why the change is being fast-tracked and which review
-or validation remains required. Any exception is still subject to repository
+approving reviewer must state why the change is being fast-tracked and which
+review or validation remains required. Any exception is still subject to repository
 permissions and branch protections.
 
 ## Stalled pull requests
 
-When a pull request is waiting on the author, the Merge Oncall should identify
-the remaining work and leave a clear prompt before closing it. When it is
-waiting on review, the on-call should request another qualified reviewer or
-hand the role to another maintainer.
+When a pull request is waiting on the author, the reviewer should identify the
+remaining work and leave a clear prompt before closing it. When it is waiting on
+review, the requested code owner should review it or ask the area's backup owner
+to take over. The reminder described in [Review routing](#review-routing)
+lists pull requests in either state.
 
 The stale workflow marks a non-draft pull request after 60 days without
 activity and closes it after another 21 days. Drafts and work labeled `KIV`,
@@ -304,7 +311,7 @@ does not delete labels that are absent from the catalog.
 ## Disagreements and escalation
 
 Reviewers should first seek a decision through concrete technical discussion
-on the issue, RFC, or pull request. The Merge Oncall may request additional
+on the issue, RFC, or pull request. Any maintainer may request additional
 area review when expertise or ownership is disputed. Maintainers make the final
 repository-level decision and record the rationale when consensus is not
 possible.
