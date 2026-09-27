@@ -18,7 +18,7 @@ The engine validates its GPU environment, model compatibility and available
 device memory during startup. Its output is available in
 ``.reef/run/sglang.log`` or ``.reef/run/vllm.log``. The managed path currently
 supports a single GPU node. Use the `SGLang installation guide
-<https://docs.sglang.io/docs/get_started/install>`__ or the `vLLM installation
+<https://docs.sglang.io/docs/get-started/install>`__ or the `vLLM installation
 guide <https://docs.vllm.ai/en/latest/getting_started/installation/>`__ to
 prepare the inference environment; the base Reef installation stays CPU-only.
 
