@@ -11,7 +11,7 @@ binary: codex
 install:
   kind: npm
   package: "@openai/codex"
-  version: "0.152.1"
+  version: "0.153.4"
   binary_path: "node_modules/.bin/codex"
 argv:
   - exec
@@ -78,7 +78,7 @@ writable_paths:
   - "codex"
 cleanup_whitelist:
   - "codex/sessions/**"
-  # Codex 0.152.1 initializes its isolated user home on first boot. These are
+  # Codex 0.153.4 initializes its isolated user home on first boot. These are
   # versioned local databases, copied system skills, coordination files, and
   # temporary discovery state observed by the real-binary smoke test.
   - "codex/.sandbox_migration"

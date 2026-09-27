@@ -478,9 +478,21 @@ def test_codex_rejects_invalid_model_metadata(metadata: dict[str, object]) -> No
         )
 
 
-@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4", "gpt-5.4-2026-03-05", "gpt-5.4-mini"])
+@pytest.mark.parametrize(
+    ("model", "native_model"),
+    [
+        ("gpt-5.4", "gpt-5.4"),
+        ("openai/gpt-5.4", "gpt-5.4"),
+        ("gpt-5.4-2026-03-05", "gpt-5.4"),
+        ("gpt-5.4-mini", "gpt-5.4-mini"),
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("openai/gpt-6-astra", "gpt-6-astra"),
+    ],
+)
 @pytest.mark.parametrize("reasoning", [True, False])
-def test_codex_overrides_native_capabilities_and_keeps_instructions(model: str, reasoning: bool) -> None:
+def test_codex_overrides_native_capabilities_and_keeps_instructions(
+    model: str, native_model: str, reasoning: bool
+) -> None:
     from reef.core.model_metadata import ModelMetadata
     from reef.harness.adapters.codex.quirks import bundled_model_catalog
 
@@ -490,7 +502,7 @@ def test_codex_overrides_native_capabilities_and_keeps_instructions(model: str, 
     assert tomllib.loads(files["codex/config.toml"])["model_catalog_json"] == "models.json"
     bundled = bundled_model_catalog()
     catalog = {entry["slug"]: entry for entry in json.loads(files["codex/models.json"])["models"]}
-    native = bundled["gpt-5.4-mini" if model == "gpt-5.4-mini" else "gpt-5.4"]
+    native = bundled[native_model]
     expected = {
         **native,
         "slug": model,

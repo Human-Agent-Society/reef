@@ -220,7 +220,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert final_assistant_text(result.trajectory) == "READY"
 
 
-@pytest.mark.parametrize("selected_model", [MODEL, "gpt-5.4"])
+@pytest.mark.parametrize("selected_model", [MODEL, "gpt-5.4", "gpt-6-astra"])
 def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path, selected_model: str) -> None:
     server, base_url = _server()
     try:
@@ -330,6 +330,33 @@ def test_metadata_preserves_codex_unknown_model_instructions() -> None:
         server.server_close()
 
 
+def model_request_config(request_json: str) -> dict[str, object]:
+    """Extract native model settings from standard and Responses Lite requests."""
+    request = json.loads(request_json)
+    if "instructions" in request:
+        instructions = request["instructions"]
+        tools = request["tools"]
+    else:
+        instructions = next(
+            item["content"] for item in request["input"] if item["type"] == "message" and item["role"] == "developer"
+        )
+        tools = next(item["tools"] for item in request["input"] if item["type"] == "additional_tools")
+        for namespace in tools:
+            if namespace["name"] != "collaboration":
+                continue
+            for tool in namespace["tools"]:
+                if tool["name"] == "spawn_agent":
+                    # Codex prepends the current catalog's model names and reasoning levels.
+                    description = tool["description"]
+                    tool["description"] = description[description.index("Spawns an agent") :]
+    return {
+        "model": request["model"],
+        "instructions": instructions,
+        "tools": tools,
+        "reasoning": request.get("reasoning", {}),
+    }
+
+
 def test_codex_bundled_model_catalog_matches_the_pin() -> None:
     from reef.harness.adapters.codex.quirks import bundled_model_catalog
 
@@ -345,11 +372,12 @@ def test_codex_bundled_model_catalog_matches_the_pin() -> None:
     assert bundled_model_catalog() == {model["slug"]: model for model in json.loads(result.stdout)["models"]}
 
 
-def test_codex_model_switch_keeps_bundled_instructions_and_tools() -> None:
+@pytest.mark.parametrize("model", ["gpt-5.4", "gpt-6-astra"])
+def test_codex_model_switch_keeps_bundled_instructions_and_tools(model: str) -> None:
     server, base_url = _server()
     try:
         descriptor = get_adapter("codex")
-        switched = replace(descriptor, argv=(*descriptor.argv, "--model", "gpt-5.4"))
+        switched = replace(descriptor, argv=(*descriptor.argv, "--model", model))
         binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
         before = run_episode(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
         after = run_episode(
@@ -357,16 +385,13 @@ def test_codex_model_switch_keeps_bundled_instructions_and_tools() -> None:
         )
         assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
         assert "fallback metadata" not in after.stdout + after.stderr
-        before_body = json.loads(server.requests[0][2])
-        after_body = json.loads(server.requests[1][2])
-        for field in ("model", "instructions", "tools", "reasoning"):
-            assert before_body[field] == after_body[field], field
+        assert model_request_config(server.requests[0][2]) == model_request_config(server.requests[1][2])
     finally:
         server.shutdown()
         server.server_close()
 
 
-@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4"])
+@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4", "gpt-6-astra", "openai/gpt-6-astra"])
 @pytest.mark.parametrize("reasoning", [True, False])
 def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: str, reasoning: bool) -> None:
     server, base_url = _server()
@@ -384,14 +409,16 @@ def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: s
             event["payload"] for event in after.trajectory if event.get("payload", {}).get("type") == "task_started"
         )
         assert started["model_context_window"] == 30_400
-        before_body = json.loads(server.requests[0][2])
-        after_body = json.loads(server.requests[1][2])
+        before_body = model_request_config(server.requests[0][2])
+        after_body = model_request_config(server.requests[1][2])
         assert before_body["instructions"] == after_body["instructions"]
         assert before_body["tools"] == after_body["tools"]
         if reasoning:
             assert after_body["reasoning"] == before_body["reasoning"]
         else:
-            assert after_body.get("reasoning", {}) == {}
+            # Responses Lite keeps its context policy while omitting effort and summary.
+            expected_reasoning = {"context": "all_turns"} if model.endswith("gpt-6-astra") else {}
+            assert after_body["reasoning"] == expected_reasoning
     finally:
         server.shutdown()
         server.server_close()

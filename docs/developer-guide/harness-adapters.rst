@@ -21,7 +21,7 @@ the agent's tools (``native_tool``) and its responses to loop events
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``claude``   | ``primary`` → ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``codex``    | ``primary`` → ``codex/config.toml``                       | npm ``@openai/codex`` 0.152.1             |
+| ``codex``    | ``primary`` → ``codex/config.toml``                       | npm ``@openai/codex`` 0.153.4             |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``dsh``      | ``primary`` → ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
 |              | ``env`` → ``dsh/.env``                                    |                                           |
@@ -71,12 +71,14 @@ compaction policy. Custom-model entries keep the pinned Codex unknown-model
 instructions, standard shell tools, and low/medium/high effort when reasoning
 is supported. The catalog includes all bundled models, so selecting another
 model with ``--model`` or the interactive picker retains its native instructions
-and tools. Explicit and discovered capabilities override the selected model's
+and tools, including ``gpt-6-astra``. Provider-prefixed names such as
+``openai/gpt-6-astra`` retain the same native configuration.
+Explicit and discovered capabilities override the selected model's
 context window and reasoning support even when its name matches a bundled model;
 other native fields and supported reasoning levels remain intact.
 ``codex/default_instructions.md`` records the effective unknown-model prompt
 exported with this adapter configuration. It is derived from
-`OpenAI Codex rust-v0.152.1 <https://github.com/openai/codex/blob/rust-v0.152.1/codex-rs/models-manager/prompt.md>`__,
+`OpenAI Codex rust-v0.153.4 <https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/models-manager/prompt.md>`__,
 under the Apache-2.0 license, with SHA-256
 ``3b08633fa672906666659d764864dfda1d7af5b5111ea5817c8f46e5de4e1a8d``.
 Codex removes instructions for tools disabled by the adapter from the source
@@ -84,7 +86,7 @@ prompt. A real-binary regression compares the resulting request instructions
 with and without metadata. ``codex/bundled_models.json`` is configuration data
 exported from the same Apache-2.0-licensed CLI with
 ``codex debug models --bundled``. Its SHA-256 is
-``cce7a61c91d8eb0781798e506ab0ea018757d72b3b47d92789a1a80522ba2bb4``.
+``661ed96cf0542e8ee117f1ddfd879f416cc05dc96dd1955249a13c04a313ba5e``.
 Keep both resources synchronized with the Codex install pin; the real-binary
 regression compares the complete bundled catalog, including instructions and
 tools. Rendering reads these packaged resources without starting Codex or
