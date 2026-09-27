@@ -7,8 +7,10 @@ import io
 import json
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from threading import Thread
 from typing import Any
+from urllib.request import Request
 
 import pytest
 
@@ -422,7 +424,7 @@ def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> Non
     )
 
 
-def test_recipe_reads_client_models_into_the_harness_surface(tmp_path) -> None:
+def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> None:
     module = tmp_path / "demo_client_models.py"
     module.write_text(
         "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
@@ -606,7 +608,9 @@ def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
 
 
 @pytest.mark.parametrize("parameters, reasoning", [(["reasoning"], True), ([], False)])
-def test_provider_metadata_is_selected_by_exact_model_and_cached(monkeypatch, parameters, reasoning) -> None:
+def test_provider_metadata_is_selected_by_exact_model_and_cached(
+    monkeypatch: pytest.MonkeyPatch, parameters: list[str], reasoning: bool
+) -> None:
     from reef.core.model_metadata import ModelMetadata
     from reef.harness.episodes.model_binding import provider_model_metadata
 
@@ -619,7 +623,7 @@ def test_provider_metadata_is_selected_by_exact_model_and_cached(monkeypatch, pa
     }
     calls = []
 
-    def fetch(request, timeout):
+    def fetch(request: Request, timeout: float) -> io.BytesIO:
         calls.append((request.full_url, request.get_header("Authorization"), timeout))
         return _Response(json.dumps(reply).encode())
 
@@ -633,13 +637,15 @@ def test_provider_metadata_is_selected_by_exact_model_and_cached(monkeypatch, pa
     provider_model_metadata.cache_clear()
 
 
-def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins(monkeypatch) -> None:
+def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from reef.core.model_metadata import ModelMetadata
     from reef.harness.episodes.model_binding import provider_model_metadata
 
     provider_model_metadata.cache_clear()
 
-    def missing(request, timeout):
+    def missing(request: Request, timeout: float) -> io.BytesIO:
         return _Response(b'{"data": [{"id": "served"}]}')
 
     monkeypatch.setattr("urllib.request.urlopen", missing)
@@ -647,7 +653,7 @@ def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins
     assert binding.with_metadata().metadata is None
     provider_model_metadata.cache_clear()
 
-    def unavailable(request, timeout):
+    def unavailable(request: Request, timeout: float) -> io.BytesIO:
         raise OSError("offline")
 
     monkeypatch.setattr("urllib.request.urlopen", unavailable)

@@ -1110,7 +1110,9 @@ inherits from the other, and there is no aggregate runtime.
   versions as values; it does not own an inference endpoint or request backend.
 * ``InferenceRuntime`` executes requests, manages admission and reconnection,
   loads selected weights or adapters, and reports serving versions. It restores
-  serving weights without restoring optimizer state.
+  serving weights without restoring optimizer state. Its ``model_path`` property
+  supplies the default model name for harness bindings; the base implementation
+  returns an empty string for runtimes whose requests select the model.
 * The existing ``RuntimeCandidateBackend`` coordinates both: prepare/train,
   evaluate, activate or reject, delegating scheduling and durable publication
   acknowledgement to ``RuntimeScheduler``. ``ScenarioCommitter`` coordinates rollback across both runtimes and

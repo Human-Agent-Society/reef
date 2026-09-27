@@ -455,7 +455,7 @@ def test_codex_catalog_uses_bound_capabilities(reasoning: bool) -> None:
     files = render_composition(binding.compose_nodes(descriptor), descriptor)
     config = tomllib.loads(files["codex/config.toml"])
     assert config["model_catalog_json"] == "models.json"
-    model = json.loads(files["codex/models.json"])["models"][0]
+    model = next(model for model in json.loads(files["codex/models.json"])["models"] if model["slug"] == binding.model)
     assert model["slug"] == binding.model
     assert model["context_window"] == model["max_context_window"] == 640_000
     assert bool(model["supported_reasoning_levels"]) is reasoning
@@ -478,12 +478,26 @@ def test_codex_rejects_invalid_model_metadata(metadata: dict[str, object]) -> No
         )
 
 
-@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4", "gpt-5.4-2026-03-05"])
-def test_codex_keeps_native_models_metadata_and_instructions(model: str) -> None:
+@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4", "gpt-5.4-2026-03-05", "gpt-5.4-mini"])
+@pytest.mark.parametrize("reasoning", [True, False])
+def test_codex_overrides_native_capabilities_and_keeps_instructions(model: str, reasoning: bool) -> None:
     from reef.core.model_metadata import ModelMetadata
+    from reef.harness.adapters.codex.quirks import bundled_model_catalog
 
     descriptor = get_adapter("codex")
-    binding = ModelBinding("http://up", model, api="responses", metadata=ModelMetadata(640_000, True))
+    binding = ModelBinding("http://up", model, api="responses", metadata=ModelMetadata(640_000, reasoning))
     files = render_composition(binding.compose_nodes(descriptor), descriptor)
-    assert "model_catalog_json" not in tomllib.loads(files["codex/config.toml"])
-    assert "codex/models.json" not in files
+    assert tomllib.loads(files["codex/config.toml"])["model_catalog_json"] == "models.json"
+    bundled = bundled_model_catalog()
+    catalog = {entry["slug"]: entry for entry in json.loads(files["codex/models.json"])["models"]}
+    native = bundled["gpt-5.4-mini" if model == "gpt-5.4-mini" else "gpt-5.4"]
+    expected = {
+        **native,
+        "slug": model,
+        "context_window": 640_000,
+        "max_context_window": 640_000,
+        "supports_reasoning_summary_parameter": reasoning,
+        "supported_reasoning_levels": native["supported_reasoning_levels"] if reasoning else [],
+        "default_reasoning_level": native["default_reasoning_level"] if reasoning else None,
+    }
+    assert catalog == {**bundled, model: expected}

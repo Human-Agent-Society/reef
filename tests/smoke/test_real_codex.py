@@ -130,7 +130,7 @@ def _server() -> tuple[StubResponses, str]:
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
 
-def _binding(base_url: str) -> ModelBinding:
+def model_binding(base_url: str) -> ModelBinding:
     return ModelBinding(base_url=base_url, model=MODEL, api_key="reef-smoke-key", api="responses").with_metadata()
 
 
@@ -170,7 +170,7 @@ def test_real_codex_accepts_every_admitted_tuning_key() -> None:
                     }
                 },
             ),
-            binding=_binding(base_url),
+            binding=model_binding(base_url),
         )
         result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=120.0)
     finally:
@@ -185,7 +185,7 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
         files = _bound_files(
             ("rules", {"text": RULES_MARKER}),
             ("skill", {"name": "reef-smoke", "text": f"# Reef smoke skill\n\n{SKILL_MARKER}"}),
-            binding=_binding(base_url),
+            binding=model_binding(base_url),
         )
         capture = Path(os.environ.get("REEF_REAL_CODEX_SESSION_OUT", tmp_path / "real-codex-session.jsonl"))
         result = run_episode(
@@ -220,12 +220,13 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert final_assistant_text(result.trajectory) == "READY"
 
 
-def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("selected_model", [MODEL, "gpt-5.4"])
+def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path, selected_model: str) -> None:
     server, base_url = _server()
     try:
         descriptor = get_adapter("codex")
         composition = render_composition([("rules", {"text": RULES_MARKER})], descriptor)
-        bound = _bound_files(("rules", {"text": RULES_MARKER}), binding=_binding(base_url))
+        bound = _bound_files(("rules", {"text": RULES_MARKER}), binding=model_binding(base_url))
         script = tmp_path / "install.sh"
         script.write_text(
             render_install_script(
@@ -251,7 +252,16 @@ def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path) -
         config = tomllib.loads((dest / "codex/config.toml").read_text())
         assert config["model_catalog_json"] == "models.json"
         run = subprocess.run(
-            [str(dest / "reef-codex"), "exec", "--json", "--strict-config", "--skip-git-repo-check", "Reply READY"],
+            [
+                str(dest / "reef-codex"),
+                "exec",
+                "--json",
+                "--strict-config",
+                "--skip-git-repo-check",
+                "--model",
+                selected_model,
+                "Reply READY",
+            ],
             cwd=tmp_path,
             env=env,
             capture_output=True,
@@ -269,7 +279,12 @@ def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path) -
         started = next(
             event["payload"] for event in sessions if event.get("payload", {}).get("type") == "task_started"
         )
-        assert started["model_context_window"] == 608_000
+        expected_window = 608_000 if selected_model == MODEL else 258_400
+        assert started["model_context_window"] == expected_window
+        request_body = json.loads(server.requests[-1][2])
+        assert request_body["model"] == selected_model
+        if selected_model == "gpt-5.4":
+            assert any(tool.get("name") == "apply_patch" for tool in request_body["tools"])
     finally:
         server.shutdown()
         server.server_close()
@@ -279,7 +294,7 @@ def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path) -
 def test_codex_sends_reasoning_parameters_only_when_supported(reasoning: bool) -> None:
     server, base_url = _server()
     try:
-        binding = replace(_binding(base_url), metadata=ModelMetadata(640_000, reasoning))
+        binding = replace(model_binding(base_url), metadata=ModelMetadata(640_000, reasoning))
         files = _bound_files(binding=binding)
         result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=30.0)
         assert result.exit_code == 0, result.stderr
@@ -315,8 +330,8 @@ def test_metadata_preserves_codex_unknown_model_instructions() -> None:
         server.server_close()
 
 
-def test_codex_bundled_model_prefixes_match_the_pin() -> None:
-    from reef.harness.adapters.codex.quirks import BUNDLED_MODEL_PREFIXES
+def test_codex_bundled_model_catalog_matches_the_pin() -> None:
+    from reef.harness.adapters.codex.quirks import bundled_model_catalog
 
     descriptor = get_adapter("codex")
     result = run_episode(
@@ -327,4 +342,56 @@ def test_codex_bundled_model_prefixes_match_the_pin() -> None:
         timeout=30.0,
     )
     assert result.exit_code == 0, result.stderr
-    assert set(BUNDLED_MODEL_PREFIXES) == {model["slug"] for model in json.loads(result.stdout)["models"]}
+    assert bundled_model_catalog() == {model["slug"]: model for model in json.loads(result.stdout)["models"]}
+
+
+def test_codex_model_switch_keeps_bundled_instructions_and_tools() -> None:
+    server, base_url = _server()
+    try:
+        descriptor = get_adapter("codex")
+        switched = replace(descriptor, argv=(*descriptor.argv, "--model", "gpt-5.4"))
+        binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
+        before = run_episode(switched, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        after = run_episode(
+            switched, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
+        )
+        assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
+        assert "fallback metadata" not in after.stdout + after.stderr
+        before_body = json.loads(server.requests[0][2])
+        after_body = json.loads(server.requests[1][2])
+        for field in ("model", "instructions", "tools", "reasoning"):
+            assert before_body[field] == after_body[field], field
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4"])
+@pytest.mark.parametrize("reasoning", [True, False])
+def test_codex_native_model_applies_capabilities_and_keeps_instructions(model: str, reasoning: bool) -> None:
+    server, base_url = _server()
+    try:
+        descriptor = get_adapter("codex")
+        binding = ModelBinding(base_url=base_url, model=model, api="responses")
+        before = run_episode(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        configured = replace(binding, metadata=ModelMetadata(32_000, reasoning))
+        after = run_episode(
+            descriptor, _bound_files(binding=configured), "Reply READY", binary=REAL_CODEX, timeout=30.0
+        )
+        assert before.exit_code == after.exit_code == 0, (before.stderr, after.stderr)
+        assert "fallback metadata" not in after.stdout + after.stderr
+        started = next(
+            event["payload"] for event in after.trajectory if event.get("payload", {}).get("type") == "task_started"
+        )
+        assert started["model_context_window"] == 30_400
+        before_body = json.loads(server.requests[0][2])
+        after_body = json.loads(server.requests[1][2])
+        assert before_body["instructions"] == after_body["instructions"]
+        assert before_body["tools"] == after_body["tools"]
+        if reasoning:
+            assert after_body["reasoning"] == before_body["reasoning"]
+        else:
+            assert after_body.get("reasoning", {}) == {}
+    finally:
+        server.shutdown()
+        server.server_close()

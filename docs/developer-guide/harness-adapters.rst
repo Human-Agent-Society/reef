@@ -67,8 +67,13 @@ provider metadata. A scenario model override resolves the new model separately.
 The binding renders ``codex/models.json`` and a relative ``model_catalog_json``
 reference, so both evaluation episodes and installed clients read the same
 capabilities after relocation. Codex retains its own context safety margin and
-compaction policy. The generated entry keeps the pinned Codex unknown-model instructions,
-standard shell tools, and low/medium/high effort when reasoning is supported.
+compaction policy. Custom-model entries keep the pinned Codex unknown-model
+instructions, standard shell tools, and low/medium/high effort when reasoning
+is supported. The catalog includes all bundled models, so selecting another
+model with ``--model`` or the interactive picker retains its native instructions
+and tools. Explicit and discovered capabilities override the selected model's
+context window and reasoning support even when its name matches a bundled model;
+other native fields and supported reasoning levels remain intact.
 ``codex/default_instructions.md`` records the effective unknown-model prompt
 exported with this adapter configuration. It is derived from
 `OpenAI Codex rust-v0.152.1 <https://github.com/openai/codex/blob/rust-v0.152.1/codex-rs/models-manager/prompt.md>`__,
@@ -76,9 +81,14 @@ under the Apache-2.0 license, with SHA-256
 ``3b08633fa672906666659d764864dfda1d7af5b5111ea5817c8f46e5de4e1a8d``.
 Codex removes instructions for tools disabled by the adapter from the source
 prompt. A real-binary regression compares the resulting request instructions
-with and without metadata. Keep this resource and the bundled model prefixes
-synchronized with the Codex install pin. Models recognized by the pinned CLI
-keep their bundled metadata and model-specific prompts instead of this catalog.
+with and without metadata. ``codex/bundled_models.json`` is configuration data
+exported from the same Apache-2.0-licensed CLI with
+``codex debug models --bundled``. Its SHA-256 is
+``cce7a61c91d8eb0781798e506ab0ea018757d72b3b47d92789a1a80522ba2bb4``.
+Keep both resources synchronized with the Codex install pin; the real-binary
+regression compares the complete bundled catalog, including instructions and
+tools. Rendering reads these packaged resources without starting Codex or
+making a network request.
 Tree rules and skills are still added normally. Tree entries may supply the
 same capability fields through the ``models`` config target, but may not set
 an arbitrary catalog path or inject native Codex model fields.

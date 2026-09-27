@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -22,20 +23,6 @@ import yaml
 
 from reef.core.model_metadata import ModelMetadata
 from reef.harness.tree.render import RenderError
-
-# Codex 0.152.1 matches bundled model slugs by prefix, including a single provider namespace.
-BUNDLED_MODEL_PREFIXES = (
-    "gpt-5.6-sol",
-    "gpt-5.6-terra",
-    "gpt-5.6-luna",
-    "gpt-daybreak-blue-latest",
-    "gpt-daybreak-red-latest",
-    "gpt-5.5",
-    "gpt-5.4",
-    "gpt-5.4-mini",
-    "gpt-5.2",
-    "codex-auto-review",
-)
 
 CONFIG = "codex/config.toml"
 EXTENSIONS = "codex/extensions/"
@@ -143,6 +130,31 @@ def validate_config(config: dict[str, Any]) -> None:
         raise RenderError("codex composition must use the Reef model provider")
 
 
+def bundled_model_catalog() -> dict[str, dict[str, object]]:
+    """The pinned CLI's catalog, including native prompts and tool configuration.
+
+    Exported with ``codex debug models --bundled``; the real-CLI test checks
+    the complete resource when the install pin changes.
+    """
+    with Path(__file__).with_name("bundled_models.json").open(encoding="utf-8") as source:
+        return {model["slug"]: model for model in json.load(source)["models"]}
+
+
+def native_model_config(model: str, catalog: Mapping[str, dict[str, object]]) -> dict[str, object] | None:
+    """Match the pinned CLI's longest prefix and single provider namespace rules."""
+    namespace, separator, suffix = model.partition("/")
+    model_names: tuple[str, ...]
+    if separator and "/" not in suffix and re.fullmatch(r"[A-Za-z0-9_-]+", namespace):
+        model_names = (model, suffix)
+    else:
+        model_names = (model,)
+    for name in model_names:
+        matched_slug = max((slug for slug in catalog if name.startswith(slug)), key=len, default="")
+        if matched_slug:
+            return dict(catalog[matched_slug])
+    return None
+
+
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     try:
         config = json.loads(files[CONFIG])
@@ -162,15 +174,9 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
     metadata_models = metadata_config.get("models", {})
     if not isinstance(metadata_models, dict):
         raise RenderError("codex models must map model names to metadata")
-    # A native model already has model-specific instructions and tool definitions. Keep those intact.
-    selected_model = config.get("model", "")
-    if isinstance(selected_model, str):
-        namespace, separator, suffix = selected_model.partition("/")
-        if separator and "/" not in suffix and re.fullmatch(r"[A-Za-z0-9_-]+", namespace):
-            selected_model = suffix
-        if selected_model.startswith(BUNDLED_MODEL_PREFIXES):
-            metadata_models = {}
-    catalog: list[dict[str, object]] = []
+    # A catalog replaces Codex's built-ins, including when the user later selects another model.
+    bundled_models = bundled_model_catalog() if metadata_models else {}
+    catalog = dict(bundled_models)
     for model, value in metadata_models.items():
         if not isinstance(model, str) or not model.strip():
             raise RenderError("codex model metadata requires a non-empty model name")
@@ -178,29 +184,42 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
             metadata = ModelMetadata.from_config(value)
         except ValueError as exc:
             raise RenderError(f"codex model {model!r}: {exc}") from exc
-        efforts = ["low", "medium", "high"] if metadata.reasoning else []
-        catalog.append(
-            {
+        native_config = native_model_config(model, bundled_models)
+        if native_config is not None:
+            model_config = native_config
+        else:
+            model_config = {
                 "slug": model,
                 "display_name": model,
-                "supported_reasoning_levels": [{"effort": effort, "description": effort} for effort in efforts],
-                "default_reasoning_level": "medium" if metadata.reasoning else None,
+                "supported_reasoning_levels": [],
+                "default_reasoning_level": None,
                 "shell_type": "unified_exec",
                 "visibility": "list",
                 "supported_in_api": True,
                 "priority": 0,
                 # Preserve the pinned CLI's unknown-model prompt; metadata must not weaken its instructions.
                 "base_instructions": Path(__file__).with_name("default_instructions.md").read_text(encoding="utf-8"),
-                "supports_reasoning_summary_parameter": metadata.reasoning,
                 "support_verbosity": False,
                 "truncation_policy": {"mode": "bytes", "limit": 10000},
-                "context_window": metadata.context_window,
-                "max_context_window": metadata.context_window,
                 "experimental_supported_tools": [],
             }
+        if metadata.reasoning:
+            model_config["supported_reasoning_levels"] = model_config["supported_reasoning_levels"] or [
+                {"effort": effort, "description": effort} for effort in ("low", "medium", "high")
+            ]
+            model_config["default_reasoning_level"] = model_config["default_reasoning_level"] or "medium"
+        else:
+            model_config["supported_reasoning_levels"] = []
+            model_config["default_reasoning_level"] = None
+        model_config.update(
+            slug=model,
+            context_window=metadata.context_window,
+            max_context_window=metadata.context_window,
+            supports_reasoning_summary_parameter=metadata.reasoning,
         )
+        catalog[model] = model_config
     if catalog:
-        files["codex/models.json"] = json.dumps({"models": catalog}, indent=2) + "\n"
+        files["codex/models.json"] = json.dumps({"models": list(catalog.values())}, indent=2) + "\n"
         # Codex resolves this relative to config.toml, including in a relocated client session.
         config["model_catalog_json"] = "models.json"
     try:

@@ -708,7 +708,7 @@ class CordisRecipe(Recipe):
         return self.default_model_bindings(scenario)
 
     def build_surface(self, scenario: str) -> Surface:
-        model = self.model_name or getattr(self.runtime, "model_path", None)
+        model = self.model_name or (self.runtime.model_path if self.runtime is not None else None)
         # Only a provider proxy has a dialect; a local engine serves Chat Completions.
         api = self.runtime.api if isinstance(self.runtime, InferenceProxyRuntime) else "openai"
         client_models = self.client_models
@@ -717,10 +717,11 @@ class CordisRecipe(Recipe):
             model = override.model_path
             api = override.api
             client_models = ()
-        served_metadata = None
         if self.adapter == "codex" and self.runtime is not None:
             selected = self.bind_model_metadata(ModelBinding.from_runtime(override or self.runtime, model=model))
             served_metadata = selected.metadata
+        else:
+            served_metadata = None
         return create_harness_surface(
             seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
