@@ -15,6 +15,9 @@ Megatron only where the pass runs.
 
 from __future__ import annotations
 
+import sys
+from types import SimpleNamespace
+
 import pytest
 
 torch = pytest.importorskip("torch")
@@ -29,6 +32,7 @@ from reef.train.slime_backend.distill.objective import (
     sampled_reverse_kl,
     sequence_importance_weight,
     token_divergence,
+    topk_tail_divergence,
 )
 from reef.train.slime_backend.distill.teacher import (
     ACTOR_TAG,
@@ -36,6 +40,8 @@ from reef.train.slime_backend.distill.teacher import (
     CurrentWeights,
     MovingCopy,
     SeparateCheckpoint,
+    TeacherAtStudentTopK,
+    gather_student_topk_ids,
     mix_teacher_weights,
     teacher_weights,
 )
@@ -218,6 +224,148 @@ def test_sampled_reverse_kl_is_the_gap_with_the_score_function_gradient() -> Non
 
 
 @pytest.mark.unit
+def test_teacher_selection_follows_schedule_with_duplicate_sequences(monkeypatch: pytest.MonkeyPatch) -> None:
+    mpu = SimpleNamespace(get_context_parallel_world_size=lambda: 1, get_tensor_model_parallel_group=lambda: None)
+    monkeypatch.setitem(sys.modules, "megatron.core", SimpleNamespace(mpu=mpu))
+    args = SimpleNamespace(distill_top_k=1, rollout_temperature=1.0)
+    # All teacher sequences are identical; student contexts select different ids.
+    selected = [torch.tensor([[index]]) for index in range(3)]
+    scorer = TeacherAtStudentTopK(selected, [[2, 0], [1]])
+    single = torch.tensor([[[0.0, 1.0, 3.0], [2.0, 0.0, 1.0], [0.0, 0.0, 0.0]]], requires_grad=True)
+    scores = []
+    for indices in ([2, 0], [1]):
+        _, result = scorer(
+            single.repeat(1, len(indices), 1),
+            args=args,
+            unconcat_tokens=[torch.tensor([8, 9, 1]) for _ in indices],
+            total_lengths=[3] * len(indices),
+            response_lengths=[1] * len(indices),
+        )
+        scores.extend(result["distill_teacher_student_topk_log_probs"])
+    expected = torch.log_softmax(single[0, 1], dim=-1)[torch.tensor([2, 0, 1])]
+    assert torch.allclose(torch.cat(scores).flatten(), expected)
+    assert all(not score.requires_grad for score in scores)
+    assert scorer.microbatch_index == 2
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("divergence", _DIVERGENCES)
+@pytest.mark.parametrize("k", [1, 4, _VOCAB])
+def test_student_topk_tail_matches_reference_value_and_gradient(divergence: str, k: int) -> None:
+    student, teacher = _rows(42)
+    logits = student.float().requires_grad_(True)
+    teacher = teacher.float()
+    ids = native_topk_ids(logits, k, None, 1, 0)
+    student_at = gather_log_probs_at_ids(logits, ids, None, 1, 0)
+    teacher_at = teacher.gather(-1, ids)
+    value = topk_tail_divergence(student_at, teacher_at, divergence=divergence)
+    value.sum().backward()
+
+    reference_logits = student.float().requires_grad_(True)
+
+    def reference_add_tail(selected_log_probs: torch.Tensor) -> torch.Tensor:
+        log_mass = torch.logsumexp(selected_log_probs, dim=-1, keepdim=True).clamp(max=-1e-7)
+        return torch.cat([selected_log_probs, (-torch.expm1(log_mass)).log()], dim=-1)
+
+    student_log = reference_add_tail(torch.log_softmax(reference_logits, dim=-1).gather(-1, ids))
+    teacher_log = reference_add_tail(teacher.gather(-1, ids))
+    student_bucket = student_log.exp()
+    teacher_bucket = teacher_log.exp()
+    if divergence == "forward":
+        expected = (teacher_bucket * (teacher_log - student_log)).sum(-1)
+    elif divergence == "reverse":
+        expected = (student_bucket * (student_log - teacher_log)).sum(-1)
+    else:
+        mixture = 0.5 * (student_bucket + teacher_bucket)
+        mixture_log = mixture.clamp_min(1e-30).log()
+        expected = 0.5 * (teacher_bucket * (teacher_log - mixture_log)).sum(-1) + 0.5 * (
+            student_bucket * (student_log - mixture_log)
+        ).sum(-1)
+    expected.sum().backward()
+
+    assert torch.allclose(value, expected, atol=2e-5, rtol=2e-5)
+    assert torch.allclose(logits.grad, reference_logits.grad, atol=2e-5, rtol=2e-5)
+
+
+@pytest.mark.unit
+def test_student_topk_tail_matches_reference_for_saturated_teacher() -> None:
+    student = torch.tensor([[0.0, 0.0]], requires_grad=True)
+    teacher = torch.log_softmax(torch.tensor([[20.0, 0.0]]), dim=-1)
+    value = topk_tail_divergence(torch.log_softmax(student, dim=-1)[:, :1], teacher[:, :1], divergence="reverse")
+    value.sum().backward()
+
+    reference_student = torch.tensor([[0.0, 0.0]], requires_grad=True)
+    selected = torch.log_softmax(reference_student, dim=-1)[:, :1]
+    student_tail = (-torch.expm1(torch.logsumexp(selected, dim=-1, keepdim=True).clamp(max=-1e-7))).log()
+    teacher_tail = (-torch.expm1(torch.logsumexp(teacher[:, :1], dim=-1, keepdim=True).clamp(max=-1e-7))).log()
+    student_log = torch.cat([selected, student_tail], dim=-1)
+    teacher_log = torch.cat([teacher[:, :1], teacher_tail], dim=-1)
+    expected = (student_log.exp() * (student_log - teacher_log)).sum(dim=-1)
+    expected.sum().backward()
+
+    assert value.item() == pytest.approx(7.36590, abs=1e-4)
+    assert torch.allclose(value, expected, atol=1e-6)
+    assert torch.allclose(student.grad, reference_student.grad, atol=1e-6)
+
+
+@pytest.mark.unit
+def test_student_topk_can_differ_from_teacher_topk_without_changing_alignment() -> None:
+    student = torch.tensor([[8.0, 2.0, 0.0, -3.0]], requires_grad=True)
+    teacher = torch.log_softmax(torch.tensor([[-3.0, 0.0, 2.0, 8.0]]), dim=-1)
+    ids = native_topk_ids(student, 2, None, 1, 0)
+
+    assert ids.tolist() == [[0, 1]]
+    assert native_topk_ids(teacher, 2, None, 1, 0).tolist() == [[3, 2]]
+    value = topk_tail_divergence(
+        gather_log_probs_at_ids(student, ids, None, 1, 0), teacher.gather(-1, ids), divergence="reverse"
+    )
+    value.sum().backward()
+    assert torch.isfinite(value).all() and torch.isfinite(student.grad).all()
+
+
+@pytest.mark.unit
+def test_student_and_teacher_forward_callbacks_score_the_same_response_positions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    mpu = SimpleNamespace(get_context_parallel_world_size=lambda: 1, get_tensor_model_parallel_group=lambda: None)
+    monkeypatch.setitem(sys.modules, "megatron", SimpleNamespace(core=SimpleNamespace(mpu=mpu)))
+    monkeypatch.setitem(sys.modules, "megatron.core", SimpleNamespace(mpu=mpu))
+    args = SimpleNamespace(distill_top_k=2, rollout_temperature=1.0)
+    student_tokens = torch.tensor([10, 11, 12, 13, 2, 3])
+    teacher_tokens = torch.tensor([10, 11, 12, 13, 14, 2, 3])
+    student_logits = torch.zeros(1, 6, 5)
+    student_logits[0, 3] = torch.tensor([8.0, 0, 3, 1, 2])
+    student_logits[0, 4] = torch.tensor([0.0, 9, 3, 1, 2])
+    teacher_logits = torch.zeros(1, 7, 5)
+    teacher_logits[0, 4] = torch.tensor([0.0, 1, 2, 3, 4])
+    teacher_logits[0, 5] = torch.tensor([4.0, 3, 2, 1, 0])
+
+    _, selected = gather_student_topk_ids(
+        student_logits,
+        args=args,
+        unconcat_tokens=[student_tokens],
+        total_lengths=[6],
+        response_lengths=[2],
+    )
+    ids = selected["distill_student_topk_ids"][0]
+    scorer = TeacherAtStudentTopK([ids], [[0]])
+    _, scores = scorer(
+        teacher_logits,
+        args=args,
+        unconcat_tokens=[teacher_tokens],
+        total_lengths=[7],
+        response_lengths=[2],
+    )
+
+    assert ids.tolist() == [[0, 2], [1, 2]]
+    expected = torch.log_softmax(teacher_logits[0, 4:6], dim=-1).gather(-1, ids)
+    assert torch.allclose(scores["distill_teacher_student_topk_log_probs"][0], expected)
+
+
+# --- the importance weight and the teacher copy -------------------------------------
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("cap", [2.0, 0.5])
 def test_sequence_importance_weight_matches_reference(cap: float) -> None:
     student = torch.tensor([-0.5, -1.0, -0.2, -2.0], dtype=torch.float64)
@@ -288,6 +436,24 @@ def _sharded_worker(rank: int, world: int, port: int, divergence: str, seed: int
         at_ids.sum().backward()
         assert torch.allclose(at_ids, dense_at.detach(), atol=1e-9), (rank, at_ids, dense_at)
         assert torch.allclose(local.grad, dense.grad[:, shard], atol=1e-9), (rank, local.grad, dense.grad[:, shard])
+
+        # SDPO selects the student's ids, scores the teacher at them, and
+        # retains each distribution's complementary tail probability.
+        ids = native_topk_ids(student[:, shard], 4, group, world, rank)
+        dense = student.clone().requires_grad_(True)
+        dense_value = topk_tail_divergence(
+            torch.log_softmax(dense, -1).gather(-1, ids),
+            teacher.gather(-1, ids),
+            divergence=divergence,
+        )
+        dense_value.sum().backward()
+        local = student[:, shard].clone().requires_grad_(True)
+        student_at = gather_log_probs_at_ids(local, ids, group, world, rank)
+        teacher_at = gather_log_probs_at_ids(teacher[:, shard], ids, group, world, rank)
+        value = topk_tail_divergence(student_at, teacher_at, divergence=divergence)
+        value.sum().backward()
+        assert torch.allclose(value, dense_value.detach(), atol=2e-5), (rank, value, dense_value)
+        assert torch.allclose(local.grad, dense.grad[:, shard], atol=2e-5), (rank, local.grad, dense.grad[:, shard])
     finally:
         dist.destroy_process_group()
 

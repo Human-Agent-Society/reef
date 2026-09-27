@@ -250,6 +250,10 @@ def _build_slime_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(allow_abbrev=False, exit_on_error=False)
     get_slime_extra_args_provider()(parser)
     add_reef_slime_arguments(parser)
+    # These Megatron-owned values are consumed by student top-K validation.
+    # Parse the shipped values instead of treating them as name-only leftovers.
+    parser.add_argument("--attention-dropout", type=float)
+    parser.add_argument("--hidden-dropout", type=float)
     return parser
 
 
@@ -387,6 +391,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
+        "recipes/sdpo/examples/feedback_group/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -412,6 +417,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/sao/examples/imo_answerbench/serve-30b-multi.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
+        "recipes/sdpo/examples/feedback_group/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

@@ -41,6 +41,7 @@ TEACHER_SOURCES = ("self", "separate")
 #: teacher); ``jsd`` is the generalized Jensen-Shannon divergence with
 #: ``jsd_beta`` as the teacher's mixture weight.
 DIVERGENCES = ("forward", "reverse", "jsd")
+IMPORTANCE_SAMPLING_MODES = ("sequence", "token")
 
 
 @dataclass(frozen=True)
@@ -50,18 +51,21 @@ class DistillSettings:
     A recipe's family subclasses this with its own defaults. ``top_k`` selects
     the teacher's representation: 0 keeps the teacher's whole next-token
     distribution at every response position (exact divergences, one
-    ``[R, V_local]`` block per sample on the host); a positive value keeps
-    the teacher's top-K log-probs and its log-prob at the sampled token
-    (divergences restricted to those entries, the reverse one estimated at
-    the sampled token).
+    ``[R, V_local]`` block per sample on the host); a positive value by
+    default keeps the teacher's top-K log-probs and its log-prob at the
+    sampled token. ``top_k_tail`` instead selects the student's top-K ids
+    with a separate no-gradient student pass, then scores the teacher only
+    at those ids and compares both distributions with a tail bucket.
     """
 
     teacher: str = "self"
     divergence: str = "forward"
     top_k: int = 0
+    top_k_tail: bool = False
     teacher_update_rate: float = 0.01
     teacher_checkpoint: str = ""
     importance_sampling_cap: float = 2.0
+    importance_sampling_mode: str = "sequence"
     skip_response_tokens: int = 0
     jsd_beta: float = 0.5
 
@@ -72,6 +76,8 @@ class DistillSettings:
             raise ValueError(f"distill divergence must be one of: {', '.join(DIVERGENCES)}")
         if not _is_integer(self.top_k) or self.top_k < 0:
             raise ValueError("distill top_k must be a non-negative integer (0 keeps the whole distribution)")
+        if not isinstance(self.top_k_tail, bool) or (self.top_k_tail and self.top_k == 0):
+            raise ValueError("distill top_k_tail requires a positive top_k and must be a boolean")
         if not _is_finite(self.teacher_update_rate) or not 0 <= self.teacher_update_rate <= 1:
             raise ValueError("distill teacher_update_rate must be a number in [0, 1]")
         if not isinstance(self.teacher_checkpoint, str):
@@ -81,6 +87,10 @@ class DistillSettings:
         if not _is_finite(self.importance_sampling_cap) or self.importance_sampling_cap < 0:
             raise ValueError(
                 "distill importance_sampling_cap must be a finite number >= 0 (0 disables the correction)"
+            )
+        if self.importance_sampling_mode not in IMPORTANCE_SAMPLING_MODES:
+            raise ValueError(
+                f"distill importance_sampling_mode must be one of: {', '.join(IMPORTANCE_SAMPLING_MODES)}"
             )
         if not _is_integer(self.skip_response_tokens) or self.skip_response_tokens < 0:
             raise ValueError("distill skip_response_tokens must be a non-negative integer")
@@ -101,11 +111,11 @@ def _is_finite(value: object) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
 
-ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, teacher_tokens]"
+ROW_SHAPE = "[source_id, tokens, loss_mask, rollout_log_probs, reward, teacher_tokens, sample_weight]"
 
 
 def distill_sample_row(sample: TrajectoryItem) -> list[Any]:
-    """Shape one Reef sample into the family's 6-element wire row."""
+    """Shape one Reef sample into the shared distillation wire row."""
     return [
         source_record_id(sample),
         list(sample.training.get("tokens", [])),
@@ -113,6 +123,7 @@ def distill_sample_row(sample: TrajectoryItem) -> list[Any]:
         list(sample.training.get("rollout_log_probs", [])),
         trajectory_reward(sample),
         list(sample.training.get("teacher_tokens", [])),
+        sample.training.get("distill_sample_weight", 1.0),
     ]
 
 
@@ -121,9 +132,15 @@ def build_distill_rollout_data(payload: Mapping[str, Any], samples: Sequence, sp
     name = spec.loss_family
     base_rows: list[list[Any]] = []
     teacher_rows: list[Any] = []
+    sample_weights: list[float] = []
     for index, row in enumerate(samples):
-        if not isinstance(row, Sequence) or isinstance(row, str | bytes) or len(row) != 6:
+        if not isinstance(row, Sequence) or isinstance(row, str | bytes) or len(row) not in (6, 7):
             raise ValueError(f"{name} sample {index} must be {ROW_SHAPE}")
+        # Six-column rows predate sample weighting and retain unit weight.
+        weight = row[6] if len(row) == 7 else 1.0
+        if not isinstance(weight, Real) or isinstance(weight, bool) or not math.isfinite(weight) or weight < 0:
+            raise ValueError(f"{name} sample {index} sample_weight must be finite and non-negative")
+        sample_weights.append(float(weight))
         base_rows.append(list(row[:5]))
         teacher_rows.append(row[5])
 
@@ -147,6 +164,7 @@ def build_distill_rollout_data(payload: Mapping[str, Any], samples: Sequence, sp
             raise ValueError(f"{name} sample {index} teacher sequence must end with the student's response ids")
         teacher_tokens.append(ids)
     data["teacher_tokens"] = teacher_tokens
+    data["distill_sample_weights"] = sample_weights
     return data
 
 
@@ -156,6 +174,8 @@ TEACHER_BATCH_KEYS = (
     "distill_teacher_topk_ids",
     "distill_teacher_topk_log_probs",
     "distill_teacher_sampled_log_probs",
+    "distill_student_topk_ids",
+    "distill_teacher_student_topk_log_probs",
 )
 
 
@@ -178,10 +198,10 @@ class DistillAlgorithm(SlimeAlgorithm):
     forbidden_advantages_message = (
         "a distillation family distils its teacher's distribution; the Reef payload must omit advantages"
     )
-    rollout_data_keys = ("teacher_tokens",)
+    rollout_data_keys: tuple[str, ...] = ("teacher_tokens", "distill_sample_weights")
     rollout_tensor_dtypes: Mapping[str, str] = {"teacher_tokens": "long"}
-    external_batch_keys = ("rollout_log_probs", *TEACHER_BATCH_KEYS)
-    rollout_log_skip_keys = ("teacher_tokens", *TEACHER_BATCH_KEYS)
+    external_batch_keys: tuple[str, ...] = ("rollout_log_probs", "distill_sample_weights", *TEACHER_BATCH_KEYS)
+    rollout_log_skip_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS)
     required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
     #: The recipe's settings type, with its defaults.
     settings_type: type[DistillSettings] = DistillSettings
@@ -197,6 +217,11 @@ class DistillAlgorithm(SlimeAlgorithm):
             raise RuntimeError(
                 f"{source} requires --num-steps-per-rollout=1: the teacher's distributions are computed once "
                 "before the step"
+            )
+        if args.distill_top_k_tail and (args.attention_dropout != 0 or args.hidden_dropout != 0):
+            raise RuntimeError(
+                f"{source} requires --attention-dropout=0 and --hidden-dropout=0 for student top-K selection: "
+                "the selection and training forwards must use the same distribution"
             )
 
     def parse_specific_options(self, arguments: Sequence[str]) -> tuple[DistillSettings, list[str]]:
@@ -227,9 +252,15 @@ class DistillAlgorithm(SlimeAlgorithm):
             dest="top_k",
             type=int,
             help=(
-                "Keep the teacher's top-K log-probs and its log-prob at the sampled token instead of its whole "
-                f"distribution; 0 keeps the whole distribution. Default {defaults.top_k}."
+                "Top-K for the teacher-selected approximation, or the student's top-K when top-k-tail is enabled; "
+                f"0 keeps the whole distribution. Default {defaults.top_k}."
             ),
+        )
+        parser.add_argument(
+            f"{prefix}top-k-tail",
+            dest="top_k_tail",
+            action="store_true",
+            help="Use the student's top-K ids plus a tail bucket; requires a positive top-k.",
         )
         parser.add_argument(
             f"{prefix}teacher-update-rate",
@@ -252,8 +283,14 @@ class DistillAlgorithm(SlimeAlgorithm):
             type=float,
             help=(
                 "Cap of the truncated importance-sampling weight between the policy and the rollout engine's "
-                f"log-probs, averaged over the response. 0 disables it. Default {defaults.importance_sampling_cap}."
+                f"log-probs, at the configured sequence or token level. 0 disables it. Default {defaults.importance_sampling_cap}."
             ),
+        )
+        parser.add_argument(
+            f"{prefix}importance-sampling-mode",
+            dest="importance_sampling_mode",
+            choices=list(IMPORTANCE_SAMPLING_MODES),
+            help=f"Apply truncated importance sampling per sequence or per token. Default {defaults.importance_sampling_mode}.",
         )
         parser.add_argument(
             f"{prefix}skip-response-tokens",
@@ -279,9 +316,11 @@ class DistillAlgorithm(SlimeAlgorithm):
         args.distill_teacher = settings.teacher
         args.distill_divergence = settings.divergence
         args.distill_top_k = settings.top_k
+        args.distill_top_k_tail = settings.top_k_tail
         args.distill_teacher_update_rate = settings.teacher_update_rate
         args.distill_teacher_checkpoint = settings.teacher_checkpoint
         args.distill_importance_sampling_cap = settings.importance_sampling_cap
+        args.distill_importance_sampling_mode = settings.importance_sampling_mode
         args.distill_skip_response_tokens = settings.skip_response_tokens
         args.distill_jsd_beta = settings.jsd_beta
 
@@ -308,9 +347,11 @@ def settings_from_args(args: Namespace) -> DistillSettings:
         teacher=args.distill_teacher,
         divergence=args.distill_divergence,
         top_k=args.distill_top_k,
+        top_k_tail=args.distill_top_k_tail,
         teacher_update_rate=args.distill_teacher_update_rate,
         teacher_checkpoint=args.distill_teacher_checkpoint,
         importance_sampling_cap=args.distill_importance_sampling_cap,
+        importance_sampling_mode=args.distill_importance_sampling_mode,
         skip_response_tokens=args.distill_skip_response_tokens,
         jsd_beta=args.distill_jsd_beta,
     )
@@ -318,6 +359,7 @@ def settings_from_args(args: Namespace) -> DistillSettings:
 
 __all__ = [
     "DIVERGENCES",
+    "IMPORTANCE_SAMPLING_MODES",
     "TEACHER_BATCH_KEYS",
     "TEACHER_SOURCES",
     "DistillAlgorithm",

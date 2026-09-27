@@ -2,7 +2,7 @@
 
 Torch/ray free: a toy family subclasses the base under its own prefix, the
 way ``recipes/<name>/slime/`` does, and the tests exercise the flags, the
-settings stamped on ``args``, the six-column wire row and the payload
+settings stamped on ``args``, the weighted wire row and the payload
 checks. The kernels are pinned in ``test_distill_parity.py``.
 """
 
@@ -149,7 +149,12 @@ def test_a_separate_teacher_needs_its_checkpoint() -> None:
 
 @pytest.mark.unit
 def test_backend_validation_pins_the_loss_type_rollout_logprobs_and_one_step_per_rollout(toy_family) -> None:
-    accepted = {"loss_type": "custom_loss", "use_rollout_logprobs": True, "num_steps_per_rollout": 1}
+    accepted = {
+        "loss_type": "custom_loss",
+        "use_rollout_logprobs": True,
+        "num_steps_per_rollout": 1,
+        "distill_top_k_tail": False,
+    }
     toy_family.validate_backend_args(SimpleNamespace(**accepted))
     toy_family.validate_backend_args(SimpleNamespace(**{**accepted, "num_steps_per_rollout": None}))  # Slime's default
 
@@ -167,16 +172,44 @@ def test_the_wire_row_is_the_policy_row_plus_the_teacher_sequence(toy_family) ->
 
     row = toy_family.shape_sample_row(sample)
 
-    assert row == [source_record_id(sample), STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, TEACHER_TOKENS]
+    assert row == [
+        source_record_id(sample),
+        STUDENT_TOKENS,
+        STUDENT_LOSS_MASK,
+        STUDENT_LOG_PROBS,
+        0.0,
+        TEACHER_TOKENS,
+        1.0,
+    ]
     data = to_slime_rollout_data(_payload(TEACHER_TOKENS))
     assert data["loss"] == "toydistill"
     assert data["tokens"] == [STUDENT_TOKENS]
     assert data["response_lengths"] == [3]
     assert data["rollout_log_probs"] == [STUDENT_LOG_PROBS]
     assert data["teacher_tokens"] == [TEACHER_TOKENS]
-    assert toy_family.rollout_data_keys == ("teacher_tokens",)
+    assert data["distill_sample_weights"] == [1.0]  # legacy six-column input
+    assert toy_family.rollout_data_keys == ("teacher_tokens", "distill_sample_weights")
     assert set(toy_family.external_batch_keys) >= {"rollout_log_probs", "distill_teacher_log_probs"}
     assert set(toy_family.rollout_log_skip_keys) >= {"teacher_tokens", "distill_teacher_topk_ids"}
+
+
+@pytest.mark.unit
+def test_sample_weight_survives_the_wire_without_changing_policy_masks(toy_family) -> None:
+    sample = _sample().with_training(distill_sample_weight=0.25)
+    row = toy_family.shape_sample_row(sample)
+    data = to_slime_rollout_data({"samples": [row], "rollout_ids": [0], "loss": "toydistill"})
+    assert data["distill_sample_weights"] == [0.25]
+    assert data["loss_masks"] == [STUDENT_LOSS_MASK]
+    assert "distill_sample_weights" in toy_family.external_batch_keys
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("weight", [-1.0, float("nan"), float("inf"), True, "0"])
+def test_sample_weight_rejects_invalid_values(toy_family, weight: object) -> None:
+    payload = _payload(TEACHER_TOKENS)
+    payload["samples"][0].append(weight)
+    with pytest.raises(ValueError, match="sample_weight"):
+        to_slime_rollout_data(payload)
 
 
 @pytest.mark.unit

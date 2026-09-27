@@ -299,6 +299,48 @@ def restricted_divergence(
     ).sum(dim=-1)
 
 
+def topk_tail_divergence(
+    student_log_probs: torch.Tensor,
+    teacher_log_probs: torch.Tensor,
+    *,
+    divergence: str,
+    jsd_beta: float = 0.5,
+) -> torch.Tensor:
+    """Divergence on student-selected top-K ids and one complementary tail bucket.
+
+    Both inputs contain full-vocabulary log-probabilities at the same ids;
+    they must not be renormalized over K. The tail carries the remaining
+    probability mass, as in the SDPO reference implementation.
+    """
+    if divergence not in DIVERGENCES:
+        raise ValueError(f"distill divergence must be one of {', '.join(DIVERGENCES)}, got {divergence!r}")
+    if student_log_probs.shape != teacher_log_probs.shape or student_log_probs.ndim != 2:
+        raise ValueError("student and teacher top-K log-probs must have the same [R, K] shape")
+    student = student_log_probs.float()
+    teacher = teacher_log_probs.detach().float()
+
+    def with_tail(log_probs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        # Match the SDPO reference's finite tail at saturated selected mass:
+        # its -1e-7 clamp matters for confident teachers in reverse KL.
+        log_selected_mass = torch.logsumexp(log_probs, dim=-1).clamp(max=-1e-7)
+        tail_log = (-torch.expm1(log_selected_mass)).log()
+        tail_mass = tail_log.exp()
+        return torch.cat([log_probs, tail_log[:, None]], dim=-1), torch.cat(
+            [log_probs.exp(), tail_mass[:, None]], dim=-1
+        )
+
+    student_log, student_prob = with_tail(student)
+    teacher_log, teacher_prob = with_tail(teacher)
+    if divergence == "forward":
+        return (teacher_prob * (teacher_log - student_log)).sum(dim=-1)
+    if divergence == "reverse":
+        return (student_prob * (student_log - teacher_log)).sum(dim=-1)
+    mixture_log = torch.logaddexp(teacher_log + math.log(jsd_beta), student_log + math.log1p(-jsd_beta))
+    return jsd_beta * (teacher_prob * (teacher_log - mixture_log)).sum(dim=-1) + (1.0 - jsd_beta) * (
+        student_prob * (student_log - mixture_log)
+    ).sum(dim=-1)
+
+
 def sampled_reverse_kl(student_log_prob: torch.Tensor, teacher_log_prob: torch.Tensor) -> torch.Tensor:
     """KL(student || teacher) estimated at the sampled token, with the score-function gradient.
 
@@ -411,6 +453,40 @@ def _topk_divergences(
     return per_sample
 
 
+def student_topk_tail_divergences(
+    settings: DistillSettings, batch: dict[str, Any], student_rows_per_sample: Any
+) -> list[torch.Tensor]:
+    """The SDPO approximation: student top-K plus the teacher and student tail masses."""
+    from megatron.core import mpu
+
+    ids_per_sample = batch.get("distill_student_topk_ids")
+    teacher_per_sample = batch.get("distill_teacher_student_topk_log_probs")
+    if ids_per_sample is None or teacher_per_sample is None:
+        raise RuntimeError(
+            "student top-K ids or teacher scores are missing: the pre-train hook did not score this batch"
+        )
+    tp_group = mpu.get_tensor_model_parallel_group()
+    tp_world = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
+    tp_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
+    per_sample: list[torch.Tensor] = []
+    for index, ((student_rows, _), ids, teacher_at_ids) in enumerate(
+        zip(student_rows_per_sample, ids_per_sample, teacher_per_sample, strict=True)
+    ):
+        if ids.shape != (student_rows.size(0), settings.top_k) or teacher_at_ids.shape != ids.shape:
+            raise ValueError(f"distill sample {index} student top-K or teacher scores do not match its response")
+        ids = ids.to(device=student_rows.device, dtype=torch.long)
+        student_at_ids = gather_log_probs_at_ids(student_rows, ids, tp_group, tp_world, tp_rank)
+        per_sample.append(
+            topk_tail_divergence(
+                student_at_ids,
+                teacher_at_ids.to(device=student_rows.device),
+                divergence=settings.divergence,
+                jsd_beta=settings.jsd_beta,
+            )
+        )
+    return per_sample
+
+
 def distill_loss(
     args: Namespace,
     batch: dict[str, Any],
@@ -443,7 +519,9 @@ def distill_loss(
             response_lengths=response_lengths,
         )
     )
-    if settings.exact:
+    if settings.top_k_tail:
+        per_sample_divergence = student_topk_tail_divergences(settings, batch, student_rows_per_sample)
+    elif settings.exact:
         per_sample_divergence = _exact_divergences(settings, args, batch, student_rows_per_sample)
     else:
         per_sample_divergence = _topk_divergences(settings, batch, student_rows_per_sample)
@@ -478,28 +556,48 @@ def distill_loss(
                 response_lengths=response_lengths,
                 with_entropy=False,
             )
-            weights = [
-                sequence_importance_weight(student, rollout, mask, settings.importance_sampling_cap)
-                for student, rollout, mask in zip(outputs["log_probs"], rollout_log_probs, loss_masks, strict=True)
-            ]
+            if settings.importance_sampling_mode == "sequence":
+                weights = [
+                    sequence_importance_weight(student, rollout, mask, settings.importance_sampling_cap)
+                    for student, rollout, mask in zip(outputs["log_probs"], rollout_log_probs, loss_masks, strict=True)
+                ]
+            else:
+                weights = [
+                    (student.float() - rollout.float())
+                    .clamp(min=-20, max=20)
+                    .exp()
+                    .clamp(max=settings.importance_sampling_cap)
+                    for student, rollout in zip(outputs["log_probs"], rollout_log_probs, strict=True)
+                ]
             student_log_probs = torch.cat(outputs["log_probs"], dim=0).float()
             engine_log_probs = torch.cat(rollout_log_probs, dim=0).float()
         weighted = torch.cat([sample * weight for sample, weight in zip(per_sample_divergence, weights, strict=True)])
-        # Slime sums a micro-batch's metrics over its samples and divides the
-        # step's total by the global batch size, so every value here is a sum
-        # of per-sample means, as ``sum_of_sample_mean`` produces.
-        metrics["distill_is_weight"] = torch.stack(weights).sum()
+        # Keep the sequence-mode diagnostic on its original sample scale;
+        # token mode uses the same reduction as its loss.
+        if settings.importance_sampling_mode == "sequence":
+            metrics["distill_is_weight"] = torch.stack(weights).sum()
+        else:
+            metrics["distill_is_weight"] = sum_of_sample_mean(torch.cat(weights, dim=0))
         # How far the trainer's forward sits from the rollout engine on the
         # sampled tokens: a large gap means a mismatch to fix, not to weight.
         metrics["distill_student_log_prob"] = sum_of_sample_mean(student_log_probs)
         metrics["distill_rollout_log_prob"] = sum_of_sample_mean(engine_log_probs)
         metrics["distill_log_prob_abs_diff"] = sum_of_sample_mean((student_log_probs - engine_log_probs).abs())
 
-    loss = sum_of_sample_mean(weighted)
+    # Sample weights select the training signal without hiding the raw
+    # divergence or rollout/trainer mismatch of inactive responses.
+    sample_weights = weighted.new_tensor(batch["distill_sample_weights"])
+    if sample_weights.shape != (len(response_lengths),):
+        raise ValueError("distill_sample_weights must contain one weight per response")
+    token_weights = torch.repeat_interleave(
+        sample_weights, torch.tensor(response_lengths, device=weighted.device), output_size=weighted.numel()
+    )
+    loss = sum_of_sample_mean(weighted * token_weights)
     if weighted.numel() == 0:
         loss = loss + 0 * logits.sum()
     metrics["loss"] = loss.detach().clone()
     metrics["distill_divergence"] = sum_of_sample_mean(divergence.detach())
+    metrics["distill_sample_weight"] = sum_of_sample_mean(token_weights)
     return loss, metrics
 
 
@@ -527,4 +625,5 @@ __all__ = [
     "sequence_importance_weight",
     "sum_across_vocab_shards",
     "token_divergence",
+    "topk_tail_divergence",
 ]

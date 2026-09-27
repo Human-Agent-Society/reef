@@ -1,0 +1,110 @@
+# One Qwen3-8B SDPO step from eight feedback-graded attempts.
+# This is an integration smoke configuration, not the paper's full dataset run.
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: ${REEF_TOKEN}
+  run-dir: ${SDPO_WORK}/stack
+  ready-timeout: 3600
+inference:
+  model-path: /root/models/Qwen3-8B
+  num-gpus: "4"
+  tensor-parallel-size: "1"
+  timeout-s: 1800
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  options:
+    context-length: "18944"
+    router-port: "23002"
+    mem-fraction-static: "0.6"
+  handler-config:
+    sampling_defaults:
+      top_p: 1.0
+      top_k: -1
+      repetition_penalty: 1.0
+      max_new_tokens: 256
+recipe:
+  implementation: recipes.sdpo.recipe:SDPORecipe
+  config:
+    batch-size: 8
+    max-staleness: 0
+    tokenizer-path: /root/models/Qwen3-8B
+    enable-thinking: false
+    max-teacher-tokens: 18944
+    checkpoint-every-n-versions: 1000
+training:
+  backend: slime
+  colocate: true
+  ready-timeout: 3600
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
+  timeout-s: 7200
+  config:
+    checkpoint_dir: ${SDPO_WORK}/checkpoints
+    global_batch_size: 8
+  options:
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    save-interval: "1000"
+    megatron-to-hf-mode: "bridge"
+    num-rollout: "100000000"
+    rollout-batch-size: "8"
+    n-samples-per-prompt: "1"
+    global-batch-size: "8"
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "4"
+    num-gpus-per-node: "4"
+    tensor-model-parallel-size: "4"
+    pipeline-model-parallel-size: "1"
+    context-parallel-size: "1"
+    seq-length: "18944"
+    rollout-max-response-len: "8192"
+    rollout-max-context-len: "18944"
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    rotary-base: "1000000"
+    swiglu: true
+    disable-bias-linear: true
+    normalization: "RMSNorm"
+    group-query-attention: true
+    qk-layernorm: true
+    attention-dropout: "0"
+    hidden-dropout: "0"
+    attention-backend: "flash"
+    accumulate-allreduce-grads-in-fp32: true
+    attention-softmax-in-fp32: true
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "18944"
+    log-probs-chunk-size: "512"
+    optimizer: "adam"
+    lr: "1e-5"
+    lr-decay-style: "constant"
+    weight-decay: "0.01"
+    clip-grad: "1.0"
+    loss-type: "custom_loss"
+    use-rollout-logprobs: true
+    disable-compute-advantages-and-returns: true
+    sdpo-teacher: "self"
+    sdpo-divergence: "jsd"
+    sdpo-top-k: "100"
+    sdpo-top-k-tail: true
+    sdpo-teacher-update-rate: "0.05"
+    sdpo-importance-sampling-cap: "2"
+    sdpo-importance-sampling-mode: "token"
+    rollout-temperature: "1.0"
+storage:
+  artifact-repository: ${SDPO_WORK}/artifacts.git
+  artifact-work-dir: ${SDPO_WORK}/artifact-work
+  artifact-cache-dir: ${SDPO_WORK}/artifact-cache
+  agent-record-dir: ${SDPO_WORK}/agent-record
+execution:
+  training: ray
+  rollout: ray
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    directory: ${SDPO_WORK}/wandb

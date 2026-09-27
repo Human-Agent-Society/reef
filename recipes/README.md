@@ -171,6 +171,10 @@ the verifier reward back at trial end (`harness/`), the loop written out
 
 ## Beta recipes
 
+[SDPO](sdpo/README.md) implements feedback-conditioned self-distillation
+under `recipes/sdpo/`. It has report, processor and CPU numerical tests but
+no Reef GPU run or paper-scale result yet; its learning claims remain open.
+
 [CORAL TTT](beta/coral/README.md) and its
 [`coral_demo`](beta/coral/examples/coral_demo/) example are beta. They live
 under `recipes/beta/coral/` until complete, reproducible learning results are

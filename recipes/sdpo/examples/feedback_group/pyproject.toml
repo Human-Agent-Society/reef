@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-sdpo-feedback-group"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["reef-client", "reef-eval[harbor]"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

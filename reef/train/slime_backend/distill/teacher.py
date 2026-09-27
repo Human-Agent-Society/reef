@@ -36,7 +36,7 @@ testable with CPU torch alone.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import torch
@@ -284,6 +284,76 @@ def gather_teacher_topk(
     }
 
 
+@torch.no_grad()
+def gather_student_topk_ids(
+    logits: torch.Tensor,
+    *,
+    args: Any,
+    unconcat_tokens: list[torch.Tensor],
+    total_lengths: list[int],
+    response_lengths: list[int],
+    with_entropy: bool = False,
+) -> tuple[torch.Tensor, dict[str, list[torch.Tensor]]]:
+    """Select the student's top-K ids before switching to the teacher weights.
+
+    Only ids travel to the teacher pass. The student's differentiable scores
+    are recomputed by the training forward, so this pass retains no logits.
+    """
+    from megatron.core import mpu
+
+    tp_group = mpu.get_tensor_model_parallel_group()
+    tp_world = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
+    tp_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
+    ids = [
+        native_topk_ids(rows, int(args.distill_top_k), tp_group, tp_world, tp_rank).cpu()
+        for rows in _response_rows(logits, args, total_lengths, response_lengths)
+    ]
+    return torch.empty((0,), device=logits.device), {"distill_student_topk_ids": ids}
+
+
+class TeacherAtStudentTopK:
+    """Slime callback following the teacher's explicit microbatch schedule.
+
+    Student results arrive in original sample order. The schedule indexes
+    those results directly, even when the teacher packs them differently
+    or two teacher sequences have identical contents. No prompt tensors
+    need to be copied to Python to identify a sample.
+    """
+
+    def __init__(self, selected_ids: list[torch.Tensor], schedule: list[list[int]]) -> None:
+        self.selected_ids = selected_ids
+        self.schedule = schedule
+        self.microbatch_index = 0
+
+    @torch.no_grad()
+    def __call__(
+        self,
+        logits: torch.Tensor,
+        *,
+        args: Any,
+        unconcat_tokens: list[torch.Tensor],
+        total_lengths: list[int],
+        response_lengths: list[int],
+        with_entropy: bool = False,
+    ) -> tuple[torch.Tensor, dict[str, list[torch.Tensor]]]:
+        from megatron.core import mpu
+
+        if self.microbatch_index >= len(self.schedule):
+            raise ValueError("teacher pass produced more microbatches than its schedule")
+        indices = self.schedule[self.microbatch_index]
+        self.microbatch_index += 1
+        tp_group = mpu.get_tensor_model_parallel_group()
+        tp_world = dist.get_world_size(group=tp_group) if dist.is_initialized() else 1
+        tp_rank = dist.get_rank(group=tp_group) if dist.is_initialized() else 0
+        scored: list[torch.Tensor] = []
+        for rows, index in zip(_response_rows(logits, args, total_lengths, response_lengths), indices, strict=True):
+            ids = self.selected_ids[index].to(device=rows.device, dtype=torch.long)
+            if ids.shape != (rows.size(0), int(args.distill_top_k)):
+                raise ValueError("student top-K ids do not match the teacher response length")
+            scored.append(gather_log_probs_at_ids(rows, ids, tp_group, tp_world, tp_rank).cpu())
+        return torch.empty((0,), device=logits.device), {"distill_teacher_student_topk_log_probs": scored}
+
+
 def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: DistillSettings | None = None) -> None:
     """Score every sample's teacher sequence with the teacher and fill the batch's ``distill_teacher_*`` keys.
 
@@ -324,9 +394,41 @@ def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: Dis
         "response_lengths": response_lengths,
         "micro_batch_indices": schedule,
     }
+    selection_scorer: TeacherAtStudentTopK | None = None
+    if settings.top_k_tail:
+        student_tokens = [tokens.to(device=device, dtype=torch.long) for tokens in rollout_data["tokens"]]
+        student_lengths = [int(tokens.numel()) for tokens in student_tokens]
+        student_schedule = pack_forward_schedule(student_lengths, budget)
+        student_view = {
+            "tokens": student_tokens,
+            "loss_masks": rollout_data["loss_masks"],
+            "total_lengths": student_lengths,
+            "response_lengths": response_lengths,
+            "micro_batch_indices": student_schedule,
+        }
+        student_result = forward_only(
+            gather_student_topk_ids,
+            args,
+            actor.model,
+            [DataIterator(student_view, student_schedule) for _ in range(vpp)],
+            [len(student_schedule)],
+        )
+        if student_result:
+            ids = student_result["distill_student_topk_ids"]
+            if len(ids) != len(teacher_tokens):
+                raise ValueError("student top-K pass returned the wrong number of samples")
+            rollout_data.update(student_result)
+            selection_scorer = TeacherAtStudentTopK(ids, schedule)
+        else:
+            # Non-final pipeline ranks do not invoke the scoring callback.
+            selection_scorer = TeacherAtStudentTopK([], schedule)
     if _TEACHER is None:
         _TEACHER = teacher_weights(settings)
-    callback = gather_teacher_log_probs if settings.exact else gather_teacher_topk
+    callback: Callable[..., tuple[torch.Tensor, dict[str, list[torch.Tensor]]]]
+    if selection_scorer is not None:
+        callback = selection_scorer
+    else:
+        callback = gather_teacher_log_probs if settings.exact else gather_teacher_topk
     _TEACHER.switch_in(actor)
     try:
         result = forward_only(
@@ -340,6 +442,8 @@ def compute_teacher_rows(actor: Any, rollout_data: dict[str, Any], settings: Dis
         _TEACHER.switch_out(actor)
     if not result:
         return  # not the last pipeline stage; the loss does not run here
+    if selection_scorer is not None and selection_scorer.microbatch_index != len(schedule):
+        raise ValueError("teacher pass did not score every student top-K selection")
     rollout_data.update(result)
 
 
@@ -350,8 +454,10 @@ __all__ = [
     "CurrentWeights",
     "MovingCopy",
     "SeparateCheckpoint",
+    "TeacherAtStudentTopK",
     "TeacherWeights",
     "compute_teacher_rows",
+    "gather_student_topk_ids",
     "gather_teacher_log_probs",
     "gather_teacher_topk",
     "mix_teacher_weights",

@@ -303,6 +303,7 @@ def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokeni
         list(STUDENT_LOG_PROBS),
         0.0,
         [*prompt_ids, 1, 2, 3],
+        1.0,
     ]
 
     data = to_slime_rollout_data({key: value for key, value in payload.items() if key != "source_rows"})
@@ -311,6 +312,7 @@ def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokeni
     assert data["response_lengths"] == [3]
     assert data["rollout_log_probs"] == [list(STUDENT_LOG_PROBS)]
     assert data["teacher_tokens"] == [[*prompt_ids, 1, 2, 3]]
+    assert data["distill_sample_weights"] == [1.0]
 
 
 def _payload(teacher_tokens: list[Any], **overrides: Any) -> dict[str, Any]:
@@ -403,7 +405,12 @@ def test_sdft_settings_reject_invalid_values(name: str, value: Any) -> None:
 @pytest.mark.unit
 def test_sdft_backend_validation_pins_the_loss_type_and_one_step_per_rollout() -> None:
     family = resolve_loss_family("sdft")
-    accepted = {"loss_type": "custom_loss", "use_rollout_logprobs": True, "num_steps_per_rollout": 1}
+    accepted = {
+        "loss_type": "custom_loss",
+        "use_rollout_logprobs": True,
+        "num_steps_per_rollout": 1,
+        "distill_top_k_tail": False,
+    }
     family.validate_backend_args(SimpleNamespace(**accepted))
 
     with pytest.raises(RuntimeError, match="loss-type custom_loss"):

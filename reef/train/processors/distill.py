@@ -47,6 +47,12 @@ class DistillProcessor(ReportedFeedbackProcessor):
         self._max_teacher_tokens = int(config.get("max_teacher_tokens", 0))
         if self._max_teacher_tokens < 0:
             raise ValueError("max_teacher_tokens must be non-negative (0 disables the limit)")
+        self.template_options: dict[str, bool] = {}
+        enable_thinking = config.get("enable_thinking")
+        if enable_thinking is not None:
+            if not isinstance(enable_thinking, bool):
+                raise ValueError("enable_thinking must be a boolean")
+            self.template_options["enable_thinking"] = enable_thinking
         tokenizer_path = str(config.get("tokenizer_path", "")).strip()
         if not tokenizer_path:
             raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
@@ -92,18 +98,27 @@ class DistillProcessor(ReportedFeedbackProcessor):
             messages, tools, recorded_response(payload), parsed.teacher_context
         )
         prompt_ids = self._tokenizer.apply_chat_template(
-            teacher_messages, tools=teacher_tools or None, tokenize=True, add_generation_prompt=True, return_dict=False
+            teacher_messages,
+            tools=teacher_tools or None,
+            tokenize=True,
+            add_generation_prompt=True,
+            return_dict=False,
+            **self.template_options,
         )
         teacher_tokens = [*prompt_ids, *tokens[-response_length:]]
         if self._max_teacher_tokens and len(teacher_tokens) > self._max_teacher_tokens:
-            self._overflow_reports.add(context.report.agent_record_id)
-            logger.warning(
-                "report %s skipped: its teacher sequence is %d tokens, over max_teacher_tokens %d",
-                context.report.agent_record_id,
-                len(teacher_tokens),
-                self._max_teacher_tokens,
-            )
+            self.teacher_overflow(context.report.agent_record_id, len(teacher_tokens))
         return sample.with_training(teacher_tokens=teacher_tokens)
+
+    def teacher_overflow(self, report_id: str, token_count: int) -> None:
+        """Release an oversized report; fixed-size group recipes may fail instead."""
+        self._overflow_reports.add(report_id)
+        logger.warning(
+            "report %s skipped: its teacher sequence is %d tokens, over max_teacher_tokens %d",
+            report_id,
+            token_count,
+            self._max_teacher_tokens,
+        )
 
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         # An overflowing report is its own group, so the group decision can release it.

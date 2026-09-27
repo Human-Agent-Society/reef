@@ -57,6 +57,8 @@ objective; the driver checks it at start and refuses a mismatch.
 +----------------+-----------------------------+----------------------------+
 | ``sdft``       | ``custom_loss``             | ``--use-rollout-logprobs`` |
 +----------------+-----------------------------+----------------------------+
+| ``sdpo``       | ``custom_loss``             | ``--use-rollout-logprobs`` |
++----------------+-----------------------------+----------------------------+
 
 The spec
 --------
@@ -97,7 +99,7 @@ Two loss lanes
 --------------
 
 ``loss_type = "custom_loss"`` replaces Slime's loss with the
-``custom_loss_function_path`` hook (``tttd``, ``openclawrl``, ``sdft``).
+``custom_loss_function_path`` hook (``tttd``, ``openclawrl``, ``sdft``, ``sdpo``).
 ``uses_pg_loss_primitive = True`` keeps Slime's ``policy_loss`` and swaps only
 the per-token primitive through ``custom_pg_loss_function_path`` (``sao``); the
 adapter layer points Slime's CISPO callsite at it.
@@ -146,8 +148,8 @@ A family that ships more than the five policy columns declares them on the spec.
 Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
-frozen Megatron teacher), ``recipes/sdft/slime/`` (a thin family on the
-distillation base below).
+frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
+(families on the distillation base below).
 
 The distillation base
 ---------------------
@@ -158,17 +160,22 @@ who the teacher is and which divergence is minimized. Both are settings of
 one implementation in the backend, ``reef/train/slime_backend/distill/``,
 and each such recipe's family is a thin subclass of it:
 
-- ``DistillAlgorithm`` is the driver-side base: the six-column wire row
+- ``DistillAlgorithm`` is the driver-side base: the seven-column wire row
   (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
-  by the student's response ids verbatim), the ``--<name>-*`` flags under
+  by the student's response ids verbatim, and ``sample_weight``), the ``--<name>-*`` flags under
   the family's own prefix (``teacher``, ``divergence``, ``top-k``,
   ``teacher-update-rate``, ``teacher-checkpoint``,
-  ``importance-sampling-cap``, ``skip-response-tokens``, ``jsd-beta``) and
+  ``importance-sampling-cap``, ``importance-sampling-mode``,
+  ``skip-response-tokens``, ``jsd-beta``) and
   the settings they stamp on ``args`` under ``distill_*`` names, which the
   worker hooks read whatever the prefix was. A family names itself, sets
   its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
   forwards ``<name>_loss`` and ``<name>_actor_pre_train`` to
   ``distill.objective``.
+- ``sample_weight`` defaults to 1.0 and scales only the loss. Diagnostics
+  retain all responses under their original token masks;
+  ``distill_sample_weight`` reports the reduced weights (the active fraction
+  for SDPO's 0/1 weights). Older six-column rows are read with weight 1.0.
 - The teacher is ``self`` (the student's own weights reading the privileged
   prefix: the current weights at update rate 1, a slow-moving copy below it,
   a frozen snapshot at 0) or ``separate`` (another checkpoint that fits the
@@ -180,7 +187,12 @@ and each such recipe's family is a thin subclass of it:
   over the teacher's whole distribution (``top-k`` 0: one row of this rank's
   vocab shard per response position, kept in float16 on the host) or over
   the teacher's top-K ids renormalized, the reverse KL then estimated at the
-  sampled token. The kernels reduce across the vocab shards of tensor
+  sampled token. With ``top-k-tail``, the worker makes a no-gradient student
+  pass to select top-K ids, scores the teacher at those exact ids, and adds a
+  complementary probability bucket. SDPO enables this option by default.
+  The teacher callback indexes the student selections using its microbatch
+  schedule, so duplicate sequences and different packing keep their alignment.
+  The kernels reduce across the vocab shards of tensor
   parallel themselves and write the gradients out where autograd over one
   shard would drop the coupling through the global log-sum-exp;
   ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python

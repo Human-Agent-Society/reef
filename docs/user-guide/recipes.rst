@@ -151,6 +151,10 @@ and a configured model endpoint.
 Beta recipes
 ------------
 
+`SDPO <recipes/sdpo.rst>`__ is a feedback-conditioned self-distillation
+recipe under ``recipes/sdpo/``. Its report and numerical path have focused
+CPU tests; there is no Reef GPU learning result yet.
+
 `CORAL TTT <../../recipes/beta/coral/README.md>`__ and its
 `coral_demo <../../recipes/beta/coral/examples/coral_demo/>`__ example are
 **beta** until complete, reproducible learning results are published. Both
