@@ -250,6 +250,40 @@ def test_git_lfs_repository_imports_forks_publishes_and_materializes(
 
 
 @pytest.mark.integration
+def test_a_fresh_scenario_forks_a_head_whose_history_holds_lfs_objects_it_never_fetched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two trained adapter versions: a new scenario's workspace fetches only the head's objects, and its fork push
+    must not ask Git LFS to upload the older version it never fetched, which the remote already holds."""
+    global_config = tmp_path / "gitconfig"
+    global_config.touch()
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
+    monkeypatch.setenv("GIT_CONFIG_SYSTEM", os.devnull)
+    remote = tmp_path / "artifacts.git"
+    first = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "work-a", cache_dir=tmp_path / "cache-a")
+    ref = first.fork()
+    for version in (1, 2):
+        candidate = tmp_path / f"trained-{version}"
+        (candidate / "weights").mkdir(parents=True)
+        (candidate / "weights" / "adapter_model.safetensors").write_bytes(f"adapter v{version}".encode() * 100)
+        ref = first.publish(Artifact.local(candidate), expected_parent=ref)
+    second = GitLFSRepositoryBackend(
+        "scenario-b", remote, work_dir=tmp_path / "work-b", cache_dir=tmp_path / "cache-b"
+    )
+    forked = second.fork()
+    assert forked.parent_release_id == ref.release_id
+    weights = second.materialize(forked).local_path / "weights" / "adapter_model.safetensors"
+    assert weights.read_bytes() == b"adapter v2" * 100
+    # A restarted service publishes from a fresh workspace too: its push adds one commit over history it never
+    # fetched the objects of.
+    restarted = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "work-a2", cache_dir=tmp_path / "c2")
+    candidate = tmp_path / "trained-3"
+    (candidate / "weights").mkdir(parents=True)
+    (candidate / "weights" / "adapter_model.safetensors").write_bytes(b"adapter v3" * 100)
+    assert restarted.publish(Artifact.local(candidate), expected_parent=ref).parent_release_id == ref.release_id
+
+
+@pytest.mark.integration
 @pytest.mark.parametrize("hook_source", ["none", "global", "template"])
 def test_fresh_scenario_forks_latest_artifact_with_real_lfs(
     tmp_path: Path,
