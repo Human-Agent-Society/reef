@@ -110,22 +110,53 @@ def test_pause_keeps_requests_and_retract_also_frees_their_kv(engine):
         engine.pause_generation("drain")
 
 
-def test_memory_release_sleeps_at_level_two_and_resume_wakes_named_regions(engine):
+def test_memory_release_sleeps_at_level_two_and_the_kv_wake_waits_for_reef_to_resume(engine):
     engine, http = engine
+    http.answer({"status": "paused"})
+    engine.pause_generation("in_place")
     engine.release_memory_occupation()
     engine.release_memory_occupation()  # already released: no second sleep
     engine.resume_memory_occupation(["weights"])
-    engine.resume_memory_occupation(["kv_cache", "cuda_graph"])
+    engine.resume_memory_occupation(["kv_cache", "cuda_graph"])  # held back: vLLM would resume scheduling
+    assert engine.kv_wake_pending is True
+    http.answer({"status": "resumed"})
+    engine.continue_generation()
+    assert engine.kv_wake_pending is False and engine.generation_paused is False
     engine.resume_memory_occupation(["kv_cache"])  # already resident: nothing to wake
     assert http.calls == [
+        ("POST", "pause", {"mode": "keep", "clear_cache": "false"}, None),
         ("POST", "sleep", {"level": "2", "mode": "keep"}, None),
         ("POST", "wake_up", {"tags": ["weights"]}, None),
         ("POST", "wake_up", {"tags": ["kv_cache"]}, None),
+        ("POST", "resume", None, None),
     ]
-    with pytest.raises(ValueError, match="only together with the weights"):
+    with pytest.raises(ValueError, match="together"):
         engine.release_memory_occupation(["kv_cache", "cuda_graph"])
+    with pytest.raises(ValueError, match="together"):
+        engine.release_memory_occupation(["weights"])
     with pytest.raises(ValueError, match="unknown inference memory regions"):
         engine.resume_memory_occupation(["weights", "optimizer"])
+
+
+def test_kv_wake_happens_at_once_while_generation_runs_and_before_a_release(engine):
+    engine, http = engine
+    # Sleeping pauses the scheduler, so a release always leaves the engine paused.
+    engine.release_memory_occupation()
+    assert engine.generation_paused is True
+    engine.resume_memory_occupation()  # weights now; KV held back
+    assert http.calls[-1] == ("POST", "wake_up", {"tags": ["weights"]}, None)
+    assert engine.kv_wake_pending is True
+    # A release before Reef resumed must wake the KV first: vLLM refuses to sleep twice.
+    engine.release_memory_occupation()
+    assert http.calls[-2:] == [
+        ("POST", "wake_up", {"tags": ["kv_cache"]}, None),
+        ("POST", "sleep", {"level": "2", "mode": "keep"}, None),
+    ]
+    assert engine.kv_wake_pending is False
+    # With generation running, a KV wake is immediate.
+    engine.generation_paused = False
+    engine.resume_memory_occupation(["kv_cache"])
+    assert http.calls[-1] == ("POST", "wake_up", {"tags": ["kv_cache"]}, None)
 
 
 def test_weights_reload_and_adapters_report_vllm_answers(engine):
@@ -148,6 +179,30 @@ def test_weights_reload_and_adapters_report_vllm_answers(engine):
     http.answer({"detail": "engine busy"}, status=503)
     with pytest.raises(engine_module.requests.HTTPError, match="engine busy"):
         engine.flush_cache()
+
+
+def test_server_process_stays_in_the_actor_session_and_shutdown_kills_the_tree(monkeypatch):
+    import subprocess
+    import sys
+
+    from reef.inference.vllm import process as process_module
+
+    captured = {}
+    real_popen = subprocess.Popen
+
+    def fake_popen(command, **kwargs):
+        captured.update(kwargs, command=command)
+        return real_popen([sys.executable, "-c", "import time; time.sleep(60)"])
+
+    monkeypatch.setattr(process_module.subprocess, "Popen", fake_popen)
+    process = process_module.launch_server("model", ["--port", "1"], {"CUDA_VISIBLE_DEVICES": "3"})
+    assert captured["command"][1:5] == ["-m", "vllm.entrypoints.cli.main", "serve", "model"]
+    assert "start_new_session" not in captured
+    assert captured["env"]["VLLM_SERVER_DEV_MODE"] == "1" and captured["env"]["CUDA_VISIBLE_DEVICES"] == "3"
+    assert process.is_alive()
+    process.shutdown(timeout=5)
+    assert not process.is_alive()
+    process.shutdown()  # idempotent
 
 
 def test_init_launches_the_server_and_waits_for_its_health_route(monkeypatch):

@@ -1,16 +1,21 @@
-"""The native vLLM server process owned by one engine actor."""
+"""The native vLLM server process owned by one engine actor.
+
+The server stays in the engine actor's own process group so the deployment's
+process guard retires it with the actor if the actor dies; only its own
+shutdown walks the process tree.
+"""
 
 from __future__ import annotations
 
 import os
-import signal
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
+from contextlib import suppress
 
 
 class EngineProcess:
-    """One ``vllm serve`` process group: the API server and the engine cores it spawns."""
+    """One ``vllm serve`` process tree: the API server and the engine cores it spawns."""
 
     def __init__(self, process: subprocess.Popen[bytes]) -> None:
         self._process = process
@@ -23,14 +28,26 @@ class EngineProcess:
         return self._process.poll() is None
 
     def shutdown(self, timeout: float = 10) -> None:
-        """Terminate the whole process group, escalating to SIGKILL after ``timeout`` seconds."""
+        """Ask the server to stop, then kill whatever of its tree survives ``timeout`` seconds."""
         if not self.is_alive():
             return
-        os.killpg(self._process.pid, signal.SIGTERM)
-        try:
+        import psutil
+
+        # Capture the children now: once the server exits they cannot be enumerated.
+        descendants: list[psutil.Process] = []
+        with suppress(psutil.NoSuchProcess):
+            descendants = psutil.Process(self._process.pid).children(recursive=True)
+        self._process.terminate()
+        with suppress(subprocess.TimeoutExpired):
             self._process.wait(timeout)
-        except subprocess.TimeoutExpired:
-            os.killpg(self._process.pid, signal.SIGKILL)
+        survivors = [child for child in descendants if child.is_running()]
+        if self.is_alive():
+            survivors.append(psutil.Process(self._process.pid))
+        for survivor in survivors:
+            with suppress(psutil.NoSuchProcess):
+                survivor.kill()
+        psutil.wait_procs(survivors, timeout=timeout)
+        with suppress(subprocess.TimeoutExpired):
             self._process.wait(timeout)
 
 
@@ -41,8 +58,6 @@ def launch_server(model_path: str, arguments: Sequence[str], env: Mapping[str, s
     environment.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     environment.pop("PYTORCH_ALLOC_CONF", None)
     process = subprocess.Popen(
-        [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model_path, *arguments],
-        env=environment,
-        start_new_session=True,
+        [sys.executable, "-m", "vllm.entrypoints.cli.main", "serve", model_path, *arguments], env=environment
     )
     return EngineProcess(process)

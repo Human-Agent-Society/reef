@@ -245,7 +245,10 @@ options use vLLM's engine-argument names; Reef sets ``model``, ``host``,
 ``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
 instead) and enables prefix caching only under a retracting pause. vLLM
 releases the KV cache only together with the weights, so
-``keep-lora-base-resident`` is unavailable on it. The Slime and Tinker
+``keep-lora-base-resident`` is unavailable on it, and it resumes scheduling by
+itself once every region is resident, so the engine restores the KV cache
+when Reef resumes generation rather than when the coordinator calls
+``onload_kv``: generation stays paused until the coordinator's commit. The Slime and Tinker
 backends still produce SGLang engine options, so their managed launches keep
 ``inference.backend: sglang`` until they select options per backend.
 

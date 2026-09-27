@@ -25,6 +25,8 @@ logger = logging.getLogger(__name__)
 
 #: Regions the coordinator may name. vLLM frees CUDA graphs with the KV cache, so that tag adds nothing.
 MEMORY_REGIONS = ("weights", "kv_cache", "cuda_graph")
+#: A released engine has lost both of these; a release naming only some of them cannot be honoured.
+RELEASED_TOGETHER = frozenset({"weights", "kv_cache"})
 
 
 class ReefVLLMEngine:
@@ -39,6 +41,10 @@ class ReefVLLMEngine:
         self.process: EngineProcess | None = None
         self.server_host = ""
         self.server_port = 0
+        # vLLM resumes scheduling by itself once every region is resident again,
+        # so the KV cache comes back only when Reef resumes generation.
+        self.generation_paused = False
+        self.kv_wake_pending = False
         self._memory = InferenceMemory(_VLLMMemoryOperations(self), MEMORY_REGIONS)
 
     def node_address_and_port(self, start_port: int = 15000) -> tuple[str, int]:
@@ -125,12 +131,19 @@ class ReefVLLMEngine:
         """
         if mode not in {"in_place", "retract"}:
             raise ValueError(f"unknown vLLM pause mode: {mode}")
+        self.generation_paused = True
         result = self._post("pause", params={"mode": "keep", "clear_cache": "false"})
         if mode == "retract":
             self._require_success(self._post("reset_prefix_cache", params={"reset_running_requests": "true"}))
         return result
 
     def continue_generation(self) -> dict[str, Any]:
+        """Let generation run again; a KV cache held back by ``resume_memory_occupation`` returns first."""
+        if self.kv_wake_pending:
+            # Waking the last region makes vLLM resume scheduling on its own.
+            self.kv_wake_pending = False
+            self._post("wake_up", params={"tags": ["kv_cache"]})
+        self.generation_paused = False
         return self._post("resume")
 
     def flush_cache(self) -> None:
@@ -164,10 +177,11 @@ class ReefVLLMEngine:
     # -- Memory -------------------------------------------------------------------
 
     def release_memory_occupation(self, tags: Sequence[str] | None = None) -> None:
-        if tags and "weights" not in tags:
-            # ``release_kv_cache_memory`` needs an engine with no requests at all, and
-            # sleep level 1 moves the weights to host memory; neither keeps a resident base.
-            raise ValueError("vLLM releases the KV cache only together with the weights")
+        if tags and not RELEASED_TOGETHER.issubset(tags):
+            # Sleep level 2 frees every region at once. ``release_kv_cache_memory``
+            # needs an engine with no requests, and level 1 moves the weights to
+            # host memory, so no partial release keeps a resident base.
+            raise ValueError("vLLM releases its weights and KV cache together; release every region")
         self._memory.release(tags or None)
 
     def resume_memory_occupation(self, tags: Sequence[str] | None = None) -> None:
@@ -212,16 +226,33 @@ class ReefVLLMEngine:
 
 
 class _VLLMMemoryOperations(InferenceMemoryOperations):
-    """Map Reef's regions onto vLLM's sleep levels and wake-up tags."""
+    """Map Reef's regions onto vLLM's sleep level and wake-up tags.
+
+    vLLM pauses scheduling when it sleeps and resumes it by itself once every
+    region is resident again. Reef's coordinator restores the KV cache before it
+    has committed the new weights, so the KV wake is held back while generation
+    is paused and performed by :meth:`ReefVLLMEngine.continue_generation`.
+    """
 
     def __init__(self, engine: ReefVLLMEngine) -> None:
         self.engine = engine
 
     def release(self, regions: Sequence[str]) -> None:
-        # Level 2 discards weights and KV; requests stay queued and re-prefill after wake-up.
-        self.engine._post("sleep", params={"level": "2", "mode": "keep"})
+        engine = self.engine
+        if engine.kv_wake_pending:
+            # vLLM refuses to sleep while a region is still asleep; wake it first.
+            engine.kv_wake_pending = False
+            engine._post("wake_up", params={"tags": ["kv_cache"]})
+        # Level 2 discards weights and KV; kept requests re-prefill once generation resumes.
+        engine._post("sleep", params={"level": "2", "mode": "keep"})
+        engine.generation_paused = True
 
     def resume(self, regions: Sequence[str]) -> None:
-        tags = [region for region in ("weights", "kv_cache") if region in regions]
-        if tags:
-            self.engine._post("wake_up", params={"tags": tags})
+        engine = self.engine
+        if "weights" in regions:
+            engine._post("wake_up", params={"tags": ["weights"]})
+        if "kv_cache" in regions:
+            if engine.generation_paused:
+                engine.kv_wake_pending = True
+            else:
+                engine._post("wake_up", params={"tags": ["kv_cache"]})
