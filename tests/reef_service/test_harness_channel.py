@@ -28,6 +28,7 @@ import reef.harness.adapters
 import reef.service.routes.system as system_routes
 from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.core.evaluation import EvaluationResult, UpdateCandidate
+from reef.core.model_metadata import ModelMetadata
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, DescriptorError, load_descriptor
@@ -160,6 +161,8 @@ def _dispatcher(
     batch_size: int = 1,
     seed: tuple[dict, ...] = (),
     api: str = "openai",
+    adapter: str = "pi",
+    model_metadata: dict[str, ModelMetadata] | None = None,
 ) -> Dispatcher:
     proposals = iter(mutations)
     binary = tmp_path / "fake-pi"
@@ -170,6 +173,8 @@ def _dispatcher(
         resolve_episode_scorer(evaluate),
         ("task one",),
         binary=str(binary),
+        adapter=adapter,
+        model_metadata=model_metadata or {},
         runtime=InferenceProxyRuntime(model_path="demo-model", base_url="http://localhost:8000", api=api),
         batch_policy=batch_policy,
         batch_size=batch_size,
@@ -2314,3 +2319,66 @@ def test_a_slow_install_render_starts_the_script_with_a_spinner_and_keeps_a_fail
     truncated = render_install_preamble() + render_streamed_install("echo 'reef: partial'\n").removesuffix("}\n")
     ran = run_shell(truncated)
     assert ran.returncode != 0 and "reef: partial" not in ran.stdout
+
+
+@pytest.mark.unit
+def test_codex_install_route_includes_model_catalog(tmp_path: Path) -> None:
+    seed = ({"id": "style", "name": "rules", "config": {"text": "Answer briefly."}},)
+    dispatcher = _dispatcher(
+        tmp_path,
+        (),
+        seed=seed,
+        api="responses",
+        adapter="codex",
+        model_metadata={"demo-model": ModelMetadata(640_000, True)},
+    )
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get("/reef/harness/install?adapter=codex", headers={"x-reef-scenario": "delivery"})
+            assert response.status == 200
+            script = await response.text()
+            assert 'model_catalog_json = "models.json"' in script
+            assert '"slug": "demo-model"' in script
+            assert '"context_window": 640000' in script
+            assert '"max_context_window": 640000' in script
+        finally:
+            await client.close()
+
+    asyncio.run(run())
+
+
+@pytest.mark.unit
+def test_codex_install_resolves_same_model_on_changed_endpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def metadata(base_url: str, model: str, api_key: str | None) -> ModelMetadata:
+        if base_url == "http://localhost:8000":
+            return ModelMetadata(640_000, True)
+        return ModelMetadata(32_000, False)
+
+    monkeypatch.setattr("reef.harness.episodes.model_binding.provider_model_metadata", metadata)
+    seed = ({"id": "style", "name": "rules", "config": {"text": "Answer briefly."}},)
+    dispatcher = _dispatcher(tmp_path, (), seed=seed, api="responses", adapter="codex")
+    scenario = dispatcher.get_or_create_scenario("delivery")
+    assert scenario.surface.harness.served_metadata == ModelMetadata(640_000, True)
+    scenario.model_config.runtime = InferenceProxyRuntime(
+        model_path="demo-model", base_url="http://alternate", api="responses"
+    )
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get("/reef/harness/install?adapter=codex", headers={"x-reef-scenario": "delivery"})
+            assert response.status == 200
+            script = await response.text()
+            assert '"context_window": 32000' in script
+            assert '"context_window": 640000' not in script
+            assert '"supports_reasoning_summary_parameter": false' in script
+        finally:
+            await client.close()
+
+    asyncio.run(run())

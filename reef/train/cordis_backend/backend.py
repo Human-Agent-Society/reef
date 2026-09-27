@@ -417,6 +417,7 @@ class _BudgetedBinding(ModelBinding):
             api_key=inner.api_key,
             api=inner.api,
             timeout_s=inner.timeout_s,
+            metadata=inner.metadata,
         )
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_calls", calls)

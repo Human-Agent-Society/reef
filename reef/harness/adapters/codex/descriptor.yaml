@@ -56,6 +56,8 @@ files:
           trace_exporter: none
         sandbox_workspace_write:
           network_access: false
+    models:
+      path: "codex/models.json"
   rules: "codex/AGENTS.md"
   # Custom prompts remain Codex's named command surface. They are deprecated
   # upstream in favor of skills, but still provide the closest translation of
@@ -104,3 +106,6 @@ model_binding:
             wire_api: responses
             supports_websockets: false
             experimental_bearer_token: "{api_key}"
+    - target: models
+      data:
+        models: "{model_metadata}"

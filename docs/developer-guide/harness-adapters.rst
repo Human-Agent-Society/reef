@@ -36,6 +36,53 @@ the agent's tools (``native_tool``) and its responses to loop events
 |              |                                                           | reef-eval ships with reef-infra           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 
+Codex model metadata
+~~~~~~~~~~~~~~~~~~~~
+
+For Codex, Reef reads the selected upstream model's ``context_length`` and
+``supported_parameters`` from ``GET /v1/models`` before routing calls through
+Reef. This is the metadata shape served by OpenRouter. Successful lookups are
+cached in the service process; discovery uses the upstream credential and a
+five-second timeout. Other adapters do not make this discovery request.
+
+Endpoints without these fields can provide explicit values under
+``evolution.model_metadata``, keyed by the exact model name:
+
+.. code:: yaml
+
+   evolution:
+     adapter: codex
+     model_metadata:
+       local-model:
+         context_window: 64000
+         reasoning: false
+
+A Python ``ModelBinding`` accepts ``metadata=ModelMetadata(64000, False)``;
+a named ``evolution.models`` binding accepts the same fields under ``metadata``.
+Values in ``evolution.model_metadata`` take precedence over discovery. Missing
+or unavailable metadata leaves Codex's existing fallback behavior intact; Reef
+does not invent a model's context window. Restart the service to refresh cached
+provider metadata. A scenario model override resolves the new model separately.
+
+The binding renders ``codex/models.json`` and a relative ``model_catalog_json``
+reference, so both evaluation episodes and installed clients read the same
+capabilities after relocation. Codex retains its own context safety margin and
+compaction policy. The generated entry keeps the pinned Codex unknown-model instructions,
+standard shell tools, and low/medium/high effort when reasoning is supported.
+``codex/default_instructions.md`` records the effective unknown-model prompt
+exported with this adapter configuration. It is derived from
+`OpenAI Codex rust-v0.152.1 <https://github.com/openai/codex/blob/rust-v0.152.1/codex-rs/models-manager/prompt.md>`__,
+under the Apache-2.0 license, with SHA-256
+``3b08633fa672906666659d764864dfda1d7af5b5111ea5817c8f46e5de4e1a8d``.
+Codex removes instructions for tools disabled by the adapter from the source
+prompt. A real-binary regression compares the resulting request instructions
+with and without metadata. Keep this resource and the bundled model prefixes
+synchronized with the Codex install pin. Models recognized by the pinned CLI
+keep their bundled metadata and model-specific prompts instead of this catalog.
+Tree rules and skills are still added normally. Tree entries may supply the
+same capability fields through the ``models`` config target, but may not set
+an arbitrary catalog path or inject native Codex model fields.
+
 Terminus 2
 ~~~~~~~~~~
 
@@ -627,6 +674,10 @@ Descriptor fields
   render path. ``files.tree`` is an optional entries-list path for agents
   that reconcile the live tree.
 - ``trajectory`` specifies the session log's path and reader format.
+  ``final_assistant_text`` extracts assistant replies from flat messages,
+  pi's ``message`` events, and Codex's ``response_item.payload`` messages,
+  including ``output_text`` parts. Reefine uses this text for episode scoring;
+  user messages, tool outputs, and reasoning events are not answers.
 - ``env`` points the agent's state into the episode root, substituting
   ``{root}``. For install scripts and ``reef-<adapter>`` wrappers, one
   variable must relocate a directory above the primary config file using

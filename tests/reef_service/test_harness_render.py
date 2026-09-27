@@ -444,3 +444,46 @@ def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], get_adapter("pi"))["pi-agent/skills/own/SKILL.md"] == own[1]["text"]
+
+
+@pytest.mark.parametrize("reasoning", [True, False])
+def test_codex_catalog_uses_bound_capabilities(reasoning: bool) -> None:
+    from reef.core.model_metadata import ModelMetadata
+
+    descriptor = get_adapter("codex")
+    binding = ModelBinding("http://up", "custom/model", api="responses", metadata=ModelMetadata(640_000, reasoning))
+    files = render_composition(binding.compose_nodes(descriptor), descriptor)
+    config = tomllib.loads(files["codex/config.toml"])
+    assert config["model_catalog_json"] == "models.json"
+    model = json.loads(files["codex/models.json"])["models"][0]
+    assert model["slug"] == binding.model
+    assert model["context_window"] == model["max_context_window"] == 640_000
+    assert bool(model["supported_reasoning_levels"]) is reasoning
+    assert model["supports_reasoning_summary_parameter"] is reasoning
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"context_window": True, "reasoning": True},
+        {"context_window": 0, "reasoning": True},
+        {"context_window": 100, "reasoning": "yes"},
+        {"context_window": 100, "reasoning": True, "base_instructions": "override"},
+    ],
+)
+def test_codex_rejects_invalid_model_metadata(metadata: dict[str, object]) -> None:
+    with pytest.raises(RenderError, match="codex model"):
+        render_composition(
+            [("config", {"target": "models", "data": {"models": {"m": metadata}}})], get_adapter("codex")
+        )
+
+
+@pytest.mark.parametrize("model", ["gpt-5.4", "openai/gpt-5.4", "gpt-5.4-2026-03-05"])
+def test_codex_keeps_native_models_metadata_and_instructions(model: str) -> None:
+    from reef.core.model_metadata import ModelMetadata
+
+    descriptor = get_adapter("codex")
+    binding = ModelBinding("http://up", model, api="responses", metadata=ModelMetadata(640_000, True))
+    files = render_composition(binding.compose_nodes(descriptor), descriptor)
+    assert "model_catalog_json" not in tomllib.loads(files["codex/config.toml"])
+    assert "codex/models.json" not in files

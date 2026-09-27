@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.run import EpisodeError, _remove_episode_root, run_episode
+from reef.harness.episodes.run import EpisodeError, EpisodeResult, _remove_episode_root, run_episode
 from reef.harness.episodes.trajectory import (
     TrajectoryError,
     read_claude_session,
@@ -25,7 +25,7 @@ from reef.harness.episodes.trajectory import (
     reader_for,
 )
 from reef.harness.tree.render import render_composition
-from reef.recipe.reefine.evolution import final_assistant_text
+from reef.recipe.reefine.evolution import evaluate, final_assistant_text
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -239,6 +239,42 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
     second.write_text('{"type": "event_msg"}\n{"type": "turn_context"\n')
     assert [event["type"] for event in read_codex_session(tmp_path)] == ["session_meta", "event_msg"]
     assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
+
+
+@pytest.mark.parametrize("answer, expected_score", [("reef-ok", 1.0), ("wrong", 0.0), (None, 0.0)])
+def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str | None, expected_score: float) -> None:
+    events = [
+        {
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "reef-ok"}]},
+        },
+        {"type": "response_item", "payload": {"type": "function_call_output", "output": "reef-ok"}},
+        {
+            "type": "response_item",
+            "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "reef-ok"}]},
+        },
+    ]
+    if answer is not None:
+        for text in ("Earlier reply", answer):
+            events.append(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Output:"}, {"type": "output_text", "text": text}],
+                    },
+                }
+            )
+    events.append({"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": answer}})
+    session = tmp_path / "rollout.jsonl"
+    session.write_text("".join(json.dumps(event) + "\n" for event in events))
+    trajectory = read_codex_session(tmp_path)
+    expected_reply = None if answer is None else f"Output:\n{answer}"
+    assert final_assistant_text(trajectory) == expected_reply
+    result = EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
+    assert evaluate("[health] Reply with the shell command's output", result) == expected_score
+    assert trajectory == tuple(events)
 
 
 def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path: Path) -> None:

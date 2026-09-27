@@ -21,14 +21,18 @@ becomes a scenario record either way.
 from __future__ import annotations
 
 import json
+import logging
 import urllib.error
 import urllib.request
 from abc import ABC, abstractmethod
 from collections.abc import Iterator, Mapping, Sequence
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import lru_cache
+from http.client import IncompleteRead
 from typing import Any
 
 from reef.core.errors import ReefError
+from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.runtime.interfaces import InferenceRuntime
 
@@ -82,6 +86,34 @@ def usage_of(response: Any) -> dict[str, int] | None:
     return {"input_tokens": inputs or 0, "output_tokens": outputs or 0}
 
 
+@lru_cache(maxsize=128)
+def provider_model_metadata(base_url: str, model: str, api_key: str | None) -> ModelMetadata | None:
+    """Read the selected model's OpenRouter-compatible /models metadata, cached per endpoint and key.
+
+    Standard OpenAI model lists have no capabilities; those leave metadata unknown.
+    HTTP and parse failures are handled by the caller and are not cached.
+    """
+    headers = {"Accept": "application/json"}
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+    request = urllib.request.Request(f"{base_url}/v1/models", headers=headers)
+    with urllib.request.urlopen(request, timeout=5.0) as response:
+        catalog = json.load(response)
+    if not isinstance(catalog, dict) or not isinstance(catalog.get("data"), list):
+        raise ValueError("model list must contain a data array")
+    for item in catalog["data"]:
+        if not isinstance(item, dict) or item.get("id") != model:
+            continue
+        window = item.get("context_length")
+        parameters = item.get("supported_parameters")
+        if window is None or parameters is None:
+            return None
+        if not isinstance(parameters, list) or not all(isinstance(parameter, str) for parameter in parameters):
+            raise ValueError("model supported_parameters must be a list of strings")
+        return ModelMetadata(context_window=window, reasoning="reasoning" in parameters)
+    return None
+
+
 @dataclass(frozen=True)
 class ModelBinding:
     """One model endpoint plus the model name to request from it.
@@ -98,6 +130,7 @@ class ModelBinding:
     #: reasoning first and answers with no text when it runs out, which reads to the harness as a turn that ended:
     #: the default leaves room for both. A harness that sets none of its own picks a smaller one (pi takes 16384).
     max_output_tokens: int = 32000
+    metadata: ModelMetadata | None = None
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -164,9 +197,22 @@ class ModelBinding:
                 api_key=api_key,
                 api=text("api", required=False) or "openai",
                 timeout_s=timeout_s,
+                metadata=ModelMetadata.from_config(config["metadata"]) if "metadata" in config else None,
             )
         except ValueError as exc:
             raise ValueError(f"{where}: {exc}") from exc
+
+    def with_metadata(self, metadata: ModelMetadata | None = None) -> ModelBinding:
+        """Resolve capabilities before replacing the provider URL with Reef's evaluation route."""
+        selected = metadata or self.metadata
+        if selected is None:
+            try:
+                selected = provider_model_metadata(self.base_url, self.model, self.api_key)
+            except (IncompleteRead, OSError, ValueError):
+                logging.getLogger(__name__).warning(
+                    "Could not read metadata for model %r; configure evolution.model_metadata for Codex", self.model
+                )
+        return replace(self, metadata=selected)
 
     # -- Method-side calls ---------------------------------------------------
 
@@ -327,11 +373,18 @@ class ModelBinding:
                 f"adapter {descriptor.name!r} declares no model_binding for the {self.api!r} api "
                 f"(declared: {known}); episodes cannot reach a model{hint}"
             )
+        metadata = {}
+        if self.metadata is not None:
+            metadata[self.model] = {
+                "context_window": self.metadata.context_window,
+                "reasoning": self.metadata.reasoning,
+            }
         values: dict[str, Any] = {
             "base_url": self.base_url,
             "api_key": self.api_key or NO_KEY_PLACEHOLDER,
             "model": self.model,
             "max_output_tokens": self.max_output_tokens,
+            "model_metadata": metadata,
         }
         choices = [self.model]
         for name in models:

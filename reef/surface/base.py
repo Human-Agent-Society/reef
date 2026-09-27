@@ -17,6 +17,7 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact, ArtifactRef, ArtifactValidator
 from reef.core.components import validate_component_name
+from reef.core.model_metadata import ModelMetadata
 
 
 @dataclass(frozen=True)
@@ -141,6 +142,10 @@ class HarnessInfo:
     served_api: str = "openai"
     #: Further models the installed client may pick from; the served one stays the default.
     client_models: tuple[str, ...] = ()
+    #: Explicit overrides by exact name; never reuse discovered metadata for a different endpoint.
+    model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
+    #: Discovered metadata for served_model on the default deployment endpoint.
+    served_metadata: ModelMetadata | None = None
 
 
 @dataclass(frozen=True)

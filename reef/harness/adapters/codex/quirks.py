@@ -13,18 +13,35 @@ nodes until Reef can run them behind a separate isolation boundary.
 from __future__ import annotations
 
 import json
+import re
+from pathlib import Path
 from typing import Any
 
 import tomli_w
 import yaml
 
+from reef.core.model_metadata import ModelMetadata
 from reef.harness.tree.render import RenderError
 
-_CONFIG = "codex/config.toml"
-_EXTENSIONS = "codex/extensions/"
-_SKILLS = ".agents/skills/"
+# Codex 0.152.1 matches bundled model slugs by prefix, including a single provider namespace.
+BUNDLED_MODEL_PREFIXES = (
+    "gpt-5.6-sol",
+    "gpt-5.6-terra",
+    "gpt-5.6-luna",
+    "gpt-daybreak-blue-latest",
+    "gpt-daybreak-red-latest",
+    "gpt-5.5",
+    "gpt-5.4",
+    "gpt-5.4-mini",
+    "gpt-5.2",
+    "codex-auto-review",
+)
 
-_ALLOWED_CONFIG_KEYS = {
+CONFIG = "codex/config.toml"
+EXTENSIONS = "codex/extensions/"
+SKILLS = ".agents/skills/"
+
+ALLOWED_CONFIG_KEYS = {
     "analytics",
     "approval_policy",
     "check_for_update_on_startup",
@@ -44,7 +61,7 @@ _ALLOWED_CONFIG_KEYS = {
     "tool_output_token_limit",
     "web_search",
 }
-_ALLOWED_FEATURES = {
+ALLOWED_FEATURES = {
     "apps",
     "enable_request_compression",
     "hooks",
@@ -52,15 +69,15 @@ _ALLOWED_FEATURES = {
     "shell_snapshot",
     "skill_mcp_dependency_install",
 }
-_DISABLED_FEATURES = {"apps", "hooks", "plugins", "shell_snapshot", "skill_mcp_dependency_install"}
-_ALLOWED_PROVIDER_KEYS = {
+DISABLED_FEATURES = {"apps", "hooks", "plugins", "shell_snapshot", "skill_mcp_dependency_install"}
+ALLOWED_PROVIDER_KEYS = {
     "base_url",
     "experimental_bearer_token",
     "name",
     "supports_websockets",
     "wire_api",
 }
-_OTEL_DEFAULTS = {
+OTEL_DEFAULTS = {
     "exporter": "none",
     "log_user_prompt": False,
     "metrics_exporter": "none",
@@ -68,7 +85,7 @@ _OTEL_DEFAULTS = {
 }
 
 
-def _with_frontmatter(path: str, text: str) -> str:
+def with_frontmatter(path: str, text: str) -> str:
     if text.startswith("---\n"):
         return text
     name = path.split("/")[-2]
@@ -77,8 +94,8 @@ def _with_frontmatter(path: str, text: str) -> str:
     return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
-def _validate_config(config: dict[str, Any]) -> None:
-    extra = sorted(set(config) - _ALLOWED_CONFIG_KEYS)
+def validate_config(config: dict[str, Any]) -> None:
+    extra = sorted(set(config) - ALLOWED_CONFIG_KEYS)
     if extra:
         raise RenderError(f"codex config keys are not admitted for benchmark episodes: {', '.join(extra)}")
     if config.get("approval_policy") != "never":
@@ -94,15 +111,15 @@ def _validate_config(config: dict[str, Any]) -> None:
     features = config.get("features")
     if not isinstance(features, dict):
         raise RenderError("codex composition must keep features as an object")
-    extra_features = sorted(set(features) - _ALLOWED_FEATURES)
+    extra_features = sorted(set(features) - ALLOWED_FEATURES)
     if extra_features:
         raise RenderError(f"codex feature keys are not admitted: {', '.join(extra_features)}")
-    for feature in _DISABLED_FEATURES:
+    for feature in DISABLED_FEATURES:
         if features.get(feature) is not False:
             raise RenderError(f"codex composition must keep features.{feature} disabled")
 
     otel = config.get("otel")
-    if otel != _OTEL_DEFAULTS:
+    if otel != OTEL_DEFAULTS:
         raise RenderError("codex composition must keep every OpenTelemetry exporter disabled")
 
     sandbox = config.get("sandbox_workspace_write")
@@ -120,7 +137,7 @@ def _validate_config(config: dict[str, Any]) -> None:
                 f"codex composition may only configure the Reef model provider: {', '.join(extra_providers)}"
             )
         for name, provider in providers.items():
-            if not isinstance(provider, dict) or set(provider) - _ALLOWED_PROVIDER_KEYS:
+            if not isinstance(provider, dict) or set(provider) - ALLOWED_PROVIDER_KEYS:
                 raise RenderError(f"codex model provider {name!r} contains unadmitted fields")
     if config.get("model_provider") not in (None, "reef"):
         raise RenderError("codex composition must use the Reef model provider")
@@ -128,24 +145,71 @@ def _validate_config(config: dict[str, Any]) -> None:
 
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
     try:
-        config = json.loads(files[_CONFIG])
+        config = json.loads(files[CONFIG])
     except (KeyError, json.JSONDecodeError) as exc:
         raise RenderError("codex primary config must be a JSON object before TOML rendering") from exc
     if not isinstance(config, dict):
         raise RenderError("codex primary config must be an object")
 
-    if any(path.startswith(_EXTENSIONS) for path in files):
+    if any(path.startswith(EXTENSIONS) for path in files):
         raise RenderError(
             "codex code_extension is not supported safely because native hooks run outside the command sandbox"
         )
-    _validate_config(config)
+    validate_config(config)
+    metadata_config = json.loads(files.pop("codex/models.json", "{}"))
+    if not isinstance(metadata_config, dict) or set(metadata_config) - {"models"}:
+        raise RenderError("codex models config accepts only models")
+    metadata_models = metadata_config.get("models", {})
+    if not isinstance(metadata_models, dict):
+        raise RenderError("codex models must map model names to metadata")
+    # A native model already has model-specific instructions and tool definitions. Keep those intact.
+    selected_model = config.get("model", "")
+    if isinstance(selected_model, str):
+        namespace, separator, suffix = selected_model.partition("/")
+        if separator and "/" not in suffix and re.fullmatch(r"[A-Za-z0-9_-]+", namespace):
+            selected_model = suffix
+        if selected_model.startswith(BUNDLED_MODEL_PREFIXES):
+            metadata_models = {}
+    catalog: list[dict[str, object]] = []
+    for model, value in metadata_models.items():
+        if not isinstance(model, str) or not model.strip():
+            raise RenderError("codex model metadata requires a non-empty model name")
+        try:
+            metadata = ModelMetadata.from_config(value)
+        except ValueError as exc:
+            raise RenderError(f"codex model {model!r}: {exc}") from exc
+        efforts = ["low", "medium", "high"] if metadata.reasoning else []
+        catalog.append(
+            {
+                "slug": model,
+                "display_name": model,
+                "supported_reasoning_levels": [{"effort": effort, "description": effort} for effort in efforts],
+                "default_reasoning_level": "medium" if metadata.reasoning else None,
+                "shell_type": "unified_exec",
+                "visibility": "list",
+                "supported_in_api": True,
+                "priority": 0,
+                # Preserve the pinned CLI's unknown-model prompt; metadata must not weaken its instructions.
+                "base_instructions": Path(__file__).with_name("default_instructions.md").read_text(encoding="utf-8"),
+                "supports_reasoning_summary_parameter": metadata.reasoning,
+                "support_verbosity": False,
+                "truncation_policy": {"mode": "bytes", "limit": 10000},
+                "context_window": metadata.context_window,
+                "max_context_window": metadata.context_window,
+                "experimental_supported_tools": [],
+            }
+        )
+    if catalog:
+        files["codex/models.json"] = json.dumps({"models": catalog}, indent=2) + "\n"
+        # Codex resolves this relative to config.toml, including in a relocated client session.
+        config["model_catalog_json"] = "models.json"
     try:
-        files[_CONFIG] = tomli_w.dumps(config)
+        files[CONFIG] = tomli_w.dumps(config)
     except (TypeError, ValueError) as exc:
         raise RenderError(f"codex config cannot be represented as TOML: {exc}") from exc
 
     for path, text in list(files.items()):
-        if path.startswith(_SKILLS) and path.endswith("/SKILL.md"):
-            files[path] = _with_frontmatter(path, text)
+        if path.startswith(SKILLS) and path.endswith("/SKILL.md"):
+            files[path] = with_frontmatter(path, text)
 
     return files

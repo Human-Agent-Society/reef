@@ -10,17 +10,24 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 import threading
+import tomllib
+from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from reef.core.model_metadata import ModelMetadata
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
+from reef.harness.episodes.trajectory import final_assistant_text
 from reef.harness.tree.render import render_composition
+from reef.service.install_script import render_install_script
 
 REAL_CODEX = os.environ.get("REEF_REAL_CODEX_BINARY", "")
 
@@ -78,6 +85,16 @@ class StubHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         pass
 
+    def do_GET(self) -> None:
+        if self.path != "/v1/models":
+            self.send_error(404)
+            return
+        payload = {"data": [{"id": MODEL, "context_length": 640_000, "supported_parameters": ["reasoning"]}]}
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps(payload).encode())
+
     def do_POST(self) -> None:
         body = self.rfile.read(int(self.headers.get("Content-Length", "0"))).decode("utf-8")
         self.server.requests.append((self.path, self.headers.get("Authorization", ""), body))
@@ -114,7 +131,7 @@ def _server() -> tuple[StubResponses, str]:
 
 
 def _binding(base_url: str) -> ModelBinding:
-    return ModelBinding(base_url=base_url, model=MODEL, api_key="reef-smoke-key", api="responses")
+    return ModelBinding(base_url=base_url, model=MODEL, api_key="reef-smoke-key", api="responses").with_metadata()
 
 
 def _bound_files(*nodes: tuple[str, dict[str, Any]], binding: ModelBinding) -> dict[str, str]:
@@ -183,6 +200,11 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
         server.server_close()
 
     assert result.exit_code == 0, (result.stdout, result.stderr)
+    assert "fallback metadata" not in result.stdout + result.stderr
+    started = next(
+        event["payload"] for event in result.trajectory if event.get("payload", {}).get("type") == "task_started"
+    )
+    assert started["model_context_window"] == 608_000  # Codex reserves 5% of the declared 640k window.
     assert server.requests
     path, authorization, body = server.requests[0]
     assert path == "/v1/responses"
@@ -195,3 +217,114 @@ def test_real_codex_renders_runs_collects_and_cleans_up(tmp_path: Path) -> None:
     assert any(event.get("payload", {}).get("type") == "task_complete" for event in result.trajectory)
     assert result.residue == ()
     assert capture.is_file() and capture.stat().st_size > 0
+    assert final_assistant_text(result.trajectory) == "READY"
+
+
+def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path) -> None:
+    server, base_url = _server()
+    try:
+        descriptor = get_adapter("codex")
+        composition = render_composition([("rules", {"text": RULES_MARKER})], descriptor)
+        bound = _bound_files(("rules", {"text": RULES_MARKER}), binding=_binding(base_url))
+        script = tmp_path / "install.sh"
+        script.write_text(
+            render_install_script(
+                descriptor=descriptor,
+                files=composition,
+                release_id="v-test",
+                content_id="c-test",
+                scenario="smoke",
+                binding_files={path: bound[path] for path in ("codex/config.toml", "codex/models.json")},
+            )
+        )
+        prefix = tmp_path / "prefix"
+        binary = prefix / "node_modules/.bin/codex"
+        binary.parent.mkdir(parents=True)
+        binary.symlink_to(Path(REAL_CODEX).resolve())
+        dest = tmp_path / "installed"
+        env = {**os.environ, "HOME": str(tmp_path / "home"), "REEF_PYTHON": sys.executable}
+        env.pop("REEF_TOKEN", None)
+        installed = subprocess.run(
+            ["sh", str(script), str(dest), str(prefix)], env=env, capture_output=True, text=True, timeout=30
+        )
+        assert installed.returncode == 0, installed.stderr
+        config = tomllib.loads((dest / "codex/config.toml").read_text())
+        assert config["model_catalog_json"] == "models.json"
+        run = subprocess.run(
+            [str(dest / "reef-codex"), "exec", "--json", "--strict-config", "--skip-git-repo-check", "Reply READY"],
+            cwd=tmp_path,
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert run.returncode == 0, (run.stdout, run.stderr)
+        assert "fallback metadata" not in run.stdout + run.stderr
+        assert '"text":"READY"' in run.stdout
+        sessions = [
+            json.loads(line)
+            for path in (dest / "codex/sessions").rglob("*.jsonl")
+            for line in path.read_text().splitlines()
+        ]
+        started = next(
+            event["payload"] for event in sessions if event.get("payload", {}).get("type") == "task_started"
+        )
+        assert started["model_context_window"] == 608_000
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+@pytest.mark.parametrize("reasoning", [True, False])
+def test_codex_sends_reasoning_parameters_only_when_supported(reasoning: bool) -> None:
+    server, base_url = _server()
+    try:
+        binding = replace(_binding(base_url), metadata=ModelMetadata(640_000, reasoning))
+        files = _bound_files(binding=binding)
+        result = run_episode(get_adapter("codex"), files, "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        assert result.exit_code == 0, result.stderr
+        assert "fallback metadata" not in result.stdout + result.stderr
+        body = json.loads(server.requests[0][2])
+        if reasoning:
+            assert body["reasoning"]["effort"] == "medium"
+        else:
+            assert body.get("reasoning", {}) == {}
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_metadata_preserves_codex_unknown_model_instructions() -> None:
+    server, base_url = _server()
+    try:
+        descriptor = get_adapter("codex")
+        binding = ModelBinding(base_url=base_url, model=MODEL, api="responses")
+        before = run_episode(descriptor, _bound_files(binding=binding), "Reply READY", binary=REAL_CODEX, timeout=30.0)
+        assert before.exit_code == 0, before.stderr
+        assert "fallback metadata" in before.stdout
+        after = run_episode(
+            descriptor, _bound_files(binding=binding.with_metadata()), "Reply READY", binary=REAL_CODEX, timeout=30.0
+        )
+        assert after.exit_code == 0, after.stderr
+        assert "fallback metadata" not in after.stdout + after.stderr
+        before_body = json.loads(server.requests[0][2])
+        after_body = json.loads(server.requests[1][2])
+        assert before_body["instructions"] == after_body["instructions"]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_codex_bundled_model_prefixes_match_the_pin() -> None:
+    from reef.harness.adapters.codex.quirks import BUNDLED_MODEL_PREFIXES
+
+    descriptor = get_adapter("codex")
+    result = run_episode(
+        replace(descriptor, argv=("debug", "models", "--bundled")),
+        render_composition([], descriptor),
+        "",
+        binary=REAL_CODEX,
+        timeout=30.0,
+    )
+    assert result.exit_code == 0, result.stderr
+    assert set(BUNDLED_MODEL_PREFIXES) == {model["slug"] for model in json.loads(result.stdout)["models"]}
