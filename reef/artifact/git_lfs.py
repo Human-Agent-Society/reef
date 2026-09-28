@@ -54,8 +54,8 @@ def _initialize_local_repository(repository: Path, git: GitClient) -> None:
         shutil.rmtree(temporary, ignore_errors=True)
 
 
-#: The remote tracking ref naming the release a workspace checked out last, a commit the remote already holds.
-CHECKED_OUT_REF = "refs/remotes/origin/reef-checked-out"
+#: The remote tracking ref naming the release a workspace fetched last, a commit the remote already holds.
+FETCHED_RELEASE_REF = "refs/remotes/origin/reef-fetched"
 
 
 class _GitWorkspace:
@@ -100,10 +100,7 @@ class _GitWorkspace:
         self._run(("git", "lfs", "install", "--local", "--skip-smudge"), cwd=repository)
 
     def checkout(self, version: str) -> None:
-        self.git("fetch", "origin", version)
-        # The remote holds this commit and its history: a remote tracking ref says so, so the LFS pre push check scans
-        # only the commits a later push adds, not the older releases whose objects this clone never fetched.
-        self.git("update-ref", CHECKED_OUT_REF, "FETCH_HEAD")
+        self.fetch_version(version)
         self.git("checkout", "--detach", "FETCH_HEAD")
         self.git("reset", "--hard", "FETCH_HEAD")
         self.git("clean", "-fdx")
@@ -193,7 +190,7 @@ class _GitWorkspace:
         index.unlink(missing_ok=True)
         environment = {"GIT_INDEX_FILE": str(index)}
         try:
-            self.git("fetch", "origin", parent)
+            self.fetch_version(parent)
             self._run(("git", "read-tree", parent), cwd=self.clone_dir, environment=environment)
             parent_paths = {
                 path
@@ -251,14 +248,25 @@ class _GitWorkspace:
         self.git("push", lease, "origin", *refs)
 
     def fetch_version(self, version: str) -> str:
+        """Fetch ``version`` from the remote and return its commit id.
+
+        Every publish path fetches the release it builds on or pushes through
+        here. The remote holds that commit and its history, and a remote
+        tracking ref records it, so the LFS pre push check scans only the
+        commits a later push adds, not the older releases whose objects this
+        clone never fetched. A push to a new ref, such as a release saved for
+        review without moving the head, has no remote commit of its own to stop
+        the scan.
+        """
         self.git("fetch", "origin", version)
+        self.git("update-ref", FETCHED_RELEASE_REF, "FETCH_HEAD")
         return self.git("rev-parse", "FETCH_HEAD")
 
     def fetch_lfs_objects(self, version: str) -> None:
         self.git("lfs", "fetch", "origin", version)
 
     def show_file(self, version: str, path: str) -> str:
-        self.git("fetch", "origin", version)
+        self.fetch_version(version)
         return self.git("show", f"FETCH_HEAD:{path}")
 
     def ls_remote(self, ref_name: str) -> str | None:

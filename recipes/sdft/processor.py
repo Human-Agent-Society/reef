@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from reef.train.processors import DistillProcessor
-from reef.train.processors.common import flatten_content
+from reef.train.processors.distill import normalize_messages_for_template
 from reef.train.types import ProcessorContext
 
 #: The reference implementation's demonstration block (idanshen/Self-Distillation, ``main.py``).
@@ -24,38 +23,6 @@ def context_block_template(config: Mapping[str, Any]) -> str:
     if CONTEXT_PLACEHOLDER not in template:
         raise ValueError(f"context_template must contain {CONTEXT_PLACEHOLDER}")
     return template
-
-
-def normalize_messages_for_template(messages: Sequence[Mapping[str, Any]]) -> list[dict[str, Any]]:
-    """Messages as a chat template expects them: text content, chat roles, tool arguments as objects."""
-    normalized: list[dict[str, Any]] = []
-    for message in messages:
-        entry = dict(message)
-        if entry.get("role") == "developer":
-            entry["role"] = "system"
-        content = entry.get("content")
-        if content is not None and not isinstance(content, str):
-            entry["content"] = flatten_content(content)
-        if entry.get("tool_calls"):
-            entry["tool_calls"] = [normalize_tool_call(call) for call in entry["tool_calls"]]
-        normalized.append(entry)
-    return normalized
-
-
-def normalize_tool_call(call: Mapping[str, Any]) -> dict[str, Any]:
-    """A tool call with its function arguments as an object, as chat templates render them."""
-    normalized = dict(call)
-    function = normalized.get("function")
-    if isinstance(function, Mapping):
-        function = dict(function)
-        arguments = function.get("arguments")
-        if isinstance(arguments, str):
-            try:
-                function["arguments"] = json.loads(arguments)
-            except json.JSONDecodeError:
-                function["arguments"] = {}
-        normalized["function"] = function
-    return normalized
 
 
 class SDFTProcessor(DistillProcessor):

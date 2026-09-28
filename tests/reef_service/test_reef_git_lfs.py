@@ -281,6 +281,15 @@ def test_a_fresh_scenario_forks_a_head_whose_history_holds_lfs_objects_it_never_
     (candidate / "weights").mkdir(parents=True)
     (candidate / "weights" / "adapter_model.safetensors").write_bytes(b"adapter v3" * 100)
     assert restarted.publish(Artifact.local(candidate), expected_parent=ref).parent_release_id == ref.release_id
+    # A candidate saved for review from a fresh workspace pushes to a new ref and leaves the head alone: the check
+    # still stops at history the remote already holds.
+    fresh = GitLFSRepositoryBackend("scenario-a", remote, work_dir=tmp_path / "work-a3", cache_dir=tmp_path / "c3")
+    pending_candidate = tmp_path / "trained-4"
+    (pending_candidate / "weights").mkdir(parents=True)
+    (pending_candidate / "weights" / "adapter_model.safetensors").write_bytes(b"adapter v4" * 100)
+    head = fresh.current()
+    pending = fresh.publish(Artifact.local(pending_candidate), expected_parent=head, advance_head=False)
+    assert pending.parent_release_id == head.release_id and fresh.current() == head
 
 
 @pytest.mark.integration
