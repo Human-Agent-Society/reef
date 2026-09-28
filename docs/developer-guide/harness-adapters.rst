@@ -729,8 +729,11 @@ Descriptor fields
   that the wrapper preserves between runs. Use ``directory`` or ``sqlite``
   for state linked into a session, and ``file`` for files copied back if the
   agent creates them or replaces their link. Include files the binary rewrites,
-  such as pi's ``settings.json``. See `Installed session files`_ for the
-  installation checks and copying rules.
+  such as pi's ``settings.json``. A ``file`` entry that the install also
+  writes, a JSON object such as pi's ``settings.json``, lists
+  ``preference_keys``: the top-level keys the binary saves itself and that
+  load no code. The install records the value of every other key. See
+  `Installed session files`_ for the installation checks and copying rules.
 - ``cleanup_whitelist`` lists agent-written paths allowed after boot or a
   run, rather than reported as drift.
 - ``quirks`` names an optional module for adapter-specific render checks
@@ -763,19 +766,46 @@ the script sits in ``$TMPDIR`` while it runs.
 Install records and validation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The script also records what it wrote in ``~/.reef/installs``, outside the
-install root: the sha256 of every file, of the release file without the
-check offs ``setup`` adds, and the address the script came from. A
-``reef-pi`` session starts only while those files are as the install wrote
-them. A file counts as changed also when a link reaches it: a link at the
+The script also records what it wrote in
+``~/.reef/installs/<sha256 of the install root>.json``, outside the install
+root: the sha256 of every file, of the release file without the check offs
+``setup`` adds, the value of every key of pi's ``settings.json`` outside its
+preference keys, and the address the script came from. A ``reef-pi``
+session starts only while those files are as the install wrote them. A file counts as changed also when a link reaches it: a link at the
 file or at a directory above it, or a second hard link to it; so does
 anything at its path that is not a regular file, such as a FIFO. When one
 differs, ``reef-pi`` prints ``cannot start agent; these files in <install
 root> changed since the install wrote them:``, the file names (a link is
 named after its file, for example ``pi-agent/models.json (a link)``, and
-a FIFO as ``pi-agent/models.json (not a regular file)``) and ``run reef-pi
-update to restore them``, and exits 3 without starting the agent;
-``reef-pi update`` writes them again.
+a FIFO as ``pi-agent/models.json (not a regular file)``, and a changed key
+of pi's settings as ``pi-agent/settings.json (keys: extensions)``) and
+``run reef-pi update to restore them``, and exits 3 without starting the
+agent; ``reef-pi update`` writes them again.
+
+The wrapper runs this check, so the install writes it beside the record, as
+``~/.reef/installs/<sha256 of the install root>/reef-pi``, links
+``~/.local/bin/reef-pi`` to it, and removes a ``reef-pi`` an earlier install
+wrote into the tree. The wrapper names the resolved install root. When a
+link replaces that root later, a start prints ``cannot start agent; <install
+root> is now a link to <target>, which the install did not make``,
+``reef-pi update`` refuses the same way, and both exit 3: remove the link
+and run the install command again.
+
+The record and the wrapper hold only while a session cannot write
+``~/.reef/installs``. A command inside the Codex or dsh sandbox can write
+only its project, ``/tmp`` and ``$TMPDIR``, so they are out of its reach.
+A pi, opencode or Hermes session runs commands with no sandbox, and Claude
+Code, and Codex outside its sandbox, run the commands and edits you
+approve: such a session can change or remove the record and the wrapper
+along with the tree, and the check does not stop it. The Python the
+wrapper runs (``REEF_PYTHON``, or the ``python3`` the install found) and
+the ``reef`` package in it run before the check, and the check does not
+read the agent under ``~/.local/share/reef-harness``, so keep them outside
+the project too.
+
+``~/.local/bin/reef-pi`` links to the wrapper of the latest install. Each
+install prints its own wrapper's path as ``wrapper:``; run that path to
+start another install of the same adapter.
 
 Links and non-regular files
 ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -799,10 +829,19 @@ Mutable client state
 ^^^^^^^^^^^^^^^^^^^^
 
 The sessions and settings the adapter keeps (``client_state`` in its
-descriptor, such as pi's ``settings.json``) are the agent's own to write
-and are not checked. A link at one of those paths would send the agent's
-writes wherever it points, so before each session the wrapper removes such
-a link, prints ``<path> in <install root> was a link to <target>; removed
+descriptor) are the agent's own to write and are not checked, except pi's
+``settings.json`` when the install wrote it (the model binding does). pi
+saves its preferences there (the model, the theme, the ``/settings``
+choices), and those keys may change. Every other key, such as
+``extensions``, ``packages`` or ``shellCommandPrefix``, must keep the value
+the install wrote, and a link at that file counts as changed, as at any
+recorded file. ``pi install``, ``pi remove`` and ``pi config`` write such
+keys, and so does the ``/settings`` choice Default project trust
+(``defaultProjectTrust``), which decides whose code loads, so the next
+``reef-pi`` start is refused until ``reef-pi update``, which writes
+``settings.json`` again, the saved preferences in it included. A link at another of those paths would send the agent's writes
+wherever it points, so before each session the wrapper removes such a
+link, prints ``<path> in <install root> was a link to <target>; removed
 the link, and the session keeps this state in the tree``, and the agent
 starts that state again in the tree; what the link pointed at is left as
 it was.
@@ -812,13 +851,13 @@ Session inputs and older installations
 
 A session gets the files the install wrote and that client state, so a
 file added to the tree later is not used, and it gets only the env file
-values the release's ``env`` items name. ``update``, ``setup``,
-``doctor``, ``evolve`` and ``page`` reach Reef at the recorded address,
-not at the one in the model binding. The check cannot cover ``reef-pi``
-itself, which runs before it, so a changed ``reef-pi`` runs as changed:
-one more reason for an install root outside the project. An install made
-before Reef kept this record has none: its sessions start without the
-check, and each such start prints ``<install root> has no install record``
+values the release's ``env`` items name. With a record, its PATH starts
+with the agent binary's directory and the wrapper's, never the install
+root, so a program added there does not run either. ``update``, ``setup``, ``doctor``,
+``evolve`` and ``page`` run from your shell reach Reef at the recorded
+address, not at the one in the model binding. An install made before Reef
+kept this record has none, and neither has one whose record was removed:
+its sessions start without the check, and each such start prints ``<install root> has no install record``
 and that ``reef-pi update`` records the files, until the update writes the
 record.
 
@@ -879,8 +918,8 @@ that the variable is set in the current shell.
 If a required item has not passed setup, an interactive session with a
 ``reef-pi`` wrapper asks ``Set up release <id8> now?`` and runs the setup
 loop below before offering the update. It finds the wrapper through
-``REEF_HARNESS_WRAPPER`` (exported by ``run_agent``), or beside the release
-file. Without a wrapper or UI, it prints the unmet items and
+``REEF_HARNESS_WRAPPER`` (exported by ``run_agent``), or, for a tree run
+without ``reef-pi``, in ``~/.reef/installs``. Without a wrapper or UI, it prints the unmet items and
 ``Run reef-pi setup, then start reef-pi again.``. Items still unmet after
 setup are reported, and the update offer waits until the next session.
 
@@ -1040,7 +1079,8 @@ to install. The separate automatic update notice remains available at
 session start.
 
 The install uses the ``reef-pi`` wrapper from ``REEF_HARNESS_WRAPPER``
-(exported by ``run_agent``) or beside the release file. If neither exists,
+(exported by ``run_agent``) or, for a tree run without ``reef-pi``, the one
+in ``~/.reef/installs``. If neither exists,
 pi reports ``reef: no reef-pi wrapper found; install it with reef-pi
 update, then reef-pi setup``. The wrapper runs
 ``reef-pi update --release <id>``, then setup, and reports

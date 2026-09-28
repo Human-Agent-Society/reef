@@ -45,6 +45,8 @@ from pathlib import Path
 
 from reef_client import ReefClient, ReefClientError
 
+from reef.harness.client.wrapper import install_directory
+
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it into reef-pi
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
@@ -56,7 +58,8 @@ POLL_S = 5.0
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 WORK = HERE / "work"
-# The install script writes the tree, reef-pi wrapper, and release metadata here.
+# The install script writes the tree and release metadata here, and the reef-pi wrapper outside it, in
+# ~/.reef/installs.
 INSTALL_ROOT = WORK / "harness"
 CAPTURES = WORK / "captures"  # the wrapper's spool, beside the run so a show session's receipts can be read back
 DEMOS = HERE / "demos"
@@ -253,10 +256,10 @@ def _wrapper_env():
 
 
 def reef_pi(args, cwd=None):
-    """One call of the installed wrapper, its lines echoed indented; the completed process."""
-    done = subprocess.run(
-        [str(INSTALL_ROOT / "reef-pi"), *args], cwd=cwd, env=_wrapper_env(), capture_output=True, text=True
-    )
+    """One call of the wrapper this install wrote, its lines echoed indented; the completed process. It is this
+    install's own, beside its record in ~/.reef/installs; ~/.local/bin/reef-pi links to the latest install."""
+    wrapper = install_directory(INSTALL_ROOT.resolve()) / "reef-pi"
+    done = subprocess.run([str(wrapper), *args], cwd=cwd, env=_wrapper_env(), capture_output=True, text=True)
     for line in (done.stdout + done.stderr).splitlines():
         print("  " + line, flush=True)
     return done

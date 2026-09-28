@@ -27,10 +27,13 @@ refused too. Rerunning when everything already matches
 writes no composition file and no release file and says "already current"; the model binding files
 are written on every run, so the served files they replace are left out of that comparison.
 Last, the script records what it wrote in ``~/.reef/installs``, outside the
-install root: the sha256 of each composition, binding and wrapper file, the
-release file's checksum without its check offs, and the address the script
-was served from. ``reef-<adapter>`` refuses to start a session while one of
-those files differs from the record.
+install root: the sha256 of each composition and binding file, for a file the
+binary writes too (pi's ``settings.json``) the value of every key but the
+binary's own preferences, the release file's checksum without its check offs,
+and the address the script was served from. ``reef-<adapter>`` refuses to
+start a session while one of those differs from the record. The wrapper runs
+that check, so the script writes it beside the record, never into the install
+root, and links ``~/.local/bin/reef-<adapter>`` to it.
 The interpreter is decided once: ``REEF_PYTHON`` when the caller names one,
 else the python3 the installing shell resolves, followed through to the
 interpreter behind it and pinned by absolute path into the wrapper, so a
@@ -154,15 +157,21 @@ def _wrapper_lines(
     writes nothing. The wrapper calls ``reef.harness.client.wrapper`` through
     ``$PYTHON``, the interpreter ``_python_lines`` resolved by absolute path
     (with ``-P`` where it exists), so the shell that runs it later needs
-    neither that interpreter nor the checkout on its PATH.
+    neither that interpreter nor the checkout on its PATH. The wrapper runs
+    the check on the tree, so it goes in ``$INSTALL_DIR``, beside the record,
+    where a session that can write only its project cannot change it, and it
+    names the resolved install root, the one the record is kept for.
     """
     wrapper_name = f"reef-{descriptor.name}"
-    wrapper = f'"$DEST/{_double_quoted(wrapper_name)}"'
+    wrapper = f'"$INSTALL_DIR/{_double_quoted(wrapper_name)}"'
+    in_tree = f'"$DEST/{_double_quoted(wrapper_name)}"'
     return [
         f"# The {wrapper_name} wrapper: capture proxy + report command. Rewritten whenever its text",
-        "# differs: it depends on this machine (binary, interpreter), not on the composition.",
+        "# differs: it depends on this machine (binary, interpreter), not on the composition. It runs the",
+        "# check on the tree, so it lives outside the tree, beside the record.",
         'BINARY_ABS="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"',
-        f'COMPOSE_ABS="$(mkdir -p "$DEST/{_double_quoted(compose_dir)}" && cd "$DEST/{_double_quoted(compose_dir)}" && pwd)"',
+        f'mkdir -p "$DEST/{_double_quoted(compose_dir)}" "$INSTALL_DIR"',
+        f'COMPOSE_ABS="$ROOT_ABS/{_double_quoted(compose_dir)}"',
         "wrapper_text() {",
         "    cat <<REEF_WRAPPER_EOF",
         "#!/bin/sh",
@@ -185,14 +194,16 @@ def _wrapper_lines(
         f"    wrapper_text > {wrapper}",
         f"    chmod +x {wrapper}",
         "fi",
+        "# An earlier install wrote the wrapper into the tree, where a session could rewrite it; removing a link",
+        "# there leaves what it points at as it was.",
+        f"if [ -f {in_tree} ] || [ -L {in_tree} ]; then",
+        f"    rm -f {in_tree}",
+        "fi",
         f"# Symlink into ~/.local/bin so {wrapper_name} is on PATH, on every run: the link may have been",
         "# pointed elsewhere since the wrapper was written (an install into another directory), and",
-        "# ln -sf costs nothing. The link target must be absolute: a DEST the person names may be",
-        "# relative (./reef-harness), and a relative target resolves against the link's own directory, so",
-        f"# the link dangles and {wrapper_name} is not runnable from anywhere.",
-        'DEST_ABS="$(cd "$DEST" && pwd)"',
+        "# ln -sf costs nothing.",
         'mkdir -p "$HOME/.local/bin"',
-        f'ln -sf "$DEST_ABS/{_double_quoted(wrapper_name)}" "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
+        f'ln -sf {wrapper} "$HOME/.local/bin/{_double_quoted(wrapper_name)}"',
         'case ":$PATH:" in',
         '    *":$HOME/.local/bin:"*) ;;',
         f"    *) echo \"reef: add '$HOME/.local/bin' to your PATH to run {wrapper_name} from anywhere\" >&2 ;;",
@@ -470,42 +481,53 @@ def prune_lines(kept: Sequence[str]) -> list[str]:
     ]
 
 
-def install_record_lines(wrapper_name: str, written: Sequence[str]) -> list[str]:
-    """Record what this install wrote in ``~/.reef/installs``, where ``reef-<adapter>`` reads it before a session.
+def install_record_lines(
+    wrapper_name: str, written: Sequence[str], preference_keys_by_path: Mapping[str, Sequence[str]]
+) -> list[str]:
+    """Record what this install wrote in ``$INSTALL_DIR.json``, where ``reef-<adapter>`` reads it before a session.
 
-    The record names the install root, the address the script was served
-    from (``$SERVICE_URL``), the release file's checksum without its check
-    offs (``$RELEASE_FILE_CHECKSUM``) and the sha256 of every file in
-    ``written``, taken after the binding and the wrapper are on disk. It is
-    kept outside the install root, which may sit in a project a session can
-    write, and rewritten only when it changed."""
+    The record names the resolved install root (``$ROOT_ABS``), the address
+    the script was served from (``$SERVICE_URL``), the release file's
+    checksum without its check offs (``$RELEASE_FILE_CHECKSUM``) and the
+    sha256 of every file in ``written``, taken after the binding is on disk.
+    For each JSON file in ``preference_keys_by_path``, which the binary writes
+    too, it keeps under ``settings`` the preference keys the binary may change
+    and, as ``checked_values``, the value of every other key as the install
+    wrote it. It is kept outside the install root, which may sit in a project
+    a session can write, and rewritten only when it changed."""
     return [
         "",
         f"# What this install wrote, recorded outside the install root: {wrapper_name} refuses to start a session once",
-        "# one of these files changed, and a session that can write the tree cannot change the record.",
-        f'"$PYTHON" - "$DEST" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" {" ".join(_single_quoted(path) for path in written)} <<\'REEF_INSTALL_RECORD_EOF\'',
+        "# one of these files changed, and a session that can write only its project cannot change the record.",
+        f'"$PYTHON" - "$ROOT_ABS" "$INSTALL_DIR.json" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" {_single_quoted(json.dumps(dict(preference_keys_by_path)))} {" ".join(_single_quoted(path) for path in written)} <<\'REEF_INSTALL_RECORD_EOF\'',
         "import hashlib, json, os, sys",
-        "root, service_url, release_file = os.path.realpath(sys.argv[1]), sys.argv[2], sys.argv[3]",
+        "root, record_path, service_url, release_file = sys.argv[1:5]",
         "files = {}",
-        "for relative in sys.argv[4:]:",
+        "for relative in sys.argv[6:]:",
         '    with open(os.path.join(root, relative), "rb") as handle:',
         "        files[relative] = hashlib.sha256(handle.read()).hexdigest()",
-        'record = {"install_root": root, "service_url": service_url or None, "release_file": release_file, "files": files}',
+        "# A file the binary writes too: the keys it may change, and the value of every other key as the install wrote it.",
+        "settings = {}",
+        "for relative, preference_keys in json.loads(sys.argv[5]).items():",
+        '    with open(os.path.join(root, relative), encoding="utf-8") as handle:',
+        "        written = json.load(handle)",
+        "    checked_values = {key: value for key, value in written.items() if key not in preference_keys}",
+        '    settings[relative] = {"preference_keys": preference_keys, "checked_values": checked_values}',
+        'record = {"install_root": root, "service_url": service_url or None, "release_file": release_file, "files": files, "settings": settings}',
         'text = json.dumps(record, indent=2) + "\\n"',
-        'path = os.path.join(os.path.expanduser("~"), ".reef", "installs", hashlib.sha256(root.encode("utf-8")).hexdigest() + ".json")',
         "try:",
-        '    with open(path, encoding="utf-8") as handle:',
+        '    with open(record_path, encoding="utf-8") as handle:',
         "        current = handle.read()",
         "except OSError:",
         "    current = None",
         "if current != text:",
         "    try:",
-        "        os.makedirs(os.path.dirname(path), exist_ok=True)",
-        '        with open(path + ".part", "w", encoding="utf-8") as handle:',
+        "        os.makedirs(os.path.dirname(record_path), exist_ok=True)",
+        '        with open(record_path + ".part", "w", encoding="utf-8") as handle:',
         "            handle.write(text)",
-        '        os.replace(path + ".part", path)',
+        '        os.replace(record_path + ".part", record_path)',
         "    except OSError as exc:",
-        '        sys.exit("reef: cannot record what the install wrote in " + path + ": " + str(exc))',
+        '        sys.exit("reef: cannot record what the install wrote in " + record_path + ": " + str(exc))',
         "REEF_INSTALL_RECORD_EOF",
     ]
 
@@ -703,8 +725,14 @@ def render_install_script(
             raise ValueError(f"composition path {relative!r} escapes the destination")
     items = parse_requires(list(requires), limit=None)
     ordered = sorted(files)
-    # What this install writes, besides the release file: the composition, the binding and the wrapper.
-    recorded = sorted({*ordered, *bindings, wrapper_name})
+    # What this install writes into the tree, besides the release file: the composition and the binding.
+    recorded = sorted({*ordered, *bindings})
+    # A recorded file the binary writes too (pi's settings.json): the record keeps every key but the binary's own.
+    preference_keys_by_path = {
+        state.path: sorted(state.preference_keys)
+        for state in descriptor.client_state
+        if state.preference_keys and state.path in recorded
+    }
     checksum = composition_checksum(files)
     # The binding rewrites its target files on every run, so a served file it targets never holds the served
     # bytes on disk again: the current check hashes the other files, and the release file names the release.
@@ -788,6 +816,11 @@ def render_install_script(
         "",
         'mkdir -p "$DEST"',
         *(f'mkdir -p "$DEST/{_double_quoted(directory)}"' for directory in directories),
+        "# The resolved install root, and this install's directory outside it, named by the root's sha256: it holds",
+        "# the wrapper, and the record beside it as INSTALL_DIR.json, where a session that can write only its project",
+        "# cannot change them.",
+        'ROOT_ABS="$("$PYTHON" -c \'import os, sys; print(os.path.realpath(sys.argv[1]))\' "$DEST")"',
+        'INSTALL_DIR="$HOME/.reef/installs/$(printf \'%s\' "$ROOT_ABS" | sha256)"',
         "",
         "# A rerun of the same release on a current tree writes nothing here, not even the release file.",
         'current=""',
@@ -818,10 +851,11 @@ def render_install_script(
         "",
         *_wrapper_lines(descriptor, env_var, compose_dir, release_id, scenario),
         *_binding_lines(bindings, is_token_expected),
-        *install_record_lines(wrapper_name, recorded),
+        *install_record_lines(wrapper_name, recorded, preference_keys_by_path),
         "",
         'echo "reef: done"',
-        f'echo "run:     $DEST/{wrapper_name}"',
+        f'echo "run:     $HOME/.local/bin/{_double_quoted(wrapper_name)}"',
+        f'echo "wrapper: $INSTALL_DIR/{_double_quoted(wrapper_name)}"',
         'echo "binary:  $BINARY"',
         'echo "harness: $DEST"',
         "",

@@ -601,7 +601,8 @@ open to a session as one in the project. The default is outside all of
 these, unless the agent's project is your home directory itself.
 
 The script installs the pinned agent, writes the tree and its model binding,
-and puts a ``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH. With
+and writes a ``reef-<adapter>`` wrapper (here ``reef-pi``) outside the tree,
+in ``~/.reef/installs``, with ``~/.local/bin/reef-pi`` linked to it. With
 a token on the service, the exported ``REEF_TOKEN`` also reaches the script,
 which writes it into the binding. Later sessions read the token from that
 binding, and the wrapper keeps each run's receipts for ``report``.
@@ -612,7 +613,10 @@ them. The published tree itself contains no endpoint or credential.
 
 The wrapper uses the interpreter that imported Reef during installation:
 ``REEF_PYTHON`` when set, otherwise ``python3`` on PATH. Wrapper updates pass
-their own interpreter as ``REEF_PYTHON``.
+their own interpreter as ``REEF_PYTHON``. Install from a Python environment
+outside the project the agent works in: a session can write a virtual
+environment in its project, and code there runs as you when ``reef-pi``
+starts, before its check.
 
 ``reef-pi doctor`` checks the interpreter and imports, service authentication,
 agent binary, tools on PATH, and installed release against the served head.
@@ -648,18 +652,37 @@ prints ``cannot start agent``, and exits with status 3. Restore the files with:
 
 Then start ``reef-pi`` again. If ``update`` names a link outside the install
 root or a non-regular file at a destination, remove that named entry before
-retrying. The installer refuses to write through it. Adapter-managed session
-state and settings are excluded from the file checksum check.
+retrying. The installer refuses to write through it. Session state is not
+checked. pi's ``settings.json``, which the model binding writes, is checked,
+except the preferences pi saves itself (the model, the theme and the other
+``/settings`` choices but Default project trust, which decides whose code
+loads). ``reef-pi install``, ``reef-pi remove`` and ``reef-pi config``, and
+that one ``/settings`` choice, change keys the check covers, so the next
+start names them, for example ``pi-agent/settings.json (keys: packages)``,
+until ``reef-pi update``, which writes ``settings.json`` again, your saved
+preferences in it included.
+
+The check stops a session that can write only its project, ``/tmp`` and
+``$TMPDIR``, as commands inside the Codex and dsh sandboxes can. A session
+that can write your home directory can also change the record in
+``~/.reef/installs`` and the wrapper, and then the check passes: pi, opencode
+and Hermes run commands with no sandbox, and Claude Code, and Codex outside
+its sandbox, run the commands you approve.
 
 Upgrade an older installation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-An install made before Reef recorded file checksums prints
-``<install root> has no install record`` at each session start. Run
-``reef-pi update`` once to write the record and enable the check.
+An install made before Reef recorded file checksums, or one whose record was
+removed, prints ``<install root> has no install record`` at each session
+start. Run ``reef-pi update`` once to write the record and enable the check.
+The update also moves the wrapper out of the tree, beside the record, and
+removes the ``reef-pi`` in the install root: run ``reef-pi`` from your PATH,
+or ``~/.local/bin/reef-pi``, which links to the latest install's wrapper. For
+another install of the same adapter, run the ``wrapper:`` path its install
+printed.
 
-The check does not protect the wrapper executable itself. Keep the install
-outside the project and, for Codex and dsh, outside ``/tmp`` and ``$TMPDIR``.
+Keep the install root, and the Python environment the wrapper runs, outside
+the project and, for Codex and dsh, outside ``/tmp`` and ``$TMPDIR``.
 See `Installed session files
 <../developer-guide/harness-adapters.rst#installed-session-files>`__ for the
 check's scope, state handling, and cleanup behavior.

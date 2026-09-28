@@ -12,16 +12,20 @@
 // Before that, an env variable the installed release requires and this shell lacks gets one warning line.
 // A release held back from the served head is offered like any other: selecting the update moves the head to it
 // first, so installing is the one decision a person makes about it.
-import { existsSync, readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, realpathSync } from "node:fs";
+import { homedir } from "node:os";
 import { join } from "node:path";
 
-// The wrapper the setup and the update run through: run_agent exports its path, and a tree run directly has it
-// beside the release file.
+// The wrapper the setup and the update run through: run_agent exports its path, and for a tree run directly the
+// install wrote it outside the tree, in ~/.reef/installs/<sha256 of the resolved install root>.
 function wrapperPath(destDir) {
   const exported = process.env.REEF_HARNESS_WRAPPER;
   if (exported && existsSync(exported)) return exported;
-  const beside = join(destDir, "reef-pi");
-  return existsSync(beside) ? beside : null;
+  if (!existsSync(destDir)) return null;
+  const rootDigest = createHash("sha256").update(realpathSync(destDir)).digest("hex");
+  const installedWrapper = join(homedir(), ".reef", "installs", rootDigest, "reef-pi");
+  return existsSync(installedWrapper) ? installedWrapper : null;
 }
 
 // One wrapper call; a wrapper that could not be started reads as a failed one.

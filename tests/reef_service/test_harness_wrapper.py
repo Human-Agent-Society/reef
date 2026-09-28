@@ -1380,8 +1380,8 @@ def _ask_env(captures: Path, compose: str, **extra: str) -> dict[str, str]:
 def unrecorded_notice(compose: str) -> str:
     """The line ``reef-pi`` prints first when it starts a session on a tree no install recorded."""
     return (
-        f"reef-pi: {Path(compose).parent.resolve()} has no install record (an install made before Reef kept one), "
-        "so its files were not checked before this session; reef-pi update records them"
+        f"reef-pi: {Path(compose).parent.resolve()} has no install record, so its files were not checked before this "
+        "session; reef-pi update records them"
     )
 
 

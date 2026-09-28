@@ -239,7 +239,9 @@ The script installs into `~/reef-harness/<scenario>` (here
 `~/reef-harness/my-harness`); `bash -s -- <dir>` names another install root.
 Keep any install root outside the project the agent works in: a session can
 write files in its project, so with the install root there it could change
-what the next session runs. For codex and dsh, keep it out of `/tmp` and
+what the next session runs. The same holds for the Python environment the
+install bakes into `reef-pi` and the Reef checkout it imports: code there runs
+as you when `reef-pi` starts. For codex and dsh, keep them out of `/tmp` and
 `$TMPDIR` too: their sandboxes let a command write there as well.
 
 Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served

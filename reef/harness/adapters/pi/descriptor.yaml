@@ -29,14 +29,26 @@ client_env:
 # pi saves sessions under its agent dir, which reef-pi points at a temp copy
 # of the installed tree; kept in the installed tree, --resume and --continue
 # find them in a later run. pi also writes settings.json in place: the first
-# interactive session records lastChangelogVersion there, and /model, /theme
-# and the like save theirs, so reef-pi keeps it as state and never checks it
-# against the install.
+# interactive session records lastChangelogVersion there, and /model and
+# /settings save their choices. Those preference keys load no code, nested
+# fields included (numbers, booleans and strings pi 0.84.2 only displays), so a
+# session may change them. Every other key must keep the value the install
+# wrote: the ones pi install and pi config write (packages, extensions,
+# skills), the one /settings writes for Default project trust
+# (defaultProjectTrust), which decides whose code loads, and the rest, such as
+# shellCommandPrefix. Review the list, nested fields too, at each pin bump.
 client_state:
   - path: "pi-agent/sessions"
     kind: directory
   - path: "pi-agent/settings.json"
     kind: file
+    preference_keys: [
+      lastChangelogVersion, defaultProvider, defaultModel, defaultThinkingLevel, enabledModels, theme,
+      steeringMode, followUpMode, transport, compaction, retry, httpIdleTimeoutMs, hideThinkingBlock,
+      showCacheMissNotices, quietStartup, collapseChangelog, enableInstallTelemetry, enableSkillCommands,
+      terminal, images, markdown, warnings, tuiMode, fullscreenExitOutput, fullscreenScrollbar,
+      doubleEscapeAction, treeFilterMode, showHardwareCursor, editorPaddingX, outputPad, autocompleteMaxVisible,
+    ]
 client_tools:
   - command: rg
     package: ripgrep
