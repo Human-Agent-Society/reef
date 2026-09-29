@@ -17,12 +17,14 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+from collections.abc import Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.executor import EpisodeExecutor, ProcessOutcome, SandboxExecutor
+from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, ProcessOutcome, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeError, run_episode
 from reef.harness.runners.terminus.runner import SESSION_DIR_ENV, TREE_DIR_ENV, TRIALS_DIR_ENV
@@ -157,6 +159,47 @@ def test_the_episode_root_is_under_the_home_directory_on_macos_only_and_removed(
     assert root.parent == expected
     assert not root.exists()
     assert (home / ".reef").exists() == (platform == "darwin")
+
+
+@dataclass(frozen=True)
+class RecordingSandbox(SandboxExecutor):
+    """A sandbox that records the root and the environment it is handed instead of starting bwrap."""
+
+    launched: list[tuple[Path, dict[str, str]]] = field(default_factory=list)
+
+    def launch(
+        self,
+        argv: Sequence[str],
+        *,
+        root: Path,
+        workspace: Path,
+        env: Mapping[str, str],
+        timeout: float,
+        writable_paths: Sequence[Path] = (),
+        readonly_paths: Sequence[Path] = (),
+    ) -> ProcessOutcome:
+        self.launched.append((root, dict(env)))
+        raise EpisodeLaunchError("recorded, not run")
+
+
+@pytest.mark.unit
+def test_an_episode_on_e2b_gets_neither_the_local_docker_context_nor_the_macos_root(
+    tmp_path: Path, home: Path, monkeypatch
+) -> None:
+    """The service's Docker context and the root under ~/.reef/episodes serve local Docker, which on macOS shares
+    only the home directory with its VM; an episode the sandbox runs on E2B gets neither, on macOS too."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    descriptor = get_adapter("terminus")
+    executor = RecordingSandbox(
+        egress_hosts=("api.e2b.dev",), env={"REEF_TERMINUS_ENVIRONMENT": "e2b", "E2B_API_KEY": "key"}
+    )
+    with pytest.raises(EpisodeError, match="recorded, not run"):
+        run_episode(descriptor, render_composition(NODES, descriptor), "task", executor=executor)
+    ((root, env),) = executor.launched
+    assert not set(descriptor.host_env) & set(env)
+    assert root.parent == Path(tempfile.gettempdir())
+    assert not (home / ".reef").exists()
 
 
 @pytest.mark.unit
