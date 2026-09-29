@@ -669,6 +669,7 @@ def _install_fixture(
     npm: str,
     scenario: str = "",
     binding_files: dict[str, str] | None = None,
+    is_token_expected: bool = False,
 ) -> tuple[Path, Path, Path, dict]:
     """A rendered script, a PATH shim dir, and an install prefix.
 
@@ -685,6 +686,7 @@ def _install_fixture(
             content_id="content-test",
             scenario=scenario,
             binding_files=binding_files,
+            is_token_expected=is_token_expected,
         )
     )
     prefix = tmp_path / "prefix"
@@ -746,7 +748,11 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
     binding_files = {"pi-agent/models.json": bound["pi-agent/models.json"]}
     assert TOKEN_PLACEHOLDER in binding_files["pi-agent/models.json"]
     script, dest, prefix, env = _install_fixture(
-        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", binding_files=binding_files
+        tmp_path,
+        binary_version="0.84.2",
+        npm="#!/bin/sh\nexit 1\n",
+        binding_files=binding_files,
+        is_token_expected=True,
     )
     result = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-123"})
     assert result.returncode == 0, result.stderr
@@ -762,14 +768,125 @@ def test_install_script_writes_the_model_binding_with_the_clients_token(tmp_path
     assert _extract_reef_url("pi", dest / "pi-agent") == "http://reef.test:8901"
     # The composition files and the release file are what the manifest served; the binding rides beside them.
     assert (dest / "pi-agent/AGENTS.md").read_text(encoding="utf-8") == HOSTILE_FILES["pi-agent/AGENTS.md"]
-    # A rerun re-points the tree and exits clean; without a token the script says so and still installs.
+    # A rerun re-points the tree and exits clean; without a token the script says so, since the request for it
+    # carried one, and still installs.
     again = _run_install(script, dest, prefix, {k: v for k, v in env.items() if k != "REEF_TOKEN"})
     assert again.returncode == 0, again.stderr
-    assert "REEF_TOKEN is not set" in again.stderr
+    assert "REEF_TOKEN is not set" in again.stderr and "export REEF_TOKEN=<token>" in again.stderr
     # pi refuses an empty key, so the binding carries a stand-in the wrapper reads back as no token.
     models = json.loads((dest / "pi-agent/models.json").read_text(encoding="utf-8"))
     assert models["providers"]["reef"]["apiKey"] == NO_TOKEN_API_KEY
     assert _extract_reef_token("pi", dest / "pi-agent") is None
+
+
+@pytest.mark.unit
+def test_the_binding_that_holds_the_token_is_readable_by_its_owner_alone(tmp_path) -> None:
+    """The token is a credential: the binding file that holds it is mode 600 on a first install and on a rerun over
+    a file an earlier install left readable, while a composition file keeps the ordinary mode."""
+    binding = ModelBinding(base_url="http://reef.test:8901", model="qwen3-8b", api_key=TOKEN_PLACEHOLDER)
+    bound = render_composition(
+        [("rules", {"text": "old rules"}), *binding.compose_nodes(get_adapter("pi"))], get_adapter("pi")
+    )
+    binding_files = {"pi-agent/models.json": bound["pi-agent/models.json"]}
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n", binding_files=binding_files
+    )
+    models = dest / "pi-agent/models.json"
+    for attempt in range(2):
+        result = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-123"})
+        assert result.returncode == 0, result.stderr
+        assert "tok-123" in models.read_text(encoding="utf-8")
+        assert models.stat().st_mode & 0o777 == 0o600, attempt
+        models.chmod(0o644)  # as an install from before this change left it
+    assert (dest / "pi-agent/AGENTS.md").stat().st_mode & 0o077 != 0
+
+
+#: The bundled adapters whose descriptor declares an install section: the ones GET /reef/harness/install serves.
+INSTALLABLE_ADAPTERS = tuple(
+    name for name in reef.harness.adapters.BUILTIN_ADAPTERS if get_adapter(name).install is not None
+)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("adapter", INSTALLABLE_ADAPTERS)
+def test_a_rerun_of_the_same_release_is_current_when_the_binding_rewrites_a_served_file(
+    tmp_path, adapter: str
+) -> None:
+    """Every installable adapter's binding rewrites served config files on every run (claude settings.json, codex
+    config.toml, dsh .env and cordis.patch.yml, hermes config.yaml, opencode opencode.json, pi settings.json and
+    models.json), so those files never hold the served bytes again: a rerun of the same release still writes no
+    composition file and no release file, and writes the binding again with this run's token; another release is
+    still written."""
+    descriptor = get_adapter(adapter)
+    install = descriptor.install
+    assert install is not None
+    nodes = [("rules", {"text": "rules\n"})]
+    binding = ModelBinding(
+        base_url="http://reef.test:8901",
+        model="m1",
+        api_key=TOKEN_PLACEHOLDER,
+        api=next(iter(descriptor.model_binding)),
+    )
+    bound_nodes = binding.compose_nodes(descriptor)
+    files = render_composition(nodes, descriptor)
+    bound_files = render_composition([*nodes, *bound_nodes], descriptor)
+    # The binding files as the install route picks them: every config target a binding node writes that renders.
+    targets = sorted(
+        {descriptor.config_targets[str(config.get("target", "primary"))].path for _, config in bound_nodes}
+    )
+    binding_files = {path: bound_files[path] for path in targets if path in bound_files}
+    assert all(path in files and files[path] != binding_files[path] for path in binding_files)
+
+    def render(release_id: str) -> Path:
+        script = tmp_path / f"install-{release_id}.sh"
+        script.write_text(
+            render_install_script(
+                descriptor=descriptor,
+                files=files,
+                release_id=release_id,
+                content_id=f"content-{release_id}",
+                binding_files=binding_files,
+            )
+        )
+        return script
+
+    # The pinned binary is in place, so the vendor install never runs; a git install also records its pin.
+    prefix = tmp_path / "prefix"
+    _write_executable(prefix / install.binary_path, f"#!/bin/sh\necho {install.version}\n")
+    if install.kind == "git":
+        (prefix / ".reef-install-pin").write_text(f"{install.repository}@{install.ref}\n")
+    env = _source_env(tmp_path / "shim", tmp_path / "home")
+    dest = tmp_path / "dest"
+    script = render("v1")
+    first = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-1"})
+    assert first.returncode == 0, first.stderr
+    assert "already installed" in first.stdout
+    assert "writing the harness tree" in first.stdout
+    # Read-only bits make any write of a composition file or the release file a hard fail.
+    unbound = [dest / relative for relative in sorted(files) if relative not in binding_files]
+    assert unbound
+    for path in (*unbound, dest / HARNESS_RELEASE_FILE):
+        path.chmod(0o444)
+    before = {path: path.stat().st_mtime_ns for path in (*unbound, dest / HARNESS_RELEASE_FILE)}
+    second = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert second.returncode == 0, second.stderr
+    assert "composition already current" in second.stdout
+    assert {path: path.stat().st_mtime_ns for path in before} == before
+    for path in binding_files:
+        assert (dest / path).read_text(encoding="utf-8") == binding_files[path].replace(TOKEN_PLACEHOLDER, "tok-2")
+    for path in before:
+        path.chmod(0o644)
+    # A changed file the binding leaves alone is still caught, and so is another release of the same files.
+    changed = unbound[-1]
+    changed.write_text("changed\n", encoding="utf-8")
+    third = _run_install(script, dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert third.returncode == 0, third.stderr
+    assert "writing the harness tree" in third.stdout
+    assert changed.read_text(encoding="utf-8") == files[changed.relative_to(dest).as_posix()]
+    fourth = _run_install(render("v2"), dest, prefix, {**env, "REEF_TOKEN": "tok-2"})
+    assert fourth.returncode == 0, fourth.stderr
+    assert "writing the harness tree" in fourth.stdout
+    assert json.loads((dest / HARNESS_RELEASE_FILE).read_text(encoding="utf-8"))["release_id"] == "v2"
 
 
 @pytest.mark.unit
@@ -952,7 +1069,7 @@ compose_stream() {
 mkdir -p "$DEST"
 mkdir -p "$DEST/pi-agent"
 
-# A rerun on a current machine writes nothing at all, not even the release file.
+# A rerun of the same release on a current tree writes nothing here, not even the release file.
 current=""
 current_release_checksum=""
 if [ -f "$DEST/.reef-harness-release" ] && [ -f "$DEST/pi-agent/AGENTS.md" ]; then
@@ -2319,6 +2436,36 @@ def test_a_slow_install_render_starts_the_script_with_a_spinner_and_keeps_a_fail
     truncated = render_install_preamble() + render_streamed_install("echo 'reef: partial'\n").removesuffix("}\n")
     ran = run_shell(truncated)
     assert ran.returncode != 0 and "reef: partial" not in ran.stdout
+
+
+@pytest.mark.unit
+def test_the_install_script_warns_of_a_missing_token_only_when_the_service_wants_one(tmp_path: Path) -> None:
+    """A service with no token serves a script that installs without REEF_TOKEN and says nothing about it; a
+    request that carried a token reached a service that wants one, and its script warns when REEF_TOKEN is unset."""
+    seed = ({"id": "style", "name": "rules", "config": {"text": "Answer briefly."}},)
+
+    async def script_for(tokens: tuple[str, ...], headers: dict[str, str]) -> str:
+        service_dir = tmp_path / f"service-{len(tokens)}"
+        service_dir.mkdir()
+        dispatcher = _dispatcher(service_dir, (), seed=seed)
+        dispatcher.get_or_create_scenario("demo")
+        client = TestClient(TestServer(create_app(dispatcher, tokens=tokens, inference_handler=_EchoBackend())))
+        await client.start_server()
+        try:
+            response = await client.get(
+                "/reef/harness/install?adapter=pi", headers={"x-reef-scenario": "demo", **headers}
+            )
+            assert response.status == 200
+            return await response.text()
+        finally:
+            await client.close()
+
+    open_script = asyncio.run(script_for((), {}))
+    assert "REEF_TOKEN is not set" not in open_script
+    guarded_script = asyncio.run(script_for(("tok",), {"Authorization": "Bearer tok"}))
+    assert "REEF_TOKEN is not set" in guarded_script
+    # The token itself stays out of the served script either way.
+    assert 'tok"' not in guarded_script and "Bearer tok" not in guarded_script
 
 
 @pytest.mark.unit

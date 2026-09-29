@@ -1055,6 +1055,8 @@ class RequestService:
             fallback_release_id=ancestor_requiring_nothing(
                 list(reversed(self.harness_rows(scenario))), manifest["release_id"]
             ),
+            # A request that carried a token reached a service that wants one, so the harness needs it too.
+            is_token_expected=any(name.lower() in ("authorization", "x-api-key") for name in headers),
         )
 
     def _install_binding(

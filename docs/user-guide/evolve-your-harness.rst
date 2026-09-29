@@ -533,12 +533,15 @@ still running:
 
 .. code:: bash
 
-   curl -sS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: harness-evolve-demo" \
+   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
      http://127.0.0.1:8900/reef/harness            # the seed tree until a step publishes
-   curl -sS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: harness-evolve-demo" \
+   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
      http://127.0.0.1:8900/reef/harness/releases
+
+The demo service listens on loopback only and runs without a token. On a
+shared machine, export ``REEF_TOKEN`` before ``run.sh`` starts it: the
+service then requires that token, and every ``curl`` on this page needs
+``-H "Authorization: Bearer $REEF_TOKEN"``.
 
 One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B: one failing task entered the
@@ -578,12 +581,14 @@ the install works before any step has run:
 
 .. code:: bash
 
-   curl -fsS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: harness-evolve-demo" \
+   curl -fsS -H "x-reef-scenario: harness-evolve-demo" \
      'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
 
    reef-pi -p "fix the failing test in auth.py"
    reef-pi report --score 0 --feedback "missed the empty-token case"
+
+With a token on the service, the exported ``REEF_TOKEN`` also reaches the
+script, which writes it into the installed harness's model binding.
 
 The script installs the pinned agent, writes the tree, writes the agent's
 model binding pointed at the address the script came from, which behind a
@@ -853,8 +858,8 @@ with the same five settings the script bakes into ``reef-pi``:
 
 .. code:: bash
 
-   python3 -c 'from reef_client import ReefClient; ReefClient("http://127.0.0.1:8900", token="reef-local").harness_pull("harness-evolve-demo", "./reef-harness")'
-   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "reef-local", "model": "qwen3-8b"}\n' > reef-harness/native/models.json
+   python3 -c 'import os; from reef_client import ReefClient; ReefClient("http://127.0.0.1:8900", token=os.environ.get("REEF_TOKEN")).harness_pull("harness-evolve-demo", "./reef-harness")'
+   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "%s", "model": "qwen3-8b"}\n' "${REEF_TOKEN:-reef-no-token}" > reef-harness/native/models.json
    export REEF_HARNESS_BINARY="$(command -v reef-native)" REEF_HARNESS_COMPOSE="$PWD/reef-harness/native"
    export REEF_HARNESS_SCENARIO=harness-evolve-demo REEF_HARNESS_ADAPTER=native REEF_HARNESS_ENV_VAR=REEF_NATIVE_DIR
    python3 -m reef.harness.client.wrapper -p "fix the failing test in auth.py"
@@ -886,11 +891,9 @@ deployment listens on port 8901.
 
 .. code:: bash
 
-   curl -sS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: <scenario>" \
+   curl -sS -H "x-reef-scenario: <scenario>" \
      http://127.0.0.1:8901/reef/harness/releases    # the row with "pending": true
-   curl -sS -X POST -H "Authorization: Bearer reef-local" \
-     -H "Content-Type: application/json" \
+   curl -sS -X POST -H "Content-Type: application/json" \
      -d '{"release_id": "<the pending release id>"}' \
      http://127.0.0.1:8901/reef/scenarios/<scenario>/promote
 

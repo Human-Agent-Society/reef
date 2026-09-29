@@ -110,15 +110,23 @@ def test_cli_exits_with_status_2_before_starting_services_for_an_invalid_path(tm
 @pytest.mark.unit
 def test_the_install_hint_is_the_one_line_that_installs_the_deployments_harness() -> None:
     """Printed once the stack is up: the loopback address when the service binds every interface, the adapter the
-    deployment evolves, and the token the config holds; a deployment without a harness gets no line."""
+    deployment evolves, and the token the config holds, exported once so curl's header and the script, whose binding
+    takes it from REEF_TOKEN, read the same value; a deployment without a token or without a harness gets a line
+    with no token or none."""
     from reef.service.deploy.orchestrator import install_hint
 
     config = {"evolution": {"adapter": "pi"}, "reef": {"host": "0.0.0.0", "port": 8901, "token": "reef-local"}}
     assert install_hint(config) == (
-        "curl -fsS -H 'Authorization: Bearer reef-local' 'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash"
+        'export REEF_TOKEN=reef-local; curl -fsS -H "Authorization: Bearer $REEF_TOKEN" '
+        "'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash"
     )
     assert install_hint({"evolution": {"adapter": "opencode"}, "reef": {"tokens": ["a", "b"]}}) == (
-        "curl -fsS -H 'Authorization: Bearer a' 'http://127.0.0.1:8900/reef/harness/install?adapter=opencode' | bash"
+        'export REEF_TOKEN=a; curl -fsS -H "Authorization: Bearer $REEF_TOKEN" '
+        "'http://127.0.0.1:8900/reef/harness/install?adapter=opencode' | bash"
+    )
+    # An unset ${REEF_TOKEN} in the config interpolates to an empty token: no authentication, no token in the line.
+    assert install_hint({"evolution": {"adapter": "pi"}, "reef": {"port": 8900, "token": ""}}) == (
+        "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash"
     )
     assert install_hint({"evolution": {"adapter": "pi"}, "reef": {"host": "127.0.0.1", "port": 8900}}) == (
         "curl -fsS 'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash"

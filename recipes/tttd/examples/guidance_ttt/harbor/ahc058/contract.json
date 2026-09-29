@@ -1,0 +1,9 @@
+{
+  "solution_language": "cpp",
+  "solution_contract": "The <solution> block must contain a complete standalone C++20 program in a ```cpp fenced block. It must obey the official batch protocol and always emit a complete valid schedule.",
+  "mechanism_constraint": "Propose algorithmic changes that generalize across all 150 published TTT-Discover public seeds. Do not hard-code disclosed seeds, bypass the official tester, invoke external services, or change the evaluator.",
+  "objective": "Maximize the mean raw AHC058 score over the exact 150-case public suite released with TTT-Discover while remaining accepted on every case. The GRPO reward matches the TTT-Discover formula, including partial scores for non-accepted candidates. Archive selection requires acceptance on every case and uses the raw mean score.",
+  "raw_score_label": "TTT-Discover 150-case public mean score",
+  "score_direction": "max",
+  "judge_problem_id": "ahc058"
+}
