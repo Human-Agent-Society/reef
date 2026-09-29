@@ -69,12 +69,28 @@ numerical comparison, not a claim of bitwise or whole-model equality.
 The complete 3,000-step, batch-128 SFT run has been started separately from
 these short checks. No full-run SFT or AIME result is available yet.
 
+## Campaign driver recovery
+
+CPU fault-injection tests exercise interrupted report submission, a lost
+response after the final report was accepted, a published update before its
+local record was saved, and interrupted evaluation. Each recovered two-update
+campaign has exactly two commits, four unique training reports and one metric
+per evaluation boundary; completed samples are reused. Tests also cover a torn
+final JSONL record, changed input rejection, missing historical predictions,
+unrelated consumed records and concurrent-driver exclusion. The campaign and
+Reef report suites passed 52 tests.
+
+This validates driver recovery logic and Reef's existing report idempotency
+contract. A real GPU interruption/resume of this updated driver has not yet
+been tested. It does not claim recovery of a stopped training service.
+
 ## Repository checks
 
 - `pre-commit run --all-files`: passed.
 - `python -m mypy`: passed for 336 source files.
-- `python -m pytest tests --cov=reef --cov-report=term`: 5,366 passed,
-  79 skipped, 89.78% coverage (required floor: 80%).
+- `python -m pytest tests --cov=reef --cov-report=term`: 5,375 passed,
+  79 skipped, 89.78% coverage (required floor: 80%); rerun after the campaign
+  recovery changes.
 - After example configuration/runtime updates, the campaign, server and
   complete example-config suites: 93 passed.
 - Node 22: `npm ci`, `npm run check:docs`, `npm run lint`, `npm run build`: passed.

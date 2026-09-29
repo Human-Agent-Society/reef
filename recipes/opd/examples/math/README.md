@@ -126,9 +126,25 @@ python recipes/opd/examples/math/run.py --config recipes/opd/examples/math/serve
 The driver collects a complete batch before submitting any training reports,
 checks that all responses came from one release, then waits for exactly one
 committed update. Its batch must match both recipe and trainer configuration.
-It refuses an existing output directory or scenario rather than silently
-restarting an interrupted campaign. Preserve a failed run and use a fresh
-scenario/run directory until resume support is added.
+It refuses an existing output directory or scenario unless `--resume` is
+explicitly supplied. To recover an interrupted **driver process**, rerun the
+same command with `--resume`, retaining the same live Reef service, scenario
+and output directory. Completed responses are reused; only missing samples
+from the current release are regenerated. Reports have deterministic IDs, so
+retrying after a lost HTTP response does not enqueue a duplicate update.
+
+Recovery checks input/configuration/driver SHA-256 hashes, sampling settings,
+release history and each commit's exact consumed receipts/report IDs. It
+refuses missing historical predictions, unrelated updates, rollback or pending
+publication histories. Only one driver may own an output directory at a time.
+Network timeout and concurrency may change on resume; the statistical protocol
+may not. An incomplete final JSONL append is discarded before collecting the
+missing sample; malformed complete records are rejected.
+
+This option does not restore a stopped Reef trainer or its optimizer. If the
+service or GPU runtime fails, preserve the run and inspect its checkpoint and
+recovery state before proceeding. In particular, do not start a fresh service
+from baseline weights and label it a resumed trained model.
 
 Use `--steps 0` on an independently launched frozen SFT or teacher deployment
 for a control evaluation. Keep the evaluation data, seeds, token budget,
@@ -139,10 +155,13 @@ results as integration checks.
 
 ## Output
 
-`config.json` records the driver settings; `train-*.jsonl` and `eval-*.jsonl`
+`config.json` records the driver settings and `inputs.json` their input/driver
+checksums; `train-*.jsonl` and `eval-*.jsonl`
 record responses, receipts, sampled release IDs, seeds, finish reasons and
 usage. `metrics.jsonl` records evaluation accuracy and truncations per step.
-`releases-*.json` records publication history. Keep the service logs and exact
+`releases-*.json` records publication history, and `commit-*.json` identifies the
+exact records consumed by each update. Evaluation timing covers the attempt
+that completed the evaluation, not time spent in previous interrupted attempts. Keep the service logs and exact
 resolved stack configuration beside these files. Include the actual SFT
 checkpoint identifier and software image digest in an experiment report.
 
