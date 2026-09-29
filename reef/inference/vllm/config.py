@@ -95,6 +95,10 @@ class VLLMConfig:
                 "list OffloadingConnector in kv_transfer_config instead"
             )
         options.setdefault("logprobs_mode", "processed_logprobs")
+        # The generate route takes the model's generation_config.json as request
+        # defaults, which can add top-k, top-p and a temperature the trainer never
+        # sees; vLLM's own defaults sample the full distribution at temperature 1.
+        options.setdefault("generation_config", "vllm")
         # A prefix-cache entry carries no weight-version identity, so sharing is
         # safe only when every publication retracts in-flight KV and resets the cache.
         sharing = options.setdefault("enable_prefix_caching", self.pause_mode == "retract")

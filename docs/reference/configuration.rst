@@ -241,7 +241,9 @@ control routes: ``/pause?mode=keep`` (a retracting pause adds
 ``/collective_rpc reload_weights`` and the ``/v1/load_lora_adapter`` routes.
 Engines are single-node; more than one engine needs ``router_url``. Engine
 options use vLLM's engine-argument names; Reef sets ``model``, ``host``,
-``port``, ``tensor_parallel_size`` and ``enable_sleep_mode`` itself, rejects
+``port``, ``tensor_parallel_size`` and ``enable_sleep_mode`` itself, defaults
+``generation_config`` to ``vllm`` so the model's own generation defaults cannot
+add truncation or a temperature the trainer never sees, rejects
 ``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
 instead) and enables prefix caching only under a retracting pause. vLLM
 releases the KV cache only together with the weights, so
@@ -358,8 +360,10 @@ trainer. Sampling runs through::
 SGLang and Slime's trainer both read at [A] (full vocabulary, trainer with
 ``rollout_temperature``, no penalties), so they agree as long as a recipe uses
 no penalties or ``logit_bias``. vLLM ``--logprobs-mode processed_logprobs``
-reads at [B], so it matches only with top-k, top-p and min-p off; otherwise
-the trainer must replay vLLM's sampling mask. Verify with Slime's
+reads at [B], so it matches only with top-k, top-p and min-p off, and Reef's
+vLLM client rejects a request whose effective ``top_p`` is below 1, ``top_k``
+above 0 or ``min_p`` above 0; replaying vLLM's sampling mask in the trainer
+would lift that restriction. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
 For both handlers, set ``inference.handler-config.force_reasoning`` to

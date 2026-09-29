@@ -46,6 +46,9 @@ def test_factory_rejects_non_native_executor_aliases(executor):
 def test_config_derives_reef_serving_options():
     config = VLLMConfig(**base_values())
     assert config.options["logprobs_mode"] == "processed_logprobs"
+    assert config.options["generation_config"] == "vllm"
+    explicit = VLLMConfig(**base_values(options={"generation_config": "/models/qwen/generation"}))
+    assert explicit.options["generation_config"] == "/models/qwen/generation"
     assert config.options["enable_prefix_caching"] is False
     assert config.options["kv_transfer_config"] == REEF_CONNECTOR_CONFIG
     assert config.engine_count == 1
