@@ -327,7 +327,9 @@ def test_score_centering_adds_to_the_family_loss_and_skips_the_critic(monkeypatc
     assert loss.policy_loss_function(policy, {}, None, None) == (3, {"loss": 2, "score_centering_term": 1})
 
     # A custom-loss family: its path moves aside and the score-centered loss calls it.
-    custom = SimpleNamespace(score_centering=True, loss_type="custom_loss", custom_loss_function_path="family.loss")
+    custom = SimpleNamespace(
+        score_centering=True, loss_type="custom_loss", custom_loss_function_path="family.loss", loss_family="sao"
+    )
     worker_hooks._install_score_centering(custom)
     worker_hooks._install_score_centering(custom)
     assert custom.custom_loss_function_path == worker_hooks.SCORE_CENTERED_CUSTOM_LOSS_PATH
@@ -335,6 +337,17 @@ def test_score_centering_adds_to_the_family_loss_and_skips_the_critic(monkeypatc
     misc = importlib.import_module("slime.utils.misc")
     monkeypatch.setattr(misc, "load_function", {"family.loss": lambda *_: (5, {"loss": 5})}.__getitem__)
     assert term.score_centered_custom_loss(custom, {}, None, None) == (6, {"loss": 5, "score_centering_term": 1})
+
+    # The distillation loss owns its teacher advantage and applies centering itself.
+    distill = SimpleNamespace(
+        score_centering=True,
+        loss_type="custom_loss",
+        loss_family="sdft",
+        custom_loss_function_path="recipes.sdft.slime.objective.sdft_loss",
+    )
+    worker_hooks._install_score_centering(distill)
+    worker_hooks._install_score_centering(distill)
+    assert distill.custom_loss_function_path == "recipes.sdft.slime.objective.sdft_loss"
 
     # The critic derives its namespace from the actor's: nothing to center.
     critic = SimpleNamespace(score_centering=True, loss_type="value_loss", custom_loss_function_path=None)

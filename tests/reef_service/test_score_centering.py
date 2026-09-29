@@ -11,6 +11,7 @@ from reef_service._trajectories import policy_trajectory
 
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
+from reef.train.slime_backend.distill import DistillSettings
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.slime_backend.score_centering import (
     ROLLOUT_KEYS,
@@ -124,6 +125,73 @@ def test_driver_refuses_what_the_term_cannot_correct(overrides: dict, message: s
 
     with pytest.raises(RuntimeError, match=message):
         configure_reef_loss_args(sao_args(**overrides))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("family", ["sdft", "sdpo"])
+@pytest.mark.parametrize("cap", [0.0, 1.2])
+def test_driver_accepts_sampled_opd_and_ships_sampler_heads(family: str, cap: float) -> None:
+    pytest.importorskip("torch")
+    from reef.train.slime_backend.loss_families import resolve_loss_family
+    from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
+
+    spec = resolve_loss_family(family)
+    args = sao_args(loss_family=family)
+    settings = spec.settings_type(
+        divergence="reverse",
+        top_k=32,
+        top_k_distribution="renormalized",
+        importance_sampling_cap=cap,
+        importance_sampling_level="token",
+    )
+    spec.apply_driver_options(args, settings)
+    configure_reef_loss_args(args)
+
+    expected = PolicyGradientWeight("none") if cap == 0 else PolicyGradientWeight("truncated", upper=cap)
+    assert spec.policy_gradient_weight(args) == expected
+    assert set(ROLLOUT_KEYS) <= set(args.reef_external_batch_keys)
+    assert set(ROLLOUT_KEYS) <= set(args.custom_rollout_data_keys)
+    assert "distill_teacher_sampled_log_probs" in args.reef_external_batch_keys
+    assert spec.advantages == "forbidden"  # The teacher signal is computed inside the loss.
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"divergence": "forward"},
+        {"divergence": "jsd"},
+        {"top_k": 0},
+        {"top_k_distribution": "tail"},
+        {"importance_sampling_level": "sequence"},
+    ],
+)
+def test_driver_refuses_other_distillation_losses(changes: dict[str, object]) -> None:
+    pytest.importorskip("torch")
+    from recipes.sdft.slime import SdftAlgorithm, SdftSettings
+    from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
+
+    args = sao_args(loss_family="sdft")
+    settings = SdftSettings(
+        **{
+            "divergence": "reverse",
+            "top_k": 32,
+            "importance_sampling_level": "token",
+            **changes,
+        }
+    )
+    SdftAlgorithm().apply_driver_options(args, settings)
+    with pytest.raises(RuntimeError, match="score centering for distillation requires"):
+        configure_reef_loss_args(args)
+
+    args.score_centering = False
+    configure_reef_loss_args(args)  # Existing configurations remain valid when centering is off.
+
+
+@pytest.mark.unit
+def test_disabled_importance_sampling_does_not_require_token_level() -> None:
+    settings = DistillSettings(divergence="reverse", top_k=32, importance_sampling_cap=0)
+    assert settings.score_centering_weight == PolicyGradientWeight("none")
 
 
 @pytest.mark.unit

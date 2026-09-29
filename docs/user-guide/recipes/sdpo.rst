@@ -114,6 +114,11 @@ The family adds its own flags:
    --sdpo-importance-sampling-cap | 2.0 | cap of the importance weight. 0 disables the correction.
    --sdpo-skip-response-tokens | 0 | response tokens at the start of every attempt left out of the loss.
 
+The sampled reverse-KL mode also accepts score centering for training/inference
+mismatch. See `Score centering <../../developer-guide/loss-families.rst#score-centering>`__
+for the required loss options and sampler top-K capture. The default JSD
+over top-K plus a tail bucket does not support it.
+
 Run the example
 ---------------
 

@@ -83,6 +83,11 @@ contributes the mean over its trained response tokens. That mean is weighted
 by the truncated importance-sampling ratio between the policy and the
 rollout engine's log-probs.
 
+The sampled reverse-KL mode also accepts score centering for training/inference
+mismatch. See `Score centering <../../developer-guide/loss-families.rst#score-centering>`__
+for the required loss options and sampler top-K capture. The default
+full-vocabulary forward KL does not support it.
+
 The report contract
 -------------------
 

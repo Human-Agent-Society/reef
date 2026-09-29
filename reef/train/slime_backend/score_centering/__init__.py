@@ -20,6 +20,11 @@ to whatever loss the recipe's family computes. The term must mirror that loss
 ``f`` (:meth:`SlimeAlgorithm.policy_gradient_weight`); a family that declares
 none is refused.
 
+The distillation base declares a weight only for sampled reverse KL, with
+token-level truncated importance sampling or no importance weighting. It
+adds the correction inside its loss, using the detached teacher/student
+log-prob gap and the same sample weights and effective loss masks.
+
 - this module, torch-free: the term's settings, the driver-side checks and
   the rollout keys, and the payload columns (the sampler's top-K per sample,
   in the order the schedule trains the rows);
