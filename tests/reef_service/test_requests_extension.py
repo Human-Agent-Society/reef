@@ -20,6 +20,7 @@ session start says the commands exist.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -1829,9 +1830,12 @@ def test_a_selected_release_installs_through_the_wrapper_after_the_confirm_with_
         {"kind": "notify", "message": "reef: notify met", "type": "info"},
         {"kind": "notify", "message": INSTALLED_LINE, "type": "info"},
     ]
-    # Without the exported path the wrapper beside the release file serves; an item without a prompt is asked for
-    # a value by name, and a check's prompt is its confirm's title.
-    beside = _wrapper(tmp_path / "reef-pi")
+    # Without the exported path the wrapper the install wrote outside the tree serves, in ~/.reef/installs under
+    # the sha256 of the resolved install root; an item without a prompt is asked for a value by name, and a check's
+    # prompt is its confirm's title.
+    home = tmp_path / "home"
+    root_digest = hashlib.sha256(os.fsencode(os.path.realpath(tmp_path))).hexdigest()
+    installed_wrapper = _wrapper(home / ".reef" / "installs" / root_digest / "reef-pi")
     listing = {
         "release_id": "rel-1111-selected",
         "items": [
@@ -1852,8 +1856,9 @@ def test_a_selected_release_installs_through_the_wrapper_after_the_confirm_with_
         TEST_CONFIRM="1",
         TEST_INPUT=json.dumps(["mail"]),
         TEST_EXEC=_exec_answers(listing),
+        HOME=str(home),
     )
-    assert [event["command"] for event in events if event["kind"] == "exec"] == [beside] * 4
+    assert [event["command"] for event in events if event["kind"] == "exec"] == [installed_wrapper] * 4
     assert events[3] == {"kind": "input", "title": "Value for SMTP_HOST", "placeholder": ""}
     assert events[6] == {"kind": "confirm", "title": "Reach the mail host", "message": "nc -z mail 25"}
     assert _said(events) == [("reef: SMTP_HOST set", "info"), ("reef: mail met", "info"), (INSTALLED_LINE, "info")]
@@ -1981,7 +1986,7 @@ def test_an_update_the_wrapper_refuses_runs_the_setup_loop_first_then_the_update
 
 def test_without_a_wrapper_on_disk_the_install_names_the_commands(tmp_path: Path) -> None:
     agent_dir = _install_root(tmp_path)
-    # An exported path that does not exist counts as none, and nothing sits beside the release file.
+    # An exported path that does not exist counts as none, and no install wrote one in ~/.reef/installs.
     events = install_step(
         tmp_path,
         agent_dir,
@@ -1989,6 +1994,7 @@ def test_without_a_wrapper_on_disk_the_install_names_the_commands(tmp_path: Path
         TEST_CONFIRM="1",
         TEST_EXEC=_exec_answers(),
         REEF_HARNESS_WRAPPER=str(tmp_path / "gone" / "reef-pi"),
+        HOME=str(tmp_path / "home"),
     )
     assert events == [
         {"kind": "confirm", "title": "Install release rel-1111 now?", "message": INSTALL_REASON},

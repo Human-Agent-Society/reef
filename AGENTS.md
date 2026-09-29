@@ -211,22 +211,37 @@ Apply this checklist to documentation changes in `docs/`, READMEs, recipes,
 and tutorials before submitting a pull request. Passing link, terminology,
 and build checks does not establish readability.
 
-Every pull request must fill in the template's `Documentation impact` section:
+Documentation is user-facing: each page should expose only the interface its
+intended readers need. That interface varies by audience: workflows and
+configuration for users, API contracts for callers, and extension contracts or
+component boundaries for developers. Describe the behavior, guarantees, and
+constraints readers must rely on. Omit implementation details they do not need
+to use that interface correctly; moving those details to an advanced page does
+not by itself make them relevant.
+
+Every pull request must assess documentation impact; this does not require a
+documentation change. Internal refactors and implementation-only fixes normally
+need none when existing documentation remains accurate and sufficient. Explain
+that in the template's `Documentation impact` section. When documentation changes,
 state the reader question, updated pages, and actual verification, including
-anything not verified. If no documentation update is needed, briefly explain
-why. Refer to results in `Verification` rather than duplicating them.
+anything not verified. Refer to results in `Verification` rather than duplicating them.
 
 - **Reader and purpose.** Identify the question the change answers and make
-  the page's purpose clear near the start. Update documentation for affected
-  behavior; do not add prose merely because code changed. Keep implementation
-  history and PR commentary in the PR or issue.
+  the page's purpose clear near the start. Keep explanations concise while
+  preserving necessary prerequisites, examples, and failure behavior. Update
+  affected workflows, interfaces, and defaults; do not document each PR's
+  implementation details. Keep implementation history and PR commentary in
+  the PR or issue.
 - **Content placement.** Keep each page focused. Put introductory workflows,
-  task instructions, API reference, and advanced internals in their appropriate
-  pages. Link to the existing explanation instead of repeating it or appending
-  an unrelated section. Update navigation and links when moving content.
+  task instructions, API reference, and developer contracts in their appropriate
+  pages. Prefer revising existing explanations over appending sections; merge
+  duplicates and remove obsolete text in the affected sections. Add content
+  only for a reader need the existing text does not cover. Explain each concept
+  in its owning page and link to it elsewhere. Update navigation and links when
+  moving content.
 - **Reading order.** Explain the main workflow and define concepts before
   relying on them. Introduce the normal path before optional modes, exceptions,
-  and implementation details. A reader should not need to understand several
+  and troubleshooting. A reader should not need to understand several
   internal types before learning what an operation does.
 - **Findable details.** Organize sections around reader tasks or distinct
   responsibilities. Separate inputs, outputs, required behavior, and optional
