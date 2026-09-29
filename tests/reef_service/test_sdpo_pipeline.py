@@ -114,7 +114,7 @@ def test_waits_for_entire_grid_and_uses_successful_sibling(tokenizer: SDPOTokeni
     ingest(target, 0, score=1.0)
     batch = target.build_batch()
     assert isinstance(batch, TrainingBatch)
-    assert batch.batch_id == "science:sdpo:1"
+    assert batch.batch_id == "science:batch:1"
     assert [s.training["distill_sample_weight"] for s in batch.items] == [0.0, 1.0, 0.0, 0.0]
     # The demonstration is the sibling's recorded response with its thinking block removed.
     assert tokenizer.calls[1][0][-1]["content"].endswith(

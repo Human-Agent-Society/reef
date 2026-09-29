@@ -657,9 +657,11 @@ must reference existing inference records in the same scenario.
 
 ``DataProcessor.training_mode`` selects automatic, instruction-triggered or
 combined batching on the same processor. Declare ``supported_training_modes`` and
-implement ``make_training_batch(batch_number, request)`` to select inputs;
+implement ``make_training_batch(batch_id, request)`` to select inputs;
 ``request`` is the queued instruction in ``manual`` and ``hybrid`` and ``None``
-for an automatic batch. Ingestion, acknowledgement, retention,
+for an automatic batch. The framework supplies the final ``batch_id`` as a
+string; assembly hooks must preserve it in the returned batch or
+``build_batch`` raises ``ValueError``. Ingestion, acknowledgement, retention,
 buffer release and background derivation are shared. See
 `Processors <../developer-guide/processors.rst>`__ for the instruction queue and batch contract.
 
@@ -680,8 +682,8 @@ Reported feedback
      - Contract
    * - ``make_sample(context) -> TrainDataItem``
      - Assemble one valid report and its resolved inferences; raise on data errors.
-   * - ``make_batch(items, batch_number) -> TrainingBatch``
-     - Shape the flat tuple of selected training items into a batch.
+   * - ``make_batch(items, batch_id) -> TrainingBatch``
+     - Shape the flat tuple of selected training items into a batch with the supplied ID.
    * - ``grouping(context) -> (group_key, slot)``
      - Optional collection group and retry slot; defaults to an independent report.
    * - ``decide_group(key, items) -> GroupDecision``
@@ -728,7 +730,7 @@ calls a model or another slow service.
 | ``make_sample(record, judgment)``     | a ``TrajectoryItem``, or ``None`` |
 |                                       | to retire the record              |
 +---------------------------------------+-----------------------------------+
-| ``make_batch(samples, batch_number)`` | the declared batch type           |
+| ``make_batch(samples, batch_id)``     | the declared batch type           |
 +---------------------------------------+-----------------------------------+
 | ``expire(now)``                       | optionally return receipts whose  |
 |                                       | completion window ended           |

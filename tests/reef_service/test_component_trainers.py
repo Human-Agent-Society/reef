@@ -44,7 +44,7 @@ from reef.train.evaluation import EvaluationResult, UpdateCandidate
 from reef.train.processors.base import DataProcessor
 from reef.train.processors.computed import ComputedFeedbackProcessor, SupportsReceipt
 from reef.train.processors.reported import GroupDecision, ReportContext
-from reef.train.types import TrainingBatch
+from reef.train.types import TrainingBatch, TrajectoryItem
 
 from ._threshold_processor import ThresholdProcessor
 from ._trajectories import policy_trajectory
@@ -1510,8 +1510,8 @@ class _RetiringRetriesProcessor(ComputedFeedbackProcessor):
             runtime_load_id="v1",
         )
 
-    def make_batch(self, samples: Any, batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:retiring:{batch_number}", tuple(samples))
+    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tuple(samples))
 
 
 @dataclass(frozen=True)

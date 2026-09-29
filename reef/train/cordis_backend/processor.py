@@ -27,20 +27,20 @@ class CordisProcessor(ReportedFeedbackProcessor):
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
     required_request_types = frozenset(RequestType)
 
-    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+    def make_training_batch(self, batch_id: str, request: TrainingRequest | None) -> TrainingBatch:
         if request is not None and self.training_mode == "manual":
             self._pending_reports = ()
-            return TrainingBatch(request.id, ())
+            return TrainingBatch(batch_id, ())
         # In hybrid an instruction takes the units an automatic batch would, none included; the base attaches it.
-        return self._make_pending(batch_number)
+        return self.make_pending(batch_id)
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
         sample = make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
         task = reported_task(context.report.payload.get("metadata"))
         return sample if task is None else sample.with_metadata(task=task)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:harness_evolve:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)
 
 
 class RecordDrivenTraceProcessor(DataProcessor):
@@ -61,11 +61,11 @@ class RecordDrivenTraceProcessor(DataProcessor):
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
     required_request_types = frozenset(RequestType)
 
-    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+    def make_training_batch(self, batch_id: str, request: TrainingRequest | None) -> TrainingBatch:
         if request is not None and self.training_mode == "manual":
-            return TrainingBatch(request.id, ())
+            return TrainingBatch(batch_id, ())
         # In hybrid an instruction takes the records an automatic batch would, none included; the base attaches it.
-        return self._make_pending(batch_number)
+        return self.make_pending(batch_id)
 
     def __init__(self, context: ProcessorContext) -> None:
         super().__init__(context)
@@ -83,10 +83,10 @@ class RecordDrivenTraceProcessor(DataProcessor):
     def _ready_count(self) -> int:
         return len(self._records)
 
-    def _make_pending(self, batch_number: int) -> TrainingBatch:
+    def make_pending(self, batch_id: str) -> TrainingBatch:
         selected = self._records[: self._batch_size]
         return TrainingBatch(
-            f"{self.scenario}:harness_evolve:{batch_number}",
+            batch_id,
             tuple(make_trajectory((record,)) for record in selected),
         )
 

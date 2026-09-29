@@ -82,8 +82,8 @@ class _ToyProcessor(ComputedFeedbackProcessor):
             runtime_load_id=record.payload.get("version", "v1"),
         )
 
-    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:toy:{batch_number}", tuple(sample for sample in samples))
+    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, tuple(sample for sample in samples))
 
 
 def _record(agent_record_id: str, **payload) -> AgentRecord:
@@ -108,6 +108,8 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     worker.push(_Judgment("r1"))
     assert processor.ready()
     batch = processor.build_batch()
+    assert batch.batch_id == "s:batch:1"
+    assert processor.build_batch() is batch
     assert source_record_id(batch.items[0]) == "r1"
     processor.acknowledge(batch.batch_id)
     decision = processor.releasable_record_ids()

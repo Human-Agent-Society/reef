@@ -16,7 +16,7 @@ crash-replay semantics. A recipe subclasses it and writes four methods:
   run on the worker's thread;
 * ``make_sample(record, judgment)`` — one judged record into a
   :class:`TrajectoryItem`, or ``None`` for a record that cannot train;
-* ``make_batch(samples, batch_number)`` — the selected samples into the
+* ``make_batch(samples, batch_id)`` — the selected samples into the
   recipe's batch type.
 
 The ingest stays recipe code on purpose: for a computed-feedback method the
@@ -241,8 +241,8 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         """One judged record into a sample; ``None`` cannot train."""
 
     @abstractmethod
-    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
-        """Shape the selected samples into this recipe's batch type."""
+    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_id: str) -> TrainingBatch:
+        """Shape selected samples into a batch with the framework-assigned ``batch_id``."""
 
     def expire(self, now: float) -> tuple[str, ...]:
         """Tracked receipts whose wait for future traffic is over; they
@@ -336,10 +336,10 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     def _ready_count(self) -> int:
         return len(self._candidates)
 
-    def _make_pending(self, batch_number: int) -> TrainingBatch:
+    def make_pending(self, batch_id: str) -> TrainingBatch:
         receipts = tuple(list(self._candidates)[: self._batch_size])
         self._pending_receipts = receipts
-        return self.make_batch(tuple(self._candidates[receipt] for receipt in receipts), batch_number)
+        return self.make_batch(tuple(self._candidates[receipt] for receipt in receipts), batch_id)
 
     def _consume_pending(self) -> frozenset[str]:
         consumed = frozenset(self._pending_receipts)

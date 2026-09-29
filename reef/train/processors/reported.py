@@ -192,9 +192,10 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         raise NotImplementedError(f"{type(self).__name__} produced a group without a decide_group override")
 
     @abstractmethod
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         """Build a batch from selected items, in group and arrival order.
 
+        Preserve the framework-assigned ``batch_id`` in the returned batch.
         The processor tracks consumption independently, including any selected
         items the recipe omits from the resulting batch.
         """
@@ -374,10 +375,10 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
     def _ready_count(self) -> int:
         return len(self.singletons) + len(self._ready_groups)
 
-    def _make_pending(self, batch_number: int) -> TrainingBatch:
+    def make_pending(self, batch_id: str) -> TrainingBatch:
         units = self._ordered_units()[: self._batch_size]
         self._pending_reports = tuple(pending for unit in units for pending in unit)
-        return self.make_batch(tuple(pending.item for pending in self._pending_reports), batch_number)
+        return self.make_batch(tuple(pending.item for pending in self._pending_reports), batch_id)
 
     def _ordered_units(self) -> list[tuple[_PendingReport, ...]]:
         """Ready groups and singleton reports, preserving the configured priority."""

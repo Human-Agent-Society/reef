@@ -89,7 +89,8 @@ def test_root_attempts_group_together():
     processor.ingest(_attempt_report("r2", "i2", 0.2, commit="c-b", parent=None))
     assert processor.ready()
     batch = processor.build_batch()
-    assert ROOT_GROUP in batch.batch_id
+    assert batch.batch_id == "coral-demo:batch:1"
+    assert all(item.group_id == ROOT_GROUP for item in batch.items)
 
 
 def test_groups_do_not_mix_across_parents():

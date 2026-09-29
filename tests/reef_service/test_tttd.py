@@ -159,7 +159,7 @@ def test_tttd_waits_for_every_rollout_in_one_policy_step() -> None:
 
     assert processor.ready()
     batch = processor.build_batch()
-    assert batch.batch_id == "discovery:tttd:0"
+    assert batch.batch_id == "discovery:batch:1"
     assert len(trajectory_groups(batch)) == 2
     assert [[trajectory_reward(sample) for sample in group] for group in trajectory_groups(batch)] == [
         [0.0, 1.0, 2.0],

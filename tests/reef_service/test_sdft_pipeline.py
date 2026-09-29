@@ -176,7 +176,7 @@ def test_processor_emits_one_sample_with_the_teacher_sequence(tokenizer: Countin
     batch = processor.build_batch()
 
     assert isinstance(batch, TrainingBatch)
-    assert batch.batch_id == "science:sdft:1"
+    assert batch.batch_id == "science:batch:1"
     (sample,) = batch.items
     assert source_record_id(sample) == "i1"
     prompt_ids = tokenizer.count_ids(tokenizer.calls[0][0])

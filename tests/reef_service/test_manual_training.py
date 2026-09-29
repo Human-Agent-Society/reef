@@ -169,6 +169,21 @@ def test_dispatched_manual_reserves_one_instruction_and_leaves_the_next_pending(
     records.close()
 
 
+@pytest.mark.parametrize("processor_type", [CordisProcessor, RecordDrivenTraceProcessor])
+@pytest.mark.parametrize("mode", ["manual", "hybrid"])
+def test_rebuilding_an_instruction_preserves_its_request_id(processor_type: type[DataProcessor], mode: str) -> None:
+    processor = processor_type(ProcessorContext("s", training_mode=mode))
+    processor.ingest(instruction("first"))
+    first = processor.build_batch()
+    assert first.batch_id == "s:instruction:first"
+    assert processor.build_batch() is first
+    processor.release_batch(first.batch_id)
+    rebuilt = processor.build_batch()
+    assert rebuilt.batch_id == first.batch_id
+    assert rebuilt.request == first.request
+    assert processor.acknowledge(rebuilt.batch_id) == frozenset({"first"})
+
+
 def test_manual_recovery_replays_pending_requests_but_not_committed_ones(tmp_path):
     path = tmp_path / "records.sqlite"
     records, backend = SQLiteRecordStore(path), CaptureBackend()
@@ -274,8 +289,10 @@ def test_manual_is_a_native_contract_for_arbitrary_batch_schemas():
         required_request_types = frozenset(RequestType)
         output_schema = ExampleBatch
 
-        def make_training_batch(self, batch_number, request):
-            return ExampleBatch(request.id, values=(request.text,))
+        def make_training_batch(self, batch_id: str, request: TrainingRequest | None) -> ExampleBatch:
+            assert request is not None
+            assert batch_id == f"s:instruction:{request.id}"
+            return ExampleBatch(batch_id, values=(request.text,))
 
     with pytest.raises(NotImplementedError, match="training_mode='auto'"):
         InstructionProcessor(ProcessorContext("s"))
@@ -359,8 +376,8 @@ def test_processor_uses_shared_data_and_one_batch_assembly_hook(mode):
         def ready(self):
             return self._pending is not None or (len(self.exchanges) >= 2 and super().ready())
 
-        def make_training_batch(self, batch_number, request):
-            return ExampleBatch("custom-batch", values=tuple(record.agent_record_id for record in self.exchanges))
+        def make_training_batch(self, batch_id: str, request: TrainingRequest | None) -> ExampleBatch:
+            return ExampleBatch(batch_id, values=tuple(record.agent_record_id for record in self.exchanges))
 
         def _consume_pending(self):
             consumed = frozenset(record.agent_record_id for record in self.exchanges)
@@ -1160,7 +1177,7 @@ def test_hybrid_batches_as_auto_does_without_an_instruction():
     processor.ingest(inference("a"))
     processor.ingest(report("a"))
     batch = processor.build_batch()
-    assert batch.batch_id == "s:harness_evolve:1"
+    assert batch.batch_id == "s:batch:1"
     assert batch.request is None
     assert [source_record_id(sample) for sample in batch.items] == ["a"]
     assert processor.acknowledge(batch.batch_id) == frozenset({"a", "report-a"})

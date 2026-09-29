@@ -44,8 +44,8 @@ class SampleProcessor(ReportedFeedbackProcessor):
         self.assembled.append(context.report.agent_record_id)
         return TaskItem(Path(context.report.agent_record_id))
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"batch:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)
 
 
 class GroupProcessor(SampleProcessor):
@@ -222,15 +222,30 @@ def test_duplicate_reports_and_batch_polls_do_not_assemble_twice() -> None:
     processor.ingest(report("r1", "i1"))
     processor.ingest(report("r1", "i1"))
     batch = processor.build_batch()
+    assert batch.batch_id == "math:batch:1"
     assert processor.build_batch() is batch
     assert processor.assembled == ["r1"]
     processor.release_batch(batch.batch_id)
     assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
     batch = processor.build_batch()
+    assert batch.batch_id == "math:batch:2"
     assert processor.acknowledge(batch.batch_id) == {"i1", "r1"}
     processor.ingest(report("late", "i1"))
     assert not processor.ready()
     assert processor.assembled == ["r1"]
+
+
+def test_batch_assembly_cannot_replace_the_framework_id() -> None:
+    class RenamingProcessor(SampleProcessor):
+        def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+            return TrainingBatch("recipe-generated-id", items)
+
+    processor = RenamingProcessor()
+    processor.ingest(inference("i1"))
+    processor.ingest(report("r1", "i1"))
+    with pytest.raises(ValueError, match="framework-assigned batch_id"):
+        processor.build_batch()
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 def test_live_report_keeps_a_shared_source_protected_until_its_consumption() -> None:
@@ -318,9 +333,9 @@ def test_recipe_receives_items_and_omitting_one_does_not_lose_consumption() -> N
             assert all(isinstance(item, TaskItem) for item in items)
             return super().decide_group(key, items)
 
-        def make_batch(self, items, batch_number):
+        def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
             assert [item.source_agent_record_ids for item in items] == [("i1", "r1"), ("i2", "r2")]
-            return super().make_batch(items[:1], batch_number)
+            return super().make_batch(items[:1], batch_id)
 
     processor = SelectedProcessor()
     for index in (1, 2):

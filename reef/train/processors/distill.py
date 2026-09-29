@@ -69,13 +69,11 @@ class DistillProcessor(ReportedFeedbackProcessor):
     than ``max_teacher_tokens`` cannot be scored by the trainer's window:
     its report is released with its inference record and counted in
     ``teacher_overflow_reports``. A recipe's subclass overrides
-    :meth:`teacher_request` with its composition and sets ``batch_label``,
-    its batches' name.
+    :meth:`teacher_request` with its composition.
     """
 
     output_schema = TrainingBatch
     exclusive_sources = True
-    batch_label = "teacher"
 
     def __init__(self, context: ProcessorContext) -> None:
         config = context.config
@@ -193,8 +191,8 @@ class DistillProcessor(ReportedFeedbackProcessor):
         self._overflow_count += 1
         return GroupDecision.DISCARD
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:{self.batch_label}:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)
 
 
 __all__ = ["DistillProcessor", "normalize_messages_for_template", "normalize_tool_call"]

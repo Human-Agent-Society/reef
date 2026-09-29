@@ -36,8 +36,6 @@ class SDFTProcessor(DistillProcessor):
     block is ``context_template`` with ``{context}`` replaced.
     """
 
-    batch_label = "sdft"
-
     def __init__(self, context: ProcessorContext) -> None:
         self._template = context_block_template(context.config)
         super().__init__(context)

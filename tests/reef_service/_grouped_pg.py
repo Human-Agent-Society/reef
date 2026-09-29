@@ -71,5 +71,5 @@ class GroupedPolicyProcessor(ReportedFeedbackProcessor):
         del key
         return GroupDecision.READY if len(items) >= 2 else GroupDecision.INCOMPLETE
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:grouped:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)

@@ -19,7 +19,7 @@ from reef.service.app import create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import PreparedStep, Trainer, TrainingBatch
 from reef.train.processors.reported import ReportedFeedbackProcessor
-from reef.train.types import TaskItem
+from reef.train.types import TaskItem, TrainDataItem
 
 from .test_reef_trainer_contracts import ExampleBackend
 
@@ -48,8 +48,8 @@ class FeedbackProcessor(ReportedFeedbackProcessor):
     def make_sample(self, context):
         return TaskItem(Path(context.report.agent_record_id), metadata=context.inferences[0].payload)
 
-    def make_batch(self, items, batch_number):
-        return TrainingBatch(f"batch:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)
 
 
 class LearningBackend(ExampleBackend):

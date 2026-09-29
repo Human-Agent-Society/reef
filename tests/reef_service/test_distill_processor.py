@@ -73,8 +73,6 @@ def tokenizer(monkeypatch: pytest.MonkeyPatch) -> CountingTokenizer:
 class FeedbackProcessor(DistillProcessor):
     """A recipe's composition: the student's own answer and the teacher context as a system message, no tools."""
 
-    batch_label = "feedback"
-
     def teacher_request(
         self, messages: list[Any], tools: list[Any] | None, response: str, teacher_context: str
     ) -> tuple[list[Any], list[Any] | None]:
@@ -142,7 +140,7 @@ def test_by_default_the_teacher_reads_the_request_as_recorded(tokenizer: Countin
     prompt_ids = tokenizer.count_ids(rendered)
     assert list(sample.training["teacher_tokens"]) == [*prompt_ids, 1, 2, 3]
     assert list(sample.training["tokens"]) == list(STUDENT_TOKENS)
-    assert batch.batch_id == "science:teacher:1"
+    assert batch.batch_id == "science:batch:1"
     assert processor.operational_metrics()["teacher_overflow_reports"] == 0
 
 
@@ -161,7 +159,7 @@ def test_a_recipe_composes_the_teacher_request_from_the_response_and_the_context
     assert rendered[1:] == [{"role": "user", "content": QUESTION}]
     assert tools is None
     assert list(batch.items[0].training["teacher_tokens"]) == [*tokenizer.count_ids(rendered), 1, 2, 3]
-    assert batch.batch_id == "science:feedback:1"
+    assert batch.batch_id == "science:batch:1"
 
 
 @pytest.mark.unit

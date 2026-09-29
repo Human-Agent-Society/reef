@@ -30,14 +30,14 @@ from reef.harness.episodes.run import EpisodeResult
 from reef.harness.step_result import design_sections
 from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
-from reef.service.page_chrome import status_label
+from reef.service.page_layout import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
-CHROME = Path(__file__).parents[2] / "reef" / "service" / "page_chrome.py"
+LAYOUT = Path(__file__).parents[2] / "reef" / "service" / "page_layout.py"
 
 OLD_CODE = "export default function hello(pi) {\n  if (1 < 2) return;\n}\n"
 NEW_CODE = 'export default function hello(pi) {\n  if (1 < 2) return;\n  pi.on("session_start", () => {});\n}\n'
@@ -337,7 +337,7 @@ def test_the_chain_lists_the_steps_evaluated_against_a_release_as_its_children(t
         dispatcher.close()
 
 
-def test_the_page_carries_the_shared_chrome_and_links_the_other_steps_with_the_query_it_was_opened_with() -> None:
+def test_the_page_carries_the_shared_layout_and_links_the_other_steps_with_the_query_it_was_opened_with() -> None:
     """The version page and the request page are one design: the same logo, header and status words.
 
     A person opens either from a browser, which sends no header, so the
@@ -455,7 +455,7 @@ def test_an_unknown_step_is_404_naming_the_range_and_a_non_number_is_404(tmp_pat
 
 def test_the_page_module_is_ascii_and_the_builder_escapes_every_angle_bracket() -> None:
     MODULE.read_text(encoding="utf-8").encode("ascii")
-    CHROME.read_text(encoding="utf-8").encode("ascii")
+    LAYOUT.read_text(encoding="utf-8").encode("ascii")
     creation = {"release_id": "rel-0", "parent_release_id": None, "operation": "creation", "current": False}
     row = {
         "release_id": "rel-1",

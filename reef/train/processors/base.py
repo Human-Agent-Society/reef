@@ -100,7 +100,8 @@ class DataProcessor:
         #: processor is ready, hands out the same object, and must not
         #: reshuffle what it references.
         self._pending: TrainingBatch | None = None
-        self._batch_number = 0
+        # Local construction sequence, also available for recipe diagnostics; not a training step.
+        self.batch_number = 0
 
     @property
     def context(self) -> ProcessorContext:
@@ -165,7 +166,7 @@ class DataProcessor:
         if item.request_type is RequestType.TRAIN:
             if item.scenario != self.scenario:
                 raise ValueError("training records must belong to the processor's scenario")
-            request = replace(TrainingRequest.from_dict(item.payload), id=item.agent_record_id)
+            request = TrainingRequest.from_dict(item.payload, request_id=item.agent_record_id)
             if request.id not in self._consumed_requests:
                 self._training_requests.setdefault(request.id, request)
 
@@ -190,31 +191,36 @@ class DataProcessor:
         if self._pending is None:
             if not self.ready():
                 raise RuntimeError(f"{type(self).__name__} batch is not ready")
-            self._batch_number += 1
+            self.batch_number += 1
             # Manual and hybrid run the oldest queued instruction first; auto leaves the queue to a mode that takes it.
             request = (
                 next(iter(self._training_requests.values()))
                 if self.training_mode != "auto" and self._training_requests
                 else None
             )
-            self._pending = self.make_training_batch(self._batch_number, request)
+            if request is None:
+                batch_id = f"{self.scenario}:batch:{self.batch_number}"
+            else:
+                batch_id = f"{self.scenario}:instruction:{request.id}"
+            batch = self.make_training_batch(batch_id, request)
+            if batch.batch_id != batch_id:
+                raise ValueError("batch assembly must preserve the framework-assigned batch_id")
             if request is not None:
-                self._pending = replace(
-                    self._pending, batch_id=f"{self.scenario}:instruction:{request.id}", request=request
-                )
+                batch = replace(batch, request=request)
+            self._pending = batch
         return self._pending
 
-    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
+    def make_training_batch(self, batch_id: str, request: TrainingRequest | None) -> TrainingBatch:
         """Select inputs for one batch; in ``manual`` and ``hybrid`` a queued instruction arrives as ``request``.
 
         Override this single assembly hook to take instructions. Ingestion,
         acknowledgement and buffer release operate on the same state in every mode.
-        With a request the hook's own batch id is replaced by
-        ``<scenario>:instruction:<request id>`` and the request is attached.
+        Return a batch with the supplied framework-assigned ``batch_id``.
+        The base class attaches the request after assembly.
         """
         if request is not None:
             raise NotImplementedError(f"{type(self).__name__} does not implement instruction batch assembly")
-        return self._make_pending(batch_number)
+        return self.make_pending(batch_id)
 
     def acknowledge(self, batch_id: str) -> frozenset[str]:
         if self._pending is None or self._pending.batch_id != batch_id:
@@ -257,7 +263,7 @@ class DataProcessor:
         """
         return 0
 
-    def _make_pending(self, batch_number: int) -> TrainingBatch:
+    def make_pending(self, batch_id: str) -> TrainingBatch:
         """Select this batch's units and shape them through ``make_batch``."""
         raise RuntimeError(f"{type(self).__name__} never produces a training batch")
 

@@ -271,14 +271,14 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
             return None
         return sample.with_training(extras={**sample.training.get("extras", {}), "teacher_cands": list(validated)})
 
-    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> TrainingBatch:
-        self._record_batch(samples, batch_number)
+    def make_batch(self, samples: tuple[TrajectoryItem, ...], batch_id: str) -> TrainingBatch:
+        self.record_batch(samples, batch_id)
         return TrainingBatch(
-            f"{self.scenario}:openclawrl:{batch_number}",
+            batch_id,
             tuple(replace(sample, source_agent_record_ids=(source_record_id(sample),)) for sample in samples),
         )
 
-    def _record_batch(self, samples: tuple[TrajectoryItem, ...], batch_number: int) -> None:
+    def record_batch(self, samples: tuple[TrajectoryItem, ...], batch_id: str) -> None:
         """Append this batch's judged population to the PRM record file.
 
         One line per batch: what the judges returned since the previous one,
@@ -288,7 +288,7 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
         states are being judged.
         """
         record = {
-            "batch": batch_number,
+            "batch_id": batch_id,
             "scenario": self.scenario,
             "samples": len(samples),
             "rewards": dict(sorted(collections.Counter(f"{trajectory_reward(s):+.0f}" for s in samples).items())),

@@ -54,5 +54,5 @@ class SAOProcessor(ReportedFeedbackProcessor):
             sample = sample.with_training(action_mask=sample.training.get("loss_mask", []))
         return sample
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:sao:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)

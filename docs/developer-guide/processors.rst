@@ -56,6 +56,11 @@ invariant failure).
 no-update default that ingests for audit and never becomes ready. Recipes
 can implement their own lifecycle or reuse one of the feedback engines below.
 
+``DataProcessor.build_batch()`` assigns the final ``batch_id`` before calling
+an assembly hook. Pass this string unchanged to ``TrainingBatch(batch_id, items)``;
+returning a different ID raises ``ValueError``. Repeated calls while a batch
+is reserved return the same batch and ID.
+
 Explicit manual training
 ------------------------
 
@@ -74,21 +79,21 @@ implements one assembly hook:
 
 .. code:: python
 
-   def make_training_batch(self, batch_number, request):
+   def make_training_batch(self, batch_id, request):
        if request is not None and self.training_mode == "manual":
            # Manual runs the instruction alone; harness needs no samples.
            self._pending_reports = ()
-           return TrainingBatch(request.id, ())
+           return TrainingBatch(batch_id, ())
        # Hybrid hands the instruction the units an automatic batch would take.
-       return self._make_pending(batch_number)
+       return self.make_pending(batch_id)
 
 This example extends the reported-feedback engine. ``request`` is a
 ``TrainingRequest`` in ``manual`` and ``hybrid`` when an instruction is queued
 and ``None`` for an automatic batch. The base class attaches the instruction
-to ``batch.request`` and replaces the hook's own batch id with
-``<scenario>:instruction:<request id>``, the oldest instruction first, one
-per step. ``_consume_pending`` releases the selected data; shared
-acknowledgement also consumes the instruction. A processor that needs other
+to ``batch.request``. For an instruction, the supplied ``batch_id`` is already
+``<scenario>:instruction:<request id>``; return it unchanged. Instructions run
+oldest first, one per step. ``_consume_pending`` releases the selected data;
+shared acknowledgement also consumes the instruction. A processor that needs other
 inputs for an instruction selects them in the hook or extends the shared
 ``ready`` predicate. Batch construction must not call models or perform
 training.
@@ -106,7 +111,7 @@ as the reported-feedback engine does.
 
 Unsupported modes, or instruction assembly without an implementation, raise
 ``NotImplementedError``. An invalid mode name raises ``ValueError``.
-The default automatic assembly keeps the existing ``_make_pending`` hook;
+The default automatic assembly calls ``make_pending(batch_id)``;
 automatic processors and computed-feedback ``ingest`` implementations need no
 mode-specific lifecycle methods or additional processor class.
 
@@ -148,7 +153,7 @@ A reported-feedback recipe implements:
 - ``make_sample(context) -> TrainDataItem``: assemble an ATIF trajectory or
   Harbor task directly. Use ``context.require_score()`` when the method needs
   a reward. The engine attaches the source and report ids to the returned item.
-- ``make_batch(items, batch_number)``: assemble the flat tuple of selected
+- ``make_batch(items, batch_id)``: assemble the flat tuple of selected
   training items into a batch. Consumption remains the engine's responsibility,
   including selected items that the recipe removes from training.
 - ``is_training_report(report)`` when another role's reports share the
@@ -256,6 +261,12 @@ and model clients belong beside the method processor.
 
 Compatibility
 -------------
+
+Custom processors migrating from ``batch_number`` hooks must accept
+``batch_id: str`` in ``make_batch`` and ``make_training_batch`` and pass it
+straight to ``TrainingBatch(batch_id, items)``. Replace overrides or calls of
+``_make_pending(batch_number)`` with ``make_pending(batch_id)``. Remove
+``batch_label`` overrides; labels no longer determine IDs.
 
 Reported-feedback subclasses must replace ``judge`` and ``ReportDecision`` with
 ``make_sample`` returning ``TrainDataItem``. Remove ``WAIT``/``NEVER`` branches: invalid

@@ -32,7 +32,8 @@ from typing import Any
 
 import pytest
 
-from reef.core.training_request import CLIENT_COMMANDS, TrainingRequest
+from reef.core.training_request import TrainingRequest
+from reef.harness.client.wrapper import CLIENT_COMMANDS
 
 ASSET = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "requests.ts"
 SKILL = Path(__file__).parents[2] / "reef" / "harness" / "adapters" / "pi" / "pi_extension_api.md"

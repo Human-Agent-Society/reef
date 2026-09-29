@@ -708,7 +708,7 @@ For a dotted weight-training deployment this field is also accepted as
 
 The processor receives ``ProcessorContext.training_mode`` as its initial
 batching mode. The modes share ingestion and retention; the
-``make_training_batch(batch_number, request)`` hook selects batch inputs.
+``make_training_batch(batch_id, request)`` hook selects batch inputs.
 Processors declare ``supported_training_modes``; unsupported modes or missing
 instruction assembly raise ``NotImplementedError``.
 Harness evolution supports the three modes and requires a proposer that

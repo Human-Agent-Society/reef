@@ -190,7 +190,7 @@ def test_pairing_processor_emits_policy_samples_for_spo() -> None:
 
     batch = processor.build_batch()
     assert isinstance(batch, TrainingBatch)
-    assert batch.batch_id == "math:threshold:1"
+    assert batch.batch_id == "math:batch:1"
     (item,) = batch.items
     assert source_record_id(item) == "i1"
     assert trajectory_reward(item) == 0.8
@@ -576,7 +576,7 @@ def test_trainer_uses_explicit_candidate_evaluator_instead_of_backend_fallback()
     assert result is not None
     assert trainer.candidate_evaluator is candidate_evaluator
     assert calls == [
-        ("evaluate", "math:threshold:1"),
+        ("evaluate", "math:batch:1"),
         ("decide", "external"),
         ("settle", "external"),
     ]
@@ -622,7 +622,7 @@ def test_trainer_aborts_candidate_when_policy_execution_fails() -> None:
 
     with pytest.raises(RuntimeError, match="policy failed"):
         trainer.run_once()
-    assert calls == [("abort", "math:threshold:1")]
+    assert calls == [("abort", "math:batch:1")]
 
 
 @pytest.mark.unit
@@ -670,7 +670,7 @@ def test_trainer_rejects_an_evaluator_that_replaces_its_evaluation_result() -> N
 
     with pytest.raises(ValueError, match="retain the evaluation result"):
         trainer.run_once()
-    assert calls == [("abort", "math:threshold:1")]
+    assert calls == [("abort", "math:batch:1")]
 
 
 @pytest.mark.unit

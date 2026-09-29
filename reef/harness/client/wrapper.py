@@ -201,11 +201,44 @@ import yaml
 from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_handler
 
 from reef.core.requirements import required_by
-from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
 from reef.harness.episodes.version_check import ships_version_check
 from reef.harness.step_result import design_sections, next_action, rejection_text
+
+
+#: The commands a client reports as on its PATH or not, so a proposer builds for the machine the change runs on,
+#: not the one it is tried in: players, notifiers, openers and clipboards per platform, and common tools.
+CLIENT_COMMANDS = (
+    "afplay",
+    "say",
+    "osascript",
+    "open",
+    "pbcopy",
+    "terminal-notifier",
+    "xdg-open",
+    "notify-send",
+    "paplay",
+    "pw-play",
+    "aplay",
+    "wl-copy",
+    "xclip",
+    "powershell.exe",
+    "wslview",
+    "ffplay",
+    "ffmpeg",
+    "mpv",
+    "mpg123",
+    "sox",
+    "espeak",
+    "curl",
+    "git",
+    "gh",
+    "python3",
+    "node",
+    "brew",
+    "apt-get",
+)
 
 
 def _captures_dir() -> Path:

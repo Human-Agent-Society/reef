@@ -111,7 +111,7 @@ def test_episodes_of_one_task_form_a_group_and_a_batch_holds_complete_groups_onl
     played(p, "harbor-00000-001", 1, 1.0)
     assert p.ready()
     batch = p.build_batch()
-    assert isinstance(batch, TrainingBatch) and batch.batch_id == "spade:spade:1"
+    assert isinstance(batch, TrainingBatch) and batch.batch_id == "spade:batch:1"
     groups = trajectory_groups(batch)
     assert [[sample.group_id for sample in group] for group in groups] == [
         ["harbor-00000-000", "harbor-00000-000"],

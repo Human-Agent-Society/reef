@@ -234,8 +234,8 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
     def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
         return GroupDecision.READY if len(items) >= self.rollouts_per_task else GroupDecision.INCOMPLETE
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:spade:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        return TrainingBatch(batch_id, items)
 
     # ----------------------------------------------------- the generation half
 

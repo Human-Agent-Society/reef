@@ -18,8 +18,8 @@ class ThresholdProcessor(ReportedFeedbackProcessor):
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
         return self._assembly.build(context, context.require_score())
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
         return TrainingBatch(
-            f"{self.scenario}:threshold:{batch_number}",
+            batch_id,
             items,
         )

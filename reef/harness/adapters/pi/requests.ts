@@ -56,7 +56,7 @@ const WATCH_CAP_MS = 30 * 60 * 1000;
 // How many of the proposer's latest moves the opened spinner lists; the request page has them all.
 const ACTIVITY_LINES = 4;
 // The commands a request reports as on this machine's PATH or not, so the proposer builds for this machine rather
-// than for the sandbox it tries the change in; the same list as reef.core.training_request.CLIENT_COMMANDS.
+// than for the sandbox it tries the change in; the same list as reef.harness.client.wrapper.CLIENT_COMMANDS.
 const CLIENT_COMMANDS = [
   "afplay",
   "say",

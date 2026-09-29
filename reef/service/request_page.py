@@ -14,8 +14,8 @@ backend reports no phase, ``settling`` while the row that consumed the
 record lands), lists what the proposer has done so far (the step's
 activity: model calls, and an agent's tool calls, checks and trials), and
 reloads itself every ``REFRESH_SECONDS``, so a person opens the link right
-after asking and watches. The chrome, the palette and
-the status wording come from :mod:`reef.service.page_chrome`, which the
+after asking and watches. The layout, the palette and
+the status wording come from :mod:`reef.service.page_layout`, which the
 version page draws with too; this module adds only its own sections' style.
 """
 
@@ -26,7 +26,7 @@ from collections.abc import Mapping, Sequence
 
 from reef.core.requirements import required_by
 from reef.harness.step_result import design_sections, floor_tasks_note, next_action, reef_installs, rejection_text
-from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
+from reef.service.page_layout import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import (
     DECLINED_WORDS,
     declined,
@@ -42,7 +42,7 @@ from reef.train.cordis_backend.contracts import StepProgress
 #: Seconds between the page's own reloads while the request is not settled.
 REFRESH_SECONDS = 5
 
-# What the shared chrome does not draw: the progress strip, the two-column layout and the mutation list.
+# What the shared layout does not draw: the progress strip, the two-column layout and the mutation list.
 STYLE = """
 main{max-width:1200px;margin:auto;padding:48px 40px 24px}
 .journey{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:0 0 28px;padding:24px 28px;

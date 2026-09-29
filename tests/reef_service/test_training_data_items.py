@@ -22,7 +22,7 @@ from reef.runtime.interfaces import InferenceStream
 from reef.service.streaming import stream_record
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.types import TaskItem, TrainingBatch, TrajectoryItem, trajectories, trajectory_groups
+from reef.train.types import TaskItem, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories, trajectory_groups
 
 
 def captured_trajectory(record_id="inference-1", reward=1.0):
@@ -239,8 +239,8 @@ def test_report_processor_reserves_and_acknowledges_mixed_data():
                 else make_trajectory(context.inferences)
             )
 
-        def make_batch(self, items, batch_number):
-            return TrainingBatch(str(batch_number), items)
+        def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+            return TrainingBatch(batch_id, items)
 
     processor = MixedProcessor(ProcessorContext("mixed", {"batch_size": 2}))
     for index, payload in enumerate(

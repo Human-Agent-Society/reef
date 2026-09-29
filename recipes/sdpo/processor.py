@@ -43,7 +43,6 @@ class SDPOProcessor(DistillProcessor):
     fails the step instead of dropping part of the grid.
     """
 
-    batch_label = "sdpo"
     ordered_groups = True
 
     def __init__(self, context: ProcessorContext) -> None:
@@ -138,8 +137,8 @@ class SDPOProcessor(DistillProcessor):
             return THINKING_BLOCK.sub("", response) if self.remove_thinking_from_demonstration else response
         return None
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        batch = TrainingBatch(f"{self.scenario}:{self.batch_label}:{batch_number}", items)
+    def make_batch(self, items: tuple[TrainDataItem, ...], batch_id: str) -> TrainingBatch:
+        batch = TrainingBatch(batch_id, items)
         samples = sorted(
             trajectories(batch), key=lambda s: (s.metadata["sdpo"]["group"], s.metadata["sdpo"]["rollout"])
         )

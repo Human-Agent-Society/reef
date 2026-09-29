@@ -1,4 +1,4 @@
-"""The chrome both harness pages share: the document wrapper, the design tokens and the status vocabulary.
+"""The layout both harness pages share: the document wrapper, the design tokens and the status vocabulary.
 
 ``GET /reef/harness/releases/{step}/page`` and
 ``GET /reef/harness/requests/{record_id}/page`` are two views of one thing, a

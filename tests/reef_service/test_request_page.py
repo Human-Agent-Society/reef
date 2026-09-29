@@ -95,11 +95,11 @@ def _section(page: str, name: str) -> str:
     return body
 
 
-def test_both_harness_pages_carry_the_readme_logo_from_the_shared_chrome() -> None:
+def test_both_harness_pages_carry_the_readme_logo_from_the_shared_layout() -> None:
     logo = (MODULE.parents[2] / "docs" / "assets" / "reef-logo-light.svg").read_text().strip()
     page = build_request_page(_record(), [CREATION], now=1_042.0)
     assert logo in page
-    # The version page draws with the same chrome, so one logo serves both.
+    # The version page draws with the same layout, so one logo serves both.
     assert logo in build_release_page(0, [CREATION])
 
 

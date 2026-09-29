@@ -25,7 +25,7 @@ from reef.artifact.repository import EnumerableRepositoryBackendFactory, Reposit
 from reef.core.errors import ScenarioBusy, UnknownScenario
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError, validate_report_payload
-from reef.core.training_request import TrainingRequest
+from reef.core.training_request import normalize_training_request_payload
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.observability import (
     ExperimentTracker,
@@ -530,10 +530,10 @@ class Dispatcher:
                     raise ValueError("explicit training requests require training_mode='manual' or 'hybrid'")
                 if all(bound.trainer.candidate_backend is None for bound in current.component_trainers):
                     raise ValueError("explicit training requests require a training backend")
-                request = TrainingRequest.from_dict(item.payload)
+                request = normalize_training_request_payload(item.payload)
                 if item.references:
                     raise ValueError("training instructions do not reference inference receipts")
-                refusal = training_request_refusal(request.text, request.requires)
+                refusal = training_request_refusal(request["text"], request["requires"])
                 if refusal is not None:
                     raise ValueError(refusal)
             # Schema enforcement: reject a malformed report before it is durably
