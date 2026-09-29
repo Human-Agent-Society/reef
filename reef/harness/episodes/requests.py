@@ -106,7 +106,7 @@ TYPED_REQUEST = "the text after /reefine in the person's message"
 #: The adapters whose interactive session reaches a rendered agent_command, and how each passes the request on.
 _COMMANDS = {
     # Claude Code refuses an allowed-tools rule on a variable, so the command runs the wrapper by name: the
-    # session's PATH starts with the install root.
+    # session's PATH has the wrapper's directory ahead of the person's PATH.
     "claude": ReefineCommand(
         request='"$ARGUMENTS"',
         wrapper="reef-claude",

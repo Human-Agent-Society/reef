@@ -18,6 +18,9 @@ from reef.core.records_types import AgentRecord
 from reef.core.trajectories import make_trajectory
 from reef.train.types import TrajectoryItem
 
+#: One response position's sampler top-k: token ids and their log-probs.
+TopkRow = tuple[list[int], list[float]]
+
 
 def sample_assembly_config_fields(config: Mapping[str, Any]) -> tuple[bool, int, int]:
     """Parse and validate the sample-assembly settings in one place.
@@ -109,6 +112,7 @@ def _extend_with_prompt_delta(
     token_log_probs: list[float],
     prompt: list[int],
     retain_log_probs: bool,
+    token_topk: list[TopkRow] | None,
 ) -> None:
     """Exact extension: the new prompt starts with the whole assembled
     transcript, so append only the masked context it adds."""
@@ -117,6 +121,8 @@ def _extend_with_prompt_delta(
     token_mask.extend([0] * len(prompt_delta))
     if retain_log_probs:
         token_log_probs.extend([0.0] * len(prompt_delta))
+    if token_topk is not None:
+        token_topk.extend(([], []) for _ in prompt_delta)
 
 
 def _drift_is_realignable(
@@ -141,6 +147,7 @@ def _realign_latest_response(
     prompt: list[int],
     realign_start: int,
     retain_log_probs: bool,
+    token_topk: list[TopkRow] | None,
 ) -> None:
     """Short drift confined to the latest response (plus at most the scaffold
     tolerance of masked context before it): replace that span with the
@@ -150,6 +157,8 @@ def _realign_latest_response(
     token_mask[realign_start:] = [0] * len(prompt_tail)
     if retain_log_probs:
         token_log_probs[realign_start:] = [0.0] * len(prompt_tail)
+    if token_topk is not None:
+        token_topk[realign_start:] = [([], []) for _ in prompt_tail]
 
 
 def make_policy_trajectory(
@@ -265,10 +274,20 @@ def make_multi_turn_policy_trajectory(
     if any(has_log_probs) and not all(has_log_probs):
         return None
     retain_log_probs = all(has_log_probs)
+    # Sampler top-k rows ride along only when every turn recorded them, one
+    # row per response token; a masked context position gets an empty row.
+    retain_topk = all(
+        0
+        < len(turn.training.get("topk_indices", []))
+        == len(turn.training.get("topk_log_probs", []))
+        == len(turn.training.get("loss_mask", []))
+        for turn in turns
+    )
 
     tokens: list[int] = []
     token_mask: list[int] = []
     token_log_probs: list[float] = []
+    token_topk: list[TopkRow] | None = [] if retain_topk else None
     leading_prompt_length = 0
     latest_response_start: int | None = None
 
@@ -294,11 +313,13 @@ def make_multi_turn_policy_trajectory(
             token_mask.extend([0] * len(prompt))
             if retain_log_probs:
                 token_log_probs.extend([0.0] * len(prompt))
+            if token_topk is not None:
+                token_topk.extend(([], []) for _ in prompt)
             leading_prompt_length = len(prompt)
         else:
             common_prefix = _common_prefix_length(tokens, prompt)
             if common_prefix == len(tokens):
-                _extend_with_prompt_delta(tokens, token_mask, token_log_probs, prompt, retain_log_probs)
+                _extend_with_prompt_delta(tokens, token_mask, token_log_probs, prompt, retain_log_probs, token_topk)
             elif _drift_is_realignable(
                 common_prefix, latest_response_start, len(tokens), realign_threshold, scaffold_tolerance
             ):
@@ -311,6 +332,7 @@ def make_multi_turn_policy_trajectory(
                     prompt,
                     min(latest_response_start, common_prefix),
                     retain_log_probs,
+                    token_topk,
                 )
             else:
                 # A genuine fork: the divergence reaches back before the latest
@@ -322,10 +344,15 @@ def make_multi_turn_policy_trajectory(
         token_mask.extend(turn.training.get("loss_mask", []))
         if retain_log_probs:
             token_log_probs.extend(turn.training.get("rollout_log_probs", []))
+        if token_topk is not None:
+            token_topk.extend(
+                zip(turn.training.get("topk_indices", []), turn.training.get("topk_log_probs", []), strict=True)
+            )
 
     loss_mask = token_mask[leading_prompt_length:]
     if not loss_mask or sum(loss_mask) == 0:
         return None
+    response_topk = [] if token_topk is None else token_topk[leading_prompt_length:]
     return (
         make_trajectory(items, reward)
         .with_metadata(source_agent_record_id=source_agent_record_id)
@@ -335,5 +362,7 @@ def make_multi_turn_policy_trajectory(
             rollout_log_probs=token_log_probs[leading_prompt_length:] if retain_log_probs else [],
             runtime_load_id=versions.pop(),
             turn_count=len(turns),
+            topk_indices=[list(indices) for indices, _ in response_topk],
+            topk_log_probs=[list(log_probs) for _, log_probs in response_topk],
         )
     )

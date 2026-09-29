@@ -64,6 +64,30 @@ RUN rm -rf /opt/sglang && \
     git checkout "${SGLANG_COMMIT}" && \
     pip install -e "python[all]" --no-deps
 
+# FlashInfer 0.7.0 over the base image's 0.6.12. Before 0.7.0 FlashInfer's
+# attention used a finite -5e4 as "minus infinity" (upstream issue #2896, fixed
+# by PR #4401), which silently corrupts attention for some prompts: on RTX PRO
+# 6000 (sm_120), SGLang's flashinfer backend scored Qwen2.5-1.5B tokens up to
+# 11 nats away from HF and Megatron, so rollout log-probs no longer matched the
+# trained policy (0.007 mean train/rollout log-prob gap against 1e-6 with the
+# fix) and every correction that reads them (SAO's ratio, TIS, score
+# centering) trained on the error. The pins below are the lowest versions
+# 0.7.0 accepts; apache-tvm-ffi stays at 0.1.11 because sgl-deep-gemm pins it
+# exactly. The cubin package ends at 0.6.13, so kernels come from the per-arch
+# JIT caches instead. --no-deps keeps the base's torch and CUDA stack.
+RUN pip uninstall -y flashinfer-cubin flashinfer-jit-cache flashinfer-python && \
+    pip install --no-cache-dir --no-deps "flashinfer-python==0.7.0" \
+        "apache-tvm-ffi==0.1.11" "cuda-tile>=1.4.0,<2" "nvidia-cudnn-frontend>=1.29.0,<2" \
+        "nvidia-cutlass-dsl==4.6.3" "nvidia-cutlass-dsl-libs-base==4.6.3" \
+        "nccl4py==0.6.0" "nccl-extensions==0.1.0" "cuda-pathfinder>=1.5.4,<2" && \
+    pip install --no-cache-dir --no-deps --index-url https://flashinfer.ai/whl/cu129 \
+        "flashinfer-jit-cache==0.7.0+cu129" "flashinfer-jit-cache-sm80==0.7.0+cu129" \
+        "flashinfer-jit-cache-sm89==0.7.0+cu129" "flashinfer-jit-cache-sm90a==0.7.0+cu129" \
+        "flashinfer-jit-cache-sm100a==0.7.0+cu129" "flashinfer-jit-cache-sm103a==0.7.0+cu129" \
+        "flashinfer-jit-cache-sm120f==0.7.0+cu129" && \
+    grep -q "numeric_limits<float>::infinity()" \
+        "$(python -c 'import flashinfer, pathlib; print(pathlib.Path(flashinfer.__file__).parent)')/data/include/flashinfer/math.cuh"
+
 COPY . .
 
 # Replace the image's Slime distribution with Reef's exact pin. Keep
