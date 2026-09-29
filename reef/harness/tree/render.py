@@ -127,10 +127,13 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
     agents: list[Mapping[str, Any]] = []
     loops: list[str] = []
     files: dict[str, str] = {}
+    # Which node or config target renders each path, so a collision error names both.
+    owners = {target.path: f"config target {name!r}" for name, target in descriptor.config_targets.items()}
 
-    def emit(path: str, text: str) -> None:
-        if path in files or any(path == target.path for target in descriptor.config_targets.values()):
-            raise RenderError(f"two nodes render to the same path {path!r}")
+    def emit(path: str, text: str, owner: str) -> None:
+        if path in owners:
+            raise RenderError(f"two nodes render to the same path {path!r}: {owners[path]} and {owner}; rename one")
+        owners[path] = owner
         files[path] = text
 
     for kind, config in nodes:
@@ -150,7 +153,7 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
             if template is None:
                 raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
             body = options.get("code", "") if kind == "code_extension" else options.get("text", "")
-            emit(template.format(name=options.get("name")), str(body))
+            emit(template.format(name=options.get("name")), str(body), f"{kind} {options.get('name')!r}")
         elif kind in ("native_tool", "native_hook", "native_loop"):
             template = descriptor.node_paths.get(kind)
             if template is None:
@@ -161,13 +164,21 @@ def render_composition(nodes: Sequence[tuple[str, Any]], descriptor: AdapterDesc
                 loops.append(str(options.get("name")))
                 if len(loops) > 1:
                     raise RenderError(f"one loop per tree: native_loop nodes {loops[0]!r} and {loops[1]!r}")
-            emit(template.format(name=options.get("name")), render_native_module(kind, options))
+            emit(
+                template.format(name=options.get("name")),
+                render_native_module(kind, options),
+                f"{kind} {options.get('name')!r}",
+            )
         elif kind in ("native_graph", "native_agent"):
             template = descriptor.node_paths.get(kind)
             if template is None:
                 raise RenderError(f"adapter {descriptor.name!r} does not render {kind} nodes")
             # Sorted keys, so a proposal's diff against the previous graph is a few lines.
-            emit(template.format(name=options.get("name")), json.dumps(options, indent=2, sort_keys=True) + "\n")
+            emit(
+                template.format(name=options.get("name")),
+                json.dumps(options, indent=2, sort_keys=True) + "\n",
+                f"{kind} {options.get('name')!r}",
+            )
             (graphs if kind == "native_graph" else agents).append(options)
         else:
             raise RenderError(f"unknown node kind {kind!r}")
