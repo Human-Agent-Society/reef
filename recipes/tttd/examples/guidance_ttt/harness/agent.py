@@ -20,7 +20,7 @@ from uuid import uuid4
 from reef_client import ReefClient
 
 from .contract import TaskContract
-from .execution import ExecutionClient
+from .execution import ExecutionClient, ExecutorUnavailableError
 from .library import GuidanceLibrary
 from .prompts import (
     Prompt,
@@ -30,7 +30,7 @@ from .prompts import (
     extract_terminal_tag_or_none,
 )
 from .run_controller import SearchHarness
-from .scorer import Scorer, extract_solution_code
+from .scorer import JudgeUnavailableError, Scorer, extract_solution_code
 from .search import guidance_chat_request, openai_action
 from .state import LibraryEntry, LibraryNode, LLMRequest, VerificationResult
 
@@ -72,6 +72,7 @@ def prepare_library(
     puct_c: float = 1.0,
     max_buffer_size: int = 1_000,
     topk_children: int = 2,
+    score_direction: str = "max",
 ) -> GuidanceLibrary:
     """Create or validate a Discover-compatible run archive from one seed."""
     seed_path = Path(seed_path)
@@ -93,7 +94,7 @@ def prepare_library(
             topk_children=topk_children,
             discover_compat=True,
             groups_per_batch=groups_per_step,
-            score_direction="max",
+            score_direction=score_direction,
         )
     else:
         library = GuidanceLibrary(run_path)
@@ -105,7 +106,7 @@ def prepare_library(
         topk_children=topk_children,
         discover_compat=True,
         groups_per_batch=groups_per_step,
-        score_direction="max",
+        score_direction=score_direction,
     )
     return library
 
@@ -168,7 +169,7 @@ class ReefGuidanceTTTHarness(SearchHarness):
             topk_children=self.library.topk_children,
             discover_compat=True,
             groups_per_batch=self.groups_per_step,
-            score_direction="max",
+            score_direction=self.contract.score_direction,
         )
         return results
 
@@ -269,6 +270,8 @@ class ReefGuidanceTTTHarness(SearchHarness):
                     )
                 else:
                     verification = self.scorer(candidate)
+            except (JudgeUnavailableError, ExecutorUnavailableError):
+                raise
             except Exception as exc:  # External execution is an environment outcome.
                 verification = VerificationResult.execution_error(f"{type(exc).__name__}: {exc}")
 

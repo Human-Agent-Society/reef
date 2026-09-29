@@ -229,6 +229,11 @@ class SandboxExecutor(EpisodeExecutor):
     """
 
     egress_hosts: tuple[str, ...] = ()
+    #: ``isolated`` runs the jail in a network namespace of its own that pasta connects to the internet: no
+    #: host address is reachable (``--no-map-gw``) except the loopback ports in ``forward_ports``, which pasta
+    #: forwards to the host's loopback. The default leaves the network to ``egress_hosts``.
+    network: str = "default"
+    forward_ports: tuple[int, ...] = ()
     limits: SandboxLimits = field(default_factory=SandboxLimits)
     #: Base directories bound read-only so the binary and its runtime resolve.
     base_paths: tuple[str, ...] = ("/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", "/etc/ssl", "/opt")
@@ -241,6 +246,10 @@ class SandboxExecutor(EpisodeExecutor):
                 "the sandbox executor requires bubblewrap (bwrap) on PATH; install it or set "
                 "evolution.executor: local for development"
             )
+        if self.network not in ("default", "isolated"):
+            raise SandboxUnavailable(f"unknown sandbox network {self.network!r}; use 'default' or 'isolated'")
+        if self.network == "isolated":
+            self._preflight_pasta()
         # The native loop nests one jail per tool call inside the episode's, so a host that refuses a user namespace
         # inside another fails here instead of ending every call in SANDBOX_FAILED and tying every pairing.
         try:
@@ -260,6 +269,41 @@ class SandboxExecutor(EpisodeExecutor):
             raise SandboxUnavailable(
                 "the sandbox executor cannot nest a bubblewrap jail on this host, which every sandboxed native "
                 f"tool call needs: {done.stderr.strip()[-600:]}"
+            )
+
+    def _preflight_pasta(self) -> None:
+        """An isolated network is one pasta sets up: prove it can on this host, as this user.
+
+        pasta cannot map users under root (it drops to nobody), and a container may deny it the namespaces it
+        needs; either way the jail would never start, so the host is refused here with pasta's own reason.
+        """
+        if shutil.which("pasta") is None:
+            raise SandboxUnavailable(
+                "an isolated sandbox network requires pasta (the passt package) on PATH; install it, or run "
+                "without isolation where that is allowed"
+            )
+        if os.geteuid() == 0:
+            raise SandboxUnavailable(
+                "pasta cannot map users when started as root; run the Reef service as a non-root user with user "
+                "namespaces allowed to isolate the network"
+            )
+        probe = ["pasta", "--config-net", "--no-map-gw", "--quiet", "-t", "none", "-u", "none", "-T", "none"]
+        try:
+            done = subprocess.run(
+                [*probe, "-U", "none", "--", "/bin/true"],
+                env={"PATH": os.environ.get("PATH", "")},
+                stdin=subprocess.DEVNULL,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=30,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise SandboxUnavailable(f"pasta cannot set up an isolated network on this host: {exc}") from exc
+        if done.returncode != 0:
+            raise SandboxUnavailable(
+                "pasta cannot set up an isolated network on this host (run the Reef service as a non-root user "
+                f"with user namespaces allowed): {(done.stderr or done.stdout).strip()[-600:]}"
             )
 
     def _nested_probe_argv(self) -> list[str]:
@@ -283,12 +327,19 @@ class SandboxExecutor(EpisodeExecutor):
         readonly_paths: Sequence[Path] = (),
     ) -> list[str]:
         cmd = ["bwrap", *_ISOLATION]
-        if not self.egress_hosts:
+        isolated = self.network == "isolated"
+        if isolated:
+            # pasta made the network namespace; bwrap stays in it rather than unsharing a disconnected one.
+            ports = ",".join(str(port) for port in self.forward_ports) or "none"
+            # Every forward is explicit: pasta's default ("auto") would expose each port the host listens on.
+            forwards = ["-t", "none", "-u", "none", "-T", ports, "-U", "none"]
+            cmd = ["pasta", "--config-net", "--no-map-gw", "--quiet", *forwards, "--", *cmd]
+        elif not self.egress_hosts:
             cmd.append("--unshare-net")
         for base in self.base_paths:
             if Path(base).exists():
                 cmd += ["--ro-bind", base, base]
-        if self.egress_hosts:
+        if self.egress_hosts or isolated:
             for dns_path in ("/etc/resolv.conf", "/etc/hosts", "/etc/nsswitch.conf"):
                 if Path(dns_path).exists():
                     cmd += ["--ro-bind", dns_path, dns_path]

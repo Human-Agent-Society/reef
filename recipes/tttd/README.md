@@ -25,3 +25,5 @@ tttd/
 [The tttd recipe page](../../docs/user-guide/recipes/tttd.rst) covers the runtime sequence, a reduced smoke, and recovery behavior, and the [example README](examples/tttd/README.md) records implementation details, paper fidelity, and the completed reproduction.
 
 The optional [Tinker backend](../../docs/user-guide/tinker.rst) reuses the same recipe, grouped objective, and feedback protocol. Start with the [two-rollout smoke](../../tutorials/tinker/README.md); the benchmark results above were obtained with Slime and are not Tinker validation results.
+
+[Guidance-TTT](../../docs/user-guide/recipes/guidance-ttt.rst) trains the guide while keeping the executor frozen. Its example includes Polyomino Packing, Lasso Path, AHC058, and TriMul.

@@ -20,6 +20,7 @@ import yaml
 from reef_service._trajectories import recorded_trajectory
 from reef_service.config_helpers import load_harness_deployment as load_config
 
+from reef.core.requirements import REQUIRE_KINDS
 from reef.harness.episodes.model_binding import ModelBindingError
 from reef.harness.episodes.run import EpisodeResult
 from reef.recipe import load_recipe_config
@@ -110,6 +111,12 @@ class Model:
         if isinstance(reply, Exception):
             raise reply
         return reply
+
+    def last_response(self) -> None:
+        return None
+
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """The step activity a ModelBinding keeps; the stand-in keeps none."""
 
 
 def canned(reply: str) -> Model:
@@ -517,7 +524,7 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     # the explicit toggle rule, what the user must provide, then the entries, complete and nothing more.
     assert "1. Restate the request in one sentence." in request_prompt
     assert "turn it on and off" in request_prompt and "never a rule that assumes the state holds" in request_prompt
-    assert "4. Then write the entries: complete for what the request implies" in request_prompt
+    assert "5. Then write the entries: complete for what the request implies" in request_prompt
     assert "nothing the request did not ask for" in request_prompt and "smallest change" not in request_prompt
     # What only the user can provide is declared, with a prompt for setup: the extension never asks for it,
     # stores it or hardcodes it, and reads an env item's value from the environment at run time.
@@ -555,26 +562,34 @@ def test_propose_answers_a_request_with_the_design_and_the_review_in_the_notes(e
     ]
     # A design longer than the record keeps is cut, and a fenced review still reads.
     fenced = f"Here it is:\n```json\n{json.dumps(REVIEW)}\n```"
-    model = Model(designed(skill("run-tests"), design="x" * 2000), fenced)
+    model = Model(designed(skill("run-tests"), design="x" * 5000), fenced)
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
-    assert proposal.notes["design"] == "x" * 1500 and proposal.notes["review"] == REVIEW
+    assert proposal.notes["design"] == "x" * 4000 and proposal.notes["review"] == REVIEW
     # Without a design object the notes carry the review alone, and the review prompt says none was written.
     model = Model(request_reply(skill("run-tests")), json.dumps(REVIEW))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
     assert proposal.notes == {"review": REVIEW} and "(none written)" in model.prompts[2]
 
 
-def test_a_review_that_fails_leaves_the_notes_without_one_and_the_mutations_stand(evolution) -> None:
-    for review in (
-        "no json here",
-        json.dumps({"result": "done", "covered": []}),
-        json.dumps(["complete"]),
-        ModelBindingError("model endpoint unreachable: connection refused"),
+def test_a_review_that_fails_says_so_in_the_notes_and_the_mutations_stand(evolution) -> None:
+    """A step whose review did not run publishes with nothing checking that it delivers the request, so the notes
+    carry the reason and the page shows it, rather than reading as a step that had no review to give."""
+    for review, reason in (
+        ("no json here", "carried no result object"),
+        (json.dumps({"result": "done", "covered": []}), "carried no result object"),
+        (json.dumps(["complete"]), "carried no result object"),
+        (ModelBindingError("model endpoint unreachable: connection refused"), "connection refused"),
     ):
         model = Model(designed(skill("run-tests")), review)
         proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
         assert [(m.op, m.id) for m in proposal.mutations] == [("create", "run-tests")]
-        assert proposal.notes == {"design": DESIGN} and model.calls == 3
+        assert set(proposal.notes) == {"design", "review_failure"} and model.calls == 3
+        assert proposal.notes["design"] == DESIGN and reason in proposal.notes["review_failure"]
+    # A reply the model's reasoning ate is asked once more with room for both, and the second answer is the review.
+    model = Model(designed(skill("run-tests")), ModelBindingError("model endpoint returned non-text content"))
+    model.replies.append(json.dumps(REVIEW))
+    proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
+    assert proposal.notes["review"] == REVIEW and "review_failure" not in proposal.notes and model.calls == 4
     # The verdict's case and the lists are read leniently: strings only, trimmed, anything else dropped.
     lenient = {"result": "Complete", "covered": ["a", 1, " b ", ""], "uncovered": "none"}
     model = Model(designed(skill("run-tests")), json.dumps(lenient))
@@ -702,7 +717,7 @@ def test_propose_keeps_the_prompt_of_a_requires_item_for_setup(evolution) -> Non
     model = Model(designed(skill("sms"), requires=refused), json.dumps(REVIEW))
     proposal = evolution.propose(NODES, (), model, requests=(dict(REQUEST),), entries=ENTRIES)
     assert proposal.notes["refused_requires"] == [
-        {"item": refused[0], "reason": "requires[0].kind must be one of ('permission', 'env', 'service')"}
+        {"item": refused[0], "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"}
     ]
 
 
@@ -736,7 +751,7 @@ def test_propose_records_the_requires_items_it_could_not_honor_with_the_reason(e
     assert proposal.notes["refused_requires"] == [
         {
             "item": {"name": "phone", "kind": "sms"},
-            "reason": "requires[0].kind must be one of ('permission', 'env', 'service')",
+            "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}",
         },
         {"item": "SLACK_WEBHOOK", "reason": "requires[0] must be an object with a name and a kind"},
         {
@@ -1517,3 +1532,24 @@ def test_the_kept_answer_is_the_delivering_one_with_the_fewest_uncovered_points(
     model = Model(designed(skill("first")), json.dumps(two_gaps), ModelBindingError("endpoint down"))
     proposal = evolution.propose(NODES, (), model, requests=(REQUEST,), entries=ENTRIES)
     assert [m.id for m in proposal.mutations] == ["first"] and proposal.notes["attempts"] == 2
+
+
+def test_a_request_on_another_adapter_asks_for_no_code_extension_and_takes_none(evolution) -> None:
+    """The proposer knows pi's extension API alone: on dsh the prompt offers rules, skills and commands, names
+    the harness and its wrapper, and an extension in the reply is not an entry."""
+    skill = {"name": "test-first", "text": "---\nname: test-first\ndescription: run tests first\n---\n# test-first\n"}
+    model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
+    mutations = evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="dsh").mutations
+    prompt = model.prompt
+    for kind in ("skill", "rules", "agent_command"):
+        assert f"- {kind}:" in prompt
+    assert "- code_extension:" not in prompt and "pi.registerCommand" not in prompt
+    assert "This harness is DeepSeek Harness (dsh)" in prompt and "reef-dsh setup" in prompt
+    assert [(m.op, m.id) for m in mutations] == [("create", "test-first")]
+    extension = {"name": "chat-mode", "code": "export default function (pi) {}\n"}
+    model = canned(request_reply({"id": "chat-mode", "name": "code_extension", "config": extension}))
+    assert failure_of(evolution.propose(NODES, (), model, requests=(REQUEST,), adapter="dsh")) == NO_ENTRY
+    # pi keeps every kind and its own wording.
+    model = canned(request_reply({"id": "test-first", "name": "skill", "config": skill}))
+    evolution.propose(NODES, (), model, requests=(REQUEST,))
+    assert "- code_extension:" in model.prompt and "reef-pi setup" in model.prompt

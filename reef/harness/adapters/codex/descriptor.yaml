@@ -11,7 +11,7 @@ binary: codex
 install:
   kind: npm
   package: "@openai/codex"
-  version: "0.152.1"
+  version: "0.153.4"
   binary_path: "node_modules/.bin/codex"
 argv:
   - exec
@@ -56,6 +56,8 @@ files:
           trace_exporter: none
         sandbox_workspace_write:
           network_access: false
+    models:
+      path: "codex/models.json"
   rules: "codex/AGENTS.md"
   # Custom prompts remain Codex's named command surface. They are deprecated
   # upstream in favor of skills, but still provide the closest translation of
@@ -76,7 +78,7 @@ writable_paths:
   - "codex"
 cleanup_whitelist:
   - "codex/sessions/**"
-  # Codex 0.152.1 initializes its isolated user home on first boot. These are
+  # Codex 0.153.4 initializes its isolated user home on first boot. These are
   # versioned local databases, copied system skills, coordination files, and
   # temporary discovery state observed by the real-binary smoke test.
   - "codex/.sandbox_migration"
@@ -104,3 +106,6 @@ model_binding:
             wire_api: responses
             supports_websockets: false
             experimental_bearer_token: "{api_key}"
+    - target: models
+      data:
+        models: "{model_metadata}"

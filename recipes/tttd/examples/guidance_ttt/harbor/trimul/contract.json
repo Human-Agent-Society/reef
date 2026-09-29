@@ -1,0 +1,9 @@
+{
+  "solution_language": "python",
+  "solution_contract": "Return a complete Python module in <solution> with a fenced python block. Define custom_kernel(data) as specified in the instruction. Include at least one Triton kernel.",
+  "mechanism_constraint": "Preserve the input and output contract. Do not access evaluator internals, skip correctness checks, cache outputs, or specialize on secret input values.",
+  "objective": "Minimize geometric-mean runtime in microseconds over the seven H100 cases after every correctness check passes.",
+  "raw_score_label": "H100 geometric-mean runtime (microseconds)",
+  "score_direction": "min",
+  "judge_problem_id": "trimul"
+}

@@ -7,7 +7,8 @@ schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8901
-  token: reef-local
+  # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
   run-dir: tutorials/evolve-your-harness/work/deployment/stack
 
 recipe:
@@ -18,7 +19,7 @@ recipe:
       adapter: pi
       propose: tutorials.evolve-your-harness.harness.evolution:propose
       evaluate: tutorials.evolve-your-harness.harness.evolution:evaluate
-      # The seed carries the /reef-harness command and the pi extension API skill the proposer reads.
+      # The seed carries the /reefine command and the pi extension API skill the proposer reads.
       requests: true
       # The notice at session start offers the update once the head moved.
       version_check: true

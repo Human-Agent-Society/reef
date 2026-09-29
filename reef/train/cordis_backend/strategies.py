@@ -14,8 +14,11 @@ import secrets
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
+from reef.harness.adapters.descriptor import AdapterDescriptor
+from reef.harness.episodes.executor import EpisodeExecutor
 from reef.harness.episodes.model_binding import ModelBindings
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import primary_reward
@@ -42,6 +45,50 @@ class StepProposal:
         object.__setattr__(self, "mutations", tuple(self.mutations))
         if not isinstance(self.notes, Mapping):
             raise TypeError("StepProposal notes must be a mapping")
+
+
+class ProposerCalls(ABC):
+    """The step's model-call budget, record and live activity, for traffic a proposer makes outside ``models``.
+
+    An agent proposer's own process reaches its model through a gateway, not
+    through the bindings; the gateway spends from and records into the same
+    per-step budget and ``proposer.json`` the bindings do, and notes what the
+    agent does as it does it, for the request page to show while the step runs.
+    """
+
+    @abstractmethod
+    def spend(self) -> None:
+        """Count one call; raise ``RuntimeError`` when the step's budget is exhausted."""
+
+    @abstractmethod
+    def record(self, entry: Mapping[str, Any]) -> None:
+        """Append one call to the step's proposer record."""
+
+    @abstractmethod
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """Add one line to the step's live activity: ``kind`` is what acted (``model``, ``agent``, ``check``,
+        ``trial``, ``provider``, ``proposer``), ``text`` what it did, ``failed`` when that went wrong."""
+
+
+@dataclass(frozen=True)
+class AgentHost:
+    """What a proposer that runs a coding agent needs from the step, handed over as the ``agent_host`` keyword.
+
+    ``descriptor`` and ``binary`` are the harness adapter and its installed
+    binary, the same the episodes run; ``executor`` is the one the deployment
+    built for the agent (its isolation, not the episodes'); ``step_dir`` is the
+    step's record directory, ``None`` with the record off; ``calls`` is the
+    step's budget and record; the timeouts bound the whole agent run and each
+    trial run of a candidate tree.
+    """
+
+    descriptor: AdapterDescriptor
+    binary: str
+    executor: EpisodeExecutor
+    step_dir: Path | None
+    calls: ProposerCalls
+    timeout_s: float
+    trial_timeout_s: float
 
 
 class Proposer(ABC):
@@ -107,6 +154,11 @@ class Proposer(ABC):
     def reads_requests(self) -> bool:
         """Whether this proposer can honor a training instruction (``manual`` and ``hybrid``)."""
         return names_keyword(self.__call__, "requests")
+
+    @property
+    def runs_agent(self) -> bool:
+        """Whether this proposer takes an :class:`AgentHost` to run a coding agent in."""
+        return names_keyword(self.__call__, "agent_host")
 
     @abstractmethod
     def __call__(
@@ -198,10 +250,15 @@ class _CallableProposer(Proposer):
         self._forward_sources = accepts_keyword(fn, "sources")
         self._forward_requests = names_keyword(fn, "requests")
         self._forward_entries = accepts_keyword(fn, "entries")
+        self._forward_agent_host = names_keyword(fn, "agent_host")
 
     @property
     def reads_requests(self) -> bool:
         return self._forward_requests
+
+    @property
+    def runs_agent(self) -> bool:
+        return self._forward_agent_host
 
     def __call__(
         self,
@@ -214,6 +271,7 @@ class _CallableProposer(Proposer):
         sources: Sequence[Mapping[str, Any]] = (),
         requests: Sequence[Mapping[str, Any]] = (),
         entries: Sequence[Mapping[str, Any]] = (),
+        agent_host: AgentHost | None = None,
     ) -> Mutation | Sequence[Mutation] | StepProposal | None:
         extra: dict[str, Any] = {}
         if self._forward_manifest:
@@ -226,6 +284,8 @@ class _CallableProposer(Proposer):
             extra["requests"] = requests
         if self._forward_entries:
             extra["entries"] = entries
+        if self._forward_agent_host:
+            extra["agent_host"] = agent_host
         return self._fn(nodes, samples, models, **extra)
 
 

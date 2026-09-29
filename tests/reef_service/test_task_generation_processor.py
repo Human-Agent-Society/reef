@@ -73,7 +73,7 @@ def test_async_hooks_preserve_sources_and_use_existing_task_types(tmp_path: Path
     # Hook calls do not yet schedule work, consume records, or create a ready batch.
     processor.ingest(source_record)
     assert not processor.ready()
-    assert processor.retention_decision().protected_agent_record_ids == frozenset({source_record.agent_record_id})
+    assert processor.releasable_record_ids().isdisjoint(frozenset({source_record.agent_record_id}))
 
 
 @pytest.mark.parametrize("errors", [(), ("oracle failed",), ("oracle failed", "nop agent passed")])

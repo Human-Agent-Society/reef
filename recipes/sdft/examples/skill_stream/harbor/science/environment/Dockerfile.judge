@@ -1,0 +1,9 @@
+# The judge's container: the server, the scoring rule, and the reference
+# test splits it scores the served model on.
+FROM python:3.12-slim
+RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/* \
+    && git clone --quiet https://github.com/idanshen/Self-Distillation /opt/self-distillation \
+    && git -C /opt/self-distillation checkout --quiet d77573212fa0 \
+    && pip install --no-cache-dir "reef-client>=0.2.0" "datasets>=3,<5"
+COPY judge_server.py score.py skills.py task.json judge_config.json /judge/
+CMD ["python3", "/judge/judge_server.py"]

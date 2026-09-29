@@ -160,6 +160,10 @@ class TinkerTrainingRuntime(TrainingRuntime):
             if (directory / MANIFEST).exists():
                 self._set_incumbent(TinkerCheckpoint.read(directory))
 
+    @property
+    def supports_checkpoint_restore(self) -> bool:
+        return True
+
     def restore_checkpoint(self, artifact: Artifact) -> None:
         """A rollback's target becomes the incumbent, optimizer state included."""
         path = artifact.materialize().local_path

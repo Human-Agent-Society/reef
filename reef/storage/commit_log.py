@@ -2,8 +2,7 @@
 
 CommitLog owns append, fsync, idempotent retries, torn-tail repair, and caching.
 CommitLogScenarioStore combines it with an injected RecordStore. The log
-append is the durable commit point; interrupted record compaction is repaired
-on retry or recovery. Stable POSIX file locks serialize commit writers across
+append is the durable commit point; recovery restores consumption progress. Stable POSIX file locks serialize commit writers across
 sessions and processes. Artifact publication remains outside this module.
 """
 
@@ -293,13 +292,11 @@ class CommitLogScenarioStore(ScenarioStore):
             if existing is not None:
                 if not self._same_commit(existing, commit):
                     raise ScenarioStoreConflict(f"commit step {commit.step} conflicts with its existing record")
-                self._compact(existing)
                 return existing
             current_step = history[-1].step if history else self._initial_step
             if expected_step != current_step:
                 raise ScenarioStoreConflict(f"expected scenario step {expected_step}, current step is {current_step}")
             self._append(commit)
-            self._compact(commit)
             return commit
 
     def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
@@ -335,10 +332,6 @@ class CommitLogScenarioStore(ScenarioStore):
                 head = records[-1]
             else:
                 head = None
-            # Every earlier commit can have an interrupted compaction, including
-            # commits before the checkpoint from which the trainer is restored.
-            for record in records:
-                self._compact(record)
             self._initial_step = checkpoint_step if head is None else head.step
             return head
 
@@ -400,10 +393,6 @@ class CommitLogScenarioStore(ScenarioStore):
                 self._memory_run_step += 1
         else:
             self._commit_log.append(commit)
-
-    def _compact(self, commit: CommitRecord) -> None:
-        if commit.compacted_ids:
-            self._records.compact(self._scenario, commit.compacted_ids)
 
     @staticmethod
     def _same_commit(left: CommitRecord, right: CommitRecord) -> bool:

@@ -217,7 +217,7 @@ def test_cookbook_recipes_reject_multi_turn_policy_samples(recipe, metadata) -> 
         )
 
     assert not processor.ready()
-    assert "r1" in processor.retention_decision().protected_agent_record_ids
+    assert "r1" not in processor.releasable_record_ids()
 
 
 def test_openclawrl_recipe_never_trains_on_reports() -> None:
@@ -235,9 +235,9 @@ def test_openclawrl_recipe_never_trains_on_reports() -> None:
         )
     )
     assert not processor.ready()
-    decision = processor.retention_decision()
-    assert "r1" in decision.releasable_agent_record_ids
-    assert "r1" not in decision.protected_agent_record_ids
+    decision = processor.releasable_record_ids()
+    assert "r1" in decision
+    assert "r1" in decision
     trainer.close()
 
 

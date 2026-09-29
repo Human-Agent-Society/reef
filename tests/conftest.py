@@ -34,6 +34,8 @@ for _cookbook_package in (
     "recipes.openclawrl",
     "recipes.ppo_rlhf",
     "recipes.sao",
+    "recipes.sdft",
+    "recipes.sdpo",
     "recipes.tttd",
 ):
     importlib.import_module(_cookbook_package)

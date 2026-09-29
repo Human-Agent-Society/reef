@@ -5,15 +5,19 @@ import importlib.util
 import os
 import sys
 import types
+from concurrent.futures import Future
 from pathlib import Path
 
 import pytest
 
+from reef.inference.sglang import config as sglang_config
+from reef.inference.sglang import deployment as sglang_deployment
 from reef.inference.sglang import plugin as sglang_plugin
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.deployment import create_inference
 from reef.inference.sglang.launch import engine_environment
 from reef.inference.sglang.lora_schema import (
+    adapter_scoped_prefix_cache_supported,
     require_lora_distributed_request_schema,
     require_lora_tensor_request_schema,
 )
@@ -338,6 +342,8 @@ def _training_inference_values(**options):
                 "num_gpus_per_node": 1,
                 "actor_num_nodes": 1,
                 "actor_num_gpus_per_node": 1,
+                "colocate": False,
+                "disjoint_prefix_sharing": False,
                 **options,
             },
         )
@@ -350,6 +356,8 @@ def test_training_inference_forces_the_flags_reef_serving_relies_on():
     config = _training_inference_config(sglang_disable_radix_cache=False)
     assert config.options["disable_radix_cache"] is True
     assert config.options["incremental_streaming_output"] is True
+    opted_out = _training_inference_config(colocate=True, offload_rollout=True, sglang_disable_radix_cache=True)
+    assert opted_out.options["disable_radix_cache"] is True, "a launch may always opt out of sharing"
 
 
 def test_inference_engine_does_not_inherit_or_patch_slime(monkeypatch):
@@ -399,7 +407,7 @@ def test_reef_engine_rejects_conflicting_lora_override(monkeypatch):
 
 
 @pytest.mark.unit
-def test_reef_config_selects_pause_mode_and_disables_shared_prefix_cache(
+def test_reef_config_selects_pause_mode_and_scopes_shared_prefix_cache(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("SGLANG_PLUGINS", "telemetry")
@@ -414,6 +422,83 @@ def test_reef_config_selects_pause_mode_and_disables_shared_prefix_cache(
     colocated = create_inference(_training_inference_values(colocate=True, offload_rollout=True)).config
     assert colocated.pause_mode == "retract"
     assert colocated.options["incremental_streaming_output"] is True
+    # A colocated step releases the KV cache before every publication, so a
+    # shared entry cannot outlive the weights that built it.
+    assert colocated.options["disable_radix_cache"] is False
+
+
+@pytest.mark.unit
+def test_disjoint_shares_prefixes_only_by_opting_into_retraction() -> None:
+    """Sharing entries and retracting in-flight KV are one decision."""
+    default = _training_inference_config()
+    assert default.options["disable_radix_cache"] is True
+    assert default.pause_mode == "in_place"
+
+    sharing = _training_inference_config(disjoint_prefix_sharing=True)
+    assert sharing.options["disable_radix_cache"] is False
+    assert sharing.pause_mode == "retract", "the cache can only be cleared once no request holds KV"
+
+    with pytest.raises(ValueError, match="disable_radix_cache=true"):
+        SGLangConfig("model", 1, 1, 1, options={"disable_radix_cache": False})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("adapter_scoped", [True, False])
+def test_colocated_lora_shares_prefixes_only_when_sglang_keys_them_by_adapter(
+    monkeypatch: pytest.MonkeyPatch, adapter_scoped: bool
+) -> None:
+    """One engine holds several scenarios' adapters; the engine must keep them apart."""
+    _load_sglang_engine_module(monkeypatch)
+    monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
+
+    config = _training_inference_config(colocate=True, offload_rollout=True, megatron_lora_rank=8)
+
+    assert config.options["enable_lora"] is True
+    assert (
+        config.options["disable_radix_cache"] is not adapter_scoped
+    ), "an engine that cannot isolate adapters shares nothing"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("broken", [None, "request", "radix", "request_id", "unsupported", "unforeseen"])
+def test_adapter_prefix_check_exercises_actual_key_isolation(
+    monkeypatch: pytest.MonkeyPatch, broken: str | None
+) -> None:
+    requests = types.ModuleType("sglang.srt.managers.schedule_batch")
+    radix = types.ModuleType("sglang.srt.mem_cache.radix_cache")
+    sampling = types.ModuleType("sglang.srt.sampling.sampling_params")
+
+    class Req:
+        def __init__(self, *, rid, origin_input_text, origin_input_ids, sampling_params, lora_id):
+            if broken == "unsupported":
+                raise TypeError("unsupported request API")
+            if broken == "unforeseen":
+                raise ValueError("a later pin rejects this request shape")
+            self.extra_key = None if broken == "request" else lora_id
+            if broken == "request_id":
+                self.extra_key = rid
+
+    class RadixKey:
+        def __init__(self, *, token_ids, extra_key):
+            self.token_ids = token_ids
+            self.extra_key = extra_key
+
+        def child_key(self):
+            if broken == "radix":
+                return tuple(self.token_ids)
+            return self.extra_key, tuple(self.token_ids)
+
+    requests.Req = Req  # type: ignore[attr-defined]
+    radix.RadixKey = RadixKey  # type: ignore[attr-defined]
+    sampling.SamplingParams = lambda **kwargs: types.SimpleNamespace(**kwargs)  # type: ignore[attr-defined]
+    for module in (requests, radix, sampling):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+    adapter_scoped_prefix_cache_supported.cache_clear()
+
+    try:
+        assert adapter_scoped_prefix_cache_supported() is (broken is None)
+    finally:
+        adapter_scoped_prefix_cache_supported.cache_clear()
 
 
 @pytest.mark.unit
@@ -462,7 +547,7 @@ def test_native_sglang_plugin_is_explicitly_gated(monkeypatch: pytest.MonkeyPatc
 
 
 @pytest.mark.unit
-def test_reef_config_rejects_yaml_that_reenables_shared_prefixes(tmp_path: Path) -> None:
+def test_reef_config_rejects_disjoint_yaml_that_reenables_shared_prefixes(tmp_path: Path) -> None:
     config = tmp_path / "sglang.yaml"
     config.write_text(
         """\
@@ -478,6 +563,65 @@ sglang:
     )
     with pytest.raises(ValueError, match="disable_radix_cache=true"):
         create_inference(_training_inference_values(sglang_config=str(config)))
+
+    colocated = create_inference(
+        _training_inference_values(colocate=True, offload_rollout=True, sglang_config=str(config))
+    ).config
+    assert colocated.models[0].groups[0].options["disable_radix_cache"] is False, "a colocated group may share"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("via_yaml", [True, False])
+def test_disjoint_prefix_sharing_rejects_pd_disaggregation(tmp_path: Path, via_yaml: bool) -> None:
+    config = tmp_path / "sglang.yaml"
+    config.write_text(
+        """\
+sglang:
+  - name: actor
+    server_groups:
+      - worker_type: prefill
+        num_gpus: 1
+      - worker_type: decode
+        num_gpus: 1
+""",
+        encoding="utf-8",
+    )
+    topology = {"sglang_config": str(config)} if via_yaml else {"prefill_num_servers": 1}
+    with pytest.raises(ValueError, match="regular SGLang engines"):
+        create_inference(_training_inference_values(disjoint_prefix_sharing=True, rollout_num_gpus=2, **topology))
+    # Without the opt-in, a disjoint PD deployment keeps in-flight KV and remains valid.
+    create_inference(_training_inference_values(rollout_num_gpus=2, **topology))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("colocate", [True, False])
+@pytest.mark.parametrize("adapter_scoped", [True, False])
+@pytest.mark.parametrize("disabled", [True, False])
+def test_lora_yaml_cannot_override_required_cache_isolation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, colocate: bool, adapter_scoped: bool, disabled: bool
+) -> None:
+    _load_sglang_engine_module(monkeypatch)
+    monkeypatch.setattr(sglang_config, "adapter_scoped_prefix_cache_supported", lambda: adapter_scoped)
+    config = tmp_path / "sglang.yaml"
+    config.write_text(
+        "sglang:\n  - name: actor\n    server_groups:\n      - worker_type: regular\n"
+        f"        num_gpus: 1\n        overrides:\n          disable-radix-cache: {str(disabled).lower()}\n",
+        encoding="utf-8",
+    )
+    values = _training_inference_values(
+        colocate=colocate,
+        offload_rollout=colocate,
+        disjoint_prefix_sharing=not colocate,
+        megatron_lora_rank=8,
+        sglang_config=str(config),
+    )
+    monkeypatch.setattr(sglang_deployment, "require_lora_tensor_request_schema", lambda: None)
+    monkeypatch.setattr(sglang_deployment, "require_lora_distributed_request_schema", lambda: None)
+    if not adapter_scoped and not disabled:
+        with pytest.raises(ValueError, match="disable_radix_cache=true"):
+            create_inference(values)
+    else:
+        create_inference(values)
 
 
 @pytest.mark.unit
@@ -711,9 +855,9 @@ def test_colocated_retract_queue_is_idle_only_for_paused_gpu_operations(
         def continue_generation(self, recv_req):
             return None
 
-        def is_fully_idle(self, for_health_check=False):
+        def is_fully_idle(self, for_health_check=False, ignore_waiting=False):
             del for_health_check
-            return not self.waiting_queue and not self.gpu_busy
+            return (ignore_waiting or not self.waiting_queue) and not self.gpu_busy
 
     scheduler_module.Scheduler = Scheduler  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler", scheduler_module)
@@ -722,6 +866,7 @@ def test_colocated_retract_queue_is_idle_only_for_paused_gpu_operations(
     scheduler = Scheduler()
     suspended = [object(), object()]
     scheduler.waiting_queue = suspended
+    scheduler.grammar_manager = types.SimpleNamespace(grammar_queue=[])
     scheduler.gpu_busy = False
 
     scheduler.pause_generation(types.SimpleNamespace(mode="in_place"))
@@ -748,7 +893,7 @@ def test_colocated_retract_queue_is_idle_only_for_paused_gpu_operations(
 
 
 @pytest.mark.unit
-def test_colocated_retract_uses_native_ignore_waiting_when_available(
+def test_colocated_retract_uses_pinned_ignore_waiting_api(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     scheduler_module = types.ModuleType("sglang.srt.managers.scheduler")
@@ -756,6 +901,8 @@ def test_colocated_retract_uses_native_ignore_waiting_when_available(
     class Scheduler:
         def __init__(self):
             self.calls = []
+            self.waiting_queue = []
+            self.grammar_manager = types.SimpleNamespace(grammar_queue=[])
 
         def pause_generation(self, recv_req):
             return None
@@ -778,6 +925,71 @@ def test_colocated_retract_uses_native_ignore_waiting_when_available(
     assert scheduler.calls[-1] == (False, True)
     assert scheduler.is_fully_idle(for_health_check=True) is False
     assert scheduler.calls[-1] == (True, False)
+    assert scheduler.is_fully_idle(True, False) is False
+    assert scheduler.calls[-1] == (True, False)
+
+
+@pytest.mark.unit
+def test_retract_flush_preserves_pending_grammar_and_gpu_guards(monkeypatch: pytest.MonkeyPatch) -> None:
+    scheduler_module = types.ModuleType("sglang.srt.managers.scheduler")
+    future: Future[str] = Future()
+    request = types.SimpleNamespace(grammar=future)
+    grammar_queue = [request]
+
+    class Scheduler:
+        def __init__(self):
+            self.waiting_queue = []
+            self.grammar_manager = types.SimpleNamespace(grammar_queue=grammar_queue)
+            self.gpu_busy = False
+            self.idle_error = False
+            self.cache = {"old-prefix": "old-kv"}
+
+        def pause_generation(self, recv_req):
+            return None
+
+        def continue_generation(self, recv_req):
+            return None
+
+        def is_fully_idle(self, for_health_check=False, ignore_waiting=False):
+            if self.idle_error:
+                raise RuntimeError("idle check failed")
+            return (
+                not self.gpu_busy
+                and (ignore_waiting or not self.waiting_queue)
+                and (for_health_check or not self.grammar_manager.grammar_queue)
+            )
+
+        def flush_cache(self):
+            if not self.is_fully_idle():
+                return False
+            self.cache.clear()
+            return True
+
+    scheduler_module.Scheduler = Scheduler  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sglang.srt.managers.scheduler", scheduler_module)
+    install_colocated_retract_offload()
+    scheduler = Scheduler()
+    scheduler.pause_generation(types.SimpleNamespace(mode="in_place"))
+    assert scheduler.flush_cache() is False
+    scheduler.pause_generation(types.SimpleNamespace(mode="retract"))
+    scheduler.gpu_busy = True
+    assert scheduler.flush_cache() is False
+    assert scheduler.cache
+    scheduler.gpu_busy = False
+    assert scheduler.flush_cache() is True
+    assert not scheduler.cache
+    assert scheduler.grammar_manager.grammar_queue is grammar_queue
+    assert not future.done()
+
+    scheduler.idle_error = True
+    with pytest.raises(RuntimeError, match="idle check failed"):
+        scheduler.is_fully_idle()
+    assert scheduler.grammar_manager.grammar_queue is grammar_queue
+    scheduler.idle_error = False
+    scheduler.continue_generation(types.SimpleNamespace())
+    assert scheduler.is_fully_idle() is False
+    future.set_result("compiled grammar")
+    assert scheduler.grammar_manager.grammar_queue.pop().grammar.result() == "compiled grammar"
 
 
 @pytest.mark.unit

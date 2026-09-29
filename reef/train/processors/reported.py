@@ -3,7 +3,7 @@
 Ingress validates references against storage before accepting reports. The
 processor consumes records in append order, so references are already present.
 Deduplication, consumed-source tracking, and group slots preserve retry behavior;
-retention protects every live report and the inference records it references.
+buffer release preserves every live report and the inference records it references.
 """
 
 from __future__ import annotations
@@ -19,7 +19,7 @@ from typing import Any, cast
 
 from reef.core.records_types import AgentRecord, RequestType
 from reef.core.reports import ReportBase, ReportValidationError, validate_report_payload
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.processors.common import (
     make_multi_turn_policy_trajectory,
     make_policy_trajectory,
@@ -83,12 +83,21 @@ class _PendingReport:
 # ------------------------------------------------- reported-feedback processor
 
 
+def accepted_by(report_type: type[ReportBase], payload: Mapping[str, Any]) -> bool:
+    """Whether ``report_type`` parses ``payload``."""
+    try:
+        report_type.from_dict(payload)
+    except ReportValidationError:
+        return False
+    return True
+
+
 class ReportedFeedbackProcessor(DataProcessor, ABC):
     """Assemble valid reports and their existing inference records into batches.
 
     Recipes implement ``make_sample`` and ``make_batch``, plus ``grouping``
     and ``decide_group`` for grouped methods. The engine owns deduplication, group slots, reservations,
-    consumption, and retention. Invalid references raise immediately; training
+    consumption, and buffer release. Invalid references raise immediately; training
     data failures propagate instead of silently dropping reports.
     """
 
@@ -208,9 +217,32 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
             self._seen_reports.add(item.agent_record_id)
             self._terminate(item)
             return
-        context = self._report_context(item)
+        report_type = self.context.report_type
+        parsed_report: ReportBase | None = None
+        if report_type is not None:
+            try:
+                parsed_report = report_type.from_dict(item.payload)
+            except ReportValidationError as refusal:
+                # A scenario of several components admits what any of them accepts: a report the ingress
+                # contract takes and this one refuses is another component's, not this method's training
+                # data, and this trainer releases it. A report every component refuses still raises.
+                admitted = self.context.admitted_report_type
+                if admitted is None or admitted is report_type or not accepted_by(admitted, item.payload):
+                    raise
+                # Named in the log: a report meant for this trainer with a broken field also lands here.
+                logger.warning(
+                    "scenario %r releases report %s to the other components: %s refused it: %s",
+                    self.scenario,
+                    item.agent_record_id,
+                    report_type.__name__,
+                    refusal,
+                )
+                self._seen_reports.add(item.agent_record_id)
+                self._terminate(item)
+                return
+        context = self._report_context(item, parsed_report)
         # Retain the report before assembly: a contract failure must not let
-        # compaction delete its inputs or turn a retry into a successful no-op.
+        # buffer release drop its inputs or turn a retry into a successful no-op.
         self._reports[item.agent_record_id] = item
         sample = self.make_sample(context)
         if not isinstance(sample, (TrajectoryItem, TaskItem)):
@@ -294,13 +326,14 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         if self.exclusive_sources or len(report.references) > 1:
             self._terminal_owned_sources.update(report.references)
 
-    def _report_context(self, report: AgentRecord) -> ReportContext:
+    def _report_context(self, report: AgentRecord, parsed_report: ReportBase | None = None) -> ReportContext:
         missing = [ref for ref in report.references if ref not in self._inferences]
         if missing:
             raise ReportValidationError(f"report references unavailable inference records: {missing!r}")
         inferences = tuple(self._inferences[ref] for ref in report.references)
         report_type = self.context.report_type
-        parsed_report = None if report_type is None else report_type.from_dict(report.payload)
+        if parsed_report is None and report_type is not None:
+            parsed_report = report_type.from_dict(report.payload)
         return ReportContext(report, report_score(report), inferences, parsed_report)
 
     # ---------------------------------------------------------------- groups
@@ -385,13 +418,13 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._pending_reports = None
         return frozenset(consumed_reports | trained_sources)
 
-    # -------------------------------------------------------------- retention
+    # ---------------------------------------------------------- buffer release
 
     def _live_references(self) -> set[str]:
         return {ref for report in self._reports.values() for ref in report.references}
 
-    def retention_decision(self) -> RetentionDecision:
-        """Derive retention from live state — a pure read, nothing mutates.
+    def releasable_record_ids(self) -> frozenset[str]:
+        """Find completed records with no remaining buffered dependents.
 
         The releasable-source set is recomputed here every time: a source is
         releasable while a terminal report owns it (or a batch consumed it)
@@ -401,15 +434,10 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         live_references = self._live_references()
         releasable_sources = (self._terminal_owned_sources | self._trained_sources) - live_references
         releasable = self._consumed | self._terminal | releasable_sources
-        protected = set(self._reports) | live_references
-        protected.update(inference_id for inference_id in self._inferences if inference_id not in releasable_sources)
-        return RetentionDecision(
-            protected_agent_record_ids=frozenset(protected | self._training_requests.keys()),
-            releasable_agent_record_ids=frozenset(releasable | self._consumed_requests),
-        )
+        return frozenset(releasable | self._consumed_requests)
 
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
-        super().compaction_applied(agent_record_ids)
+    def release_records(self, agent_record_ids: frozenset[str]) -> None:
+        super().release_records(agent_record_ids)
         # --- scalar id sets ---
         self._consumed -= agent_record_ids
         self._terminal -= agent_record_ids
@@ -417,11 +445,7 @@ class ReportedFeedbackProcessor(DataProcessor, ABC):
         self._terminal_owned_sources -= agent_record_ids
         self._seen_reports -= agent_record_ids
 
-        # Stored records: only inferences can be here. The trainer compacts
-        # ``releasable - protected``, and every live report, every reference
-        # a live report holds, and every buffered report are protected —
-        # so a compacted id is never in _reports, singletons, or a
-        # group.
+        # Only completed inferences without live report references are released.
         for agent_record_id in agent_record_ids:
             self._inferences.pop(agent_record_id, None)
 

@@ -1,0 +1,182 @@
+"""Report storage events, accepted records and committed steps, to an observer.
+
+Both events happen at the storage boundary: a record row is inserted for the
+first time, or a commit row lands. Wrapping the storage with
+:class:`ObservedScenarioStorage` reports them without any coordination code
+knowing an observer exists. The wrappers delegate every other call
+unchanged and isolate observer failures, so an exporter can never become
+part of record acceptance or the commit transaction.
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Mapping, Sequence
+
+from reef.core.records_types import AgentRecord, RequestType
+from reef.storage.commits import CommitRecord
+from reef.storage.records import AppendResult, ConsumptionReceipt, RecordLoss, RecordStore, StoredRecord
+from reef.storage.scenario import ScenarioStorage, ScenarioStore
+
+logger = logging.getLogger(__name__)
+
+
+class RecordObserver:
+    """Process-level observer of first-time record inserts and committed steps.
+
+    Observation is a side effect. The wrappers below already isolate
+    failures; implementations should still keep their own work off the
+    caller's thread where it can block, such as network export.
+    """
+
+    def record_accepted(self, item: AgentRecord) -> None:
+        """One record the store inserted for the first time (retries are not reported)."""
+
+    def record_committed(self, commit: CommitRecord) -> None:
+        """One committed step, training or rollback, with the record ids its batch consumed."""
+
+    def close(self) -> None:
+        pass
+
+
+class ObservedRecordStore(RecordStore):
+    """A record store that reports first-time inserts."""
+
+    def __init__(self, inner: RecordStore, observer: RecordObserver) -> None:
+        self._inner = inner
+        self._observer = observer
+
+    def append(self, item: AgentRecord) -> AgentRecord:
+        return self.append_result(item).item
+
+    def append_result(self, item: AgentRecord) -> AppendResult:
+        appended = self._inner.append_result(item)
+        self.notify_accepted((appended,))
+        return appended
+
+    def append_many(self, items: Sequence[AgentRecord]) -> tuple[AppendResult, ...]:
+        appended = self._inner.append_many(items)
+        self.notify_accepted(appended)
+        return appended
+
+    def notify_accepted(self, results: Sequence[AppendResult]) -> None:
+        for appended in results:
+            if appended.inserted:
+                try:
+                    self._observer.record_accepted(appended.item)
+                except Exception:
+                    logger.exception("record observer failed on accepted record %s", appended.item.agent_record_id)
+
+    def existing_receipt(self, item: AgentRecord) -> AgentRecord | None:
+        return self._inner.existing_receipt(item)
+
+    def get(self, scenario: str, agent_record_id: str) -> AgentRecord | None:
+        return self._inner.get(scenario, agent_record_id)
+
+    def replay(self, scenario: str, *, offset: int = 0, limit: int | None = None) -> tuple[AgentRecord, ...]:
+        return self._inner.replay(scenario, offset=offset, limit=limit)
+
+    def replay_page(
+        self, scenario: str, *, after_sequence: int = 0, limit: int = 256
+    ) -> tuple[tuple[int, AgentRecord], ...]:
+        return self._inner.replay_page(scenario, after_sequence=after_sequence, limit=limit)
+
+    def count(self, scenario: str, *, request_type: RequestType | None = None, after_sequence: int = 0) -> int:
+        return self._inner.count(scenario, request_type=request_type, after_sequence=after_sequence)
+
+    def get_for_audit(self, scenario: str, agent_record_id: str) -> StoredRecord | None:
+        return self._inner.get_for_audit(scenario, agent_record_id)
+
+    def audit_page(
+        self, scenario: str, *, after_sequence: int = 0, limit: int = 256, request_type: RequestType | None = None
+    ) -> tuple[StoredRecord, ...]:
+        return self._inner.audit_page(scenario, after_sequence=after_sequence, limit=limit, request_type=request_type)
+
+    def record_consumption(
+        self,
+        scenario: str,
+        agent_record_ids: frozenset[str],
+        *,
+        receipt_id: str,
+        metadata: Mapping[str, object],
+    ) -> None:
+        self._inner.record_consumption(scenario, agent_record_ids, receipt_id=receipt_id, metadata=metadata)
+
+    def consumption_receipts(self, scenario: str) -> tuple[ConsumptionReceipt, ...]:
+        return self._inner.consumption_receipts(scenario)
+
+    def loss(self, scenario: str) -> RecordLoss:
+        return self._inner.loss(scenario)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class ObservedScenarioStore(ScenarioStore):
+    """A scenario session whose record inserts and landed commits are reported."""
+
+    def __init__(self, inner: ScenarioStore, observer: RecordObserver) -> None:
+        self._inner = inner
+        self._observer = observer
+        self._records = ObservedRecordStore(inner.records, observer)
+
+    @property
+    def records(self) -> RecordStore:
+        return self._records
+
+    @property
+    def durable(self) -> bool:
+        return self._inner.durable
+
+    def history(self) -> tuple[CommitRecord, ...]:
+        return self._inner.history()
+
+    def training_run_position(self) -> tuple[int, int]:
+        return self._inner.training_run_position()
+
+    def commit_step(self, *, expected_step: int, commit: CommitRecord) -> CommitRecord:
+        recorded = self._inner.commit_step(expected_step=expected_step, commit=commit)
+        try:
+            self._observer.record_committed(recorded)
+        except Exception:
+            logger.exception("record observer failed on committed step %s of %s", recorded.step, recorded.scenario)
+        return recorded
+
+    def recover(self, *, checkpoint: CommitRecord | None) -> CommitRecord | None:
+        return self._inner.recover(checkpoint=checkpoint)
+
+    def close(self) -> None:
+        self._inner.close()
+
+
+class ObservedScenarioStorage(ScenarioStorage):
+    """Storage whose sessions report to one observer; closing the storage closes the observer."""
+
+    def __init__(self, inner: ScenarioStorage, observer: RecordObserver) -> None:
+        self._inner = inner
+        self._observer = observer
+
+    @property
+    def durable(self) -> bool:
+        return self._inner.durable
+
+    def open(self, scenario: str) -> ScenarioStore:
+        return ObservedScenarioStore(self._inner.open(scenario), self._observer)
+
+    def archive(self, scenario: str) -> tuple[str, ...]:
+        return self._inner.archive(scenario)
+
+    def prune(self, *, days: float, max_bytes: int) -> int:
+        return self._inner.prune(days=days, max_bytes=max_bytes)
+
+    def close(self) -> None:
+        try:
+            self._inner.close()
+        finally:
+            try:
+                self._observer.close()
+            except Exception:
+                logger.exception("record observer failed to close")
+
+
+__all__ = ["ObservedRecordStore", "ObservedScenarioStorage", "ObservedScenarioStore", "RecordObserver"]

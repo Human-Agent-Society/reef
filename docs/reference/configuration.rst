@@ -10,13 +10,17 @@ Local inference needs no YAML file:
 This starts SGLang on an automatically selected loopback port, waits for its
 health endpoint, then starts Reef on ``127.0.0.1:8900``. Use
 ``--inference.tensor-parallel-size 2`` for two visible GPUs; the default is one.
-``--inference.backend sglang`` makes the default backend explicit. The
-service interpreter (``REEF_PYTHON``, otherwise the launcher's interpreter)
-must have SGLang and GPU-enabled PyTorch installed. SGLang validates its GPU environment,
-model compatibility and available device memory during startup. Its output
-is available in ``.reef/run/sglang.log``. The managed path currently supports a single GPU node and SGLang.
-Use the `SGLang installation guide <https://docs.sglang.io/docs/get_started/install>`__
-to prepare the inference environment; the base Reef installation stays CPU-only.
+``--inference.backend sglang`` makes the default backend explicit;
+``--inference.backend vllm`` starts ``vllm.entrypoints.openai.api_server``
+instead. The service interpreter (``REEF_PYTHON``, otherwise the launcher's
+interpreter) must have the selected engine and GPU-enabled PyTorch installed.
+The engine validates its GPU environment, model compatibility and available
+device memory during startup. Its output is available in
+``.reef/run/sglang.log`` or ``.reef/run/vllm.log``. The managed path currently
+supports a single GPU node. Use the `SGLang installation guide
+<https://docs.sglang.io/docs/get-started/install>`__ or the `vLLM installation
+guide <https://docs.vllm.ai/en/latest/getting_started/installation/>`__ to
+prepare the inference environment; the base Reef installation stays CPU-only.
 
 Local model paths and Hugging Face IDs use the existing model resolver.
 Reef resolves a downloaded snapshot once and preserves the original model
@@ -302,12 +306,47 @@ The factory path must name an ``InferenceHandler`` subclass with a
 It does not configure the managed SGLang process. Executor ``options`` and
 recipe-owned option objects likewise stay with their selected components.
 
-For ``reef.inference.sglang.chat.SGLangInferenceHandler``, set
-``inference.handler-config.force_reasoning`` to ``true`` if the chat template
-pre-opens ``<think>``, or ``false`` if it does not. When omitted, the handler
-detects this by rendering the template and caches only a successful result.
-Tokenizer or template errors propagate to the request; they do not silently
-disable reasoning separation. An explicit value bypasses this detection.
+Two token-native handlers record exact samples: the sampled token ids, their
+rollout log probabilities and the weight version that produced each token.
+``reef.inference.sglang.chat.SGLangInferenceHandler`` calls SGLang
+``/generate`` and relays its incremental stream.
+``reef.inference.vllm.chat.VLLMInferenceHandler`` calls vLLM
+``/inference/v1/generate``; it serves buffered responses and answers a
+streaming request with the completed turn as one burst of protocol frames.
+Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
+``sampling_defaults`` and ``force_reasoning``; per-request sampling extras pass
+through ``sglang_sampling_params`` or ``vllm_sampling_params``. A vLLM engine
+serving a training stack also needs Reef's connector, which stamps every
+sampled token with the weight version that produced it::
+
+   --kv-transfer-config '{"kv_connector": "ReefConnector", "kv_connector_module_path": "reef.inference.vllm.connector", "kv_role": "kv_both"}'
+
+The connector moves no KV and composes with another connector under vLLM's
+``MultiConnector``. To combine it with vLLM's native CPU offloading, list
+``OffloadingConnector`` and ``ReefConnector`` as ``MultiConnector`` children
+in ``--kv-transfer-config``; the ``--kv-offloading-size`` flag replaces the
+configured connector, so it cannot be combined with this one. A local release
+without the connector serves under its release id; a live release without it
+is rejected.
+
+``rollout_log_probs`` must mean the same thing on every engine as in the
+trainer. Sampling runs through::
+
+   raw logits -> penalties, logit_bias -> / temperature -> [A] -> top-k, top-p, min-p -> [B] -> sample
+
+SGLang and Slime's trainer both read at [A] (full vocabulary, trainer with
+``rollout_temperature``, no penalties), so they agree as long as a recipe uses
+no penalties or ``logit_bias``. vLLM ``--logprobs-mode processed_logprobs``
+reads at [B], so it matches only with top-k, top-p and min-p off; otherwise
+the trainer must replay vLLM's sampling mask. Verify with Slime's
+``train_rollout_logprob_abs_diff`` on identical weights before training.
+
+For both handlers, set ``inference.handler-config.force_reasoning`` to
+``true`` if the chat template pre-opens ``<think>``, or ``false`` if it does
+not. When omitted, the handler detects this by rendering the template and
+caches only a successful result. Tokenizer or template errors propagate to the
+request; they do not silently disable reasoning separation. An explicit value
+bypasses this detection.
 
 Explicit file selection and legacy compatibility
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -567,6 +606,7 @@ shown above; the repository examples all use version 2.
    reef.recipe | the recipe this deployment serves. Required.
    reef.host | 0.0.0.0 | bind address
    reef.port | 8900 | bind port
+   reef.served_url | | the URL a composite recipe's own evaluation calls (episodes and the proposer) reach this service at; the default is loopback on the bind port, so set it when episodes run on another host. A recipe of one component calls its runtime's endpoint directly and ignores it
    reef.console_origins | [] | exact browser console origins allowed to access the HTTP service; disabled by default
    reef.token | the bearer token the service accepts. Use ``tokens: [...]`` to accept several while rotating.
    reef.model_path | a local HF model directory or a repo id, downloaded on start
@@ -589,41 +629,51 @@ persistent.
    reef.artifact_work_dir | .reef/artifact-work | materialization scratch
    reef.artifact_cache_dir | .reef/artifact-cache | fetched artifact cache
    reef.agent_record_dir | .reef/agent-record | the record store
-   reef.agent_record_retention_days | 7.0 | compacted trace bodies expire this many days after compaction
-   reef.agent_record_retention_max_bytes | 21474836480 | 20 GiB shared across compacted trace bodies in the record directory
+   reef.agent_record_retention_days | 7.0 | deprecated compatibility setting; automatic cleanup no longer expires data by age
+   reef.agent_record_retention_max_bytes | 21474836480 | 20 GiB shared across all record bodies, including unconsumed records
 
 .. warning::
 
    On ephemeral storage, a restart loses the record store, the commit logs, and
    every version.
 
-The record store keeps trace bodies after training compaction. Compaction marks
-records as retired from training; it does not remove their requests, responses,
-or feedback from SQLite immediately. The HTTP service starts retention cleanup
-at startup and repeats it every 60 seconds, outside the inference and training
-request paths. It first removes bodies older than 7 days, then the oldest
-remaining bodies until their total fits within 20 GiB. Both limits are
-configurable above and must be positive; the time limit must also be finite.
+Training completion updates consumption progress without retiring stored bodies.
+Storage manages cleanup independently: the HTTP service runs a sweep at startup
+and every 60 seconds. When the total record-body size exceeds the configured
+budget, storage evicts the oldest records by stored creation time, breaking ties
+by append sequence. Both consumed and unconsumed data are eligible; processors
+cannot protect disk records from capacity eviction. The legacy
+``agent_record_retention_days`` option is accepted but has no cleanup effect.
 
-The byte budget counts UTF-8 JSON payloads, references, and artifact references
-across all scenario databases, including databases under ``archived/``. It is
-shared across the directory, not allocated separately to each scenario. Deletes
-commit in batches of 256. Active records, retry hashes, and commit/receipt
-metadata are retained. Cleanup failures are logged and retried on the next sweep.
+The budget measures UTF-8 JSON payloads, references and artifact references
+across active and archived scenarios. SQLite shares it across the record
+directory; PostgreSQL shares it across the deployment schema. Each eviction
+logs a warning with the scenario, record count, sequence range and body bytes.
+Per-scenario loss totals survive restart. Processor status exposes
+``record_data_incomplete``, ``evicted_record_count`` and ``evicted_body_bytes``
+after a loss; metrics also expose ``records/evicted_count`` and
+``records/data_incomplete``. These describe missing stored data, not proof that
+an already committed model missed those examples. Pending reports whose inputs
+are no longer stored are skipped with a warning; remaining records continue
+through the usual processor.
 
-This is a retained-body budget, not a hard disk quota. Incoming compaction can
-exceed the budget between sweeps; active records, indexes, hashes, commit logs,
-and WAL files take additional space. SQLite reuses pages freed by cleanup but
-does not automatically shrink the database file. Allow additional disk headroom.
-Standalone Python stores do not start a maintenance task; see `Python API <python-api.rst>`__
-for explicit retention and purge methods.
+Retry hashes and commit metadata survive eviction, so retrying an upload does
+not restore evicted records or train them again. A consumer needing multiple
+passes must tolerate missing records once capacity eviction occurs.
 
-Existing stores gain ``compacted_at`` and ``body_bytes`` columns when opened.
-The migration measures retained JSON byte sizes once. Already
-deleted bodies cannot be recovered by this migration. Older Reef versions do
-not filter that column: stop the service and restore a pre-upgrade backup for
-rollback, or purge all compacted bodies with the new version before downgrading.
-Do not share a migrated store between old and new writers.
+This is a body budget, not a hard filesystem quota or an emergency disk-full
+handler. Concurrent writes can exceed it between sweeps. Indexes, retry hashes,
+commit logs and WAL require additional disk headroom. SQLite reuses freed pages
+without automatically shrinking its file. Cleanup failures are logged and
+retried on the next sweep. Standalone stores need an explicit maintenance call;
+see `Python API <python-api.rst>`__.
+
+Existing stores are upgraded transactionally. Older retirement markers and
+receipts become consumption records without deleting original bodies. The old
+columns, indexes and receipt table are removed; PostgreSQL advances its schema
+version to 3. Training commits store only consumption progress. Already deleted
+bodies cannot be recovered. Do not share stores between old and new writers, or
+downgrade without restoring a compatible backup.
 
 Recipe settings such as ``batch_size`` sit beside these in the same section,
 along with any others the recipe declares with ``config_field``. When
@@ -741,6 +791,60 @@ service can assemble their Ray training runtime; their fields are flat
 preset or the deployment's upstream proxy. There, ``data`` holds batching
 fields and a recipe-specific section holds the rest.
 
+A composite recipe serves and evolves several release components in one
+scenario, one recipe per component. Its ``components`` object carries one
+recipe config per component name; each inherits the deployment's ``model``
+unless it names its own, and every component shares the deployment's
+runtime and training runtime. A composite whose component trains weights is
+deployed the way that recipe is: ``training.backend`` selects the training
+backend, the component's own ``data`` section sets its fields, and the
+runtime pair reaches every component. The repository base keeps one
+directory per component: the recipes' seeds are written there, a bootstrap
+model snapshot goes under the weight-training component's directory, and a
+component whose recipe seeds nothing starts empty. Each component's trainer
+runs as its own worker and commits into the same release chain, so every
+step checkpoints and the components share one ``training_mode``. A report
+is admitted when any component's contract accepts it, and each trainer
+keeps the reports its own contract parses:
+
+.. code:: yaml
+
+   implementation: reef.recipe.composite:CompositeRecipe
+   model:
+     path: qwen3-8b
+   components:
+     harness:
+       implementation: reef.recipe.cordis:CordisRecipe
+       evolution:
+         adapter: pi
+         propose: methods.mine:propose
+         evaluate: methods.mine:evaluate
+         tasks: ["..."]
+     config:
+       implementation: my_pkg.config:ConfigRecipe
+
+The same composite with a weight-training component is a deployment file:
+the composite is selected by its dotted class, ``training.backend`` picks the
+backend, and the weight component's fields live under its ``data``:
+
+.. code:: yaml
+
+   schema-version: 2
+   recipe:
+     implementation: reef.recipe.composite:CompositeRecipe
+     config:
+       components:
+         weights:
+           implementation: recipes.sao.recipe:SAORecipe
+           data: {batch_size: 8}
+         harness:
+           implementation: reef.recipe.cordis:CordisRecipe
+           evolution: {adapter: pi, propose: methods.mine:propose, evaluate: methods.mine:evaluate, tasks: ["..."]}
+   inference:
+     model-path: Qwen/Qwen3-8B
+   training:
+     backend: slime
+
 A preset's ``runtime.type: executor_training`` selects an executor-backed
 training coordinator. Its ``executor`` mapping accepts ``backend`` (default
 ``auto``, resolving to ``uni``, ``mp`` or ``ray``, or a custom executor import path), ordered ``workers`` and backend
@@ -826,13 +930,17 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.task_manifest | a split manifest written by ``reef.core.tasks``; the eval split names the evaluation's tasks as directories under ``evolution.tasks_root``, each passed to the adapter as its path; set instead of ``evolution.tasks`` and only with an adapter whose prompt is a task directory (``terminus``); ``promote_failures`` cannot be combined with it
    evolution.tasks_root | the directory the manifest's task names live under
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes, whose loop events listen to ``native_hook`` nodes, and whose loop is a ``native_graph`` node or, as code, a ``native_loop`` node), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
+   evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own
+   evolution.on_stale | merge | what a step's result becomes when another component's commit (a weights step, in a composite) replaced the release it was evaluated against: ``merge`` commits it onto the release served now, since each pairing compared candidate and current under the same conditions when it ran (the commit metrics then carry ``merged_onto``); ``reevaluate`` keeps the candidate and runs its episodes again against the new release, under the next attempt directory of the step record; ``refuse`` drops the result and proposes again
    evolution.forbid_residue | false | when true, an episode leaving files outside the cleanup whitelist scores as one that could not run
    evolution.max_steps | 0 | stop automatic evolve steps once this many steps ran, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs past it
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
+   evolution.multimodal | | reefine only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; the profile reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
+   evolution.proposer_agent | | off unless set (the reefine recipe sets it); a proposer that takes ``agent_host`` runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; ``e2b`` runs it in an E2B cloud sandbox that reaches the gateway through a tunnel, with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>``, built on first use), and needs the ``e2b`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See the reefine recipe guide
    evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
    execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
@@ -848,10 +956,10 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.seed | entry options loaded into the tree on first boot, or a dotted ``module:attribute`` naming a sequence of them (``reef.harness.runners.native.seed:SEED_NODES`` is the native harness's shipped tools and hook); recovered state takes precedence
    evolution.models | auxiliary models for the method: ``url``, ``model``, optional ``api`` (default ``openai``) and ``timeout_s``, with the credential as a literal ``api_key`` or an ``api_key_env`` variable name
    evolution.version_check | appends the adapter's update notice; an interactive pulled tree offers to run the update or skip when behind
-   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reef-harness <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``data.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; ``pi`` only, other adapters refuse boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
+   evolution.requests | false | appends the adapter's harness requests extension and its extension API skill after the notice (the reserved entries ``reef-requests`` and ``reef-pi-extension-api``), so a ``reef-pi`` session gets ``/reefine <request>`` in the TUI (submits to ``POST /reef/train``, which needs ``data.training_mode: hybrid`` or ``manual``) and the method reads the API reference before it writes an extension; on ``claude``, ``codex``, ``opencode``, ``hermes`` and ``dsh`` it appends one ``agent_command`` named ``reefine`` under the same reserved id, which has the session's model file the request with ``reef-<adapter> evolve``, wait with ``reef-<adapter> wait`` and offer ``reef-<adapter> update``; an adapter with no command surface (``terminus``, ``native``) refuses boot (a seed entry: a deployment that boots from a recovered state keeps its tree, as with ``version_check``); the tutorial's ``tutorials/evolve-your-harness/configs/deployment.yaml`` sets it, with ``version_check: true`` and ``review_kinds: [code_extension]``
    evolution.proposals_dir | .reef/proposals | where agent proposals from ``POST /reef/harness/proposals`` wait for the next evolve step: one directory per scenario under it (``<dir>/<scenario>``, made absolute at build, created when the first proposal arrives), with ``claimed/``, ``refused/`` and ``settled/`` beside the pending files
    evolution.max_pending_proposals | 8 | how many admitted proposals one scenario holds; the route answers ``admitted: false`` with reason ``inbox full`` beyond it, and with reason ``manual mode takes instructions only`` on a scenario in ``data.training_mode: manual``
-   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
+   evolution.step_record_dir | | off by default; when set, every step writes its record under ``<dir>/<scenario>/<step>`` (the path is made absolute at build): ``proposer.json`` (each model call the proposer made: ``model``, ``messages`` and ``params`` for a ``chat`` or ``body`` for a ``complete``, then ``reply`` and the provider ``response`` for a built-in ``chat`` binding, ``response`` for ``complete``, or ``error``, and ``seconds``; the response retains provider reasoning/thinking fields when returned; long text is clipped with a marker and a credential shaped literal is replaced by ``[redacted credential]``), ``mutations.json`` (the parsed proposal with its full options, refused or not, redacted the same way) and ``episodes/<side>-<task index>/`` (each evaluation episode's trajectory files as the adapter writes them, copied out of its root before the root is removed, plus ``episode.json`` with the task, the exit code, stdout and stderr, the residue, the score, the failure and the stage path; a repeat adds ``-<repeat>``); a recheck step writes ``episodes/`` only and has no proposer files; a step skipped on the step cap or the failure streak writes nothing; a step directory is never reused, so a retried step lands in ``<step>-2``, then ``<step>-3``, and a kept candidate evaluated again under ``on_stale: reevaluate`` writes its ``episodes/`` under the next attempt directory with ``reevaluation.json`` naming the first; nothing prunes the directory; an unwritable path refuses boot and a record copy that fails aborts the step instead of scoring it
 
 The served model's binding is appended at render time; it never enters the
 published files. The seed defines the baseline the first mutation is measured
@@ -1032,7 +1140,15 @@ binds and another after each rollback. The deterministic run id includes those
 identities, so restarting resumes the same run with ``resume=allow``. A rollback
 finishes the current run, marks its summary with the source and target, and
 resets ``train/step`` to zero; the globally monotonic ``reef/step`` stays
-attached for joining a run back to the commit log.
+attached for joining a run back to the commit log. A scenario with several
+trainers shares the run: each step's metrics carry its component name as a
+prefix (``harness/train/loss``) on the same ``train/step`` axis with
+``reef/component`` on the row, its optimizer step rows land under
+``<component>/step/*`` on their own counter, and the run config lists each
+component's backend under ``reef.components`` and ``backend.<component>``
+with ``reef.backend`` null. The names ``train``, ``step``, ``reef`` and
+``operations`` are these prefixes, so a composite recipe refuses them as
+component names.
 
 Recipe and processor code logs through the same object without importing W&B:
 
@@ -1071,13 +1187,20 @@ The following names are relative to ``operations/``:
    * - ``serve/admission/*``
      - Time acquiring runtime admission. ``active`` is the number waiting for
        admission; immediate admissions also contribute to count and duration.
+   * - ``evaluate/request/*``, ``evaluate/admission/*``
+     - The same measurements for calls on the evaluation route, a step's
+       episodes and proposer calls, which keep no record; counted apart so a
+       step does not read as served traffic.
    * - ``serve/retries_total``, ``serve/timeouts_total``
      - Additional buffered inference attempts and requests that exhaust the
        inference retry deadline. Retries do not create extra request counts.
+       Calls on the evaluation route count under ``evaluate/retries_total``
+       and ``evaluate/timeouts_total``.
    * - ``serve/version_mismatch_total``
      - Responses rejected by runtime-load-ID verification, including missing
        engine version information and buffered or deferred streaming responses.
        This is a counter of observed rejections, not a background drift probe.
+       Calls on the evaluation route count under ``evaluate/version_mismatch_total``.
    * - ``ingest/accepted_total``, ``ingest/duplicates_total``
      - New records appended and identical retries acknowledged by the dispatcher.
        Accepted records include incomplete-stream diagnostics; acceptance does
@@ -1172,3 +1295,75 @@ Checkpoint paths are metadata only unless ``upload_checkpoints: true``.
 
 Import, initialization, logging, summary, and upload failures are reported in
 the service log and never fail a training step or its commit.
+
+Record tracing
+--------------
+
+Record tracing exports every accepted record and every committed training
+step as OpenTelemetry spans, so a tracing backend shows what an agent did in a
+scenario and which version it trained. It is optional, off by default, and
+independent of experiment tracking. Reef speaks OTLP over HTTP and names no
+vendor: point it at Langfuse, Arize Phoenix, Jaeger, Grafana Tempo or an
+OpenTelemetry Collector. Install ``reef-infra[opentelemetry]``.
+
+.. code:: yaml
+
+   observability:
+     tracing:
+       enabled: true
+       endpoint: https://cloud.langfuse.com/api/public/otel/v1/traces  # full OTLP/HTTP traces URL
+       authorization: ${LANGFUSE_AUTH}  # the backend credential, sent as the Authorization header
+       service_name: reef              # optional resource service.name
+
+``endpoint`` is the complete traces URL. ``authorization`` is the credential
+the backend expects in its ``Authorization`` header: ``Basic <base64
+public:secret>`` for Langfuse, ``Bearer <token>`` for most others. It is
+handled like ``inference.upstream_api_key``: write it as an environment
+reference in the YAML, or omit it and export ``REEF_TRACING_AUTHORIZATION``;
+the startup report masks it and it never appears in a span or a log line. A
+backend that expects its credential under another header name, such as
+``x-api-key``, takes it in the ``headers`` mapping; the startup report masks
+every header value, and ``Authorization`` itself is rejected there so the
+credential has one place. When no endpoint, credential or header is configured the
+exporter reads the standard ``OTEL_EXPORTER_OTLP_ENDPOINT`` and
+``OTEL_EXPORTER_OTLP_HEADERS`` environment variables instead.
+
+Each accepted inference record becomes the root span of its own trace, named
+``chat <model>``. Its trace and span ids derive from the scenario and record
+id, so a restart or a second Reef host produces the same ids. The span carries:
+
+* ``session.id`` and ``reef.scenario``: the scenario.
+* ``reef.agent_record_id`` and ``reef.request_type``: the receipt and record kind.
+* ``gen_ai.request.model``, ``gen_ai.response.model``, ``gen_ai.response.id``,
+  ``gen_ai.usage.input_tokens``, ``gen_ai.usage.output_tokens`` and
+  ``gen_ai.response.finish_reasons`` from the provider request and response,
+  following the OpenTelemetry GenAI semantic conventions.
+* ``reef.release_id``, ``reef.content_id`` and ``reef.runtime_load_id``: the
+  version that served the request, when the record names one.
+* ``reef.tags``: the ``x-reef-tag-*`` request tags.
+
+A feedback record becomes a ``feedback`` span inside the trace of the first
+inference it references, with ``reef.score`` and ``reef.references``; further
+references are span links. A training instruction becomes a
+``training request`` span. A committed step adds a ``training step N`` span
+with the commit's step, release, job id, consumed record counts,
+its component as ``reef.component`` when the scenario runs several trainers,
+and its scalar metrics as ``reef.metrics.*``, plus one ``trained in step N``
+child span below every record the step consumed, linked back to the commit
+span. Records carry one timestamp, so their spans have zero duration and start
+at the record's creation time.
+
+For streamed provider responses, token usage is read from the captured SSE
+events, including Chat Completions usage chunks, Responses terminal events
+and Anthropic message usage. Cumulative counts are not summed across chunks.
+If the provider sends no usage, token counts remain absent; for Chat
+Completions, request ``stream_options: {include_usage: true}`` when supported.
+The stored response and the forwarded stream remain unchanged.
+
+Spans carry the exchange itself: the request messages and the reply as JSON
+in ``gen_ai.input.messages`` and ``gen_ai.output.messages``, feedback text in
+``reef.feedback`` and instruction text in ``reef.instruction``. The backend
+therefore sees the scenario's traffic; point tracing only at one trusted with
+it. Export failures are reported in the service log and never
+fail record acceptance or a commit; the exporter batches spans in a background
+thread and flushes them during graceful shutdown.

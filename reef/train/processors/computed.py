@@ -6,7 +6,7 @@ explicit reports; a computed-feedback recipe produces its signal from the traffi
 record only becomes judgeable when some LATER record completes it, and
 the judgment itself calls models, so it runs asynchronously on a private
 worker. This engine owns everything between those facts and the trainer:
-the record lifecycle, the judging worker, the batch cycle, retention, and
+the record lifecycle, the judging worker, the batch cycle, buffer release, and
 crash-replay semantics. A recipe subclasses it and writes four methods:
 
 * ``ingest(record)`` — the method's own correlation, written with the
@@ -41,7 +41,7 @@ from threading import Lock, Thread
 from typing import Any
 
 from reef.core.records_types import AgentRecord
-from reef.train.processors.base import DataProcessor, RetentionDecision
+from reef.train.processors.base import DataProcessor
 from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
@@ -178,7 +178,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
 
     Every ingested receipt sits in exactly one state: tracked
     (awaiting future traffic) → in-flight (judging) → candidate | terminal
-    | trained. Terminal records are released for compaction instead of
+    | trained. Terminal records are released from memory instead of
     ever entering a batch. Only the newest runtime load ID (by record
     arrival, not judgment arrival) ever batches: continual serving
     advances the version every step, and stale pending candidates would
@@ -193,7 +193,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     def __init__(self, context: ProcessorContext, *, worker: JudgingWorker | None) -> None:
         super().__init__(context)
         #: No worker: records track and expire, nothing is ever judged,
-        #: everything stays compactable.
+        #: everything can be released.
         self._worker = worker
 
         # Every ingested receipt is in exactly one state.
@@ -281,7 +281,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
             self.retire(job.receipt)
 
     def retire(self, receipt: str) -> None:
-        """This receipt is terminal: released for compaction, never batched."""
+        """This receipt is terminal: released from memory, never batched."""
         self._terminal.add(receipt)
         self._arrival_order.pop(receipt, None)
 
@@ -297,7 +297,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
             return
         for judgment in self._worker.poll():
             # 1. Only records still in flight resolve; anything else was
-            #    already retired by compaction or teardown.
+            #    already released or closed.
             record = self._in_flight.pop(judgment.receipt, None)
             if record is None:
                 continue
@@ -361,16 +361,13 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         if self._worker is not None:
             self._worker.close()
 
-    # -------------------------------------------------------------- retention
+    # ---------------------------------------------------------- buffer release
 
-    def retention_decision(self) -> RetentionDecision:
+    def releasable_record_ids(self) -> frozenset[str]:
         protected = frozenset(self._tracked) | frozenset(self._in_flight) | frozenset(self._candidates)
-        return RetentionDecision(
-            protected_agent_record_ids=protected,
-            releasable_agent_record_ids=frozenset(self._terminal) - protected,
-        )
+        return frozenset(self._terminal) - protected
 
-    def compaction_applied(self, agent_record_ids: frozenset[str]) -> None:
+    def release_records(self, agent_record_ids: frozenset[str]) -> None:
         self._terminal -= agent_record_ids
         for agent_record_id in agent_record_ids:
             self._tracked.pop(agent_record_id, None)

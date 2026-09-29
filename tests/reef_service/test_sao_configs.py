@@ -133,11 +133,20 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--expert-tensor-parallel-size",
         "--group-query-attention",
         "--hidden-dropout",
+        "--lr-decay-iters",
         "--lr-decay-style",
+        "--lr-warmup-iters",
+        "--moe-aux-loss-coeff",
+        "--moe-grouped-gemm",
+        "--moe-permute-fusion",
+        "--moe-router-dtype",
+        "--moe-router-topk",
+        "--moe-token-dispatcher-type",
         "--normalization",
         "--no-save-optim",
         "--optimizer",
         "--optimizer-cpu-offload",
+        "--optimizer-offload-fraction",
         "--overlap-cpu-optimizer-d2h-h2d",
         "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
@@ -167,8 +176,16 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
     "REEF_TOKEN": "config-test-token",
+    "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
+    "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
+    "SDFT_LR_DECAY_ITERS": "252",
+    "SDFT_MODEL_PATH": "/root/models/Qwen2.5-7B-Instruct",
     "REEF_UPSTREAM_URL": "http://127.0.0.1:8000/v1",
     "REEF_UPSTREAM_MODEL": "config-test-model",
+    "SAO_BATCH": "128",
+    "SAO_CKPT_DIR": "/tmp/reef-config-test/sao-checkpoints",
+    "SAO_ROLLOUT_GPUS": "8",
+    "SAO_TRAIN_NODES": "4",
     "TTTD_CHECKPOINT_INTERVAL": "2",
     "TTTD_CUDA_GRAPH_MAX_BS": "8",
     "TTTD_GLOBAL_BATCH_SIZE": "8",
@@ -301,6 +318,10 @@ def _parse_config(config_path: Path):
     # The full parser adds these bootstrap flags before its Slime option provider.
     parser.add_argument("--debug-train-only", action="store_true")
     parser.add_argument("--debug-rollout-only", action="store_true")
+    # The distillation base refuses dropout while the student selects the
+    # top-K support before the step. Parse the real values on CPU too.
+    parser.add_argument("--attention-dropout", type=float, default=0.1)
+    parser.add_argument("--hidden-dropout", type=float, default=0.1)
     args, leftover = parser.parse_known_args(tokens, namespace=SlimeArguments())
 
     index = 0
@@ -371,6 +392,8 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/openclawrl/examples/openclawrl/serve.yaml",
         "recipes/sao/examples/imo_answerbench/serve.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
+        "recipes/sdft/examples/skill_stream/serve.yaml",
+        "recipes/sdpo/examples/sciknoweval/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -392,7 +415,11 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "tutorials/evolve-your-harness/configs/serve-native.yaml",
         "tutorials/evolve-your-harness/configs/serve.yaml",
         "recipes/sao/examples/imo_answerbench/serve.yaml",
+        "recipes/sao/examples/imo_answerbench/serve-30b.yaml",
+        "recipes/sao/examples/imo_answerbench/serve-30b-multi.yaml",
         "recipes/sao/examples/ceobench/serve.yaml",
+        "recipes/sdft/examples/skill_stream/serve.yaml",
+        "recipes/sdpo/examples/sciknoweval/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

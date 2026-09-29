@@ -13,18 +13,28 @@ and its selection policy into the candidate evaluator executed by ``Trainer``.
 from __future__ import annotations
 
 import importlib
+import logging
 import warnings
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, ClassVar
+from urllib.parse import quote
 
 from reef.core.errors import ReefError
+from reef.core.model_metadata import ModelMetadata
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
-from reef.harness.episodes.executor import EpisodeExecutor, build_executor
+from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
+from reef.harness.episodes.executor import (
+    EpisodeExecutor,
+    LocalExecutor,
+    SandboxExecutor,
+    SandboxUnavailable,
+    build_executor,
+)
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
@@ -32,13 +42,14 @@ from reef.harness.tree.render import render_composition
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
 from reef.observability import ExperimentLogger
-from reef.recipe.base import Recipe
+from reef.recipe.base import Recipe, ServedEndpoint
 from reef.recipe.config_fields import config_field
 from reef.recipe.errors import RecipeConfigError
 from reef.runtime.executor.config import ExecutorSettings, WorkerResources, executor_settings, role_executor_settings
 from reef.storage.records import RecordStore
 from reef.surface.base import Surface
 from reef.surface.harnesses import create_harness_surface
+from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import (
     CordisBackend,
     FloorPluginFactory,
@@ -65,16 +76,79 @@ _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
 }
 
 
+def proposer_agent_settings(section: Any, environ: Mapping[str, str]) -> tuple[EpisodeExecutor | None, float, float]:
+    """``evolution.proposer_agent`` as the agent's executor and its two timeouts; no section runs no agent.
+
+    ``sandbox: bwrap`` jails the agent and gives it the internet but no host port
+    but the gateway's, and refuses to start where bwrap or pasta is missing;
+    ``sandbox: e2b`` runs it in an E2B cloud sandbox (``e2b_api_key``, else
+    ``E2B_API_KEY``; ``e2b_template``, else the harness's pinned binary, built on
+    first use) that reaches the gateway through a tunnel and nothing else of the
+    host; ``sandbox: none`` runs it unisolated with the service's privileges, and must
+    be chosen. Left empty (and ``REEF_PROPOSER_SANDBOX`` unset), the agent is
+    jailed where the host can, and off (the text proposer answers requests)
+    where it cannot.
+    """
+    if section is None:
+        return None, 1800.0, 300.0
+    if not isinstance(section, Mapping):
+        raise RecipeConfigError("evolution.proposer_agent must be a mapping")
+    timeouts = []
+    for key, default in (("timeout_s", 1800.0), ("trial_timeout_s", 300.0)):
+        value = section.get(key, default)
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise RecipeConfigError(f"evolution.proposer_agent.{key} must be a positive number")
+        timeouts.append(float(value))
+    sandbox = str(section.get("sandbox") or environ.get("REEF_PROPOSER_SANDBOX") or "").strip()
+    if sandbox == "none":
+        logging.getLogger(__name__).warning(
+            "evolution.proposer_agent.sandbox is none: the agent proposer runs with the service's own privileges and "
+            "full network access, fed text from clients; use it only where you trust every client"
+        )
+        return LocalExecutor(), timeouts[0], timeouts[1]
+    if sandbox == "e2b":
+        remote = E2BExecutor(
+            api_key=str(section.get("e2b_api_key") or environ.get("E2B_API_KEY") or "").strip(),
+            template=str(section.get("e2b_template") or "").strip(),
+            timeout_s=timeouts[0],
+        )
+        try:
+            remote.preflight()
+        except SandboxUnavailable as exc:
+            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is e2b, but {exc}") from exc
+        return remote, timeouts[0], timeouts[1]
+    if sandbox not in ("", "bwrap"):
+        raise RecipeConfigError("evolution.proposer_agent.sandbox must be 'bwrap', 'e2b' or 'none'")
+    executor = SandboxExecutor(network="isolated")
+    try:
+        executor.preflight()
+    except SandboxUnavailable as exc:
+        if sandbox == "bwrap":
+            raise RecipeConfigError(f"evolution.proposer_agent.sandbox is bwrap, but {exc}") from exc
+        logging.getLogger(__name__).warning(
+            "the agent proposer is off: %s. Requests are answered by the text proposer; set "
+            "evolution.proposer_agent.sandbox: none to run the agent without isolation",
+            exc,
+        )
+        return None, timeouts[0], timeouts[1]
+    return executor, timeouts[0], timeouts[1]
+
+
 @dataclass(frozen=True)
 class _ScenarioModels(ModelBindingsResolver):
     config: ModelConfig
     recipe: CordisRecipe
+    #: The scenario the bindings serve; a call naming none resolves for it.
+    scenario: str | None = None
 
-    def resolve(self) -> ModelBindings:
+    def resolve(self, scenario: str | None = None) -> ModelBindings:
+        scenario = self.scenario if scenario is None else scenario
         runtime = self.config.runtime
         if runtime is None:
-            return self.recipe.default_model_bindings()
-        served = ModelBinding.from_runtime(runtime)
+            return self.recipe.default_model_bindings(scenario)
+        # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
+        binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
+        served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
 
 
@@ -229,6 +303,12 @@ class CordisRecipe(Recipe):
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
+    model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
+    #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
+    served_endpoint: ServedEndpoint | None = None
+    #: What a result becomes when another component's commit replaced its base while it was evaluated:
+    #: merged onto the release served now, evaluated again, or refused and proposed again.
+    on_stale: StaleResultPolicy = "merge"
     candidate_plugin: CandidatePluginFactory = field(default_factory=ScoreComparisonPluginFactory, repr=False)
     episode_workers: int | None = None  # Deprecated Python compatibility alias.
     #: Default proposal inbox root, with one directory per scenario.
@@ -237,6 +317,10 @@ class CordisRecipe(Recipe):
     step_record_dir: str | None = None
     worker_executor: ExecutorSettings = field(default_factory=ExecutorSettings)
     worker_gpus: float | None = None
+    #: The isolation an agent proposer runs under (``evolution.proposer_agent``); ``None`` runs no agent.
+    agent_executor: EpisodeExecutor | None = None
+    agent_timeout_s: float = 1800.0
+    agent_trial_timeout_s: float = 300.0
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
     batch_size: int = config_field(1)
@@ -251,6 +335,10 @@ class CordisRecipe(Recipe):
     @property
     def report_type(self) -> type[ScoredRolloutReport]:
         return ScoredRolloutReport
+
+    @property
+    def harness_adapter(self) -> str | None:
+        return self.adapter
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -272,6 +360,8 @@ class CordisRecipe(Recipe):
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
+        if self.on_stale not in STALE_RESULT_POLICIES:
+            raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
         for label, value in (
             ("max_steps", self.max_steps),
             ("max_failure_streak", self.max_failure_streak),
@@ -355,6 +445,9 @@ class CordisRecipe(Recipe):
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
+        on_stale = evolution.get("on_stale", "merge")
+        if on_stale not in STALE_RESULT_POLICIES:
+            raise RecipeConfigError(f"evolution.on_stale must be one of {STALE_RESULT_POLICIES}")
         forbid_residue = evolution.get("forbid_residue", False)
         if not isinstance(forbid_residue, bool):
             raise RecipeConfigError("evolution.forbid_residue must be a boolean")
@@ -453,6 +546,17 @@ class CordisRecipe(Recipe):
         named = evolution.get("models") or {}
         if not isinstance(named, Mapping):
             raise RecipeConfigError("evolution.models must map a name to a model section (url, model, api_key_env)")
+        metadata_config = evolution.get("model_metadata", {})
+        if not isinstance(metadata_config, Mapping):
+            raise RecipeConfigError("evolution.model_metadata must map model names to metadata")
+        model_metadata: dict[str, ModelMetadata] = {}
+        for name, section in metadata_config.items():
+            if not isinstance(name, str) or not name.strip():
+                raise RecipeConfigError("evolution.model_metadata requires non-empty model names")
+            try:
+                model_metadata[name] = ModelMetadata.from_config(section)
+            except ValueError as exc:
+                raise RecipeConfigError(f"evolution.model_metadata.{name}: {exc}") from exc
         models: dict[str, ModelBinding] = {}
         for name, section in named.items():
             if not isinstance(name, str) or not name or not isinstance(section, Mapping):
@@ -512,7 +616,17 @@ class CordisRecipe(Recipe):
             evaluation_selection(scorer, episode_workers, worker_executor, worker_gpus)
         except (TypeError, ValueError) as exc:
             raise RecipeConfigError(str(exc)) from exc
+        agent_executor, agent_timeout_s, agent_trial_timeout_s = proposer_agent_settings(
+            evolution.get("proposer_agent"), values
+        )
+        if isinstance(agent_executor, E2BExecutor):
+            # The deployment's own state directory names its sandboxes, so its first sandbox can stop the ones a
+            # previous run left, which a stop mid run never closed.
+            agent_executor = replace(agent_executor, owner=deployment_owner(Path(proposals_dir.strip())))
         return {
+            "agent_executor": agent_executor,
+            "agent_timeout_s": agent_timeout_s,
+            "agent_trial_timeout_s": agent_trial_timeout_s,
             "proposals_dir": proposals_dir.strip(),
             "max_pending_proposals": max_pending,
             "propose": resolve_proposer(evolution.get("propose")),
@@ -525,6 +639,7 @@ class CordisRecipe(Recipe):
             "binary": binary,
             "episode_timeout_s": float(timeout),
             "episode_repeats": repeats,
+            "on_stale": on_stale,
             "forbid_residue": forbid_residue,
             **budgets,
             "floor_score": float(floor_score),
@@ -538,34 +653,66 @@ class CordisRecipe(Recipe):
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
+            "model_metadata": model_metadata,
             "candidate_plugin": candidate_plugin,
             "episode_workers": episode_workers,
             "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
         }
 
-    def model_binding(self) -> ModelBinding:
-        """The served model's endpoint, derived from the recipe's runtime."""
+    def with_served_endpoint(self, endpoint: ServedEndpoint) -> CordisRecipe:
+        return replace(self, served_endpoint=endpoint)
+
+    def model_binding(self, scenario: str | None = None) -> ModelBinding:
+        """The served model's endpoint.
+
+        With the service known and a scenario named, this Reef's own
+        evaluation route for that scenario: an episode then samples the
+        release the scenario serves, weights, request defaults and all, and
+        its calls are kept by nobody. Otherwise the runtime's own endpoint.
+        """
         if self.runtime is None:
             raise RecipeConfigError(
                 "harness evolution requires an inference runtime: set reef.upstream_url (and reef.upstream_model) "
                 "in the deployment config"
             )
         try:
-            return ModelBinding.from_runtime(self.runtime, model=self.model_name)
+            binding = ModelBinding.from_runtime(self.runtime, model=self.model_name)
         except ValueError as exc:
             raise RecipeConfigError(str(exc)) from exc
+        return self.served_through_service(self.bind_model_metadata(binding), scenario)
 
-    def default_model_bindings(self) -> ModelBindings:
-        return ModelBindings(served=self.model_binding(), named=dict(self.models))
+    def bind_model_metadata(self, binding: ModelBinding) -> ModelBinding:
+        """Only Codex needs discovery; keep other adapters' startup independent of /models."""
+        if self.adapter == "codex":
+            return binding.with_metadata(self.model_metadata.get(binding.model))
+        return binding
 
-    def model_bindings(self) -> ModelBindings:
+    def served_through_service(self, binding: ModelBinding, scenario: str | None) -> ModelBinding:
+        """``binding`` routed through this Reef's evaluation route for ``scenario``, when the service is known.
+
+        A component of a composed release names itself in the route, so the
+        release's hooks for the component a candidate replaces stay out.
+        """
+        if self.served_endpoint is None or scenario is None:
+            return binding
+        # The name is free form: quoted as the wrapper quotes it, so a slash or a space stays one segment.
+        route = f"{self.served_endpoint.url}/reef/scenarios/{quote(scenario, safe='')}"
+        component = self.served_endpoint.component
+        if component is not None:
+            route += f"/components/{quote(component, safe='')}"
+        return replace(binding, base_url=f"{route}/evaluation", api_key=self.served_endpoint.token)
+
+    def default_model_bindings(self, scenario: str | None = None) -> ModelBindings:
+        return ModelBindings(served=self.model_binding(scenario), named=dict(self.models))
+
+    def model_bindings(self, scenario: str | None = None) -> ModelBindings:
         """The scenario's model override, or the recipe's served and named models."""
         if self.scenario_model is not None:
-            return _ScenarioModels(self.scenario_model, self).resolve()
-        return self.default_model_bindings()
+            return _ScenarioModels(self.scenario_model, self).resolve(scenario)
+        return self.default_model_bindings(scenario)
 
     def build_surface(self, scenario: str) -> Surface:
-        model = self.model_name or getattr(self.runtime, "model_path", None)
+        model = self.model_name or (self.runtime.model_path if self.runtime is not None else None)
         # Only a provider proxy has a dialect; a local engine serves Chat Completions.
         api = self.runtime.api if isinstance(self.runtime, InferenceProxyRuntime) else "openai"
         client_models = self.client_models
@@ -574,10 +721,17 @@ class CordisRecipe(Recipe):
             model = override.model_path
             api = override.api
             client_models = ()
+        if self.adapter == "codex" and self.runtime is not None:
+            selected = self.bind_model_metadata(ModelBinding.from_runtime(override or self.runtime, model=model))
+            served_metadata = selected.metadata
+        else:
+            served_metadata = None
         return create_harness_surface(
             seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
+            model_metadata=self.model_metadata,
+            served_metadata=served_metadata,
             client_models=client_models,
         )
 
@@ -608,9 +762,10 @@ class CordisRecipe(Recipe):
         algorithm_state: Mapping[str, Any] | None = None,
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
-        kwargs = self._backend_kwargs()
+        kwargs = self._backend_kwargs(scenario)
         if self.scenario_model is not None:
-            kwargs["model_resolver"] = _ScenarioModels(self.scenario_model, self)
+            # Frozen again at every step, for this scenario: the bindings then follow the service's route.
+            kwargs["model_resolver"] = _ScenarioModels(self.scenario_model, self, scenario)
         # One recipe serves many scenarios, so each scenario's steps record under their own directory; absolute,
         # so the path a commit record names resolves from any working directory.
         if kwargs["step_record_dir"] is not None:
@@ -624,14 +779,15 @@ class CordisRecipe(Recipe):
             experiment_logger=experiment_logger,
         )
 
-    def _backend_kwargs(self) -> dict[str, Any]:
+    def _backend_kwargs(self, scenario: str | None = None) -> dict[str, Any]:
         """Arguments shared by the stock backend and recipe specializations."""
         return {
             "descriptor": get_adapter(self.adapter),
             "propose": self.propose,
             "score_episode": self.score_episode,
             "tasks": self.tasks,
-            "models": self.model_bindings(),
+            "models": self.model_bindings(scenario),
+            "on_stale": self.on_stale,
             "binary": self.binary,
             "episode_timeout_s": self.episode_timeout_s,
             "episode_repeats": self.episode_repeats,
@@ -652,6 +808,9 @@ class CordisRecipe(Recipe):
             "max_pending_proposals": self.max_pending_proposals,
             "step_record_dir": self.step_record_dir,
             "worker_executor": self.worker_executor,
+            "agent_executor": self.agent_executor,
+            "agent_timeout_s": self.agent_timeout_s,
+            "agent_trial_timeout_s": self.agent_trial_timeout_s,
         }
 
     def _build_trainer(

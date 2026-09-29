@@ -358,9 +358,9 @@ use the PR's `ci` rerun to satisfy its merge checks.
 
 ## Review and acceptance
 
-Maintainers route reviews according to the affected areas. The
-[maintenance model](.github/MAINTAINER.md) defines Maintainer, Merge Oncall,
-and Area Reviewer responsibilities and the merge process. Reviewers may ask for
+GitHub requests reviews from the code owners of the affected areas. The
+[maintenance model](.github/MAINTAINER.md) defines Maintainer, Code Owner, and
+Area Reviewer responsibilities and the merge process. Reviewers may ask for
 changes to correctness, interfaces, tests, documentation, compatibility,
 operability, or scope. Authors are expected to respond to substantive comments
 and to say when a request is unclear or when they disagree.

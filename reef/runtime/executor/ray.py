@@ -8,7 +8,14 @@ from contextlib import suppress
 from time import monotonic
 from typing import Any
 
-from reef.runtime.executor.base import ExecutorConfig, ExecutorFuture, SubmittingExecutor, check_rank, resolve_class
+from reef.runtime.executor.base import (
+    ExecutorConfig,
+    ExecutorFuture,
+    SubmittingExecutor,
+    WorkerSpec,
+    check_rank,
+    resolve_class,
+)
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener, FailureState
 from reef.runtime.executor.ray_runtime import RayRuntimeLease, acquire_ray_runtime
 
@@ -61,6 +68,20 @@ class RayExecutorFuture(ExecutorFuture):
                 raise ExecutorFailedError(self._failure_state.failure or failure) from exc
 
 
+def actor_options(config: ExecutorConfig, spec: WorkerSpec) -> dict[str, Any]:
+    """Ray actor options for one worker: executor defaults, per-worker overrides, node placement."""
+    options = {"max_restarts": 0, "max_task_retries": 0, **config.options, **spec.options}
+    if options["max_task_retries"] != 0:
+        raise ValueError("RayExecutor requires max_task_retries=0 to avoid replaying mutating RPCs")
+    if config.node_id is not None:
+        if "scheduling_strategy" in options:
+            raise ValueError("RayExecutor cannot combine node_id with a scheduling_strategy option")
+        from ray.util.scheduling_strategies import NodeAffinitySchedulingStrategy
+
+        options["scheduling_strategy"] = NodeAffinitySchedulingStrategy(node_id=config.node_id, soft=False)
+    return options
+
+
 class RayExecutor(SubmittingExecutor):
     """Launch Ray actors, or attach an existing group without taking ownership.
 
@@ -81,9 +102,7 @@ class RayExecutor(SubmittingExecutor):
             self._runtime_lease = acquire_ray_runtime()
             for spec in self.config.workers:
                 actor_class = ray.remote(resolve_class(spec.worker_cls))
-                options = {"max_restarts": 0, "max_task_retries": 0, **self.config.options, **spec.options}
-                if options["max_task_retries"] != 0:
-                    raise ValueError("RayExecutor requires max_task_retries=0 to avoid replaying mutating RPCs")
+                options = actor_options(self.config, spec)
                 workers.append(actor_class.options(**options).remote(*spec.args, **dict(spec.kwargs)))
             self._workers = tuple(workers)
             # Actor constructors run asynchronously. Readiness makes constructor
