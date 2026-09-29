@@ -4,7 +4,9 @@ import pytest
 
 from reef.artifact import ArtifactNotFound, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.inference.http import InferenceProxyRuntime
 from reef.recipe import Recipe
+from reef.recipe.cordis import CordisRecipe
 from reef.service.app import RequestService
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
@@ -100,3 +102,46 @@ def test_harness_surface_ignores_repository_bookkeeping(tmp_path) -> None:
     surface = create_harness_surface()
     assert surface.files is not None
     assert surface.files.read_files(Artifact.local(root)) == {"skills/SKILL.md": "rule"}
+
+
+class ClaudeHarnessRecipe(_HarnessRecipe):
+    @property
+    def harness_adapter(self) -> str | None:
+        return "claude"
+
+
+def test_scenario_list_names_the_harness_adapter(tmp_path) -> None:
+    (tmp_path / "harness").mkdir()
+    (tmp_path / "weights").mkdir()
+    harness = _service(tmp_path / "harness", recipe=ClaudeHarnessRecipe(), skill_text="x").dispatcher
+    weights = _service(tmp_path / "weights", recipe=Recipe(), skill_text="x").dispatcher
+    assert [(row["scenario"], row["adapter"]) for row in harness.list_scenarios()] == [("delivery", "claude")]
+    assert all("adapter" not in row for row in weights.list_scenarios())
+    # A registered scenario that is not in memory, as while it loads or after its preload failed, names it too.
+    harness.get_or_create_scenario("waiting")
+    harness._registry.remove("waiting")
+    assert [(row["scenario"], row["loaded"], row["adapter"]) for row in harness.list_scenarios()] == [
+        ("delivery", True, "claude"),
+        ("waiting", False, "claude"),
+    ]
+
+
+def test_harness_recipes_name_their_adapter(tmp_path, monkeypatch) -> None:
+    (tmp_path / "demo_adapter_surface.py").write_text(
+        "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    config = {
+        "model": {"path": "small"},
+        "evolution": {
+            "propose": "demo_adapter_surface:propose",
+            "evaluate": "demo_adapter_surface:evaluate",
+            "tasks": ["t"],
+            "adapter": "claude",
+        },
+    }
+    built = CordisRecipe.from_environment(
+        {}, config=config, runtime=InferenceProxyRuntime(model_path="small", base_url="http://up")
+    )
+    assert built.harness_adapter == "claude"
+    assert Recipe().harness_adapter is None

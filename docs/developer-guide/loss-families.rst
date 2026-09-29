@@ -146,8 +146,8 @@ A family that ships more than the five policy columns declares them on the spec.
 Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
-frozen Megatron teacher), ``recipes/sdft/slime/`` (a thin family on the
-distillation base below).
+frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
+(thin families on the distillation base below).
 
 The distillation base
 ---------------------
@@ -158,12 +158,15 @@ who the teacher is and which divergence is minimized. Both are settings of
 one implementation in the backend, ``reef/train/slime_backend/distill/``,
 and each such recipe's family is a thin subclass of it:
 
-- ``DistillAlgorithm`` is the driver-side base: the six-column wire row
+- ``DistillAlgorithm`` is the driver-side base: the seven-column wire row
   (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
-  by the student's response ids verbatim), the ``--<name>-*`` flags under
+  by the student's response ids verbatim, and ``sample_weight``, the factor
+  on that sample's mean divergence, 1 unless the recipe's processor sets
+  ``distill_sample_weight`` on the sample), the ``--<name>-*`` flags under
   the family's own prefix (``teacher``, ``divergence``, ``top-k``,
-  ``teacher-update-rate``, ``teacher-checkpoint``,
-  ``importance-sampling-cap``, ``skip-response-tokens``, ``jsd-beta``) and
+  ``top-k-source``, ``top-k-distribution``, ``teacher-update-rate``,
+  ``teacher-checkpoint``, ``importance-sampling-cap``,
+  ``importance-sampling-level``, ``skip-response-tokens``, ``jsd-beta``) and
   the settings they stamp on ``args`` under ``distill_*`` names, which the
   worker hooks read whatever the prefix was. A family names itself, sets
   its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
@@ -178,9 +181,12 @@ and each such recipe's family is a thin subclass of it:
   actor back.
 - The divergence is the forward KL, the reverse KL or the generalized JSD,
   over the teacher's whole distribution (``top-k`` 0: one row of this rank's
-  vocab shard per response position, kept in float16 on the host) or over
-  the teacher's top-K ids renormalized, the reverse KL then estimated at the
-  sampled token. The kernels reduce across the vocab shards of tensor
+  vocab shard per response position, kept in float16 on the host) or over K
+  ids per position, the teacher's own top-K or the current student's (one
+  more forward before the step, which needs zero dropout), either
+  renormalized over them, the reverse KL then estimated at the sampled
+  token, or with one bucket for the rest of the vocabulary as SDPO's
+  reference does. The kernels reduce across the vocab shards of tensor
   parallel themselves and write the gradients out where autograd over one
   shard would drop the coupling through the global log-sum-exp;
   ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python

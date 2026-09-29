@@ -18,7 +18,7 @@ The engine validates its GPU environment, model compatibility and available
 device memory during startup. Its output is available in
 ``.reef/run/sglang.log`` or ``.reef/run/vllm.log``. The managed path currently
 supports a single GPU node. Use the `SGLang installation guide
-<https://docs.sglang.io/docs/get_started/install>`__ or the `vLLM installation
+<https://docs.sglang.io/docs/get-started/install>`__ or the `vLLM installation
 guide <https://docs.vllm.ai/en/latest/getting_started/installation/>`__ to
 prepare the inference environment; the base Reef installation stays CPU-only.
 
@@ -951,6 +951,7 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.task_manifest | a split manifest written by ``reef.core.tasks``; the eval split names the evaluation's tasks as directories under ``evolution.tasks_root``, each passed to the adapter as its path; set instead of ``evolution.tasks`` and only with an adapter whose prompt is a task directory (``terminus``); ``promote_failures`` cannot be combined with it
    evolution.tasks_root | the directory the manifest's task names live under
    evolution.adapter | pi | ``opencode``, ``claude``, ``codex``, ``dsh`` (DeepSeek Harness), ``hermes`` (Hermes Agent), ``native`` (Reef's own agent, whose tools are ``native_tool`` nodes, whose loop events listen to ``native_hook`` nodes, and whose loop is a ``native_graph`` node or, as code, a ``native_loop`` node), ``terminus`` (Terminal-Bench's Terminus 2, through a Reef-owned Harbor runner), or an entry-point adapter
+   evolution.model_metadata | {} | optional map of exact model names to ``{context_window: <positive token count>, reasoning: <boolean>}``; Codex uses these values before provider discovery
    evolution.binary | a path to the harness binary; unset, backend construction installs the adapter's pinned version through the vendor's channel under ``$REEF_HARNESS_PREFIX`` (default ``~/.local/share/reef-harness``)
    evolution.episode_timeout_s | 600 | seconds one evaluation episode may run
    evolution.episode_repeats | 1 | episode pairings per task per step; each repeat tallies on its own

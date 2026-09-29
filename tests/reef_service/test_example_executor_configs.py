@@ -56,7 +56,8 @@ def test_training_examples_use_managed_ray_without_reserving_driver_gpus(relativ
     assert not services[0].get("depends_on")
     assert services[1]["depends_on"] == ["slime-driver"]
     if "coral" not in relative:
-        assert "export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}" in path.with_name("run.sh").read_text()
+        launcher = path.with_name("run.sh").read_text().replace('"', "")
+        assert "export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}" in launcher
     if "tttd" in relative:
         assert config["training"]["num_gpus"] == 2
         assert config["reef"]["training_backend_options"]["actor-num-gpus-per-node"] == str(

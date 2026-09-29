@@ -22,6 +22,7 @@ from typing import Any, ClassVar
 from urllib.parse import quote
 
 from reef.core.errors import ReefError
+from reef.core.model_metadata import ModelMetadata
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.harness.adapters import get_adapter
@@ -146,7 +147,8 @@ class _ScenarioModels(ModelBindingsResolver):
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
         # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
-        served = self.recipe.served_through_service(ModelBinding.from_runtime(runtime), scenario)
+        binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
+        served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
 
 
@@ -301,6 +303,7 @@ class CordisRecipe(Recipe):
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
+    model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
     #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
     served_endpoint: ServedEndpoint | None = None
     #: What a result becomes when another component's commit replaced its base while it was evaluated:
@@ -332,6 +335,10 @@ class CordisRecipe(Recipe):
     @property
     def report_type(self) -> type[ScoredRolloutReport]:
         return ScoredRolloutReport
+
+    @property
+    def harness_adapter(self) -> str | None:
+        return self.adapter
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -539,6 +546,17 @@ class CordisRecipe(Recipe):
         named = evolution.get("models") or {}
         if not isinstance(named, Mapping):
             raise RecipeConfigError("evolution.models must map a name to a model section (url, model, api_key_env)")
+        metadata_config = evolution.get("model_metadata", {})
+        if not isinstance(metadata_config, Mapping):
+            raise RecipeConfigError("evolution.model_metadata must map model names to metadata")
+        model_metadata: dict[str, ModelMetadata] = {}
+        for name, section in metadata_config.items():
+            if not isinstance(name, str) or not name.strip():
+                raise RecipeConfigError("evolution.model_metadata requires non-empty model names")
+            try:
+                model_metadata[name] = ModelMetadata.from_config(section)
+            except ValueError as exc:
+                raise RecipeConfigError(f"evolution.model_metadata.{name}: {exc}") from exc
         models: dict[str, ModelBinding] = {}
         for name, section in named.items():
             if not isinstance(name, str) or not name or not isinstance(section, Mapping):
@@ -635,6 +653,7 @@ class CordisRecipe(Recipe):
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
             "models": models,
+            "model_metadata": model_metadata,
             "candidate_plugin": candidate_plugin,
             "episode_workers": episode_workers,
             "step_record_dir": None if step_record_dir is None else step_record_dir.strip(),
@@ -660,7 +679,13 @@ class CordisRecipe(Recipe):
             binding = ModelBinding.from_runtime(self.runtime, model=self.model_name)
         except ValueError as exc:
             raise RecipeConfigError(str(exc)) from exc
-        return self.served_through_service(binding, scenario)
+        return self.served_through_service(self.bind_model_metadata(binding), scenario)
+
+    def bind_model_metadata(self, binding: ModelBinding) -> ModelBinding:
+        """Only Codex needs discovery; keep other adapters' startup independent of /models."""
+        if self.adapter == "codex":
+            return binding.with_metadata(self.model_metadata.get(binding.model))
+        return binding
 
     def served_through_service(self, binding: ModelBinding, scenario: str | None) -> ModelBinding:
         """``binding`` routed through this Reef's evaluation route for ``scenario``, when the service is known.
@@ -687,7 +712,7 @@ class CordisRecipe(Recipe):
         return self.default_model_bindings(scenario)
 
     def build_surface(self, scenario: str) -> Surface:
-        model = self.model_name or getattr(self.runtime, "model_path", None)
+        model = self.model_name or (self.runtime.model_path if self.runtime is not None else None)
         # Only a provider proxy has a dialect; a local engine serves Chat Completions.
         api = self.runtime.api if isinstance(self.runtime, InferenceProxyRuntime) else "openai"
         client_models = self.client_models
@@ -696,10 +721,17 @@ class CordisRecipe(Recipe):
             model = override.model_path
             api = override.api
             client_models = ()
+        if self.adapter == "codex" and self.runtime is not None:
+            selected = self.bind_model_metadata(ModelBinding.from_runtime(override or self.runtime, model=model))
+            served_metadata = selected.metadata
+        else:
+            served_metadata = None
         return create_harness_surface(
             seed_entries=tuple(dict(entry) for entry in self.seed),
             served_model=model if isinstance(model, str) and model else None,
             served_api=api,
+            model_metadata=self.model_metadata,
+            served_metadata=served_metadata,
             client_models=client_models,
         )
 

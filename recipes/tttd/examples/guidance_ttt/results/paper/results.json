@@ -1,0 +1,148 @@
+{
+  "paper_commit": "709c405",
+  "source_repository": "https://github.com/Chonghe-Jiang/Guidance-ttt-paper",
+  "source_section": "sections/case_study.tex, Table main-results",
+  "source_sha256": {
+    "sections/case_study.tex": "a7a5d54382bb2539cab06e0bf3b137b472fd656b8ccd03b2282d328970c7f61a",
+    "figures/best_solution_trajectories.png": "a5dbbf22866fc6b36c7607c6cf5056a83e3c9d14a3a2daf064d0f70fc8978c24",
+    "figures/polyomino_score_trajectory.csv": "d9dc5be97ba957694d9db3478ecd4e2990338cb65d4317a7e6e3684a9bc427f6",
+    "figures/trimul_14b_frontier.csv": "7ed5c996cd854dd96572e07e506dd9a97f259f92b6b6c8aa3296bca069633c62"
+  },
+  "claim_scope": "Paper results, not fresh runs of this port. Models and evaluation protocols differ between baseline rows. Search-time peaks are not final reported results.",
+  "results": [
+    {
+      "task": "polyomino_packing",
+      "guidance_model": "Qwen/Qwen3-8B",
+      "result": 91.89,
+      "unit": "packing score",
+      "direction": "max",
+      "suite": "70 FrontierCS cases",
+      "baselines": [
+        [
+          "CORAL / Opus 4.6",
+          84.2
+        ],
+        [
+          "CORAL / GLM-5.2",
+          83.8
+        ],
+        [
+          "TTT-Discover / GPT-OSS-120B",
+          83.72
+        ],
+        [
+          "OpenEvolve / GLM-5.2",
+          78.36
+        ],
+        [
+          "Human reference",
+          89.1
+        ]
+      ],
+      "executor": "z-ai/glm-5.2",
+      "updates": 30,
+      "groups_per_step": 8,
+      "rollouts_per_group": 16
+    },
+    {
+      "task": "lasso_path",
+      "guidance_model": "Qwen/Qwen3-8B",
+      "result": 0.1739,
+      "unit": "inverse geometric-mean solve time (1/ms)",
+      "direction": "max",
+      "suite": "17 synthetic cases; frozen-solver evaluation",
+      "baselines": [
+        [
+          "SimpleTES / GPT-OSS-120B",
+          0.1243
+        ],
+        [
+          "TTT-Discover / GPT-OSS-120B",
+          0.1368
+        ],
+        [
+          "OpenEvolve / GLM-5.2",
+          0.1402
+        ]
+      ],
+      "executor": "z-ai/glm-5.2",
+      "updates": 30,
+      "groups_per_step": 8,
+      "rollouts_per_group": 16
+    },
+    {
+      "task": "ahc058",
+      "guidance_model": "Qwen/Qwen3-14B",
+      "result": 850082731,
+      "unit": "AtCoder score",
+      "direction": "max",
+      "suite": "official submitted solution score",
+      "baselines": [
+        [
+          "TTT-Discover / GPT-OSS-120B",
+          848414228
+        ],
+        [
+          "SimpleTES / GPT-OSS-20B",
+          849325750
+        ],
+        [
+          "OpenEvolve / GLM-5.2",
+          848189802
+        ]
+      ],
+      "executor": "z-ai/glm-5.2",
+      "updates": 30,
+      "groups_per_step": 8,
+      "rollouts_per_group": 16
+    },
+    {
+      "task": "trimul",
+      "guidance_model": "Qwen/Qwen3-14B",
+      "result": 1129,
+      "unit": "geometric-mean latency (microseconds)",
+      "direction": "min",
+      "suite": "seven H100 benchmark cases; frozen-kernel evaluation",
+      "baselines": [
+        [
+          "GPUMode rank 1",
+          1128
+        ],
+        [
+          "GPUMode rank 4",
+          1163
+        ],
+        [
+          "GPUMode rank 5",
+          1278
+        ],
+        [
+          "K-Search / GPT-5.2 + Gemini-3-Pro",
+          1131
+        ],
+        [
+          "TTT-Discover / GPT-OSS-120B",
+          1261.99
+        ],
+        [
+          "CORAL / GLM-5.2",
+          1180
+        ],
+        [
+          "OpenEvolve / GLM-5.2",
+          2152.25
+        ]
+      ],
+      "executor": "z-ai/glm-5.2",
+      "updates": 30,
+      "groups_per_step": 8,
+      "rollouts_per_group": 16
+    }
+  ],
+  "search_history_source": {
+    "file": "dynamics.csv",
+    "sha256": "6f9e206ca58f806da95675ce4eab1fc7cfa508495530f0b32e5e9e6aec177c62",
+    "export": "search_histories.csv",
+    "transformation": "Cumulative maximum by update; AHC mean multiplied by 150 for the paper figure; no interpolation."
+  }
+}

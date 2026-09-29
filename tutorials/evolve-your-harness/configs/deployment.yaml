@@ -7,7 +7,8 @@ schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8901
-  token: reef-local
+  # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
   run-dir: tutorials/evolve-your-harness/work/deployment/stack
 
 recipe:

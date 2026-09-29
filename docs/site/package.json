@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
-    "predev": "node scripts/fetch-repo-stats.mjs",
-    "prebuild": "node scripts/fetch-repo-stats.mjs",
+    "predev": "node scripts/copy-doc-assets.mjs && node scripts/fetch-repo-stats.mjs",
+    "prebuild": "node scripts/copy-doc-assets.mjs && node scripts/fetch-repo-stats.mjs",
     "build": "next build --webpack",
     "check:docs": "node scripts/check-doc-links.mjs && node scripts/check-doc-contracts.mjs && node --test scripts/fetch-repo-stats.test.mjs",
     "start": "next start",
@@ -18,9 +18,9 @@
     "@shikijs/langs": "4.4.3",
     "github-slugger": "^2.0.0",
     "html-react-parser": "^6.1.8",
-    "lucide-react": "^1.47.0",
+    "lucide-react": "^1.48.0",
     "mermaid": "^12.0.0",
-    "next": "^16.3.5",
+    "next": "^16.3.6",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "rst-compiler": "^0.5.9",
@@ -28,12 +28,12 @@
   },
   "devDependencies": {
     "@eslint/compat": "^2.1.1",
-    "@types/node": "^26.6.1",
+    "@types/node": "^26.6.2",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@typescript/native": "npm:typescript@^7.0.2",
-    "eslint": "^10.10.0",
-    "eslint-config-next": "^16.3.5",
+    "eslint": "^10.11.0",
+    "eslint-config-next": "^16.3.6",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "overrides": {

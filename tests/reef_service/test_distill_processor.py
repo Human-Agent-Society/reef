@@ -187,6 +187,19 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
 
 
 @pytest.mark.unit
+def test_teacher_tokens_render_the_request_cut_the_prompt_and_append_the_response(
+    tokenizer: CountingTokenizer,
+) -> None:
+    processor = _processor()
+    messages = [{"role": "user", "content": QUESTION}]
+    prompt_ids = tokenizer.count_ids(messages)
+
+    assert processor.teacher_tokens(messages, None, (1, 2, 3)) == [*prompt_ids, 1, 2, 3]
+    # A prompt window cuts the rendered prompt on the right and leaves the response whole.
+    assert processor.teacher_tokens(messages, None, (1, 2, 3), max_prompt_tokens=2) == [*prompt_ids[:2], 1, 2, 3]
+
+
+@pytest.mark.unit
 def test_the_processor_requires_one_recorded_request_per_report(tokenizer: CountingTokenizer) -> None:
     processor = _processor(accept_multi_turn_policy_samples=True)
     processor.ingest(_inference("i1"))

@@ -466,6 +466,11 @@ class InferenceRuntime(AdapterWeightRuntime):
         return self._base_url
 
     @property
+    def model_path(self) -> str:
+        """The served model name, or empty when requests must select a model."""
+        return ""
+
+    @property
     def inference_timeout_s(self) -> float:
         return self._inference_timeout_s
 

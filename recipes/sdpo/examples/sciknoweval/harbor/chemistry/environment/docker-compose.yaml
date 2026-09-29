@@ -1,0 +1,8 @@
+# The runner reaches the Reef service on the host as host.docker.internal.
+# Harbor's docker environment does not name the host by itself, so this
+# override adds it to the task's container. The service URL, the token and the
+# scenario arrive through the harness's exec environment.
+services:
+  main:
+    extra_hosts:
+      - "host.docker.internal:host-gateway"

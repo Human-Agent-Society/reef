@@ -11,7 +11,8 @@ schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
-  token: reef-local
+  # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
   # The OpenAI-compatible provider (no /v1 suffix) and the model under test.
   # Reef proxies recorded traffic here, the proposer's calls go here, and
   # evaluation episodes are pointed here - nothing else ever sees it.

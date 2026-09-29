@@ -3,11 +3,14 @@
 # CLAUDE_CONFIG_DIR relocates the whole config tree (settings.json, CLAUDE.md,
 # skills/, commands/, plugins/, and the session transcripts under projects/)
 # into the episode root, so nothing is read from or written to the user's real
-# ~/.claude and the directory-trust prompt never fires. The three DISABLE_*
-# variables stop the startup network work (auto-update, telemetry, and the
-# non-essential background traffic) that would otherwise make episodes
-# non-deterministic. `-p --output-format json` is Claude Code's headless
-# mode; `--permission-mode auto` matches opencode's `--auto` and pi's json
+# ~/.claude. DISABLE_AUTOUPDATER, DISABLE_TELEMETRY and
+# CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC stop the startup network work
+# (auto-update, telemetry, and the non-essential background traffic) that
+# would otherwise make episodes non-deterministic. DISABLE_UPDATES makes
+# Claude Code's own update and install commands refuse, so an episode's shell
+# commands cannot replace the pinned version either. `-p --output-format json`
+# is Claude Code's headless mode, which skips the folder trust prompt;
+# `--permission-mode auto` matches opencode's `--auto` and pi's json
 # mode — auto-approve without dropping every safety check, which is the
 # right level for a hermetic episode root.
 name: claude
@@ -20,18 +23,52 @@ install:
   version: "2.1.257"
   binary_path: "node_modules/.bin/claude"
 argv: ["-p", "{prompt}", "--output-format", "json", "--permission-mode", "auto"]
-# Keep interactive installs on the same pinned version as evaluation episodes.
-client_env:
-  DISABLE_AUTOUPDATER: "1"
 env:
   CLAUDE_CONFIG_DIR: "{root}/claude"
   DISABLE_AUTOUPDATER: "1"
+  DISABLE_UPDATES: "1"
   DISABLE_TELEMETRY: "1"
   CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1"
+# Keep interactive installs on the same pinned version as evaluation episodes.
+# An interactive run through reef-claude gets only CLAUDE_CONFIG_DIR from the
+# env above. reef pins Claude Code's version, and Claude Code's own updater
+# would otherwise install the latest release over the person's own claude:
+# the background updater and `update` (alias `upgrade`) run
+# `npm install --global`, and `install` links a native build at
+# ~/.local/bin/claude. DISABLE_AUTOUPDATER stops only the background updater.
+# DISABLE_UPDATES stops all three, wherever the command sits on the command
+# line (`--verbose upgrade`) and in the session's own shell commands too:
+# update and install print "Updates are disabled by your administrator" and
+# exit 0. A lone --update or --upgrade, which Claude Code reads as `update`
+# only with nothing else on the command line, stops at "unknown option" after
+# the --settings below. reef-claude update is reef's own install of the
+# served release. Claude Code copies settings.env over its environment, so
+# the quirks refuse a tree whose settings.env sets either switch; a project
+# .claude/settings.json of the person's own can still set them.
+client_env:
+  DISABLE_AUTOUPDATER: "1"
+  DISABLE_UPDATES: "1"
+# An interactive run otherwise registers the claude-cli:// link handler, and
+# unless $HOME/.local/bin/claude exists it points the handler at the pinned
+# binary, which replaces the handler of the person's own claude: on macOS the
+# app "$HOME/Applications/Claude Code URL Handler.app", on Linux and WSL an
+# xdg-mime default, on Windows a registry key. Claude Code reads this switch
+# only from settings, and it skips a whole settings.json that fails its schema
+# (cleanupPeriodDays 0, say), so the wrapper passes it as --settings, which the
+# tree cannot change. The binary reads the last --settings: one the person
+# passes replaces this one, and the settings.json default below still applies.
+client_args: ["--settings", '{"disableDeepLinkRegistration":"disable"}']
+# Claude Code prints its version for --version, -v and -V (alone, or before
+# --verbose) before it reads any setting, and takes -V only there: after
+# --settings, -V is an unknown option. A command line that starts with one of
+# them starts no session, so the wrapper runs it without client_args.
+client_version_args: ["--version", "-v", "-V"]
 # --resume and --continue read the transcripts under projects/, which
 # reef-claude would otherwise leave in the temp copy it removes. .claude.json
 # records the finished onboarding, the approved API key and the trusted
-# folders; without it every run starts at the theme picker again.
+# folders; without it every run starts at the theme picker again, and an
+# interactive run asks again whether to trust the folder (the default answer
+# is "No, exit").
 client_state:
   - path: "claude/projects"
     kind: directory
@@ -42,9 +79,12 @@ files:
     primary:
       path: "claude/settings.json"
       defaults:
-        # Keep episodes hermetic: no auto-update mid-campaign, and no
-        # Co-Authored-By trailer written into commits an episode makes.
+        # No Co-Authored-By trailer written into commits an episode makes;
+        # the updater is off through env and client_env, not here.
         includeCoAuthoredBy: false
+        # Covers a run where the person passes their own --settings, which
+        # replaces the one in client_args.
+        disableDeepLinkRegistration: "disable"
   rules: "claude/CLAUDE.md"
   agent_command: "claude/commands/{name}.md"
   skill: "claude/skills/{name}/SKILL.md"

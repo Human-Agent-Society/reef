@@ -28,8 +28,9 @@
 // lazily from pi's own loader, so plain node loads the file without it. Evaluation
 // episodes set PI_OFFLINE and this extension then registers nothing, so the
 // evaluation never sees the commands or the tools.
-import { accessSync, constants, existsSync, readFileSync, writeFileSync } from "node:fs";
-import { release } from "node:os";
+import { createHash } from "node:crypto";
+import { accessSync, constants, existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { homedir, release } from "node:os";
 import { delimiter, join } from "node:path";
 
 // The release file the install script and harness_pull write at the tree root.
@@ -589,12 +590,15 @@ export default function requests(pi) {
     ctx.ui.notify(content, "info");
   };
 
-  // The wrapper the next steps run through: the one run_agent exported, else the one beside the release file.
+  // The wrapper the next steps run through: the one run_agent exported, else the one the install wrote outside
+  // the tree, in ~/.reef/installs/<sha256 of the resolved install root>.
   const wrapperPath = () => {
     const exported = process.env.REEF_HARNESS_WRAPPER;
     if (exported && existsSync(exported)) return exported;
-    const beside = join(destDir, WRAPPER_NAME);
-    return existsSync(beside) ? beside : null;
+    if (!existsSync(destDir)) return null;
+    const rootDigest = createHash("sha256").update(realpathSync(destDir)).digest("hex");
+    const installedWrapper = join(homedir(), ".reef", "installs", rootDigest, WRAPPER_NAME);
+    return existsSync(installedWrapper) ? installedWrapper : null;
   };
 
   // One wrapper call; a wrapper that could not be started reads as a failed one.
@@ -666,7 +670,9 @@ export default function requests(pi) {
       await runSetup(wrapper, releaseId, ctx);
       updated = await update();
     } else if (updated.code === 0) {
-      await runSetup(wrapper, releaseId, ctx);
+      // Looked up again: the update of an install made before Reef kept the wrapper outside the tree removes the
+      // wrapper the session was started with.
+      await runSetup(wrapperPath() ?? wrapper, releaseId, ctx);
     }
     if (updated.code !== 0) {
       const detail = updated.stderr.trim();

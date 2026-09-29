@@ -67,6 +67,19 @@ def _random_harness_scenario_name() -> str:
     return f"harness-{uuid.uuid4().hex[:12]}"
 
 
+def install_service_url(headers: Mapping[str, str]) -> str | None:
+    """The address an install request reached Reef at, from its Host; None without one.
+
+    A gateway in front of Reef names the address the client reached in the
+    forwarded headers; the binding goes there, so the installed harness
+    calls back through it."""
+    normalized = {key.lower(): value.strip() for key, value in headers.items()}
+    host = normalized.get("x-forwarded-host") or normalized.get("host")
+    if not host:
+        return None
+    return f"{normalized.get('x-forwarded-proto') or 'http'}://{host}"
+
+
 def _inference_aborted(response: Mapping[str, Any]) -> bool:
     def aborted(value: Any) -> bool:
         return value == "abort" or (isinstance(value, Mapping) and value.get("type") == "abort")
@@ -124,6 +137,8 @@ class PreparedInference:
     #: What the handler serves: the runtime-loaded component's view of the
     #: release, or the release itself when nothing is loaded or it is flat.
     served: Artifact
+    #: The release the attempt's record names: the served one, or the one the client runs (see recorded_ref).
+    record_ref: ArtifactRef
     handler: InferenceHandler
     surface: Surface
     #: True when a training runtime serves the scenario: the recorded payload
@@ -307,7 +322,7 @@ class RequestService:
                                 self._accept,
                                 prepared.parsed,
                                 {**payload, "response": response},
-                                artifact_ref=prepared.artifact.ref,
+                                artifact_ref=prepared.record_ref,
                             )
                         succeeded = True
                         return client_inference_response(response), item
@@ -394,7 +409,7 @@ class RequestService:
                     scenario=prepared.parsed.scenario,
                     request_type=RequestType.INFERENCE,
                     payload=_with_tags(payload, prepared.parsed),
-                    artifact_ref=prepared.artifact.ref,
+                    artifact_ref=prepared.record_ref,
                 ),
                 release_id=prepared.parsed.release_id,
                 measurement=measurement,
@@ -606,6 +621,7 @@ class RequestService:
             parsed=parsed,
             artifact=artifact,
             served=served,
+            record_ref=recorded_ref(scenario, parsed, ref),
             handler=selected_handler,
             surface=surface,
             durable=scenario.training_runtime is not None,
@@ -1040,18 +1056,23 @@ class RequestService:
         )
         manifest = self._harness_manifest_for_scenario(scenario, release_id or self.harness_release_id(scenario))
         descriptor = get_adapter(adapter)
+        binding_files = self._install_binding(scenario, manifest, descriptor, headers)
         return render_install_script(
             descriptor=descriptor,
             files=manifest["files"],
             release_id=manifest["release_id"],
             content_id=manifest["content_id"],
             scenario=scenario.name,
-            binding_files=self._install_binding(scenario, manifest, descriptor, headers),
+            binding_files=binding_files,
+            # The install record keeps the address the binding names, for a wrapper whose binding a session changed.
+            service_url=install_service_url(headers) if binding_files else None,
             requires=manifest["requires"],
             # The release the script names for a first install must be one the catalog lists.
             fallback_release_id=ancestor_requiring_nothing(
                 list(reversed(self.harness_rows(scenario))), manifest["release_id"]
             ),
+            # A request that carried a token reached a service that wants one, so the harness needs it too.
+            is_token_expected=any(name.lower() in ("authorization", "x-api-key") for name in headers),
         )
 
     def _install_binding(
@@ -1069,10 +1090,7 @@ class RequestService:
         when any of those is unknown, and the script then installs the
         composition as before.
         """
-        normalized = {key.lower(): value.strip() for key, value in headers.items()}
-        # A gateway in front of Reef names the address the client reached in the forwarded
-        # headers; the binding goes there, so the installed harness calls back through it.
-        host = normalized.get("x-forwarded-host") or normalized.get("host")
+        service_url = install_service_url(headers)
         evaluation_metrics = manifest.get("evaluation", manifest.get("gate")) or {}
         model = (
             (evaluation_metrics.get("evaluation_context", evaluation_metrics.get("gated_against")) or {}).get("model")
@@ -1085,17 +1103,24 @@ class RequestService:
         entries = scenario.entries_for_version(manifest["release_id"])
         if entries is None and info is not None:
             entries = info.seed_entries
-        if not host or not model or not entries:
+        if not service_url or not model or not entries:
             return {}
-        scheme = normalized.get("x-forwarded-proto") or "http"
         api = "openai" if info is None else info.served_api
         client_models = () if info is None else info.client_models
+        metadata = None if info is None else info.model_metadata.get(model)
+        if metadata is None and info is not None and model == info.served_model:
+            metadata = info.served_metadata
         override = scenario.model_config.runtime
         if override is not None:
             selected = ModelBinding.from_runtime(override)
             model, api = selected.model, selected.api
+            if descriptor.name == "codex":
+                selected = selected.with_metadata(None if info is None else info.model_metadata.get(model))
+            metadata = selected.metadata
             client_models = ()
-        binding = ModelBinding(base_url=f"{scheme}://{host}", model=model, api_key=TOKEN_PLACEHOLDER, api=api)
+        binding = ModelBinding(
+            base_url=service_url, model=model, api_key=TOKEN_PLACEHOLDER, api=api, metadata=metadata
+        )
         nodes = [(str(entry["name"]), entry.get("config")) for entry in entries if not entry.get("disabled")]
         try:
             bound = binding.compose_nodes(descriptor, models=client_models)
@@ -1177,13 +1202,37 @@ class RequestService:
             raise
 
 
+def recorded_ref(scenario: Scenario, parsed: RequestHeaders, served: ArtifactRef) -> ArtifactRef:
+    """The release an inference record names: the served one, or the release the client says it runs.
+
+    A ``reef-<adapter>`` session sends the release it installed as
+    ``x-reef-tag-release`` and keeps running it after a newer one is
+    published. Where the client pulls everything a release changes (a file
+    tree, with no request hooks and no served weights), a call answers the
+    same on every release, so the record names the client's release when the
+    scenario's catalog has it. A value the catalog does not have names the
+    served release, as does every call on a scenario that serves its release
+    itself."""
+    claimed = parsed.tags.get("release")
+    surface = scenario.surface
+    if (
+        claimed is None
+        or claimed == served.release_id
+        or surface.files is None
+        or surface.inference is not None
+        or scenario.training_runtime is not None
+    ):
+        return served
+    return scenario.ref_for_version(claimed) or served
+
+
 def _with_tags(payload: Mapping[str, Any], parsed: RequestHeaders) -> Mapping[str, Any]:
     """Carry ``x-reef-tag-*`` through to the INFERENCE record's metadata.
 
     Only inference: a tag is context about a served exchange, and the
-    processors that read one correlate on the inference side. The service
-    never interprets a value — it stores the pair and moves on
-    (method-integration RFC §3.2).
+    processors that read one correlate on the inference side. This stores
+    every pair as sent (method-integration RFC §3.2); only
+    :func:`recorded_ref` reads a value.
     """
     if parsed.request_type is not RequestType.INFERENCE or not parsed.tags:
         return payload

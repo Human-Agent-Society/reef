@@ -474,6 +474,9 @@ to a task-specific judge.
 Related guides
 --------------
 
+* `Guidance-TTT <guidance-ttt.rst>`__: train a guidance model with a frozen executor on four discovery tasks.
+
+
 - `Inference and feedback quickstart <../../getting-started/quickstart.rst>`__:
   learn the request, receipt, and report workflow.
 - `Train model weights from agent feedback <../evolve-your-model.rst>`__:

@@ -61,7 +61,8 @@ Routes
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/train``                                                             | enqueue one training instruction                  |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                                                          | every known scenario and current release          |
+| ``GET /reef/scenarios``                                                          | every known scenario, current release and harness |
+|                                                                                  | adapter                                           |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
 | ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
 +----------------------------------------------------------------------------------+---------------------------------------------------+
@@ -129,10 +130,30 @@ Headers
 |                                   | specific release, use ``?release_id=`` on the harness   |
 |                                   | manifest or install route.                              |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-tag-<name>``             | optional on inference: opaque key/value context stored  |
-|                                   | on the record under ``metadata.tags``, for a processor  |
-|                                   | to correlate on. Reef never reads a value.              |
+| ``x-reef-tag-<name>``             | optional on inference: context stored under             |
+|                                   | ``metadata.tags``. The ``release`` tag can select the   |
+|                                   | record's release; see `Client release tags`_ below.     |
 +-----------------------------------+---------------------------------------------------------+
+
+Client release tags
+~~~~~~~~~~~~~~~~~~~
+
+``x-reef-tag-release`` identifies the harness release installed by the client.
+Reef uses it as the inference record's ``artifact_ref`` only when all three
+conditions hold:
+
+- The scenario serves files for clients to pull.
+- Its surface has no inference hooks, and it has no training runtime.
+- The tag names a release in that scenario's catalog.
+
+Otherwise the record names the current served release, including when the tag
+is absent or unknown. The tag does not change which release serves inference.
+
+For example, a harness client installed release A before the service published
+B. If these conditions hold, its calls tagged with A are recorded against A;
+an untagged call or a call tagged with an unknown release is recorded against B.
+This tag is separate from ``x-reef-release-id``, which binds a scenario to its
+starting release.
 
 Scenario model settings
 -----------------------
@@ -430,8 +451,10 @@ unknown scenario returns HTTP 404 and you create it first:
 |                                             | content_id}``; 201 created, 200 already     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios``                     | every known scenario and its current        |
-|                                             | release once loaded                         |
+| ``GET /reef/scenarios``                     | every known scenario, its current release   |
+|                                             | once loaded and, for a harness recipe, the  |
+|                                             | ``adapter`` its tree is rendered for, also  |
+|                                             | while the scenario loads                    |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types, training_mode,      |
@@ -513,8 +536,10 @@ Send the same body you would send to the provider. Reef never touches your
 sampling parameters. 
 
 Before calling the model, Reef reads the scenario's current artifact ref and
-builds the request against that release. The stored exchange uses the same ref,
-so an update completing mid-request does not change what the receipt records.
+builds the request against that release. The stored exchange normally uses
+that frozen ref, even if an update completes mid-request. For a scenario that
+only delivers files to clients, `Client release tags`_ describes when the
+record instead names the client's installed harness release.
 
 On a weight-serving deployment it adds engine
 bookkeeping keys: ``lora_path`` to address the served adapter and
@@ -694,7 +719,12 @@ Harness artifacts
 |                                | binding at the address the request reached (a gateway in      |
 |                                | front names it in ``x-forwarded-host`` and                    |
 |                                | ``x-forwarded-proto``), the token filled from ``REEF_TOKEN``  |
-|                                | when the script runs                                          |
+|                                | when the script runs; it records the sha256 of each tree file |
+|                                | it wrote (for pi's ``settings.json``, the value of each key   |
+|                                | but pi's own preferences) and that address in                 |
+|                                | ``~/.reef/installs``, and writes the ``reef-<adapter>``       |
+|                                | wrapper beside that record, which checks it before a session  |
+|                                | starts                                                        |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
@@ -1205,11 +1235,15 @@ Record and commit history
 
 ``GET /reef/scenarios/{scenario}/records`` reads retained record metadata,
 including consumed records. ``after_sequence`` defaults to 0 and ``limit``
-defaults to 50 (1–100). Records are oldest first; ``next_after_sequence`` is
-null at the end. Each row contains ``sequence``, ``agent_record_id``,
-``request_type``, ``created_at``, ``references``, the recorded
-``artifact_ref``, and the payload's ``score`` field. No record payload or
-learning classification is included.
+defaults to 50 (1 to 100). ``request_type`` (``inference``, ``report`` or
+``train``) lists one type only; another value is HTTP 400. Records are oldest
+first; ``next_after_sequence`` is null at the end. Each row contains
+``sequence``, ``agent_record_id``, ``request_type``, ``created_at``,
+``references``, the recorded ``artifact_ref``, and the payload's ``score``
+field. No record payload or learning classification is included. An inference
+record's ``artifact_ref`` names the release that served the call, except when
+the conditions in `Client release tags`_ select the client's installed harness
+release.
 
 ``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
 and the stored ``payload``. A missing body returns 404: it may have expired or

@@ -45,10 +45,11 @@ from pathlib import Path
 from reef_client import ReefClient, ReefClientError
 
 from harness import evolution
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY
 
 SERVICE_URL = "http://127.0.0.1:8900"  # the Reef run.sh started
 SCENARIO = "harness-evolve-demo"  # this workload's isolated lane
-TOKEN = "reef-local"  # matches serve.yaml
+TOKEN = os.environ.get("REEF_TOKEN") or None  # serve.yaml reads the same variable; unset means no authentication
 MODEL = "qwen3-8b"  # matches serve.yaml's upstream_model
 PULL_TIMEOUT_S = 900.0
 # run.sh polls the head every 5 s, but a poll that started during the evolve step waits behind the step's
@@ -202,7 +203,7 @@ def pull():
         "files": sorted(manifest["files"]),
     }
     (TREE_DIR / RELEASE_FILE).write_text(json.dumps(release_info, indent=2) + "\n", encoding="utf-8")
-    binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN, "model": MODEL}
+    binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN or NO_TOKEN_API_KEY, "model": MODEL}
     (TREE_DIR / "native" / "models.json").write_text(
         json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -219,7 +220,6 @@ def _wrapper_env():
         "REEF_HARNESS_SCENARIO": SCENARIO,
         "REEF_HARNESS_ADAPTER": "native",
         "REEF_HARNESS_ENV_VAR": "REEF_NATIVE_DIR",
-        "REEF_TOKEN": TOKEN,
     }
 
 

@@ -57,6 +57,9 @@ function resolveImageSource(src: string, sourcePath: string) {
   if (!src || /^(https?:|data:|\/)/.test(src)) return src;
   const repoSource = path.posix.join("docs", sourcePath);
   const resolved = path.posix.normalize(path.posix.join(path.posix.dirname(repoSource), src));
+  if (resolved.startsWith("docs/assets/")) {
+    return `/doc-assets/${resolved.slice("docs/assets/".length)}`;
+  }
   return `${siteConfig.repository}/raw/main/${resolved}`;
 }
 

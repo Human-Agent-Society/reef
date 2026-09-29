@@ -7,6 +7,8 @@ import signal
 import socket
 import sys
 import uuid
+from collections.abc import Callable
+from contextlib import ExitStack
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -16,7 +18,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestServer
 
 from reef.cli import main
-from reef.service.connector import Connector, _running, authorize
+from reef.service.connector import BODY_LIMIT, Connector, _running, authorize
 from reef.service.connector.runtime import HTTPFailure, JSONClient, ReefRuntime, endpoint_url, release_summary
 from reef.service.connector.service import ReefService, serve_address
 from reef.service.connector.state import ConnectorState
@@ -105,7 +107,268 @@ def test_snapshots_and_releases_strip_private_data():
             },
         }
     )
-    assert row == {"release_id": "seed", "current": True, "metrics": {"wins": 3, "selected": True, "skipped": True}}
+    assert row == {
+        "release_id": "seed",
+        "current": True,
+        "metrics": {"wins": 3, "selected": True, "skipped": True},
+        "result": "selected",
+    }
+
+
+def test_snapshot_names_each_scenario_adapter():
+    async def run():
+        client = AsyncMock()
+        client.base_url = "http://127.0.0.1:8900"
+        client.request.side_effect = [
+            {
+                "scenarios": [
+                    {"scenario": "chat", "release_id": "seed", "adapter": "claude"},
+                    {"scenario": "odd", "adapter": "pi; rm -rf ~"},
+                    {"scenario": "weights"},
+                ]
+            },
+            {"scenarios": {}},
+        ]
+        return await ReefRuntime(client).snapshot()
+
+    assert asyncio.run(run())["scenarios"] == [
+        {"scenario": "chat", "release_id": "seed", "adapter": "claude"},
+        {"scenario": "odd"},
+        {"scenario": "weights"},
+    ]
+
+
+def test_release_summary_keeps_request_mutation_and_selection_codes_without_text():
+    """A published request step as the catalog lists it: ids, kinds, counts and codes leave; every text stays."""
+    row = release_summary(
+        {
+            "release_id": "published",
+            "parent_release_id": "seed",
+            "operation": "training",
+            "current": True,
+            "pending": False,
+            "recorded_at": 1790000000.5,
+            "metrics": {
+                "selected": True,
+                "candidate_score": 1.0,
+                "passed": 1,
+                "failed": 0,
+                "floor_score": 1.0,
+                "step_record": "/private/steps/chat/1",
+                "proposal_notes": {"design": "private design", "review": {"covered": ["private point"]}},
+                "training_request": {
+                    "id": "3d44ceb6",
+                    "text": "private request text",
+                    "session": "private-session",
+                    "client": {"platform": "private"},
+                    "requires": [{"name": "SEARCH_KEY", "kind": "env", "check": "private check command"}],
+                },
+                "mutations": [
+                    {
+                        "op": "create",
+                        "id": "chat",
+                        "options": {"name": "agent_command", "config": {"text": "private"}},
+                    },
+                    {"op": "create", "id": "chat-rules", "options": {"name": "rules", "config": {"text": "private"}}},
+                    {"op": "update", "id": "settings", "options": {"config": {"allow": ["private"]}}},
+                ],
+                "selection": {
+                    "outcome": "select",
+                    "policy": "floor",
+                    "reason": "private reason text",
+                    "candidate_id": "private-candidate",
+                    "metrics": {"passed": 1, "failed": 0, "floor_score": 1.0},
+                    "evaluation": {"evaluator": "harness_episode_pairs", "metrics": {"candidate_paths": ["private"]}},
+                },
+            },
+        }
+    )
+    assert row == {
+        "release_id": "published",
+        "parent_release_id": "seed",
+        "operation": "training",
+        "current": True,
+        "pending": False,
+        "recorded_at": 1790000000.5,
+        "metrics": {
+            "selected": True,
+            "candidate_score": 1.0,
+            "passed": 1,
+            "failed": 0,
+            "floor_score": 1.0,
+            "training_request": {"id": "3d44ceb6", "requires": [{"name": "SEARCH_KEY", "kind": "env"}]},
+            "mutation_count": 3,
+            "mutations": [
+                {"op": "create", "id": "chat", "options": {"name": "agent_command"}},
+                {"op": "create", "id": "chat-rules", "options": {"name": "rules"}},
+                {"op": "update", "id": "settings"},
+            ],
+            "selection": {
+                "outcome": "select",
+                "policy": "floor",
+                "metrics": {"passed": 1, "failed": 0, "floor_score": 1.0},
+                "evaluation": {"evaluator": "harness_episode_pairs"},
+            },
+        },
+        "result": "selected",
+    }
+    assert "private" not in json.dumps(row)
+    failed = release_summary(
+        {"operation": "training", "metrics": {"skipped": "private", "error": "private traceback"}}
+    )
+    assert failed == {"operation": "training", "metrics": {"skipped": True}, "result": "failed"}
+    assert "result" not in release_summary({"operation": "creation", "metrics": {}})
+
+
+def test_release_summary_names_proposal_and_recheck_steps_without_text():
+    """A step from an agent's proposal keeps the proposal id; a recheck keeps its reason code."""
+    proposal = release_summary(
+        {
+            "operation": "training",
+            "metrics": {
+                "selected": False,
+                "proposal": {
+                    "id": "proposal-7",
+                    "session": "private-session",
+                    "release_id": "seed",
+                    "reason": "private reason text",
+                },
+                "mutation": {"op": "create", "id": "x", "options": {"name": "skill", "config": {"text": "private"}}},
+            },
+        }
+    )
+    assert proposal == {
+        "operation": "training",
+        "metrics": {
+            "selected": False,
+            "proposal": {"id": "proposal-7"},
+            "mutation_count": 1,
+            "mutations": [{"op": "create", "id": "x", "options": {"name": "skill"}}],
+        },
+        "result": "rejected",
+    }
+    recheck = release_summary(
+        {"operation": "training", "metrics": {"selected": True, "recheck": True, "recheck_reason": "drift"}}
+    )
+    assert recheck["metrics"] == {"selected": True, "recheck": True, "recheck_reason": "drift"}
+    assert "private" not in json.dumps([proposal, recheck])
+
+
+def test_releases_over_the_size_limit_keep_the_newest_rows_that_fit(tmp_path):
+    """A long catalog drops its oldest rows to fit the result limit instead of failing the whole read."""
+
+    def result_for(rows):
+        async def run():
+            state = ConnectorState(tmp_path)
+            runtime = AsyncMock()
+            runtime.execute.return_value = {"releases": rows, "truncated": False}
+            command = {"id": str(uuid.uuid4()), "action": "releases", "scenario": "chat"}
+            try:
+                await Connector(AsyncMock(), runtime, state).execute(command)
+                return dict(state.pending())[command["id"]]
+            finally:
+                state.close()
+
+        return asyncio.run(run())
+
+    def size(value):
+        return len(json.dumps(value).encode())
+
+    def rows_of():
+        return [{"release_id": f"step-{index:03d}", "metrics": {"mutation_count": 20}} for index in range(100)]
+
+    # Rows come newest first. A list exactly at the limit comes whole; one byte over drops its oldest row.
+    rows = rows_of()
+    rows[-1]["release_id"] += "x" * (
+        BODY_LIMIT - size({"state": "succeeded", "value": {"releases": rows, "truncated": False}})
+    )
+    whole = result_for(rows)
+    assert whole == {"state": "succeeded", "value": {"releases": rows, "truncated": False}}
+    assert size(whole) == BODY_LIMIT
+    rows[-1]["release_id"] += "x"
+    assert result_for(rows) == {"state": "succeeded", "value": {"releases": rows[:-1], "truncated": True}}
+    # The second oldest row pads the newest 99 to the limit exactly; one byte more and it goes too.
+    rows = rows_of()
+    rows[98]["release_id"] += "x" * (
+        BODY_LIMIT - size({"state": "succeeded", "value": {"releases": rows[:99], "truncated": True}})
+    )
+    fitted = result_for(rows)
+    assert fitted == {"state": "succeeded", "value": {"releases": rows[:99], "truncated": True}}
+    assert size(fitted) == BODY_LIMIT
+    rows[98]["release_id"] += "x"
+    assert result_for(rows) == {"state": "succeeded", "value": {"releases": rows[:98], "truncated": True}}
+
+
+def test_requests_lists_ids_states_and_times_without_text(tmp_path):
+    async def run():
+        seen = []
+
+        async def handler(request):
+            seen.append((request.path, request.query_string, request.headers.get("x-reef-scenario")))
+            if request.path.endswith("/records"):
+                after = int(request.query["after_sequence"])
+                # The first page answers like a Reef that predates the type filter: an inference record comes too.
+                pages = {
+                    0: {
+                        "records": [
+                            {"sequence": 1, "agent_record_id": "turn", "request_type": "inference", "created_at": 1.0},
+                            {"sequence": 2, "agent_record_id": "first", "request_type": "train", "created_at": 2.0},
+                        ],
+                        "next_after_sequence": 2,
+                    },
+                    2: {
+                        "records": [
+                            {"sequence": 3, "agent_record_id": "second", "request_type": "train", "created_at": 3.0}
+                        ],
+                        "next_after_sequence": None,
+                    },
+                }
+                return web.json_response(pages[after])
+            progress = {
+                "first": {"state": "selected", "step": 1, "activity": []},
+                "second": {
+                    "state": "proposing",
+                    "step": None,
+                    "meaning": "private words",
+                    "step_record": "/private/steps/chat/2",
+                    "activity": [{"at": 1.0, "kind": "model", "text": "private proposer line"}],
+                },
+            }
+            return web.json_response(progress[request.path.split("/")[4]])
+
+        app = web.Application()
+        app.router.add_route("*", "/{path:.*}", handler)
+        async with TestServer(app) as server, aiohttp.ClientSession() as session:
+            runtime = ReefRuntime(JSONClient(session, str(server.make_url("")).rstrip("/"), "local-test-token"))
+            state = ConnectorState(tmp_path)
+            connector = Connector(AsyncMock(), runtime, state)
+            command = {"id": str(uuid.uuid4()), "action": "requests", "scenario": "chat a"}
+            try:
+                await connector.execute(command)
+                result = dict(state.pending())[command["id"]]
+            finally:
+                state.close()
+        assert result == {
+            "state": "succeeded",
+            "value": {
+                "requests": [
+                    {"id": "second", "state": "proposing", "created_at": 3.0},
+                    {"id": "first", "state": "selected", "step": 1, "created_at": 2.0},
+                ],
+                "truncated": False,
+            },
+        }
+        assert "private" not in json.dumps(result)
+        assert [entry for entry in seen if entry[0].endswith("/records")] == [
+            ("/reef/scenarios/chat a/records", "request_type=train&limit=100&after_sequence=0", None),
+            ("/reef/scenarios/chat a/records", "request_type=train&limit=100&after_sequence=2", None),
+        ]
+        assert [entry for entry in seen if entry[0].endswith("/progress")] == [
+            ("/reef/harness/requests/second/progress", "", "chat a"),
+            ("/reef/harness/requests/first/progress", "", "chat a"),
+        ]
+
+    asyncio.run(run())
 
 
 @pytest.mark.parametrize(
@@ -444,6 +707,112 @@ def test_background_cli_stops_restarts_without_pairing_and_exits_on_revocation(t
                 os.kill(int((tmp_path / "connector.pid").read_text()), signal.SIGTERM)
                 await wait_for_running(False)
             state.close()
+
+    asyncio.run(run())
+
+
+def foreground_platform(polled: asyncio.Event, on_approval: Callable[[], object] = lambda: None) -> web.Application:
+    """A platform that approves the pairing at once and answers polls; it also answers as the Reef the connector checks."""
+
+    async def handler(request):
+        if request.path == "/api/connector/pair":
+            if request.method == "POST":
+                return web.json_response(
+                    {
+                        "device_token": "foreground-test-token",
+                        "user_code": "ABCD-EF12-3456",
+                        "verification_uri": str(request.url.with_path("/local/authorize")),
+                        "expires_in": 60,
+                    }
+                )
+            on_approval()
+            return web.json_response({"status": "approved", "runtime_id": "runtime-id"})
+        if request.path == "/api/connector/poll":
+            polled.set()
+            return web.json_response({"protocol": 1, "command": None})
+        if request.path == "/reef/scenarios":
+            return web.json_response({"scenarios": [{"scenario": "original"}]})
+        return web.json_response({"scenarios": {"original": {"training_mode": "manual"}}})
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", handler)
+    return app
+
+
+async def foreground_connect(tmp_path: Path, platform_url: str) -> asyncio.subprocess.Process:
+    """``reef connect --foreground`` against ``platform_url``, which also stands in for the Reef."""
+    return await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-m",
+        "reef.cli",
+        "connect",
+        "--no-browser",
+        "--foreground",
+        "--name",
+        "workstation",
+        "--platform",
+        platform_url,
+        "--url",
+        platform_url,
+        "--state-dir",
+        str(tmp_path),
+        cwd=Path(__file__).resolve().parents[2],
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process lifecycle")
+def test_foreground_cli_says_it_connected_once_the_pairing_is_approved(tmp_path):
+    """The foreground connector prints the line the background one prints, while it keeps running."""
+
+    async def run():
+        polled = asyncio.Event()
+        async with TestServer(foreground_platform(polled)) as server:
+            platform_url = str(server.make_url("")).rstrip("/")
+            process = await foreground_connect(tmp_path, platform_url)
+            try:
+                lines = []
+                while not lines or not lines[-1].startswith("Connected"):
+                    line = await asyncio.wait_for(process.stdout.readline(), 15)
+                    assert line, "the connector exited before it said it connected"
+                    lines.append(line.decode().rstrip("\n"))
+                assert lines[-1] == f"Connected workstation. Open {platform_url}/local"
+                # The connector is running: it polls after it said so, and stops cleanly on SIGTERM.
+                await asyncio.wait_for(polled.wait(), 15)
+                assert process.returncode is None
+            finally:
+                if process.returncode is None:
+                    process.send_signal(signal.SIGTERM)
+                _, stderr = await asyncio.wait_for(process.communicate(), 15)
+        assert process.returncode == 0, stderr.decode()
+
+    asyncio.run(run())
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX process lifecycle")
+def test_foreground_cli_never_says_connected_when_another_connector_took_the_lock(tmp_path):
+    """A connector that started while this one waited for approval holds the lock: this one says so and exits
+    without the Connected line, since it never runs."""
+
+    async def run():
+        polled = asyncio.Event()
+        other = ConnectorState(tmp_path)
+        held = ExitStack()
+        try:
+            # The other connector takes the lock after this one's start check, while the pairing waits.
+            platform = foreground_platform(polled, on_approval=lambda: held.enter_context(other.lock()))
+            async with TestServer(platform) as server:
+                process = await foreground_connect(tmp_path, str(server.make_url("")).rstrip("/"))
+                stdout, stderr = await asyncio.wait_for(process.communicate(), 15)
+        finally:
+            held.close()
+            other.close()
+        assert process.returncode == 1
+        assert "Device code: ABCD-EF12-3456" in stdout.decode()
+        assert "Connected" not in stdout.decode()
+        assert "reef connect: A connector is already running for this instance" in stderr.decode()
+        assert not polled.is_set()
 
     asyncio.run(run())
 

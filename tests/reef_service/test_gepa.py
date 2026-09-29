@@ -138,6 +138,7 @@ class FakeChat:
     api_key = None
     api = "openai"
     timeout_s = 600.0
+    metadata = None
 
     def __init__(self, reply: str) -> None:
         self.reply = reply

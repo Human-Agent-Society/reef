@@ -115,6 +115,7 @@ class _ChatBinding:
     api_key = MODEL.api_key
     api = MODEL.api
     timeout_s = MODEL.timeout_s
+    metadata = MODEL.metadata
 
     def chat(self, *args, **kwargs) -> str:
         return "ok"

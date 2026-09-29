@@ -21,13 +21,13 @@ the agent's tools (``native_tool``) and its responses to loop events
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``claude``   | ``primary`` → ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``codex``    | ``primary`` → ``codex/config.toml``                       | npm ``@openai/codex`` 0.152.1             |
+| ``codex``    | ``primary`` → ``codex/config.toml``                       | npm ``@openai/codex`` 0.153.4             |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``dsh``      | ``primary`` → ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
 |              | ``env`` → ``dsh/.env``                                    |                                           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
-| ``hermes``   | ``primary`` → ``hermes/config.yaml``                      | git ``NousResearch/hermes-agent``         |
-|              |                                                           | at ``v2026.8.31`` (0.21.0)                |
+| ``hermes``   | ``primary`` → ``hermes/config.yaml``,                     | git ``NousResearch/hermes-agent``         |
+|              | ``env`` → ``hermes/.env``                                 | at ``v2026.8.31`` (0.21.0)                |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
 | ``native``   | ``primary`` → ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
 |              | ``models`` → ``native/models.json``                       |                                           |
@@ -35,6 +35,65 @@ the agent's tools (``native_tool``) and its responses to loop events
 | ``terminus`` | ``primary`` → ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
 |              |                                                           | reef-eval ships with reef-infra           |
 +--------------+-----------------------------------------------------------+-------------------------------------------+
+
+Codex model metadata
+~~~~~~~~~~~~~~~~~~~~
+
+For Codex, Reef reads the selected upstream model's ``context_length`` and
+``supported_parameters`` from ``GET /v1/models`` before routing calls through
+Reef. This is the metadata shape served by OpenRouter. Successful lookups are
+cached in the service process; discovery uses the upstream credential and a
+five-second timeout. Other adapters do not make this discovery request.
+
+Endpoints without these fields can provide explicit values under
+``evolution.model_metadata``, keyed by the exact model name:
+
+.. code:: yaml
+
+   evolution:
+     adapter: codex
+     model_metadata:
+       local-model:
+         context_window: 64000
+         reasoning: false
+
+A Python ``ModelBinding`` accepts ``metadata=ModelMetadata(64000, False)``;
+a named ``evolution.models`` binding accepts the same fields under ``metadata``.
+Values in ``evolution.model_metadata`` take precedence over discovery. Missing
+or unavailable metadata leaves Codex's existing fallback behavior intact; Reef
+does not invent a model's context window. Restart the service to refresh cached
+provider metadata. A scenario model override resolves the new model separately.
+
+The binding renders ``codex/models.json`` and a relative ``model_catalog_json``
+reference, so both evaluation episodes and installed clients read the same
+capabilities after relocation. Codex retains its own context safety margin and
+compaction policy. Custom-model entries keep the pinned Codex unknown-model
+instructions, standard shell tools, and low/medium/high effort when reasoning
+is supported. The catalog includes all bundled models, so selecting another
+model with ``--model`` or the interactive picker retains its native instructions
+and tools, including ``gpt-6-astra``. Provider-prefixed names such as
+``openai/gpt-6-astra`` retain the same native configuration.
+Explicit and discovered capabilities override the selected model's
+context window and reasoning support even when its name matches a bundled model;
+other native fields and supported reasoning levels remain intact.
+``codex/default_instructions.md`` records the effective unknown-model prompt
+exported with this adapter configuration. It is derived from
+`OpenAI Codex rust-v0.153.4 <https://github.com/openai/codex/blob/rust-v0.153.4/codex-rs/models-manager/prompt.md>`__,
+under the Apache-2.0 license, with SHA-256
+``3b08633fa672906666659d764864dfda1d7af5b5111ea5817c8f46e5de4e1a8d``.
+Codex removes instructions for tools disabled by the adapter from the source
+prompt. A real-binary regression compares the resulting request instructions
+with and without metadata. ``codex/bundled_models.json`` is configuration data
+exported from the same Apache-2.0-licensed CLI with
+``codex debug models --bundled``. Its SHA-256 is
+``661ed96cf0542e8ee117f1ddfd879f416cc05dc96dd1955249a13c04a313ba5e``.
+Keep both resources synchronized with the Codex install pin; the real-binary
+regression compares the complete bundled catalog, including instructions and
+tools. Rendering reads these packaged resources without starting Codex or
+making a network request.
+Tree rules and skills are still added normally. Tree entries may supply the
+same capability fields through the ``models`` config target, but may not set
+an arbitrary catalog path or inject native Codex model fields.
 
 Terminus 2
 ~~~~~~~~~~
@@ -627,10 +686,35 @@ Descriptor fields
   render path. ``files.tree`` is an optional entries-list path for agents
   that reconcile the live tree.
 - ``trajectory`` specifies the session log's path and reader format.
+  ``final_assistant_text`` extracts assistant replies from flat messages,
+  pi's ``message`` events, and Codex's ``response_item.payload`` messages,
+  including ``output_text`` parts. Reefine uses this text for episode scoring;
+  user messages, tool outputs, and reasoning events are not answers.
 - ``env`` points the agent's state into the episode root, substituting
   ``{root}``. For install scripts and ``reef-<adapter>`` wrappers, one
   variable must relocate a directory above the primary config file using
   ``{root}/<dir>``. Terminus relocates the root itself and has no wrapper.
+- ``client_env`` lists variables the ``reef-<adapter>`` wrapper adds when a
+  person runs the binary. That run gets only the relocating ``env`` entry,
+  so what an interactive run needs goes here. An example is turning off the
+  binary's own updater while Reef pins its version: ``PI_SKIP_VERSION_CHECK``
+  for ``pi``, and for ``claude`` both ``DISABLE_AUTOUPDATER`` (the background
+  updater) and ``DISABLE_UPDATES`` (its ``update``, ``upgrade``, and
+  ``install`` commands, which would otherwise install the latest release
+  over the person's own ``claude``). The ``claude`` episode ``env`` sets both
+  too. A variable the shell sets wins. Claude Code applies the ``env`` block
+  of ``settings.json`` over the environment, so the ``claude`` quirks reject
+  a tree that sets either one there.
+- ``client_args`` lists arguments the wrapper puts ahead of the person's own,
+  for a setting the rendered tree must not undo. ``claude`` passes
+  ``--settings '{"disableDeepLinkRegistration":"disable"}'``. Claude Code
+  skips a whole ``settings.json`` that fails its schema, and an interactive
+  run could then point the person's ``claude-cli://`` link handler at the
+  pinned binary. A ``--settings`` the person passes replaces it.
+- ``client_version_args`` lists first arguments that get no ``client_args``:
+  the binary's version flags, which start no session. ``claude`` names
+  ``--version``, ``-v``, and ``-V``, because Claude Code prints its version
+  early only when nothing is ahead of the flag, and takes ``-V`` only there.
 - ``install`` pins the vendor install: ``kind`` (``npm`` or editable-venv
   ``git``), ``package``, ``version`` (as reported by ``--version``), and
   ``binary_path`` below the install prefix. A git install also names
@@ -642,16 +726,152 @@ Descriptor fields
 - ``writable_paths`` lists state directories that a hosted sandbox makes
   writable. Rendered inputs within them stay read-only.
 - ``client_state`` lists ``{path, kind}`` entries for sessions and settings
-  that a ``reef-<adapter>`` wrapper keeps under the relocated composition.
-  The wrapper uses a temporary copy of links, then removes it. ``directory``
-  and ``sqlite`` entries are created and linked before the run; ``file``
-  entries are copied back with their mode if the binary created the file
-  or replaced its link. Other state created only in the temporary copy is
-  lost.
+  that the wrapper preserves between runs. Use ``directory`` or ``sqlite``
+  for state linked into a session, and ``file`` for files copied back if the
+  agent creates them or replaces their link. Include files the binary rewrites,
+  such as pi's ``settings.json``. A ``file`` entry that the install also
+  writes, a JSON object such as pi's ``settings.json``, lists
+  ``preference_keys``: the top-level keys the binary saves itself and that
+  load no code. The install records the value of every other key. See
+  `Installed session files`_ for the installation checks and copying rules.
 - ``cleanup_whitelist`` lists agent-written paths allowed after boot or a
   run, rather than reported as drift.
 - ``quirks`` names an optional module for adapter-specific render checks
   and boot mutations.
+
+Installed session files
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The wrapper checks and copies installed files before starting a session.
+For installation and recovery commands, see `Install the published tree
+<../user-guide/evolve-your-harness.rst#install-the-published-tree>`__.
+
+Temporary session copies
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each session runs the agent on a temporary copy of the tree whose model binding points at the
+wrapper's capture proxy and holds the token. The wrapper makes that copy in
+``$XDG_CACHE_HOME/reef-harness/sessions`` (``~/.cache/reef-harness/sessions``
+by default on Linux and macOS; on Windows the wrapper runs under WSL, where
+the same path applies), readable by you alone, and never in
+``$TMPDIR`` or ``/tmp``: a command in the Codex or dsh sandbox can write
+there, and Codex reads its config and rules from that copy again when you
+start a new thread with ``/new``. When the terminal closes (SIGHUP) or the
+wrapper gets SIGTERM, it passes the signal to the agent, waits for the
+agent to exit, removes the temp copy, keeps the receipts, and exits with
+128 plus the signal number. ``reef-pi update`` passes the install script to
+``bash`` on its standard input, as ``curl ... | bash`` does, so no copy of
+the script sits in ``$TMPDIR`` while it runs.
+
+Install records and validation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The script also records what it wrote in ``~/.reef/installs/<sha256 of the
+install root>.json``, outside the install root: the sha256 of every file, of
+the release file without the check offs ``setup`` adds, the value of every
+key of pi's ``settings.json`` outside its preference keys, and the address
+the script came from. A ``reef-pi`` session starts only while those files
+are as the install wrote them. A file counts as changed also when a link
+reaches it: a link at the file or at a directory above it, or a second hard
+link to it; so does anything at its path that is not a regular file, such as
+a FIFO. When one differs, ``reef-pi`` prints ``cannot start agent; these
+files in <install root> changed since the install wrote them:``, the file
+names (a link is named after its file, for example ``pi-agent/models.json (a
+link)``, a FIFO as ``pi-agent/models.json (not a regular file)``, a changed
+key of pi's settings as ``pi-agent/settings.json (keys: extensions)``, and a
+settings file that no longer holds a JSON object as ``pi-agent/settings.json
+(not a JSON object)``) and ``run reef-pi update to restore them``, and exits
+3 without starting the agent; ``reef-pi update`` writes them again.
+
+The wrapper runs this check, so the install writes it beside the record, as
+``~/.reef/installs/<sha256 of the install root>/reef-pi``, links
+``~/.local/bin/reef-pi`` to it, and removes a ``reef-pi`` an earlier install
+wrote into the tree. The wrapper names the resolved install root. When that
+root later leads through a link, at the root or at a directory above it, a
+start prints ``cannot start agent; <install root> now leads through a link
+to <target>, which the install did not make``, ``reef-pi update`` refuses
+the same way, and both exit 3: remove the link and run the install command
+again.
+
+The record and the wrapper hold only while a session cannot write
+``~/.reef/installs`` or ``~/.local/bin``. A command inside the Codex or dsh
+sandbox can write only its project, ``/tmp`` and ``$TMPDIR``, so they are
+out of its reach. A pi, opencode or Hermes session runs commands with no
+sandbox, and Claude Code, and Codex outside its sandbox, run the commands
+and edits you approve: such a session can change or remove the record and
+the wrapper along with the tree, and the check does not stop it. The Python
+the wrapper runs (``REEF_PYTHON``, or the ``python3`` the install found) and
+the ``reef`` package in it run before the check, and the check does not read
+the agent under ``~/.local/share/reef-harness``, so keep them outside the
+project too.
+
+``~/.local/bin/reef-pi`` links to the wrapper of the latest install. Each
+install prints its own wrapper's path as ``wrapper:``; run that path to
+start another install of the same adapter.
+
+Links and non-regular files
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The installer handles links before writing:
+
+- A link to a file inside the install root is replaced with a regular copy of
+  its target, preserving setup check-offs when the linked file is the release
+  file. A link to a directory is removed and that directory is written again.
+- A link outside the install root is refused. The installer names the link
+  and target and writes nothing until you remove it.
+- A non-regular file at a destination is also refused and named. Remove it
+  before retrying; the installer writes nothing while it remains.
+- When removing files absent from a new release, the installer leaves paths
+  under linked directories untouched and prints
+  ``did not remove <path>: <directory> is a link``.
+
+``setup`` and ``update`` also refuse to write the release file through a link.
+
+Mutable client state
+^^^^^^^^^^^^^^^^^^^^
+
+The sessions and settings the adapter keeps (``client_state`` in its
+descriptor) are the agent's own to write and are not checked, except pi's
+``settings.json`` when the install wrote it (the model binding does). pi
+saves its preferences there, the model, the theme and the ``/settings``
+choices except Default project trust, and those keys may change. Every other
+key must keep the value the install wrote: the ones ``pi install``, ``pi
+remove`` and ``pi config`` write (``packages``, ``extensions``, ``skills``,
+``prompts``, ``themes``), ``defaultProjectTrust``, which the Default project
+trust choice writes and which decides whose code loads, and the rest, such
+as ``shellCommandPrefix``. After such a change the next ``reef-pi`` start is
+refused until ``reef-pi update``, which rewrites ``settings.json`` as the
+install wrote it and so also resets the preferences pi saved there.
+
+A link at a recorded ``settings.json`` counts as changed, as at any recorded
+file. A link at another client state path would send the agent's writes
+wherever it points, so before each session the wrapper removes such a link,
+prints ``<path> in <install root> was a link to <target>; removed the link,
+and the session keeps this state in the tree``, and the agent starts that
+state again in the tree; what the link pointed at is left as it was.
+
+Session inputs and older installations
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A session gets the files the install wrote and that client state, so a
+file added to the tree later is not used, and it gets only the env file
+values the release's ``env`` items name. With a record, its PATH starts
+with the agent binary's directory and the wrapper's, never the install
+root, so a program added there does not run either. ``update``, ``setup``, ``doctor``,
+``evolve`` and ``page`` run from your shell reach Reef at the recorded
+address, not at the one in the model binding. An install made before Reef
+kept this record has none, and neither has one whose record was removed:
+its sessions start without the check, and each such start prints ``<install root> has no install record``
+and that ``reef-pi update`` records the files, until the update writes the
+record.
+
+For a recorded install, the temporary tree contains copies of installed
+files with their modes, plus links to individual ``client_state`` paths.
+Copied files allow Codex to load skills: it skips a linked ``SKILL.md``.
+Overwriting a copied input affects only the session copy. ``directory`` and
+``sqlite`` state is created and linked before launch; ``file`` state is copied
+back with its mode if the agent creates it or replaces its link. Other state
+created only in the temporary tree is discarded when the session ends.
 
 Connect a new agent
 ~~~~~~~~~~~~~~~~~~~
@@ -702,8 +922,8 @@ that the variable is set in the current shell.
 If a required item has not passed setup, an interactive session with a
 ``reef-pi`` wrapper asks ``Set up release <id8> now?`` and runs the setup
 loop below before offering the update. It finds the wrapper through
-``REEF_HARNESS_WRAPPER`` (exported by ``run_agent``), or beside the release
-file. Without a wrapper or UI, it prints the unmet items and
+``REEF_HARNESS_WRAPPER`` (exported by ``run_agent``), or, for a tree run
+without ``reef-pi``, in ``~/.reef/installs``. Without a wrapper or UI, it prints the unmet items and
 ``Run reef-pi setup, then start reef-pi again.``. Items still unmet after
 setup are reported, and the update offer waits until the next session.
 
@@ -863,7 +1083,8 @@ to install. The separate automatic update notice remains available at
 session start.
 
 The install uses the ``reef-pi`` wrapper from ``REEF_HARNESS_WRAPPER``
-(exported by ``run_agent``) or beside the release file. If neither exists,
+(exported by ``run_agent``) or, for a tree run without ``reef-pi``, the one
+in ``~/.reef/installs``. If neither exists,
 pi reports ``reef: no reef-pi wrapper found; install it with reef-pi
 update, then reef-pi setup``. The wrapper runs
 ``reef-pi update --release <id>``, then setup, and reports

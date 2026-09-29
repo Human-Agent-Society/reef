@@ -214,7 +214,10 @@ Common members
 +---------------------------------------------------+-----------------------------+--------------------------------+
 
 Every recipe may declare ``report_type``, the ``ReportBase`` subclass its
-reports parse as (``None`` keeps ingress open). Weight-training recipes add
+reports parse as (``None`` keeps ingress open), and ``harness_adapter``, the
+adapter a client installs its harness tree with (``None``, the default, for a
+recipe with no harness tree; ``CordisRecipe`` names ``evolution.adapter``).
+The scenario list names it for every scenario. Weight-training recipes add
 ``training_spec()``, which binds the processor, the registered or dotted training
 objective, which declares the backend loss family, and the ``StepScheduling`` the
 runtime cuts each batch with; ``max_staleness``, the accepted
@@ -1110,7 +1113,9 @@ inherits from the other, and there is no aggregate runtime.
   versions as values; it does not own an inference endpoint or request backend.
 * ``InferenceRuntime`` executes requests, manages admission and reconnection,
   loads selected weights or adapters, and reports serving versions. It restores
-  serving weights without restoring optimizer state.
+  serving weights without restoring optimizer state. Its ``model_path`` property
+  supplies the default model name for harness bindings; the base implementation
+  returns an empty string for runtimes whose requests select the model.
 * The existing ``RuntimeCandidateBackend`` coordinates both: prepare/train,
   evaluate, activate or reject, delegating scheduling and durable publication
   acknowledgement to ``RuntimeScheduler``. ``ScenarioCommitter`` coordinates rollback across both runtimes and

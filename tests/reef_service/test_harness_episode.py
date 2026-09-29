@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.run import EpisodeError, _remove_episode_root, run_episode
+from reef.harness.episodes.run import EpisodeError, EpisodeResult, _remove_episode_root, run_episode
 from reef.harness.episodes.trajectory import (
     TrajectoryError,
     read_claude_session,
@@ -25,7 +25,7 @@ from reef.harness.episodes.trajectory import (
     reader_for,
 )
 from reef.harness.tree.render import render_composition
-from reef.recipe.reefine.evolution import final_assistant_text
+from reef.recipe.reefine.evolution import evaluate, final_assistant_text
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -98,6 +98,21 @@ rollout.write_text("".join(json.dumps(event) + "\\n" for event in events))
 (codex_home / ".tmp" / "probe").write_text("ephemeral")
 print(json.dumps({"type": "item.completed", "item": {"type": "agent_message", "text": "done"}}))
 sys.exit(3 if prompt == "fail" else 0)
+"""
+
+CLAUDE_FAKE = """\
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+args = sys.argv[1:]
+assert args[0] == "-p" and args[2:4] == ["--output-format", "json"], args
+session = Path(os.environ["CLAUDE_CONFIG_DIR"]) / "projects" / "workspace" / "s1.jsonl"
+session.parent.mkdir(parents=True)
+# The shell commands an agent runs inherit this env.
+switches = {key: os.environ.get(key) for key in ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES")}
+session.write_text(json.dumps({"type": "user", "env": switches}) + "\\n")
+print(json.dumps({"type": "result", "result": "done"}))
 """
 
 
@@ -182,6 +197,16 @@ def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_pat
     assert result.residue == ()
 
 
+def test_claude_episode_runs_with_the_updater_and_its_update_commands_off(tmp_path: Path) -> None:
+    """The episode env sets both updater switches, and the agent's shell commands inherit them, so a claude update
+    or claude install run there keeps the pinned version."""
+    files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("claude"))
+    result = run_episode(get_adapter("claude"), files, "list files", binary=fake_binary(tmp_path, CLAUDE_FAKE))
+    assert result.exit_code == 0
+    assert [event["env"] for event in result.trajectory] == [{"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}]
+    assert result.residue == ()
+
+
 def test_missing_binary_raises_episode_error(tmp_path: Path) -> None:
     with pytest.raises(EpisodeError, match="not found"):
         run_episode(get_adapter("pi"), pi_files(), "x", binary=str(tmp_path / "no-such-binary"))
@@ -239,6 +264,42 @@ def test_codex_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path
     second.write_text('{"type": "event_msg"}\n{"type": "turn_context"\n')
     assert [event["type"] for event in read_codex_session(tmp_path)] == ["session_meta", "event_msg"]
     assert reader_for("codex-session-jsonl").format == "codex-session-jsonl"
+
+
+@pytest.mark.parametrize("answer, expected_score", [("reef-ok", 1.0), ("wrong", 0.0), (None, 0.0)])
+def test_codex_episode_grades_assistant_output_text(tmp_path: Path, answer: str | None, expected_score: float) -> None:
+    events = [
+        {
+            "type": "response_item",
+            "payload": {"type": "message", "role": "user", "content": [{"type": "input_text", "text": "reef-ok"}]},
+        },
+        {"type": "response_item", "payload": {"type": "function_call_output", "output": "reef-ok"}},
+        {
+            "type": "response_item",
+            "payload": {"type": "reasoning", "summary": [{"type": "summary_text", "text": "reef-ok"}]},
+        },
+    ]
+    if answer is not None:
+        for text in ("Earlier reply", answer):
+            events.append(
+                {
+                    "type": "response_item",
+                    "payload": {
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{"type": "output_text", "text": "Output:"}, {"type": "output_text", "text": text}],
+                    },
+                }
+            )
+    events.append({"type": "event_msg", "payload": {"type": "task_complete", "last_agent_message": answer}})
+    session = tmp_path / "rollout.jsonl"
+    session.write_text("".join(json.dumps(event) + "\n" for event in events))
+    trajectory = read_codex_session(tmp_path)
+    expected_reply = None if answer is None else f"Output:\n{answer}"
+    assert final_assistant_text(trajectory) == expected_reply
+    result = EpisodeResult(exit_code=0, stdout="", stderr="", trajectory=trajectory, residue=())
+    assert evaluate("[health] Reply with the shell command's output", result) == expected_score
+    assert trajectory == tuple(events)
 
 
 def test_deepseek_reader_reads_nested_sessions_and_tolerates_one_torn_tail(tmp_path: Path) -> None:

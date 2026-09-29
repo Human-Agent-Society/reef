@@ -157,8 +157,9 @@ class RecordStore(ABC):
         *,
         after_sequence: int = 0,
         limit: int = 256,
+        request_type: RequestType | None = None,
     ) -> tuple[StoredRecord, ...]:
-        """Read retained records with the same sequence bounds as ``replay_page``."""
+        """Read retained records with the same sequence bounds as ``replay_page``, optionally of one type."""
 
     @abstractmethod
     def record_consumption(

@@ -6,6 +6,7 @@ import pytest
 
 from reef.core.batches import TrainingBatch
 from reef.core.evaluation import EvaluationResult, SelectionDecision
+from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.interfaces import (
     ActivatedModel,
     CandidateTrainingDeferred,
@@ -109,6 +110,16 @@ class WeightReceiver(InferenceRuntime):
 
 def staged_journal(training, *, state="READY_TO_COMMIT", scenario=None):
     training.journal.update(status=state, training_job_id="job-1", scenario_step=0, scenario=scenario)
+
+
+def test_runtime_without_a_default_model_requires_an_explicit_binding_name() -> None:
+    runtime = WeightReceiver()
+    assert runtime.model_path == ""
+    with pytest.raises(ValueError, match="requires a model name"):
+        ModelBinding.from_runtime(runtime)
+    binding = ModelBinding.from_runtime(runtime, model="selected-model")
+    assert binding.model == "selected-model"
+    assert binding.base_url == runtime.base_url
 
 
 @pytest.mark.parametrize("colocate", [False, True])
