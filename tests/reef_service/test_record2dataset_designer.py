@@ -164,10 +164,10 @@ def test_a_dotfile_or_an_underscore_file_is_a_file_the_task_can_hold() -> None:
     document = json.loads(json.dumps(HARBOR_DOCUMENT))
     document["environment"][".hidden_config"] = "token=1\n"
     document["environment"]["home/.bashrc"] = "alias ll='ls -la'\n"
-    document["environment"]["ledger/__init__.py"] = ""
+    document["environment"]["package/__init__.py"] = ""
     reply = parse_harbor_reply("```json\n" + json.dumps(document) + "\n```")
     assert reply.environment[".hidden_config"] == "token=1\n" and "home/.bashrc" in reply.environment
-    assert reply.environment["ledger/__init__.py"] == ""
+    assert reply.environment["package/__init__.py"] == ""
 
 
 def test_a_harbor_reply_without_json_is_refused() -> None:
