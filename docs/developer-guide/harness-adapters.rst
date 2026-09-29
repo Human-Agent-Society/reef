@@ -173,6 +173,14 @@ A command named ``review`` can select an existing agent:
    ---
    Review the changes and explain any correctness problems.
 
+When present, frontmatter must be a YAML mapping between opening and closing
+``---`` lines, without a byte order mark, YAML tags, or an alternate format
+such as JSON. Quote strings containing a colon followed by a space, or
+numeric-looking text such as ``"1e5"``. Use ``true`` or ``false`` for
+booleans; ``yes`` is a string.
+Reef rejects unsupported frontmatter forms and fields with the wrong types
+during rendering.
+
 Command fields have these constraints:
 
 .. list-table::
@@ -208,48 +216,17 @@ The defaults keep autoupdate and sharing off, allow every permission, and set
 ``enabled_providers`` to ``["reef"]``. Rendering rejects changes to those
 update, sharing, and provider-list settings.
 
-Reef's model binding writes ``provider`` and ``model`` after the tree. It
-replaces every value it writes and supplies a non-empty ``apiKey``; the tree
-cannot supply an inline credential. Do not set ``provider``, ``model``,
-``disabled_providers``, or ``small_model`` in the tree, or choose a model in
-an agent or command. These settings would override the deployment's binding
-and are rejected.
+The deployment's model binding selects the provider and model. The tree must
+not contain inline credentials, set ``provider``, ``model``,
+``disabled_providers``, or ``small_model``, or choose a model in an agent or
+command. Reef rejects these overrides.
 
-Session files and web search
-^^^^^^^^^^^^^^^^^^^^^^^^^^^
+Web search
+^^^^^^^^^^
 
-``OPENCODE_CONFIG_DIR`` relocates configuration. XDG variables relocate data,
-cache, and state; ``npm_config_cache`` relocates the boot install's npm cache.
-This keeps episode files inside the declared directories.
-
-The ``opencode-session-sqlite`` trajectory reader reads ``opencode.db`` in the
-data directory. It emits one event per message, with the message's parts,
-including text, as ``content``.
-
-Interactive ``reef-opencode`` sets ``OPENCODE_ENABLE_EXA=1`` to register the
-Exa ``websearch`` tool for provider ``reef`` without an API key. Evaluation
-episodes do not set it and do not search the web.
-
-Frontmatter parsing compatibility
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-Command and skill files must write their frontmatter in the plain form: a
-``---`` line, a YAML mapping with no tags, and a closing ``---`` line.
-opencode reads frontmatter with gray-matter, which also takes a byte order
-mark, another engine named after the opening ``---`` (JSON, JavaScript), and
-a block with no closing line. A check that read those forms another way
-could miss the agent or the model opencode sees, so rendering rejects them.
-
-When js-yaml, the YAML reader in gray-matter, cannot read a block, opencode
-rewrites each unquoted top-level value that holds ``': '`` as a block scalar
-and reads the file again. Rendering does the same, so it admits a file such
-as ``description: Chat mode: web search only``. It rejects a block the
-rewrite does not repair, which opencode reads with no keys or skips, and an
-unreadable block that holds a tab, since js-yaml reads a tab after a colon
-as a space where PyYAML fails. Rendering reads each plain value with the
-js-yaml types, so ``1e5`` is a number and ``yes`` a string, as opencode
-reads them, and it rejects a date that does not exist, such as
-``2001-13-45``.
+Interactive ``reef-opencode`` sessions offer the Exa ``websearch`` tool
+without requiring a search API key. Evaluation episodes do not enable this
+tool.
 
 DeepSeek Harness
 ~~~~~~~~~~~~~~~~
