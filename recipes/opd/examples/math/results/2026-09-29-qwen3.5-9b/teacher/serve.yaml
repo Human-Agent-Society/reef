@@ -1,0 +1,31 @@
+schema-version: 2
+reef:
+  ready-timeout: 3600
+  host: 127.0.0.1
+  port: 28986
+  run-dir: /work/teacher-control-v4/runtime
+  token: ${REEF_TOKEN}
+inference:
+  backend: sglang
+  model-path: /work/models/Qwen3.5-9B
+  timeout-s: 7200
+  num-gpus: 1
+  tensor-parallel-size: 1
+  options:
+    context-length: 65536
+    dtype: bfloat16
+    mem-fraction-static: 0.6
+    disable-cuda-graph: true
+    reasoning-parser: qwen3
+    skip-server-warmup: true
+    enable-deterministic-inference: true
+recipe:
+  implementation: recipe
+storage:
+  artifact-repository: /work/teacher-control-v4/artifacts.git
+  artifact-work-dir: /work/teacher-control-v4/artifact-work
+  artifact-cache-dir: /work/teacher-control-v4/artifact-cache
+  agent-record-dir: /work/teacher-control-v4/agent-record
+observability:
+  wandb:
+    enabled: false

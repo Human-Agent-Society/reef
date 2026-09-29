@@ -1,8 +1,9 @@
 # B200 validation record
 
-Status as of 2026-09-29: integration verified; the full SFT initialization is
-running. The AIME'24 baseline, OPD learning curve and final acceptance remain
-pending. This record does not claim the roadmap's ten-point improvement.
+Status as of 2026-09-29: implementation checks and the frozen teacher control
+are complete; the full SFT initialization is running. The student AIME'24
+baseline, OPD learning curve and final acceptance remain pending. This record
+does not claim the roadmap's ten-point improvement.
 
 ## Software and data
 
@@ -93,11 +94,18 @@ optimizer states and the trainer/scheduler counters identify step 300; all
 four RNG files load. Only checkpoint 300 remained after automatic retention,
 with 869.4 GiB free. The report is `checkpoint-300-validation.json`.
 
+At 2026-09-29 15:12 UTC, checkpoint 400 passed the same checks. Checkpoint
+500 passed at 16:42 UTC after training continued beyond it: all 427 optimizer
+states, trainer/scheduler counters, four RNG files and sampled HF/FSDP values
+passed. Automatic retention leaves checkpoint 500; this does not validate a
+full restore of that checkpoint. Reports remain in the experiment state.
+
 Each checkpoint occupies approximately 137 GiB. These checks cover structure,
 shapes, counters and sampled numerical values; they are not full checksums,
 actual restores of the formal checkpoints, or evaluation results. The earlier
 checkpoint-1 restore test remains the recovery check. No full-run SFT or
-AIME result is available yet. Detailed reports are retained under
+student AIME result is available yet; the frozen teacher result is below.
+Detailed reports are retained under
 `/raid/x9zou/reef-opd-state`: `checkpoint-100-validation.json`,
 `checkpoint-200-validation.json` and `second-checkpoint-watch-result.json`.
 
@@ -147,8 +155,24 @@ records are under `/raid/x9zou/reef-opd-state/teacher-control-v4`.
 
 After the deterministic-inference configuration change, deployment validation,
 recipe deployment and campaign suites passed 69 tests; focused pre-commit
-checks passed. Formal teacher evaluation and the SFT/OPD comparison remain
-pending.
+checks passed. The formal teacher control subsequently completed; the
+SFT/OPD comparison remains pending.
+
+## Complete frozen teacher control
+
+The formal run completed all 480 responses (30 questions, 16 seeds) with
+exit code 0: 406 correct, mean accuracy 84.5833%, and 63 output-limit cases.
+Every question/seed pair and original answer was checked; independently
+rescored answers agree, and all 480 saved receipts reference one frozen
+creation release. Exported compact scores reproduce the original analysis.
+
+The one-B200 control took 10,895 seconds including final verification. The
+container was stopped after export validation and its GPU lock was released.
+SFT continued on its original four GPUs. The
+[committed control result](results/2026-09-29-qwen3.5-9b/README.md) contains
+individual scores, configuration, source/model/data pins, resource measurements
+and validation records. Teacher
+accuracy alone does not establish the roadmap's student learning improvement.
 
 ## Complete evaluation schedule
 

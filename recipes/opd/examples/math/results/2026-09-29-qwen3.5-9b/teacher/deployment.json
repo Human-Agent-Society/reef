@@ -1,0 +1,10 @@
+{
+  "image": "slimerl/slime@sha256:8851cdff296ce6e569fed9b427aab05a72b55e803ccf73ecb6697c261621fd02",
+  "started_utc": "2026-09-29T13:24:51.677132+00:00",
+  "telemetry_timestamp_timezone": "UTC",
+  "slime_commit": "41014d1f29e201137fdffce737bb8bac65bc5219",
+  "sglang_commit": "f7ea06e1e519c569c1d6cb7e1c7b1128cbdbc39f",
+  "aime_dataset": "HuggingFaceH4/aime_2024",
+  "aime_revision": "2fe88a2f1091d5048c0f36abc874fb997b3dd99a",
+  "scope": "Frozen teacher inference; no optimizer or OPD update ran in this deployment."
+}

@@ -1,0 +1,19 @@
+{
+  "config": "/work/teacher-control-v4/serve.yaml",
+  "url": "http://127.0.0.1:28986",
+  "scenario": "opd-teacher-aime24",
+  "model": "/work/models/Qwen3.5-9B",
+  "train_data": "/work/data/deepmath.jsonl",
+  "eval_data": "/work/data/aime24.jsonl",
+  "output": "/work/teacher-control-v4/results",
+  "steps": 0,
+  "prompts_per_step": 512,
+  "samples_per_prompt": 4,
+  "train_tokens": 16384,
+  "eval_tokens": 64000,
+  "eval_repeats": 16,
+  "eval_every": 20,
+  "seed": 0,
+  "concurrency": 32,
+  "timeout": 7200.0
+}

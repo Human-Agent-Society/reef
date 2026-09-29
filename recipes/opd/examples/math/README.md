@@ -6,6 +6,9 @@ OpenThoughts3-SFT initialization of `Qwen/Qwen3.5-9B-Base`. It runs on local GPU
 workers through Reef, Slime/Megatron and SGLang. No Tinker credentials or API
 are used. Experiment tracking is in [#682](https://github.com/Human-Agent-Society/reef/issues/682).
 See [VALIDATION.md](VALIDATION.md) for completed checks and pending acceptance.
+The [frozen teacher control](results/2026-09-29-qwen3.5-9b/README.md) completed
+with 84.5833% mean AIME'24 accuracy over 480 samples. Student learning results
+remain pending.
 
 ## Protocol and acceptance
 

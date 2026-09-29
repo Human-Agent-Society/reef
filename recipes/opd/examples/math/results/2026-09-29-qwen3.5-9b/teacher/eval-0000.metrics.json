@@ -1,0 +1,10 @@
+{
+  "step": 0,
+  "release_id": "9fef2ede55350af2fae66733465cca9e0faf7b83",
+  "accuracy": 0.8458333333333333,
+  "samples": 480,
+  "questions": 30,
+  "elapsed_s": 10894.163927795831,
+  "elapsed_scope": "completing_attempt",
+  "truncated": 63
+}

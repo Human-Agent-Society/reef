@@ -1,0 +1,22 @@
+{
+  "scope": "frozen control",
+  "final_step": 0,
+  "eval_every": 20,
+  "questions": 30,
+  "repeats": 16,
+  "source_directory": "/work/teacher-control-v4/results",
+  "question_file_sha256": "89de34f2cd0029841dda82ab609fb63a3cbbdd5daab78268ec3d67d5117761bb",
+  "export_script_sha256": "cbde34191e7f2c05ae484f49d53edf69c3b40802691c3e1efbc4a890aff8bad8",
+  "evaluations": [
+    {
+      "step": 0,
+      "source_file": "eval-0000.jsonl",
+      "source_sha256": "64343ea04d832956c68264c167ea18e139448171cb7aeaeac4a10f4b27d32b0d",
+      "samples": 480,
+      "accuracy": 0.8458333333333333,
+      "release_id": "9fef2ede55350af2fae66733465cca9e0faf7b83"
+    }
+  ],
+  "generated_text": "Retained privately in original B200 files; compact rows preserve scores, extracted answers, token counts and text checksums.",
+  "acceptance": "Not claimed by this exporter. Run the repository analysis on the complete student curve and compare with original files."
+}
