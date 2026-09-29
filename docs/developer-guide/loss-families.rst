@@ -189,14 +189,17 @@ and each such recipe's family is a thin subclass of it:
   renormalized over them, the reverse KL then estimated at the sampled
   token, or with one bucket for the rest of the vocabulary as SDPO's
   reference does. The kernels reduce across the vocab shards of tensor
-  parallel themselves and write the gradients out where autograd over one
-  shard would drop the coupling through the global log-sum-exp;
+  parallel with ``reef/train/slime_backend/vocab_parallel.py`` and write the
+  gradients out where autograd over one shard would drop the coupling
+  through the global log-sum-exp;
   ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python
   reference and to the dense gradients across four ranks.
 
 The base registers no family and imports nothing from ``reef_adapters``;
-``recipes/openclawrl/slime/`` imports its packing schedule and its sharded
-gathers from it.
+``recipes/openclawrl/slime/`` imports its packing schedule from it. The
+operations over vocab shards (log-sum-exp, the log-probs at ids on any
+shard, the top-K ids) live in ``reef/train/slime_backend/vocab_parallel.py``,
+shared by the distillation base, score centering and OpenClaw-RL's teacher.
 
 Score centering
 ---------------

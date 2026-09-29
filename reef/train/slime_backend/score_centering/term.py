@@ -2,8 +2,9 @@
 
 :func:`centering_term` computes the per-token term on replicated log-probs;
 :func:`score_centering_term` gathers the trainer's log-probs at the sampler's
-head ids across the tensor-parallel vocab shards (the distillation package's
-differentiable gather) and reduces the term with the same per-sample mean the
+head ids across the tensor-parallel vocab shards
+(:func:`~reef.train.slime_backend.vocab_parallel.gather_log_probs_at_ids`)
+and reduces the term with the same per-sample mean the
 family's loss uses. :func:`add_score_centering` adds it to that loss; the
 worker hook installs it around Slime's ``policy_loss_function`` or, for a
 custom loss, through :func:`score_centered_custom_loss`. The kernel takes
@@ -22,13 +23,13 @@ import torch
 import torch.distributed as dist
 
 from reef.train.slime_backend.algorithm import PolicyGradientWeight, resolve_args_loss_family
-from reef.train.slime_backend.distill.objective import gather_log_probs_at_ids
 from reef.train.slime_backend.score_centering import (
     TOPK_INDICES_KEY,
     TOPK_LOG_PROBS_KEY,
     ScoreCenteringSettings,
     settings_from_args,
 )
+from reef.train.slime_backend.vocab_parallel import gather_log_probs_at_ids
 
 
 @dataclass(frozen=True)
