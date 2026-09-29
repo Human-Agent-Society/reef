@@ -81,12 +81,19 @@ step 101:
   MLP weights are finite and exactly equal between the HF and FSDP files.
   Sampled optimizer moments are also finite.
 
-The checkpoint occupies approximately 137 GiB. The check covers structure,
-shapes, counters and sampled numerical values; it is not a full checksum,
-an actual restore of checkpoint 100, or an evaluation result. The earlier
+At 2026-09-29 12:21 UTC, `checkpoint-200` passed the same checks with step-200
+trainer, optimizer and scheduler counters, after training continued to step
+201. Trainer removed `checkpoint-100` as configured by `save_total_limit=1`;
+only `checkpoint-200` remained, with 873.2 GiB free on the checkpoint volume.
+The observer performed no deletion or restart.
+
+Each checkpoint occupies approximately 137 GiB. These checks cover structure,
+shapes, counters and sampled numerical values; they are not full checksums,
+actual restores of the formal checkpoints, or evaluation results. The earlier
 checkpoint-1 restore test remains the recovery check. No full-run SFT or
-AIME result is available yet. The detailed report is retained on B200 as
-`/raid/x9zou/reef-opd-state/checkpoint-100-validation.json`.
+AIME result is available yet. Detailed reports are retained under
+`/raid/x9zou/reef-opd-state`: `checkpoint-100-validation.json`,
+`checkpoint-200-validation.json` and `second-checkpoint-watch-result.json`.
 
 ## Campaign driver recovery
 
