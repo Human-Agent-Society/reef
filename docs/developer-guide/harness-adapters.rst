@@ -136,6 +136,98 @@ tree and configured executor before Reef writes episode files. It raises
 ``self_isolating`` nesting restriction. Execution, timeout, cleanup, and
 trajectory handling still use the shared episode code.
 
+opencode
+~~~~~~~~
+
+The ``opencode`` adapter runs ``opencode run --format json --auto "<task>"``
+headless. It renders configuration to ``opencode/opencode.json``, skills to
+``opencode/skill/<name>/SKILL.md``, and commands to
+``opencode/command/<name>.md``.
+
+Write a skill or command
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+For a skill named ``notes``, use a body such as:
+
+.. code:: text
+
+   ---
+   name: notes
+   description: Summarize the changes made during a task.
+   ---
+   List the changed files and the checks that ran.
+
+If a skill has no frontmatter, Reef supplies its directory name and first
+line as quoted ``name`` and ``description`` strings. If you provide your own
+frontmatter, include both fields.
+
+A command named ``review`` can select an existing agent:
+
+.. code:: text
+
+   ---
+   name: review
+   description: Review the current changes.
+   agent: plan
+   subtask: false
+   ---
+   Review the changes and explain any correctness problems.
+
+When present, frontmatter must be a YAML mapping between opening and closing
+``---`` lines, without a byte order mark, YAML tags, or an alternate format
+such as JSON. Quote strings containing a colon followed by a space, or
+numeric-looking text such as ``"1e5"``. Use ``true`` or ``false`` for
+booleans; ``yes`` is a string.
+Reef rejects unsupported frontmatter forms and fields with the wrong types
+during rendering.
+
+Command fields have these constraints:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Field
+     - Type and constraint
+   * - ``name``
+     - Optional; must match the command's file name. The name replaces any
+       existing command with that name, including ``/reefine``.
+   * - ``description``, ``variant``
+     - Strings when present.
+   * - ``agent``
+     - A string naming an enabled tree agent or a built-in agent: ``build``,
+       ``plan``, ``general``, ``explore``, ``title``, ``summary``, or ``compaction``.
+   * - ``subtask``
+     - A boolean when present.
+   * - ``model``
+     - Not allowed; Reef's model binding selects the model.
+
+Tree agents are configured under ``agent`` (or the older ``mode``). Their
+``disable`` and ``hidden`` fields are booleans, and ``mode`` is ``subagent``,
+``primary``, or ``all``. An agent may not set a different ``name``.
+``default_agent`` must name an enabled, non-hidden agent that is not a subagent.
+Without ``default_agent``, keep at least one agent meeting those conditions.
+Reef rejects invalid configurations before opencode can fail to start or load
+a command.
+
+Configuration and model binding
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The defaults keep autoupdate and sharing off, allow every permission, and set
+``enabled_providers`` to ``["reef"]``. Rendering rejects changes to those
+update, sharing, and provider-list settings.
+
+The deployment's model binding selects the provider and model. The tree must
+not contain inline credentials, set ``provider``, ``model``,
+``disabled_providers``, or ``small_model``, or choose a model in an agent or
+command. Reef rejects these overrides.
+
+Web search
+^^^^^^^^^^
+
+Interactive ``reef-opencode`` sessions offer the Exa ``websearch`` tool
+without requiring a search API key. Evaluation episodes do not enable this
+tool.
+
 DeepSeek Harness
 ~~~~~~~~~~~~~~~~
 
