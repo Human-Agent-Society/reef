@@ -6,6 +6,7 @@ import json
 import math
 import re
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -816,9 +817,13 @@ def test_descriptor_client_argument_lists_are_lists_of_strings(tmp_path, key: st
 
 def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:
     """A reef-<adapter> run keeps what the binary's resume and first-run setup read in the installed tree."""
-    kept = {name: get_adapter(name).client_state for name in ("pi", "claude", "codex", "hermes", "dsh")}
+    kept = {
+        name: tuple(replace(state, preference_keys=()) for state in get_adapter(name).client_state)
+        for name in ("pi", "claude", "codex", "hermes", "dsh")
+    }
     assert kept == {
-        "pi": (ClientState("pi-agent/sessions", "directory"),),
+        # pi writes settings.json in place at its first interactive start (lastChangelogVersion).
+        "pi": (ClientState("pi-agent/sessions", "directory"), ClientState("pi-agent/settings.json", "file")),
         "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
         "codex": (ClientState("codex/sessions", "directory"),),
         "hermes": (ClientState("hermes/state.db", "sqlite"),),
@@ -837,6 +842,14 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
         ({"kind": "directory"}, "'path'"),
         ({"path": "sessions", "kind": "directory"}, "not below 'pi-agent'"),
         ({"path": "pi-agent", "kind": "directory"}, "not below 'pi-agent'"),
+        (
+            {"path": "pi-agent/sessions", "kind": "directory", "preference_keys": ["theme"]},
+            "'preference_keys' is for a 'file' entry",
+        ),
+        (
+            {"path": "pi-agent/settings.json", "kind": "file", "preference_keys": "theme"},
+            "'preference_keys' must be a list",
+        ),
     ],
 )
 def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path, entry, message: str) -> None:
@@ -847,6 +860,63 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
+
+
+def test_a_client_state_file_that_is_a_config_target_names_the_keys_the_binary_may_change() -> None:
+    """The install writes a config target and the check skips client state, so a client state file that is also a
+    config target (pi's settings.json) names the keys its binary may change; the check covers every other key."""
+    for name in available_adapters():
+        descriptor = get_adapter(name)
+        targets = {target.path for target in descriptor.config_targets.values()}
+        for state in descriptor.client_state:
+            assert state.kind != "file" or state.path not in targets or state.preference_keys, (name, state.path)
+
+
+def test_pi_settings_keys_that_load_code_are_not_preference_keys() -> None:
+    """From these settings keys pi 0.84.2 loads code, skills, prompts or themes, runs a program, or decides whose code
+    loads, so none of them may be a key a session changes unchecked."""
+    (settings,) = [state for state in get_adapter("pi").client_state if state.path == "pi-agent/settings.json"]
+    checked_keys = {
+        "packages",
+        "extensions",
+        "skills",
+        "prompts",
+        "themes",
+        "shellPath",
+        "shellCommandPrefix",
+        "npmCommand",
+        "externalEditor",
+        "defaultProjectTrust",
+    }
+    assert checked_keys.isdisjoint(settings.preference_keys)
+    # What pi writes by itself, and what /model saves.
+    assert {"lastChangelogVersion", "theme", "defaultModel", "defaultProvider"} <= set(settings.preference_keys)
+
+
+def test_pi_settings_keys_pi_rewrites_on_load_are_rendered_in_their_new_form() -> None:
+    """pi 0.84.2 rewrites queueMode, a boolean websockets and a skills object when it loads settings.json and writes
+    the new form back on its next save; the render writes that form, so pi's save changes no key the check covers."""
+    files = render_composition(
+        [
+            (
+                "config",
+                {
+                    "data": {
+                        "queueMode": "all",
+                        "websockets": False,
+                        "skills": {"customDirectories": ["extra"], "enableSkillCommands": True},
+                    }
+                },
+            )
+        ],
+        get_adapter("pi"),
+    )
+    assert json.loads(files["pi-agent/settings.json"]) == {
+        "steeringMode": "all",
+        "transport": "sse",
+        "skills": ["extra"],
+        "enableSkillCommands": True,
+    }
 
 
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:

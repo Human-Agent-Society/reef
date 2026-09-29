@@ -235,6 +235,18 @@ curl -fsS -H "x-reef-scenario: my-harness" \
 reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
+The script installs into `~/reef-harness/<scenario>` (here
+`~/reef-harness/my-harness`); `bash -s -- <dir>` names another install root.
+Keep any install root outside the project the agent works in: a session can
+write files in its project, so with the install root there it could change
+what the next session runs. The same holds for the Python environment the
+install bakes into `reef-pi` and the Reef checkout it imports: code there runs
+as you when `reef-pi` starts. For codex and dsh, keep them out of `/tmp` and
+`$TMPDIR` too: their sandboxes let a command write there as well. The check
+`reef-pi` runs before a session holds only against a session that can write
+just its project, `/tmp` and `$TMPDIR`; pi runs commands with no sandbox (see
+[Recover a changed installation](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#recover-a-changed-installation)).
+
 Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
 extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a

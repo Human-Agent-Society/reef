@@ -8,6 +8,7 @@ supplies the pinned binary through ``REEF_REAL_CODEX_BINARY``.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -251,9 +252,11 @@ def test_installed_codex_reads_catalog_after_client_relocation(tmp_path: Path, s
         assert installed.returncode == 0, installed.stderr
         config = tomllib.loads((dest / "codex/config.toml").read_text())
         assert config["model_catalog_json"] == "models.json"
+        # The install writes the wrapper outside the tree, beside its record in the fake home.
+        root_digest = hashlib.sha256(os.fsencode(os.path.realpath(dest))).hexdigest()
         run = subprocess.run(
             [
-                str(dest / "reef-codex"),
+                str(tmp_path / "home" / ".reef" / "installs" / root_digest / "reef-codex"),
                 "exec",
                 "--json",
                 "--strict-config",
