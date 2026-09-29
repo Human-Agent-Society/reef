@@ -173,7 +173,10 @@ After the final scheduled evaluation, generate the curve and acceptance record:
 python recipes/opd/examples/math/analyze.py /work/opd/results
 ```
 
-The analysis requires the same question/seed pairs at every checkpoint. Its
+The analysis requires the same question/seed pairs at every checkpoint and
+all scheduled evaluations, including the final step. Missing, duplicate or
+unexpected steps prevent an acceptance result. For a different predeclared
+schedule, pass matching `--final-step` and `--eval-every` values. Its
 95% bootstrap interval resamples whole questions, retaining repeated samples
 and baseline/final pairing. `acceptance.json` reports whether the final point
 estimate reaches the predeclared target; it does not equate that threshold

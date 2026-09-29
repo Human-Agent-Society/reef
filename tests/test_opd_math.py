@@ -70,7 +70,8 @@ def test_evaluation_never_submits_training_reports(tmp_path) -> None:
 def test_acceptance_uses_final_checkpoint_and_paired_questions(tmp_path) -> None:
     from recipes.opd.examples.math.analyze import analyze
 
-    for step, values in [(0, [False, False]), (20, [True, True]), (200, [True, False])]:
+    for step in range(0, 201, 20):
+        values = [False, False] if step == 0 else ([True, False] if step == 200 else [True, True])
         rows = [
             {"question_id": str(i), "seed": 0, "evaluation": True, "correct": value, "release_id": str(step)}
             for i, value in enumerate(values)
@@ -80,9 +81,56 @@ def test_acceptance_uses_final_checkpoint_and_paired_questions(tmp_path) -> None
     assert result["absolute_improvement"] == 0.5
     assert result["target_met"] is True
     assert result["paired_question_bootstrap_95_interval"] == [0.0, 1.0]
-    assert [point["step"] for point in result["curve"]] == [0, 20, 200]
+    assert [point["step"] for point in result["curve"]] == list(range(0, 201, 20))
     with pytest.raises(ValueError, match="acceptance is pending"):
-        analyze(tmp_path, final_step=100, questions=2, repeats=1)
+        analyze(tmp_path, final_step=220, questions=2, repeats=1)
+
+
+@pytest.mark.parametrize(
+    ("steps", "message"),
+    [
+        ([0, 200], "missing="),
+        ([*range(0, 201, 20), 10], "unexpected="),
+    ],
+)
+def test_acceptance_requires_the_complete_declared_schedule(tmp_path, steps, message) -> None:
+    from recipes.opd.examples.math.analyze import analyze
+
+    for step in steps:
+        row = {"question_id": "q", "seed": 0, "evaluation": True, "correct": step > 0, "release_id": str(step)}
+        (tmp_path / f"eval-{step:04d}.jsonl").write_text(json.dumps(row) + "\n")
+    with pytest.raises(ValueError, match=message):
+        analyze(tmp_path, questions=1, repeats=1)
+
+
+@pytest.mark.parametrize(("eval_every", "steps"), [(20, [0, 20, 25]), (10, [0, 10, 20, 25])])
+def test_acceptance_includes_final_step_outside_regular_interval(tmp_path, eval_every, steps) -> None:
+    from recipes.opd.examples.math.analyze import analyze
+
+    for step in steps:
+        row = {"question_id": "q", "seed": 0, "evaluation": True, "correct": step > 0, "release_id": str(step)}
+        (tmp_path / f"eval-{step:04d}.jsonl").write_text(json.dumps(row) + "\n")
+    result = analyze(tmp_path, final_step=25, eval_every=eval_every, questions=1, repeats=1)
+    assert [point["step"] for point in result["curve"]] == steps
+    assert result["target_met"] is True
+
+
+def test_acceptance_rejects_duplicate_step_files(tmp_path) -> None:
+    from recipes.opd.examples.math.analyze import analyze
+
+    for filename, step in [("eval-0000.jsonl", 0), ("eval-0200.jsonl", 200), ("eval-200.jsonl", 200)]:
+        row = {"question_id": "q", "seed": 0, "evaluation": True, "correct": step > 0, "release_id": str(step)}
+        (tmp_path / filename).write_text(json.dumps(row) + "\n")
+    with pytest.raises(ValueError, match="Duplicate evaluation steps"):
+        analyze(tmp_path, questions=1, repeats=1)
+
+
+@pytest.mark.parametrize(("final_step", "eval_every"), [(-1, 20), (200, 0)])
+def test_acceptance_rejects_invalid_schedule(tmp_path, final_step, eval_every) -> None:
+    from recipes.opd.examples.math.analyze import analyze
+
+    with pytest.raises(ValueError, match=r"nonnegative.*positive"):
+        analyze(tmp_path, final_step=final_step, eval_every=eval_every)
 
 
 def test_paired_interval_rejects_different_eval_questions() -> None:

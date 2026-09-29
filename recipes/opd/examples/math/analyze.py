@@ -37,7 +37,11 @@ def paired_interval(baseline: dict, final: dict, *, draws: int = 10000) -> list[
     return [samples[int(0.025 * draws)], samples[min(draws - 1, int(0.975 * draws))]]
 
 
-def analyze(results: Path, *, final_step: int = 200, questions: int = 30, repeats: int = 16) -> dict:
+def analyze(
+    results: Path, *, final_step: int = 200, eval_every: int = 20, questions: int = 30, repeats: int = 16
+) -> dict:
+    if final_step < 0 or eval_every <= 0:
+        raise ValueError("Final step must be nonnegative and evaluation interval must be positive")
     baseline, baseline_release = read_scores(results / "eval-0000.jsonl")
     expected = {key[0] for key in baseline}
     if len(expected) != questions or any(
@@ -59,9 +63,21 @@ def analyze(results: Path, *, final_step: int = 200, questions: int = 30, repeat
                 raise ValueError("Final checkpoint still identifies the baseline release")
     if final is None:
         raise ValueError(f"No evaluation for the predeclared final step {final_step}; acceptance is pending")
+    expected_steps = {0, final_step, *range(eval_every, final_step, eval_every)}
+    observed_steps = [point["step"] for point in curve]
+    missing = sorted(expected_steps - set(observed_steps))
+    unexpected = sorted(set(observed_steps) - expected_steps)
+    if len(observed_steps) != len(set(observed_steps)):
+        raise ValueError("Duplicate evaluation steps; acceptance is pending")
+    if missing or unexpected:
+        raise ValueError(
+            f"Evaluation schedule is incomplete or mismatched: missing={missing}, unexpected={unexpected}; "
+            "acceptance is pending"
+        )
     improvement = (sum(final.values()) - sum(baseline.values())) / len(baseline)
     return {
         "final_step": final_step,
+        "eval_every": eval_every,
         "questions": questions,
         "samples_per_question": repeats,
         "target_absolute_improvement": 0.10,
@@ -77,8 +93,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("results", type=Path)
     parser.add_argument("--final-step", type=int, default=200)
+    parser.add_argument("--eval-every", type=int, default=20)
     args = parser.parse_args()
-    report = analyze(args.results, final_step=args.final_step)
+    report = analyze(args.results, final_step=args.final_step, eval_every=args.eval_every)
     (args.results / "acceptance.json").write_text(json.dumps(report, indent=2) + "\n")
     import matplotlib
 

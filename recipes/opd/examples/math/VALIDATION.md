@@ -87,6 +87,12 @@ trainer, optimizer and scheduler counters, after training continued to step
 only `checkpoint-200` remained, with 873.2 GiB free on the checkpoint volume.
 The observer performed no deletion or restart.
 
+At 2026-09-29 13:46 UTC, `checkpoint-300` passed the same structural and
+sampled numerical validation after training continued to step 301. All 427
+optimizer states and the trainer/scheduler counters identify step 300; all
+four RNG files load. Only checkpoint 300 remained after automatic retention,
+with 869.4 GiB free. The report is `checkpoint-300-validation.json`.
+
 Each checkpoint occupies approximately 137 GiB. These checks cover structure,
 shapes, counters and sampled numerical values; they are not full checksums,
 actual restores of the formal checkpoints, or evaluation results. The earlier
@@ -144,13 +150,27 @@ recipe deployment and campaign suites passed 69 tests; focused pre-commit
 checks passed. Formal teacher evaluation and the SFT/OPD comparison remain
 pending.
 
+## Complete evaluation schedule
+
+A regression check reproduced acceptance from only steps 0 and 200, with
+all intermediate evaluations missing. Analysis now requires every declared
+interval plus the final step, rejects missing/extra/duplicate steps, and
+records the evaluation interval in its output. Regression tests also cover
+an off-interval final checkpoint and invalid schedule arguments. The complete
+suite below was rerun after this correction.
+
+A private score exporter was checked against the completed toy control:
+compact scored rows preserve the original analysis result, while exporting
+the incomplete real AIME control is refused. This validates the export path;
+no benchmark values or learning curve are substituted with toy data.
+
 ## Repository checks
 
 - `pre-commit run --all-files`: passed.
 - `python -m mypy`: passed for 336 source files.
-- `python -m pytest tests --cov=reef --cov-report=term`: 5,375 passed,
-  79 skipped, 89.78% coverage (required floor: 80%); rerun after the campaign
-  recovery changes.
+- `python -m pytest tests --cov=reef --cov-report=term`: 5,382 passed,
+  79 skipped, 89.79% coverage (required floor: 80%); rerun after the complete
+  evaluation-schedule checks. Duration: 583.55 seconds.
 - After example configuration/runtime updates, the campaign, server and
   complete example-config suites: 93 passed.
 - Node 22: `npm ci`, `npm run check:docs`, `npm run lint`, `npm run build`: passed.
