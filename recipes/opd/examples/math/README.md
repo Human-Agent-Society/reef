@@ -28,7 +28,9 @@ Results with the 9B pair must identify that difference.
 - Evaluation: the 30 AIME'24 questions, 16 samples per question at the fixed
   seeds 0 through 15, temperature 1, top-p 1, top-k disabled, 64,000 output-token
   budget, the same boxed-answer instruction and scorer for all checkpoints.
-  Evaluate at initialization, every 20 steps, and step 200. Evaluation receipts
+  Enable SGLang deterministic inference in every deployment: this pinned
+  runtime otherwise ignores per-request sampling seeds. Evaluate at
+  initialization, every 20 steps, and step 200. Evaluation receipts
   are never reported for training. This repeated-sampling protocol must be
   reported separately from a one-sample benchmark score.
 - Acceptance is predeclared: the final scheduled OPD checkpoint should improve

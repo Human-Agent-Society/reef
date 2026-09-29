@@ -110,6 +110,40 @@ This validates driver recovery logic and Reef's existing report idempotency
 contract. A real GPU interruption/resume of this updated driver has not yet
 been tested. It does not claim recovery of a stopped training service.
 
+## Frozen teacher evaluation preflight
+
+A separate TP1 Qwen3.5-9B deployment on an idle fifth B200 was checked while
+SFT continued on its original four GPUs. This control uses Reef's native
+SGLang provider deployment; OPD uses Reef's token-native SGLang handler.
+The actual server-rendered token IDs matched the OPD handler for all 30
+AIME prompts, and effective sampling parameters matched at temperature 1,
+top-p 1, top-k disabled, repetition penalty 1 and 64,000 output tokens.
+
+The pinned SGLang sampler ignores request seeds unless deterministic
+inference is enabled. The example now enables it, and the live teacher
+engine confirmed deterministic inference with PyTorch sampling. Repeating
+a toy prompt twice at seed 0 produced identical 658-token completions;
+seed 1 produced identical 4,096-token truncated completions. The two seeds
+produced different text. All four receipts referenced one creation release.
+Completed responses had the correct final boxed answer, while truncated
+reasoning was not scored as a final answer. The helper's initial requirement
+that every toy response finish within 4,096 tokens was too strict; the saved
+validation separately checks repeatability, normal answers and truncation.
+These checks establish neither an AIME score nor general bitwise invariance
+across hardware, batching or different inference deployments.
+
+The standalone launch skips unused vision warmup, matching Slime's engine
+setting, and sets a valid unused `SGLANG_GRPC_PORT`: this SGLang revision
+otherwise validates an automatic HTTP port plus 10,000 even with gRPC off.
+Earlier startup attempts and the pre-fix seed checks are retained separately;
+no formal AIME samples were collected before the correction. Raw preflight
+records are under `/raid/x9zou/reef-opd-state/teacher-control-v4`.
+
+After the deterministic-inference configuration change, deployment validation,
+recipe deployment and campaign suites passed 69 tests; focused pre-commit
+checks passed. Formal teacher evaluation and the SFT/OPD comparison remain
+pending.
+
 ## Repository checks
 
 - `pre-commit run --all-files`: passed.

@@ -18,6 +18,8 @@ inference:
     dtype: bfloat16
     mem-fraction-static: "0.6"
     disable-cuda-graph: true
+    # SGLang otherwise ignores the per-request sampling seeds.
+    enable-deterministic-inference: true
   handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
   handler-config:
     sampling_defaults:
