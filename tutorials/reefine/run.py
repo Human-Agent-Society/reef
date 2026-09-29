@@ -45,7 +45,7 @@ from pathlib import Path
 
 from reef_client import ReefClient, ReefClientError
 
-from reef.harness.client.wrapper import install_directory
+from reef.harness.client.wrapper import wrapper_directory
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it into reef-pi
@@ -258,7 +258,7 @@ def _wrapper_env():
 def reef_pi(args, cwd=None):
     """One call of the wrapper this install wrote, its lines echoed indented; the completed process. It is this
     install's own, beside its record in ~/.reef/installs; ~/.local/bin/reef-pi links to the latest install."""
-    wrapper = install_directory(INSTALL_ROOT.resolve()) / "reef-pi"
+    wrapper = wrapper_directory(INSTALL_ROOT.resolve()) / "reef-pi"
     done = subprocess.run([str(wrapper), *args], cwd=cwd, env=_wrapper_env(), capture_output=True, text=True)
     for line in (done.stdout + done.stderr).splitlines():
         print("  " + line, flush=True)

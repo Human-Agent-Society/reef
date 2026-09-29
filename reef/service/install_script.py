@@ -158,19 +158,19 @@ def _wrapper_lines(
     ``$PYTHON``, the interpreter ``_python_lines`` resolved by absolute path
     (with ``-P`` where it exists), so the shell that runs it later needs
     neither that interpreter nor the checkout on its PATH. The wrapper runs
-    the check on the tree, so it goes in ``$INSTALL_DIR``, beside the record,
+    the check on the tree, so it goes in ``$WRAPPER_DIR``, beside the record,
     where a session that can write only its project cannot change it, and it
     names the resolved install root, the one the record is kept for.
     """
     wrapper_name = f"reef-{descriptor.name}"
-    wrapper = f'"$INSTALL_DIR/{_double_quoted(wrapper_name)}"'
-    in_tree = f'"$DEST/{_double_quoted(wrapper_name)}"'
+    wrapper = f'"$WRAPPER_DIR/{_double_quoted(wrapper_name)}"'
+    tree_wrapper = f'"$DEST/{_double_quoted(wrapper_name)}"'
     return [
         f"# The {wrapper_name} wrapper: capture proxy + report command. Rewritten whenever its text",
         "# differs: it depends on this machine (binary, interpreter), not on the composition. It runs the",
         "# check on the tree, so it lives outside the tree, beside the record.",
         'BINARY_ABS="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"',
-        f'mkdir -p "$DEST/{_double_quoted(compose_dir)}" "$INSTALL_DIR"',
+        f'mkdir -p "$DEST/{_double_quoted(compose_dir)}" "$WRAPPER_DIR"',
         f'COMPOSE_ABS="$ROOT_ABS/{_double_quoted(compose_dir)}"',
         "wrapper_text() {",
         "    cat <<REEF_WRAPPER_EOF",
@@ -196,8 +196,8 @@ def _wrapper_lines(
         "fi",
         "# An earlier install wrote the wrapper into the tree, where a session could rewrite it; removing a link",
         "# there leaves what it points at as it was.",
-        f"if [ -f {in_tree} ] || [ -L {in_tree} ]; then",
-        f"    rm -f {in_tree}",
+        f"if [ -f {tree_wrapper} ] || [ -L {tree_wrapper} ]; then",
+        f"    rm -f {tree_wrapper}",
         "fi",
         f"# Symlink into ~/.local/bin so {wrapper_name} is on PATH, on every run: the link may have been",
         "# pointed elsewhere since the wrapper was written (an install into another directory), and",
@@ -484,7 +484,7 @@ def prune_lines(kept: Sequence[str]) -> list[str]:
 def install_record_lines(
     wrapper_name: str, written: Sequence[str], preference_keys_by_path: Mapping[str, Sequence[str]]
 ) -> list[str]:
-    """Record what this install wrote in ``$INSTALL_DIR.json``, where ``reef-<adapter>`` reads it before a session.
+    """Record what this install wrote in ``$WRAPPER_DIR.json``, where ``reef-<adapter>`` reads it before a session.
 
     The record names the resolved install root (``$ROOT_ABS``), the address
     the script was served from (``$SERVICE_URL``), the release file's
@@ -499,7 +499,7 @@ def install_record_lines(
         "",
         f"# What this install wrote, recorded outside the install root: {wrapper_name} refuses to start a session once",
         "# one of these files changed, and a session that can write only its project cannot change the record.",
-        f'"$PYTHON" - "$ROOT_ABS" "$INSTALL_DIR.json" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" {_single_quoted(json.dumps(dict(preference_keys_by_path)))} {" ".join(_single_quoted(path) for path in written)} <<\'REEF_INSTALL_RECORD_EOF\'',
+        f'"$PYTHON" - "$ROOT_ABS" "$WRAPPER_DIR.json" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" {_single_quoted(json.dumps(dict(preference_keys_by_path)))} {" ".join(_single_quoted(path) for path in written)} <<\'REEF_INSTALL_RECORD_EOF\'',
         "import hashlib, json, os, sys",
         "root, record_path, service_url, release_file = sys.argv[1:5]",
         "files = {}",
@@ -510,8 +510,8 @@ def install_record_lines(
         "settings = {}",
         "for relative, preference_keys in json.loads(sys.argv[5]).items():",
         '    with open(os.path.join(root, relative), encoding="utf-8") as handle:',
-        "        written = json.load(handle)",
-        "    checked_values = {key: value for key, value in written.items() if key not in preference_keys}",
+        "        installed_settings = json.load(handle)",
+        "    checked_values = {key: value for key, value in installed_settings.items() if key not in preference_keys}",
         '    settings[relative] = {"preference_keys": preference_keys, "checked_values": checked_values}',
         'record = {"install_root": root, "service_url": service_url or None, "release_file": release_file, "files": files, "settings": settings}',
         'text = json.dumps(record, indent=2) + "\\n"',
@@ -816,11 +816,11 @@ def render_install_script(
         "",
         'mkdir -p "$DEST"',
         *(f'mkdir -p "$DEST/{_double_quoted(directory)}"' for directory in directories),
-        "# The resolved install root, and this install's directory outside it, named by the root's sha256: it holds",
-        "# the wrapper, and the record beside it as INSTALL_DIR.json, where a session that can write only its project",
-        "# cannot change them.",
-        'ROOT_ABS="$("$PYTHON" -c \'import os, sys; print(os.path.realpath(sys.argv[1]))\' "$DEST")"',
-        'INSTALL_DIR="$HOME/.reef/installs/$(printf \'%s\' "$ROOT_ABS" | sha256)"',
+        "# The resolved install root, byte for byte as pwd -P prints it, and the wrapper's directory outside it, named",
+        "# by the root's sha256; the record sits beside it as WRAPPER_DIR.json, where a session that can write only its",
+        "# project cannot change either.",
+        'ROOT_ABS="$(CDPATH= cd -P -- "$DEST" && pwd -P)"',
+        'WRAPPER_DIR="$HOME/.reef/installs/$(printf \'%s\' "$ROOT_ABS" | sha256)"',
         "",
         "# A rerun of the same release on a current tree writes nothing here, not even the release file.",
         'current=""',
@@ -855,7 +855,7 @@ def render_install_script(
         "",
         'echo "reef: done"',
         f'echo "run:     $HOME/.local/bin/{_double_quoted(wrapper_name)}"',
-        f'echo "wrapper: $INSTALL_DIR/{_double_quoted(wrapper_name)}"',
+        f'echo "wrapper: $WRAPPER_DIR/{_double_quoted(wrapper_name)}"',
         'echo "binary:  $BINARY"',
         'echo "harness: $DEST"',
         "",

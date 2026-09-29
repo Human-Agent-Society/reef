@@ -510,9 +510,9 @@ def test_a_client_state_file_that_is_a_config_target_names_the_keys_the_binary_m
             assert state.kind != "file" or state.path not in targets or state.preference_keys, (name, state.path)
 
 
-def test_pi_settings_keys_a_session_may_change_load_no_code() -> None:
-    """From these settings keys pi 0.84.2 loads code, decides whose code loads, or changes where its traffic and data
-    go, so the check must cover them."""
+def test_pi_settings_keys_that_load_code_are_not_preference_keys() -> None:
+    """From these settings keys pi 0.84.2 loads code, skills, prompts or themes, runs a program, or decides whose code
+    loads, so none of them may be a key a session changes unchecked."""
     (settings,) = [state for state in get_adapter("pi").client_state if state.path == "pi-agent/settings.json"]
     checked_keys = {
         "packages",
@@ -525,14 +525,36 @@ def test_pi_settings_keys_a_session_may_change_load_no_code() -> None:
         "npmCommand",
         "externalEditor",
         "defaultProjectTrust",
-        "sessionDir",
-        "httpProxy",
-        "defaultTools",
-        "enableAnalytics",
     }
     assert checked_keys.isdisjoint(settings.preference_keys)
     # What pi writes by itself, and what /model saves.
     assert {"lastChangelogVersion", "theme", "defaultModel", "defaultProvider"} <= set(settings.preference_keys)
+
+
+def test_pi_settings_keys_pi_rewrites_on_load_are_rendered_in_their_new_form() -> None:
+    """pi 0.84.2 rewrites queueMode, a boolean websockets and a skills object when it loads settings.json and writes
+    the new form back on its next save; the render writes that form, so pi's save changes no key the check covers."""
+    files = render_composition(
+        [
+            (
+                "config",
+                {
+                    "data": {
+                        "queueMode": "all",
+                        "websockets": False,
+                        "skills": {"customDirectories": ["extra"], "enableSkillCommands": True},
+                    }
+                },
+            )
+        ],
+        get_adapter("pi"),
+    )
+    assert json.loads(files["pi-agent/settings.json"]) == {
+        "steeringMode": "all",
+        "transport": "sse",
+        "skills": ["extra"],
+        "enableSkillCommands": True,
+    }
 
 
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:

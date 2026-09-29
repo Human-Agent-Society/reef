@@ -670,7 +670,9 @@ export default function requests(pi) {
       await runSetup(wrapper, releaseId, ctx);
       updated = await update();
     } else if (updated.code === 0) {
-      await runSetup(wrapper, releaseId, ctx);
+      // Looked up again: the update of an install made before Reef kept the wrapper outside the tree removes the
+      // wrapper the session was started with.
+      await runSetup(wrapperPath() ?? wrapper, releaseId, ctx);
     }
     if (updated.code !== 0) {
       const detail = updated.stderr.trim();

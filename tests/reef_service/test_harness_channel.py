@@ -1132,11 +1132,11 @@ compose_stream() {
 
 mkdir -p "$DEST"
 mkdir -p "$DEST/pi-agent"
-# The resolved install root, and this install's directory outside it, named by the root's sha256: it holds
-# the wrapper, and the record beside it as INSTALL_DIR.json, where a session that can write only its project
-# cannot change them.
-ROOT_ABS="$("$PYTHON" -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$DEST")"
-INSTALL_DIR="$HOME/.reef/installs/$(printf '%s' "$ROOT_ABS" | sha256)"
+# The resolved install root, byte for byte as pwd -P prints it, and the wrapper's directory outside it, named
+# by the root's sha256; the record sits beside it as WRAPPER_DIR.json, where a session that can write only its
+# project cannot change either.
+ROOT_ABS="$(CDPATH= cd -P -- "$DEST" && pwd -P)"
+WRAPPER_DIR="$HOME/.reef/installs/$(printf '%s' "$ROOT_ABS" | sha256)"
 
 # A rerun of the same release on a current tree writes nothing here, not even the release file.
 current=""
@@ -1204,7 +1204,7 @@ fi
 # differs: it depends on this machine (binary, interpreter), not on the composition. It runs the
 # check on the tree, so it lives outside the tree, beside the record.
 BINARY_ABS="$(cd "$(dirname "$BINARY")" && pwd)/$(basename "$BINARY")"
-mkdir -p "$DEST/pi-agent" "$INSTALL_DIR"
+mkdir -p "$DEST/pi-agent" "$WRAPPER_DIR"
 COMPOSE_ABS="$ROOT_ABS/pi-agent"
 wrapper_text() {
     cat <<REEF_WRAPPER_EOF
@@ -1224,9 +1224,9 @@ export REEF_HARNESS_ENV_VAR="PI_CODING_AGENT_DIR"
 exec "$PYTHON"${SAFE_PATH:+ $SAFE_PATH} -m reef.harness.client.wrapper "\$@"
 REEF_WRAPPER_EOF
 }
-if [ ! -x "$INSTALL_DIR/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$INSTALL_DIR/reef-pi")" ]; then
-    wrapper_text > "$INSTALL_DIR/reef-pi"
-    chmod +x "$INSTALL_DIR/reef-pi"
+if [ ! -x "$WRAPPER_DIR/reef-pi" ] || [ "$(wrapper_text)" != "$(cat "$WRAPPER_DIR/reef-pi")" ]; then
+    wrapper_text > "$WRAPPER_DIR/reef-pi"
+    chmod +x "$WRAPPER_DIR/reef-pi"
 fi
 # An earlier install wrote the wrapper into the tree, where a session could rewrite it; removing a link
 # there leaves what it points at as it was.
@@ -1237,7 +1237,7 @@ fi
 # pointed elsewhere since the wrapper was written (an install into another directory), and
 # ln -sf costs nothing.
 mkdir -p "$HOME/.local/bin"
-ln -sf "$INSTALL_DIR/reef-pi" "$HOME/.local/bin/reef-pi"
+ln -sf "$WRAPPER_DIR/reef-pi" "$HOME/.local/bin/reef-pi"
 case ":$PATH:" in
     *":$HOME/.local/bin:"*) ;;
     *) echo "reef: add '$HOME/.local/bin' to your PATH to run reef-pi from anywhere" >&2 ;;
@@ -1245,7 +1245,7 @@ esac
 
 # What this install wrote, recorded outside the install root: reef-pi refuses to start a session once
 # one of these files changed, and a session that can write only its project cannot change the record.
-"$PYTHON" - "$ROOT_ABS" "$INSTALL_DIR.json" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" '{}' 'pi-agent/AGENTS.md' <<'REEF_INSTALL_RECORD_EOF'
+"$PYTHON" - "$ROOT_ABS" "$WRAPPER_DIR.json" "$SERVICE_URL" "$RELEASE_FILE_CHECKSUM" '{}' 'pi-agent/AGENTS.md' <<'REEF_INSTALL_RECORD_EOF'
 import hashlib, json, os, sys
 root, record_path, service_url, release_file = sys.argv[1:5]
 files = {}
@@ -1256,8 +1256,8 @@ for relative in sys.argv[6:]:
 settings = {}
 for relative, preference_keys in json.loads(sys.argv[5]).items():
     with open(os.path.join(root, relative), encoding="utf-8") as handle:
-        written = json.load(handle)
-    checked_values = {key: value for key, value in written.items() if key not in preference_keys}
+        installed_settings = json.load(handle)
+    checked_values = {key: value for key, value in installed_settings.items() if key not in preference_keys}
     settings[relative] = {"preference_keys": preference_keys, "checked_values": checked_values}
 record = {"install_root": root, "service_url": service_url or None, "release_file": release_file, "files": files, "settings": settings}
 text = json.dumps(record, indent=2) + "\n"
@@ -1278,7 +1278,7 @@ REEF_INSTALL_RECORD_EOF
 
 echo "reef: done"
 echo "run:     $HOME/.local/bin/reef-pi"
-echo "wrapper: $INSTALL_DIR/reef-pi"
+echo "wrapper: $WRAPPER_DIR/reef-pi"
 echo "binary:  $BINARY"
 echo "harness: $DEST"
 """
@@ -1593,13 +1593,9 @@ def test_an_install_with_no_root_named_goes_under_the_home_directory(tmp_path) -
 
 @pytest.mark.unit
 def test_the_path_symlink_resolves_when_dest_is_the_relative_default(tmp_path) -> None:
-    """A person may name a relative install root such as ./reef-harness.
-
-    ``ln -s`` reads a relative target against the link's own directory, so
-    linking "$DEST/reef-pi" from ~/.local/bin left a dangling link pointing at
-    ~/.local/bin/reef-harness/reef-pi and ``reef-pi`` was not on PATH at all.
-    Every other install test passes an absolute DEST and cannot see it.
-    """
+    """A person may name a relative install root such as ./reef-harness: the ~/.local/bin link is still absolute
+    and leads to the wrapper in the directory named by the resolved root's sha256, so it never dangles. Every other
+    install test passes an absolute DEST and cannot see it."""
     script, _, prefix, env = _install_fixture(tmp_path, binary_version="0.84.2", npm="#!/bin/sh\nexit 1\n")
     workdir = tmp_path / "workdir"
     workdir.mkdir()
@@ -1884,7 +1880,7 @@ def test_the_install_records_what_it_wrote_outside_the_tree_and_a_session_starts
     listed = ["./AGENTS.md", "./models.json", "./settings.json", "./skills/notes/SKILL.md"]
     assert start_session(dest, env).returncode == 0
     assert (tmp_path / "listing.txt").read_text().split() == listed
-    # Files a session adds to the tree are not linked into the next one; pi's settings are its own to write.
+    # Files a session adds to the tree are not linked into the next one; pi's preference keys are its own to write.
     (dest / "pi-agent/skills/added").mkdir()
     (dest / "pi-agent/skills/added/SKILL.md").write_text("added later\n", encoding="utf-8")
     (dest / "pi-agent/extra").mkdir()
@@ -1928,7 +1924,7 @@ def test_pi_writes_its_preferences_to_settings_json_and_a_session_that_changes_a
     tmp_path,
 ) -> None:
     """pi writes settings.json in place, so the next session starts while only the keys pi saves itself differ from
-    the install (the model, the theme, the changelog version), in pi's own key order and layout. A change to any other
+    the install (the model, the theme, the changelog version), in another key order and layout. A change to any other
     key would load or run code in the next session (extensions, packages, a shell prefix), or undo what the release
     set, so the start is refused, naming the key, until ``update`` writes the install's settings again."""
     script, dest, prefix, env = session_install(tmp_path, settings={"defaultProjectTrust": "never"})
@@ -1944,7 +1940,7 @@ def test_pi_writes_its_preferences_to_settings_json_and_a_session_that_changes_a
     }
     settings = dest / "pi-agent/settings.json"
     installed = json.loads(settings.read_text(encoding="utf-8"))
-    preferences = {"theme": "light", "lastChangelogVersion": "0.84.2", "defaultModel": "other", "retry": {}}
+    preferences = {"theme": "light", "lastChangelogVersion": "0.84.2", "retry": {}}
     settings.write_text(json.dumps({**preferences, **installed, "defaultModel": "other"}, indent=2), encoding="utf-8")
     assert start_session(dest, env).returncode == 0
     changes = {
@@ -1967,6 +1963,25 @@ def test_pi_writes_its_preferences_to_settings_json_and_a_session_that_changes_a
     assert refused.stderr.splitlines() == refusal_lines(root, "pi-agent/settings.json (not a JSON object)")
 
 
+@pytest.mark.unit
+def test_a_record_without_a_settings_entry_checks_every_key_of_pi_settings(tmp_path) -> None:
+    """A record written before Reef checked pi's settings, or a damaged one, keeps no preference keys for
+    settings.json, so every key counts as changed and the start is refused until ``update`` records them."""
+    script, dest, prefix, env = session_install(tmp_path)
+    assert _run_install(script, dest, prefix, env).returncode == 0
+    record_path = installed_wrapper(env, dest).parent.with_suffix(".json")
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    for settings_entry in (None, [], {"pi-agent/settings.json": {"preference_keys": "theme"}}):
+        record_path.write_text(json.dumps({**record, "settings": settings_entry}), encoding="utf-8")
+        refused = start_session(dest, env)
+        assert refused.returncode == 3, settings_entry
+        assert refused.stderr.splitlines() == refusal_lines(
+            str(dest.resolve()), "pi-agent/settings.json (keys: defaultModel, defaultProvider)"
+        )
+    assert _run_install(script, dest, prefix, env).returncode == 0
+    assert start_session(dest, env).returncode == 0
+
+
 def refusal_lines(root: str, *entries: str) -> list[str]:
     """The lines ``reef-pi`` prints when it refuses to start on a tree whose recorded files changed."""
     return [
@@ -1977,11 +1992,10 @@ def refusal_lines(root: str, *entries: str) -> list[str]:
 
 
 @pytest.mark.unit
-def test_the_wrapper_lives_outside_the_install_root_and_the_session_path_holds_nothing_from_the_tree(tmp_path) -> None:
+def test_the_wrapper_lives_beside_the_record_and_a_session_is_given_that_wrapper(tmp_path) -> None:
     """The wrapper runs the check, so the install writes it outside the tree, beside the record, links
     ~/.local/bin/reef-pi to it and removes the wrapper an earlier install wrote into the tree. A session gets that
-    wrapper as REEF_HARNESS_WRAPPER and its directory on PATH, never the install root, where a file a session adds
-    would run in place of a command (node, which starts pi)."""
+    wrapper as REEF_HARNESS_WRAPPER, also after its record was removed."""
     script, dest, prefix, env = session_install(tmp_path)
     dest.mkdir()
     _write_executable(dest / "reef-pi", "#!/bin/sh\necho an earlier install wrote this\n")
@@ -1992,12 +2006,13 @@ def test_the_wrapper_lives_outside_the_install_root_and_the_session_path_holds_n
     assert (Path(env["HOME"]) / ".local/bin/reef-pi").resolve() == wrapper
     assert f'export REEF_HARNESS_COMPOSE="{root}/pi-agent"' in wrapper.read_text(encoding="utf-8")
     assert "reef-pi" not in json.loads(wrapper.parent.with_suffix(".json").read_text())["files"]
-    started = start_session(dest, env)
-    assert started.returncode == 0, started.stderr
-    seen = dict(line.split("=", 1) for line in (tmp_path / "env.txt").read_text().splitlines() if "=" in line)
-    assert seen["REEF_HARNESS_WRAPPER"] == str(wrapper)
-    assert seen["PATH"].split(os.pathsep)[1] == str(wrapper.parent)
-    assert root not in seen["PATH"].split(os.pathsep)
+    for label in ("recorded", "record removed"):
+        started = start_session(dest, env)
+        assert started.returncode == 0, (label, started.stderr)
+        seen = dict(line.split("=", 1) for line in (tmp_path / "env.txt").read_text().splitlines() if "=" in line)
+        assert seen["REEF_HARNESS_WRAPPER"] == str(wrapper), label
+        assert seen["PATH"].split(os.pathsep)[1] == str(wrapper.parent), label
+        wrapper.parent.with_suffix(".json").unlink(missing_ok=True)
 
 
 @pytest.mark.unit
@@ -2032,7 +2047,7 @@ def test_a_start_and_an_update_refuse_an_install_root_a_session_replaced_with_a_
     (rogue / "pi-agent/AGENTS.md").write_text("rules a session wrote\n", encoding="utf-8")
     shutil.rmtree(dest)
     dest.symlink_to(rogue)
-    moved = f"{root} is now a link to {os.path.realpath(rogue)}, which the install did not make: remove the link"
+    moved = f"{root} now leads through a link to {os.path.realpath(rogue)}, which the install did not make: remove the link"
     refused = subprocess.run([str(wrapper), "-p", "hi"], env=env, capture_output=True, text=True, timeout=60)
     assert refused.returncode == 3
     assert refused.stderr.splitlines() == [f"reef-pi: cannot start agent; {moved} and run the install command again"]

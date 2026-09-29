@@ -1208,8 +1208,8 @@ def test_the_temp_copy_is_made_in_the_cache_directory_for_the_person_alone(tmp_p
 def test_a_link_at_a_client_state_path_is_removed_before_the_run_so_the_state_stays_in_the_tree(
     tmp_path, capsys
 ) -> None:
-    """The install never writes client state, so a link a session put at pi's ``sessions`` or ``settings.json``
-    would take the next session's writes wherever it points, outside the tree too. The wrapper removes such a link
+    """On a tree with no install record, a link a session put at pi's ``sessions`` or ``settings.json`` would take
+    the next session's writes wherever it points, outside the tree too. The wrapper removes such a link
     before the run and says so, and the agent keeps its state in the tree; what the links pointed at stays as it
     was."""
     compose = Path(_make_compose(tmp_path, 1))
@@ -3256,7 +3256,8 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     tmp_path, capsys
 ) -> None:
     """Each env file variable reaches the agent unless the shell sets it; an env item the file meets is not warned
-    about; ``REEF_HARNESS_WRAPPER`` names the wrapper at the install root when the install wrote one."""
+    about; on a tree with no install record, ``REEF_HARNESS_WRAPPER`` names the wrapper at the install root when an
+    older install wrote one there."""
     reef = _FakeReef({"agent_record_id": "q-1", "scenario": "ask-scenario", "request_type": "train"})
     release_info = {
         "release_id": "v2",
@@ -3278,7 +3279,7 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     uuid.UUID(seen["REEF_HARNESS_SESSION"])
     assert seen["REEF_HARNESS_WRAPPER"] == str(Path(compose).resolve().parent / "reef-pi")
     assert seen["REEF_HARNESS_DEST"] == str(Path(compose).resolve().parent)
-    # The harness binary's directory, then the install root, so reef-pi by name is this install's wrapper.
+    # The harness binary's directory, then the directory of that older wrapper, so reef-pi by name is this install's.
     assert seen["PATH"].split(os.pathsep)[:2] == [str(binary.resolve().parent), str(Path(compose).resolve().parent)]
     assert capsys.readouterr().err == unrecorded_notice(compose) + "\n"
     # Without a wrapper at the install root nothing names one, and the shell's own setting is kept.

@@ -766,42 +766,44 @@ the script sits in ``$TMPDIR`` while it runs.
 Install records and validation
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-The script also records what it wrote in
-``~/.reef/installs/<sha256 of the install root>.json``, outside the install
-root: the sha256 of every file, of the release file without the check offs
-``setup`` adds, the value of every key of pi's ``settings.json`` outside its
-preference keys, and the address the script came from. A ``reef-pi``
-session starts only while those files are as the install wrote them. A file counts as changed also when a link reaches it: a link at the
-file or at a directory above it, or a second hard link to it; so does
-anything at its path that is not a regular file, such as a FIFO. When one
-differs, ``reef-pi`` prints ``cannot start agent; these files in <install
-root> changed since the install wrote them:``, the file names (a link is
-named after its file, for example ``pi-agent/models.json (a link)``, and
-a FIFO as ``pi-agent/models.json (not a regular file)``, and a changed key
-of pi's settings as ``pi-agent/settings.json (keys: extensions)``) and
-``run reef-pi update to restore them``, and exits 3 without starting the
-agent; ``reef-pi update`` writes them again.
+The script also records what it wrote in ``~/.reef/installs/<sha256 of the
+install root>.json``, outside the install root: the sha256 of every file, of
+the release file without the check offs ``setup`` adds, the value of every
+key of pi's ``settings.json`` outside its preference keys, and the address
+the script came from. A ``reef-pi`` session starts only while those files
+are as the install wrote them. A file counts as changed also when a link
+reaches it: a link at the file or at a directory above it, or a second hard
+link to it; so does anything at its path that is not a regular file, such as
+a FIFO. When one differs, ``reef-pi`` prints ``cannot start agent; these
+files in <install root> changed since the install wrote them:``, the file
+names (a link is named after its file, for example ``pi-agent/models.json (a
+link)``, a FIFO as ``pi-agent/models.json (not a regular file)``, a changed
+key of pi's settings as ``pi-agent/settings.json (keys: extensions)``, and a
+settings file that no longer holds a JSON object as ``pi-agent/settings.json
+(not a JSON object)``) and ``run reef-pi update to restore them``, and exits
+3 without starting the agent; ``reef-pi update`` writes them again.
 
 The wrapper runs this check, so the install writes it beside the record, as
 ``~/.reef/installs/<sha256 of the install root>/reef-pi``, links
 ``~/.local/bin/reef-pi`` to it, and removes a ``reef-pi`` an earlier install
-wrote into the tree. The wrapper names the resolved install root. When a
-link replaces that root later, a start prints ``cannot start agent; <install
-root> is now a link to <target>, which the install did not make``,
-``reef-pi update`` refuses the same way, and both exit 3: remove the link
-and run the install command again.
+wrote into the tree. The wrapper names the resolved install root. When that
+root later leads through a link, at the root or at a directory above it, a
+start prints ``cannot start agent; <install root> now leads through a link
+to <target>, which the install did not make``, ``reef-pi update`` refuses
+the same way, and both exit 3: remove the link and run the install command
+again.
 
 The record and the wrapper hold only while a session cannot write
-``~/.reef/installs``. A command inside the Codex or dsh sandbox can write
-only its project, ``/tmp`` and ``$TMPDIR``, so they are out of its reach.
-A pi, opencode or Hermes session runs commands with no sandbox, and Claude
-Code, and Codex outside its sandbox, run the commands and edits you
-approve: such a session can change or remove the record and the wrapper
-along with the tree, and the check does not stop it. The Python the
-wrapper runs (``REEF_PYTHON``, or the ``python3`` the install found) and
-the ``reef`` package in it run before the check, and the check does not
-read the agent under ``~/.local/share/reef-harness``, so keep them outside
-the project too.
+``~/.reef/installs`` or ``~/.local/bin``. A command inside the Codex or dsh
+sandbox can write only its project, ``/tmp`` and ``$TMPDIR``, so they are
+out of its reach. A pi, opencode or Hermes session runs commands with no
+sandbox, and Claude Code, and Codex outside its sandbox, run the commands
+and edits you approve: such a session can change or remove the record and
+the wrapper along with the tree, and the check does not stop it. The Python
+the wrapper runs (``REEF_PYTHON``, or the ``python3`` the install found) and
+the ``reef`` package in it run before the check, and the check does not read
+the agent under ``~/.local/share/reef-harness``, so keep them outside the
+project too.
 
 ``~/.local/bin/reef-pi`` links to the wrapper of the latest install. Each
 install prints its own wrapper's path as ``wrapper:``; run that path to
@@ -831,20 +833,22 @@ Mutable client state
 The sessions and settings the adapter keeps (``client_state`` in its
 descriptor) are the agent's own to write and are not checked, except pi's
 ``settings.json`` when the install wrote it (the model binding does). pi
-saves its preferences there (the model, the theme, the ``/settings``
-choices), and those keys may change. Every other key, such as
-``extensions``, ``packages`` or ``shellCommandPrefix``, must keep the value
-the install wrote, and a link at that file counts as changed, as at any
-recorded file. ``pi install``, ``pi remove`` and ``pi config`` write such
-keys, and so does the ``/settings`` choice Default project trust
-(``defaultProjectTrust``), which decides whose code loads, so the next
-``reef-pi`` start is refused until ``reef-pi update``, which writes
-``settings.json`` again, the saved preferences in it included. A link at another of those paths would send the agent's writes
-wherever it points, so before each session the wrapper removes such a
-link, prints ``<path> in <install root> was a link to <target>; removed
-the link, and the session keeps this state in the tree``, and the agent
-starts that state again in the tree; what the link pointed at is left as
-it was.
+saves its preferences there, the model, the theme and the ``/settings``
+choices except Default project trust, and those keys may change. Every other
+key must keep the value the install wrote: the ones ``pi install``, ``pi
+remove`` and ``pi config`` write (``packages``, ``extensions``, ``skills``,
+``prompts``, ``themes``), ``defaultProjectTrust``, which the Default project
+trust choice writes and which decides whose code loads, and the rest, such
+as ``shellCommandPrefix``. After such a change the next ``reef-pi`` start is
+refused until ``reef-pi update``, which rewrites ``settings.json`` as the
+install wrote it and so also resets the preferences pi saved there.
+
+A link at a recorded ``settings.json`` counts as changed, as at any recorded
+file. A link at another client state path would send the agent's writes
+wherever it points, so before each session the wrapper removes such a link,
+prints ``<path> in <install root> was a link to <target>; removed the link,
+and the session keeps this state in the tree``, and the agent starts that
+state again in the tree; what the link pointed at is left as it was.
 
 Session inputs and older installations
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

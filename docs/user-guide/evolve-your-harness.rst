@@ -657,10 +657,10 @@ checked. pi's ``settings.json``, which the model binding writes, is checked,
 except the preferences pi saves itself (the model, the theme and the other
 ``/settings`` choices but Default project trust, which decides whose code
 loads). ``reef-pi install``, ``reef-pi remove`` and ``reef-pi config``, and
-that one ``/settings`` choice, change keys the check covers, so the next
-start names them, for example ``pi-agent/settings.json (keys: packages)``,
-until ``reef-pi update``, which writes ``settings.json`` again, your saved
-preferences in it included.
+that one ``/settings`` choice, change keys the check covers, so the next start
+names them, for example ``pi-agent/settings.json (keys: packages)``, until
+``reef-pi update``, which rewrites ``settings.json`` as the install wrote it
+and so also resets the preferences pi saved there.
 
 The check stops a session that can write only its project, ``/tmp`` and
 ``$TMPDIR``, as commands inside the Codex and dsh sandboxes can. A session
