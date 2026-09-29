@@ -9,6 +9,7 @@ from reef.surface import (
     AdapterWeightRuntime,
     ArtifactActivator,
     ArtifactLoader,
+    ComponentSurface,
     InferenceHooks,
     LeasingInferenceHooks,
     RequestSkillLayer,
@@ -85,10 +86,12 @@ def test_request_injection_requires_declaring_the_optional_layer_capability() ->
     assert create_skill_surface([UndeclaredLayer()]).inference is None
 
 
-def test_default_validate_accepts_anything() -> None:
-    validator = Recipe().build_artifact_validator()
+def test_default_component_validator_accepts_anything() -> None:
+    validator = ComponentSurface().validator
     assert isinstance(validator, AcceptAnyArtifact)
     validator.validate(object())  # type: ignore[arg-type]
+    # A record-only surface has no components, so nothing to admit.
+    Recipe().build_surface("s").validate(object())  # type: ignore[arg-type]
 
 
 def _skill_artifact(tmp_path, text: str = "Always check units."):

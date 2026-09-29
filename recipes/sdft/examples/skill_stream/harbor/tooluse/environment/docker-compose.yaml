@@ -1,0 +1,37 @@
+# The judge, and the arm's Reef service on the host, reachable from both
+# containers as host.docker.internal on the port run.py published for the
+# arm. REEF_HOST_PORT, REEF_TOKEN and REEF_SCENARIO come from the environment
+# of the process running reef-eval (run.py sets them per arm and stage);
+# reef-eval refuses to start a trial while they are unset.
+services:
+  main:
+    depends_on:
+      judge:
+        condition: service_healthy
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      JUDGE_URL: "http://judge:8082"
+      REEF_SERVICE_URL: "http://host.docker.internal:${REEF_HOST_PORT}"
+      REEF_TOKEN: "${REEF_TOKEN}"
+      REEF_SCENARIO: "${REEF_SCENARIO}"
+  judge:
+    build:
+      context: ${CONTEXT_DIR}
+      dockerfile: Dockerfile.judge
+    command: ["python3", "/judge/judge_server.py"]
+    networks: [default]
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      PORT: "8082"
+      VERIFIER_PORT: "8083"
+      REEF_SERVICE_URL: "http://host.docker.internal:${REEF_HOST_PORT}"
+      REEF_TOKEN: "${REEF_TOKEN}"
+      REEF_SCENARIO: "${REEF_SCENARIO}"
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8082/health', timeout=2)"]
+      interval: 5s
+      timeout: 3s
+      retries: 60
+      start_period: 3s

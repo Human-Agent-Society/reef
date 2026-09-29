@@ -123,9 +123,9 @@ def test_next_state_binds_by_trace_matching_and_verdicts_batch() -> None:
     assert source_record_id(batch.items[0]) == "t1"
     processor.acknowledge(batch.batch_id)
     assert not processor.ready()
-    decision = processor.retention_decision()
-    assert "t1" in decision.releasable_agent_record_ids
-    assert "t2" in decision.protected_agent_record_ids  # still the session's open turn
+    decision = processor.releasable_record_ids()
+    assert "t1" in decision
+    assert "t2" not in decision  # still the session's open turn
 
 
 @pytest.mark.unit
@@ -158,9 +158,9 @@ def test_side_calls_and_retried_turns_are_terminal() -> None:
     processor.ingest(_turn("t1", Q1))
     processor.ingest(_turn("t1-retry", Q1))  # identical request: retried logical turn
 
-    releasable = processor.retention_decision().releasable_agent_record_ids
+    releasable = processor.releasable_record_ids()
     assert {"side", "t1-retry"} <= set(releasable)
-    assert "t1" in processor.retention_decision().protected_agent_record_ids
+    assert "t1" not in processor.releasable_record_ids()
     assert not worker.jobs
 
 
@@ -171,8 +171,8 @@ def test_session_ttl_flushes_the_final_turn_terminal() -> None:
     processor.ingest(_turn("t1", Q1))
     time.sleep(0.001)
     assert not processor.ready()  # catches up: the TTL pass runs
-    decision = processor.retention_decision()
-    assert "t1" in decision.releasable_agent_record_ids
+    decision = processor.releasable_record_ids()
+    assert "t1" in decision
     assert not processor.derivation_pending()
 
 
@@ -184,14 +184,14 @@ def test_untrainable_verdicts_and_bad_tensors_are_terminal() -> None:
     processor.ingest(_turn("cont1", _successor(Q1, "meh")))
     worker.push(TurnJudgment("declined"))  # judge declined: no RL, no directive
     assert not processor.ready()
-    assert "declined" in processor.retention_decision().releasable_agent_record_ids
+    assert "declined" in processor.releasable_record_ids()
 
     # ragged top-K capture: one row missing → the select loss cannot run
     processor.ingest(_turn("ragged", Q2, topk_rows=[[1, 2]]))
     processor.ingest(_turn("cont2", _successor(Q2, "ok")))
     worker.push(TurnJudgment("ragged", score=-1.0, teacher_cands=ANCHOR))
     assert not processor.ready()
-    assert "ragged" in processor.retention_decision().releasable_agent_record_ids
+    assert "ragged" in processor.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -205,8 +205,8 @@ def test_stale_runtime_load_ids_drop_from_pending_candidates() -> None:
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
     assert not processor.ready()  # the stale candidate was dropped, 1 < batch_size
-    assert "old" in processor.retention_decision().releasable_agent_record_ids
-    assert "new" in processor.retention_decision().protected_agent_record_ids
+    assert "old" in processor.releasable_record_ids()
+    assert "new" not in processor.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -215,7 +215,7 @@ def test_correlate_only_mode_never_trains_and_releases_everything() -> None:
     processor.ingest(_turn("t1", Q1))
     processor.ingest(_turn("t2", _successor(Q1, "ok")))
     assert not processor.ready()
-    assert "t1" in processor.retention_decision().releasable_agent_record_ids
+    assert "t1" in processor.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -358,8 +358,8 @@ def test_stale_drop_uses_record_arrival_order_not_verdict_order() -> None:
     worker.push(TurnJudgment("new", score=1.0, teacher_cands=ANCHOR))
     worker.push(TurnJudgment("old", score=1.0, teacher_cands=ANCHOR))
     assert not processor.ready()
-    assert "old" in processor.retention_decision().releasable_agent_record_ids
-    assert "new" in processor.retention_decision().protected_agent_record_ids
+    assert "old" in processor.releasable_record_ids()
+    assert "new" not in processor.releasable_record_ids()
 
 
 @pytest.mark.unit
@@ -393,7 +393,7 @@ def test_reports_are_terminal_on_sight() -> None:
     processor.ingest(
         AgentRecord.create(scenario="s", request_type=RequestType.REPORT, payload={}, agent_record_id="r1")
     )
-    releasable = processor.retention_decision().releasable_agent_record_ids
+    releasable = processor.releasable_record_ids()
     assert "r1" in set(releasable)
 
 
@@ -406,7 +406,7 @@ def test_rejected_submission_retires_the_turn() -> None:
     processor = _processor(worker=RefusingWorker())
     processor.ingest(_turn("t1", Q1))
     processor.ingest(_turn("t2", _successor(Q1, "ok")))
-    assert "t1" in processor.retention_decision().releasable_agent_record_ids
+    assert "t1" in processor.releasable_record_ids()
 
 
 @pytest.mark.unit

@@ -9,6 +9,8 @@ from types import MappingProxyType, ModuleType
 import pytest
 from reef_service.test_harness_example import NODES, REQUEST, _method, canned, request_reply
 
+from reef.core.requirements import REQUIRE_KINDS
+
 REQUIRES_OBJECT = {
     "requires": [
         {"name": "TWILIO_SID", "kind": "env", "check": "TWILIO_SID"},
@@ -31,9 +33,9 @@ def test_the_request_prompt_says_how_to_name_what_the_change_needs(evolution) ->
     # One worked example per kind, each with a prompt; an env item is the variable name alone, its value never
     # written into the tree.
     assert '{"requires": [...]}' in prompt
-    for kind in ("permission", "env", "service"):
+    for kind in REQUIRE_KINDS:
         assert f'"kind": "{kind}"' in prompt
-    assert prompt.count('"prompt": "') == 3 and "Each item carries a prompt" in prompt
+    assert prompt.count('"prompt": "') == len(REQUIRE_KINDS) and "Each item carries a prompt" in prompt
     assert (
         "the value is never written into the tree" in prompt
         and "Omit the object when the change needs nothing" in prompt

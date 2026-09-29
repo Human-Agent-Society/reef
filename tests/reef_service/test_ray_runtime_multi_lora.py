@@ -73,7 +73,7 @@ def test_malformed_lora_mode_is_rejected() -> None:
 
 
 def test_reconcile_leaves_another_scenarios_pending_job_alone() -> None:
-    handle = ScenarioLoraHandle(status="READY_TO_COMMIT", rollout_id=3)
+    handle = ScenarioLoraHandle(status="READY_TO_COMMIT", scenario_step=3)
     runtime = ExecutorRuntimeFixture(train_group_handle=handle, inference_url="http://router")
     # code's backend sees math's job awaiting commit: admission stays closed, no ack.
     runtime.reconcile_training_job(4, committed_training_job_id="job-3", scenario="code")

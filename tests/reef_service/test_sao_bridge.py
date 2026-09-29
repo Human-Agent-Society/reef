@@ -17,6 +17,7 @@ import pytest
 import ray
 from reef_service.slime_coordinator import build_slime_coordinator
 
+from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, read_marker
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
 
@@ -265,6 +266,7 @@ class _RecordingGroup:
         self.train_calls: list[tuple[int, object]] = []
         self.external_data: list[object] = []
         self.saved_model_rollouts: list[int] = []
+        self.saved_scenario_steps: list[int | None] = []
         self.saved_training_checkpoint_rollouts: list[int] = []
         self._actor_handlers = [_FakeRank(version=SERVING_VERSION, metrics=worker_metrics)]
 
@@ -303,11 +305,12 @@ class _RecordingGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         pass
 
-    def save_model(self, rollout_id, force_sync=False):
+    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
         if self.critic:
             self.saved_training_checkpoint_rollouts.append(rollout_id)
             return
         self.saved_model_rollouts.append(rollout_id)
+        self.saved_scenario_steps.append(scenario_step)
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
         checkpoint.mkdir(parents=True)
         (checkpoint / "weights").write_text("hf", encoding="utf-8")
@@ -343,7 +346,7 @@ def _sao_actor(
             _sao_row("b", reward=1.0, producing_runtime_load_id="inc:3"),
         ]
     )
-    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
     return actor, actor_group, critic_group, payload
 
 
@@ -379,6 +382,28 @@ def test_sao_critic_only_warmup_commits_without_moving_the_policy(tmp_path, _loc
     assert len(critic_group.train_calls) == 2
     assert actor_group.train_calls == []
     assert result.metrics["sao/actor_trained"] == 0
+
+
+@pytest.mark.unit
+def test_sao_jobs_keep_the_bridge_checkpoint_index_when_scenario_steps_skip(tmp_path, _local_ray_get) -> None:
+    # The other components of a composite advance the scenario step between two weight steps.
+    actor, actor_group, _, payload = _sao_actor(tmp_path)
+
+    first = _execute_and_update_weights(actor, payload)
+    actor.acknowledge_training_commit(first.training_job_id)
+    # The next batch, reserved four scenario steps later.
+    next_batch = _payload([_sao_row("c", producing_runtime_load_id=first.runtime_load_id)])
+    next_batch.update(scenario_step=4, expected_runtime_load_id=first.runtime_load_id)
+    later = _execute_and_update_weights(actor, next_batch)
+
+    assert (first.outcome, later.outcome) == ("complete", "complete")
+    assert [rollout_id for rollout_id, _ in actor_group.train_calls] == [0, 1]
+    assert actor_group.saved_model_rollouts == [0, 1]
+    # The adapter's metadata file names the scenario step, not the checkpoint index.
+    assert actor_group.saved_scenario_steps == [0, 4]
+    marker = read_marker(tmp_path / LATEST_JOB_MARKER_FILENAME)
+    assert (marker["rollout_id"], marker["scenario_step"]) == (1, 4)
+    assert actor.health()["training_job"]["scenario_step"] == 4
 
 
 @pytest.mark.unit
@@ -485,7 +510,7 @@ def test_bridge_defaults_match_the_paper_critic_cadence(tmp_path, _local_ray_get
         loss_family="sao",
     )
     payload = _payload([_sao_row("a", producing_runtime_load_id="inc:4")])
-    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
 
     result = _execute_and_update_weights(actor, payload)
 
@@ -850,7 +875,7 @@ def test_sao_requires_a_value_model(tmp_path, _local_ray_get) -> None:
         loss_family="sao",
     )
     payload = _payload([_sao_row("a")])
-    payload.update(rollout_id=0, expected_runtime_load_id=SERVING_VERSION)
+    payload.update(scenario_step=0, expected_runtime_load_id=SERVING_VERSION)
 
     with pytest.raises(RuntimeError, match="SAO requires a value model"):
         _execute_and_update_weights(actor, payload)

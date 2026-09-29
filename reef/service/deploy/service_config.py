@@ -40,6 +40,11 @@ class ServiceConfig:
     tokens: tuple[str, ...] = config_option(
         (), public_path=("reef", "tokens"), help="Accepted bearer tokens as a JSON/YAML list."
     )
+    served_url: str | None = config_option(
+        None,
+        public_path=("reef", "served_url"),
+        help="URL the recipe's own evaluation calls reach this service at (default: loopback on the bind port).",
+    )
     console_origins: tuple[str, ...] = config_option(
         (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
     )
@@ -157,7 +162,9 @@ class ServiceConfig:
         "reef_records", public_path=("storage", "record_database_schema"), help="PostgreSQL schema."
     )
     agent_record_retention_days: float = config_option(
-        7.0, public_path=("storage", "agent_record_retention_days"), help="Record retention in days."
+        7.0,
+        public_path=("storage", "agent_record_retention_days"),
+        help="Deprecated compatibility setting; records are evicted by capacity, not age.",
     )
     agent_record_retention_max_bytes: int = config_option(
         20 * 1024**3,
@@ -174,6 +181,11 @@ class ServiceConfig:
     wandb_config: Mapping[str, Any] = field(
         default_factory=dict,
         metadata=config_metadata("W&B settings as a JSON/YAML object.", path=("observability", "wandb")),
+    )
+    #: OpenTelemetry record tracing settings, sourced from ``observability.tracing``.
+    tracing_config: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata("Record tracing settings as a JSON/YAML object.", path=("observability", "tracing")),
     )
     training_settings: Mapping[str, Any] = field(
         default_factory=dict,
@@ -242,7 +254,13 @@ SERVICE_CONFIG_ALIASES: Mapping[str, str] = {"token": "tokens"}
 
 def service_owned_keys() -> frozenset[str]:
     """Every ``reef.*`` key the service layer consumes."""
-    non_reef_fields = {"evaluation_settings", "generator_settings", "training_settings", "wandb_config"}
+    non_reef_fields = {
+        "evaluation_settings",
+        "generator_settings",
+        "tracing_config",
+        "training_settings",
+        "wandb_config",
+    }
     return frozenset(
         settings_field.name
         for settings_field in dataclasses.fields(ServiceConfig)

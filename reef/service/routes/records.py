@@ -1,15 +1,49 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.parse import quote
 
 from aiohttp import web
 
 from reef.core.records_types import RequestType
+
+from reef.service.auth import page_query
 from reef.service.request_service import RequestService
 from reef.service.routes.payload import read_object
 
+#: The most a record import takes in one request. The app itself reads bodies of several MiB, the size of a coding
+#: agent's first inference call, so the import routes keep their existing limit.
+MAX_RECORD_IMPORT_BYTES = 1024 * 1024
+
 
 def register_record_routes(app: web.Application, *, request_service: RequestService) -> None:
+    async def import_record(request: web.Request) -> web.Response:
+        body = await read_object(request.clone(client_max_size=MAX_RECORD_IMPORT_BYTES))
+        item = await asyncio.to_thread(request_service.import_record, request.headers, body)
+        return web.json_response(
+            {
+                "agent_record_id": item.agent_record_id,
+                "scenario": item.scenario,
+                "request_type": item.request_type.value,
+            }
+        )
+
+    async def import_records(request: web.Request) -> web.Response:
+        body = await read_object(request.clone(client_max_size=MAX_RECORD_IMPORT_BYTES))
+        items = await asyncio.to_thread(request_service.import_records, request.headers, body)
+        return web.json_response(
+            {
+                "records": [
+                    {
+                        "agent_record_id": item.agent_record_id,
+                        "scenario": item.scenario,
+                        "request_type": item.request_type.value,
+                    }
+                    for item in items
+                ]
+            }
+        )
+
     def accept_typed(request_type: RequestType):
         async def accept(request: web.Request) -> web.Response:
             payload = await read_object(request)
@@ -28,16 +62,21 @@ def register_record_routes(app: web.Application, *, request_service: RequestServ
                 request_type=request_type,
                 agent_record_id=agent_record_id,
             )
-            return web.json_response(
-                {
-                    "agent_record_id": item.agent_record_id,
-                    "scenario": item.scenario,
-                    "request_type": item.request_type.value,
-                }
-            )
+            answer = {
+                "agent_record_id": item.agent_record_id,
+                "scenario": item.scenario,
+                "request_type": item.request_type.value,
+            }
+            if request_type is RequestType.TRAIN:
+                # A training request has a page; its link carries a page key in place of the token.
+                record = quote(item.agent_record_id, safe="")
+                answer["page_path"] = f"/reef/harness/requests/{record}/page?{page_query(request, item.scenario)}"
+            return web.json_response(answer)
 
         return accept
 
+    app.router.add_post("/reef/records", import_record)
+    app.router.add_post("/reef/records/batch", import_records)
     app.router.add_post("/reef/report", accept_typed(RequestType.REPORT))
     app.router.add_post("/reef/train", accept_typed(RequestType.TRAIN))
 

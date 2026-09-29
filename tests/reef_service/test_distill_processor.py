@@ -177,13 +177,26 @@ def test_the_processor_skips_and_counts_a_teacher_sequence_over_the_window(token
     assert not processor.ready()
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
     # The report and its inference are released for compaction.
-    assert {"r1", "i1"} <= processor.retention_decision().releasable_agent_record_ids
+    assert {"r1", "i1"} <= processor.releasable_record_ids()
 
     # A later report that fits still trains.
     processor.ingest(short_request)
     processor.ingest(_report("r2", ("i2",), teacher_context="ok"))
     assert len(processor.build_batch().items) == 1
     assert processor.operational_metrics()["teacher_overflow_reports"] == 1
+
+
+@pytest.mark.unit
+def test_teacher_tokens_render_the_request_cut_the_prompt_and_append_the_response(
+    tokenizer: CountingTokenizer,
+) -> None:
+    processor = _processor()
+    messages = [{"role": "user", "content": QUESTION}]
+    prompt_ids = tokenizer.count_ids(messages)
+
+    assert processor.teacher_tokens(messages, None, (1, 2, 3)) == [*prompt_ids, 1, 2, 3]
+    # A prompt window cuts the rendered prompt on the right and leaves the response whole.
+    assert processor.teacher_tokens(messages, None, (1, 2, 3), max_prompt_tokens=2) == [*prompt_ids[:2], 1, 2, 3]
 
 
 @pytest.mark.unit

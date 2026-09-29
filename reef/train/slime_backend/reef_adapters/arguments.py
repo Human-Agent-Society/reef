@@ -26,6 +26,7 @@ class SlimeArguments(Namespace):
     offload_train: bool
     offload_rollout: bool
     keep_lora_base_resident: bool
+    disjoint_prefix_sharing: bool
     megatron_lora_rank: int
     megatron_lora_alpha: int | None
     megatron_lora_target_modules: list[str] | None

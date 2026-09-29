@@ -9,9 +9,12 @@ from typing import Any
 
 from reef.artifact.artifact import Artifact
 from reef.core.errors import ReefError
-from reef.surface.base import ArtifactValidator, InferenceHooks, Surface
+from reef.surface.base import ArtifactValidator, ComponentSurface, InferenceHooks, Surface
 from reef.surface.files import TextFileTree
 from reef.surface.skills.modules import RequestSkillLayer, SkillLayer
+
+#: The component name a skill surface binds.
+SKILLS_COMPONENT = "skills"
 
 
 def validate_tree(files: Mapping[str, str], layers: Sequence[SkillLayer]) -> None:
@@ -64,12 +67,17 @@ class SkillInferenceHooks(InferenceHooks):
 
 
 def create_skill_surface(layers: Sequence[SkillLayer]) -> Surface:
-    """Build optional request injection and client-pulled skill files."""
+    """Build the ``skills`` component: layer validation, optional request injection, and client-pulled files."""
     layer_tuple = _skill_layers(layers)
     request_layers = tuple(item for item in layer_tuple if isinstance(item, RequestSkillLayer))
     return Surface(
-        inference=SkillInferenceHooks(request_layers) if request_layers else None,
-        files=TextFileTree(),
+        components={
+            SKILLS_COMPONENT: ComponentSurface(
+                validator=SkillValidator(layer_tuple),
+                inference=SkillInferenceHooks(request_layers) if request_layers else None,
+                files=TextFileTree(),
+            )
+        }
     )
 
 
@@ -98,4 +106,4 @@ def _layer_files(local_path: Path, layer: str) -> dict[str, str]:
     return files
 
 
-__all__ = ["SkillInferenceHooks", "SkillValidator", "create_skill_surface", "validate_tree"]
+__all__ = ["SKILLS_COMPONENT", "SkillInferenceHooks", "SkillValidator", "create_skill_surface", "validate_tree"]

@@ -14,8 +14,10 @@ import logging
 import math
 import tarfile
 import tempfile
+import threading
 import time
 import weakref
+from collections import deque
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from io import BytesIO
@@ -38,7 +40,7 @@ from reef.harness.compose.loader import EntryOptions, Loader
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError
+from reef.harness.episodes.trajectory import TrajectoryError, final_assistant_text
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.mutations import (
     Mutation,
@@ -60,7 +62,7 @@ from reef.harness.tree.nodes import (
 from reef.harness.tree.render import render_composition
 from reef.runtime.executor import Executor, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
-from reef.train.backend import CandidateBackend, PreparedStep
+from reef.train.backend import STALE_RESULT_POLICIES, CandidateBackend, PreparedStep, StaleResultPolicy
 from reef.train.cordis_backend.contracts import ProposalValidator, StepProgress, StepProgressReader, StepRecords
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation
@@ -68,9 +70,11 @@ from reef.train.cordis_backend.manifest import FailureRecord as FailureRecord  #
 from reef.train.cordis_backend.manifest import advance
 from reef.train.cordis_backend.proposals import Proposal, ProposalInbox
 from reef.train.cordis_backend.strategies import (
+    AgentHost,
     EpisodeScorer,
     Promoter,
     Proposer,
+    ProposerCalls,
     StepProposal,
     accepts_keyword,
     accepts_manifest,
@@ -182,13 +186,16 @@ class EpisodeEvaluationWorker:
         )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
+        reply = final_assistant_text(result.trajectory)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return _ScoredEpisode(
-                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path
+                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path, reply
             )
-        return _ScoredEpisode(score, None, residue, agents, path)
+        # An empty trajectory is no failure: a grader that reads files scored the run as it stands. The summary
+        # still says no transcript was read, so a low score a text grader gave is not blamed on the request.
+        return _ScoredEpisode(score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory))
 
 
 def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
@@ -225,6 +232,8 @@ class HarnessCandidate(UpdateCandidate):
 
 #: Characters kept per text in the step record; a longer text ends in a clip marker.
 RECORD_TEXT_CAP = 20_000
+#: The record file of an attempt directory that re-evaluated a kept candidate; it names the first attempt.
+RECORD_REEVALUATION_FILE = "reevaluation.json"
 #: The record files one step writes under its claimed directory (``<step>``, a retried step ``<step>-<attempt>``).
 RECORD_PROPOSER_FILE = "proposer.json"
 RECORD_MUTATIONS_FILE = "mutations.json"
@@ -346,6 +355,44 @@ def _admit_promoted(
     return promoted
 
 
+#: The most activity lines a step keeps; the oldest go first.
+MAX_ACTIVITY = 300
+
+
+class _StepCalls(ProposerCalls):
+    """One step's model-call budget, record and live activity, shared by the budgeted bindings and an agent's gateway.
+
+    A cap of 0 is no budget; the record is the list the step writes to ``proposer.json``; the activity is what the
+    request page shows while the step runs, read from another thread through :meth:`activity`.
+    """
+
+    def __init__(self, cap: int, record: list[dict[str, Any]]) -> None:
+        self._cap = cap
+        self._spent = 0
+        self._record = record
+        self._activity: deque[dict[str, Any]] = deque(maxlen=MAX_ACTIVITY)
+        self._lock = threading.Lock()
+
+    def spend(self) -> None:
+        if self._cap and self._spent >= self._cap:
+            raise RuntimeError(f"model call budget of {self._cap} per evolve step exhausted")
+        self._spent += 1
+
+    def record(self, entry: Mapping[str, Any]) -> None:
+        self._record.append(dict(entry))
+
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        line: dict[str, Any] = {"at": time.time(), "kind": kind, "text": " ".join(text.split())[:300]}
+        if failed:
+            line["failed"] = True
+        with self._lock:
+            self._activity.append(line)
+
+    def activity(self) -> tuple[dict[str, Any], ...]:
+        with self._lock:
+            return tuple(dict(line) for line in self._activity)
+
+
 class _BudgetedBinding(ModelBinding):
     """A ModelBinding that delegates ``chat`` to a wrapped binding under a
     shared per-step call budget and records every call in the step record.
@@ -361,30 +408,23 @@ class _BudgetedBinding(ModelBinding):
     """
 
     _inner: ModelBinding
-    _spent: list[int]
-    _cap: int
-    _record: list[dict[str, Any]]
+    _calls: _StepCalls
 
-    def __init__(self, inner: ModelBinding, spent: list[int], cap: int, record: list[dict[str, Any]]) -> None:
+    def __init__(self, inner: ModelBinding, calls: _StepCalls) -> None:
         super().__init__(
             base_url=inner.base_url,
             model=inner.model,
             api_key=inner.api_key,
             api=inner.api,
             timeout_s=inner.timeout_s,
+            metadata=inner.metadata,
         )
         object.__setattr__(self, "_inner", inner)
-        object.__setattr__(self, "_spent", spent)
-        object.__setattr__(self, "_cap", cap)
-        object.__setattr__(self, "_record", record)
-
-    def _spend(self) -> None:
-        if self._cap and self._spent[0] >= self._cap:
-            raise RuntimeError(f"model call budget of {self._cap} per evolve step exhausted")
-        self._spent[0] += 1
+        object.__setattr__(self, "_calls", calls)
 
     def chat(self, messages: Sequence[Mapping[str, Any]], *, timeout_s: float | None = None, **params: Any) -> str:
-        self._spend()
+        self._calls.spend()
+        self._calls.note("model", f"asking {self.model}")
         kwargs: dict[str, Any] = dict(params)
         if timeout_s is not None:
             kwargs["timeout_s"] = timeout_s
@@ -412,11 +452,35 @@ class _BudgetedBinding(ModelBinding):
             usage = self._inner.last_usage() if isinstance(self._inner, ModelBinding) else None
             if usage is not None:
                 entry["usage"] = usage
-            self._record.append(entry)
+            self._calls.record(entry)
+            self._note_answer(entry)
+
+    def last_response(self) -> dict[str, Any] | None:
+        """The provider response of the latest call, as the wrapped binding kept it."""
+        return self._inner.last_response() if isinstance(self._inner, ModelBinding) else None
+
+    def note(self, kind: str, text: str, *, failed: bool = False) -> None:
+        """A method's own line in the step's activity, beside the lines the calls write."""
+        self._calls.note(kind, text, failed=failed)
+
+    def _note_answer(self, entry: Mapping[str, Any]) -> None:
+        """One activity line for a finished call: how long it took and its tokens, or its error."""
+        seconds = entry.get("seconds", 0)
+        if "error" in entry:
+            self._calls.note("model", f"{self.model} failed after {seconds:g} s: {entry['error']}", failed=True)
+            return
+        usage = entry.get("usage")
+        tokens = (
+            f", {int(usage.get('input_tokens', 0) or 0):,} → {int(usage.get('output_tokens', 0) or 0):,} tokens"
+            if isinstance(usage, Mapping)
+            else ""
+        )
+        self._calls.note("model", f"{self.model} answered in {seconds:g} s{tokens}")
 
     def complete(self, body: Mapping[str, Any], *, timeout_s: float | None = None) -> dict[str, Any]:
         """A method's raw request goes through the same budget and record as ``chat``: ``body`` in, ``response`` out."""
-        self._spend()
+        self._calls.spend()
+        self._calls.note("model", f"asking {self.model}")
         kwargs: dict[str, Any] = {} if timeout_s is None else {"timeout_s": timeout_s}
         entry: dict[str, Any] = {"model": self.model, "body": _bounded(body), "params": _bounded(kwargs)}
         started = time.monotonic()
@@ -425,14 +489,16 @@ class _BudgetedBinding(ModelBinding):
         except BaseException as exc:
             entry["error"] = _clip(f"{type(exc).__name__}: {exc}")
             entry["seconds"] = round(time.monotonic() - started, 3)
-            self._record.append(entry)
+            self._calls.record(entry)
+            self._note_answer(entry)
             raise
         entry["response"] = _bounded(response)
         entry["seconds"] = round(time.monotonic() - started, 3)
         usage = usage_of(response)
         if usage is not None:
             entry["usage"] = usage
-        self._record.append(entry)
+        self._calls.record(entry)
+        self._note_answer(entry)
         return response
 
 
@@ -445,17 +511,16 @@ def _proposer_tokens(record: Sequence[Mapping[str, Any]]) -> tuple[int, int]:
     )
 
 
-def _budgeted_bindings(models: ModelBindings, cap: int, record: list[dict[str, Any]]) -> ModelBindings:
-    """The proposer's view: every ``chat`` shares one per-step budget and lands in ``record``.
+def _budgeted_bindings(models: ModelBindings, calls: _StepCalls) -> ModelBindings:
+    """The proposer's view: every ``chat`` shares the step's budget and lands in its record.
 
     The bindings are wrapped whatever the cap, so the record sees every call;
-    with ``cap`` 0 nothing is refused. The counter is per prepare_step call,
+    with a cap of 0 nothing is refused. ``calls`` is per prepare_step call,
     so a cap bounds one step's model bill, never the campaign's.
     """
-    spent: list[int] = [0]
 
     def wrap(binding: ModelBinding) -> ModelBinding:
-        return _BudgetedBinding(binding, spent, cap, record)
+        return _BudgetedBinding(binding, calls)
 
     return ModelBindings(
         served=wrap(models.served),
@@ -650,6 +715,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         step_record_dir: str | Path | None = None,
         worker_executor: ExecutorSettings | None = None,
         worker_gpus: float | None = None,
+        agent_executor: EpisodeExecutor | None = None,
+        agent_timeout_s: float = 1800.0,
+        agent_trial_timeout_s: float = 300.0,
+        on_stale: StaleResultPolicy = "merge",
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
@@ -702,6 +771,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         Executor.get_class(self._worker_selection.settings.backend)
         self._episode_timeout_s = float(episode_timeout_s)
         self._episode_repeats = episode_repeats
+        if on_stale not in STALE_RESULT_POLICIES:
+            raise ValueError(f"on_stale must be one of {STALE_RESULT_POLICIES}")
+        self.on_stale = on_stale
+        # Proposals a settlement already filed; a step evaluated again settles once.
+        self.settled_proposals: set[str] = set()
         self._forbid_residue = forbid_residue
         self._max_steps = max_steps
         self._max_failure_streak = max_failure_streak
@@ -735,9 +809,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # Created at boot so an unwritable record path refuses to start, not the first step.
         self._step_record_dir = None if step_record_dir is None else Path(step_record_dir)
         self._current_step_record: Path | None = None
+        # What a step that raised had reached: its phase, and past a candidate its proposal, for the skip row.
+        self._failed_step: dict[str, Any] = {}
         # Written by the training thread, read by the service's request page from another: each write is one
         # assignment of a frozen value, which is all the synchronization a reader that tolerates a stale phase needs.
         self._step_progress: StepProgress | None = None
+        # The running step's calls, whose activity the progress reports; replaced by the next step's.
+        self._step_calls: _StepCalls | None = None
+        self.step_request_id: str | None = None
         if self._step_record_dir is not None:
             try:
                 self._step_record_dir.mkdir(parents=True, exist_ok=True)
@@ -752,6 +831,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # Bind the whole install: npm launchers are symlinks into packages,
             # and git installs need both their editable source and their venv.
             self._executor = replace(self._executor, base_paths=(*self._executor.base_paths, str(prefix)))
+        for label, timeout in (("agent_timeout_s", agent_timeout_s), ("agent_trial_timeout_s", agent_trial_timeout_s)):
+            if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
+                raise ValueError(f"{label} must be a positive number")
+        # The agent proposer runs the same installed binary as the episodes, under its own isolation.
+        if binary is None and descriptor.install is not None and isinstance(agent_executor, SandboxExecutor):
+            agent_executor = replace(agent_executor, base_paths=(*agent_executor.base_paths, str(prefix)))
+        self._agent_executor = agent_executor
+        self._agent_timeout_s = float(agent_timeout_s)
+        self._agent_trial_timeout_s = float(agent_trial_timeout_s)
         self._evaluation_pool = EvaluationWorkerPool(
             self._worker_selection,
             self._worker_requirements,
@@ -782,6 +870,14 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     @property
     def descriptor(self) -> AdapterDescriptor:
         return self._descriptor
+
+    @property
+    def harness_node_paths(self) -> Mapping[str, str] | None:
+        return self._descriptor.node_paths
+
+    @property
+    def harness_adapter(self) -> str | None:
+        return self._descriptor.name
 
     def admit(
         self, entries: Sequence[Mapping[str, Any]], mutations: Sequence[Mutation]
@@ -867,8 +963,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
     @property
     def step_progress(self) -> StepProgress | None:
-        """The running step's phase and start, ``None`` between steps (see ``StepProgress``)."""
-        return self._step_progress
+        """The running step's phase, start and activity so far, ``None`` between steps (see ``StepProgress``)."""
+        progress, calls = self._step_progress, self._step_calls
+        if progress is None or calls is None:
+            return progress
+        return replace(progress, activity=calls.activity())
 
     def prepare_step(
         self,
@@ -878,9 +977,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     ) -> PreparedStep:
         self._current_step_record = None
         self._step_progress = None
+        self._failed_step = {}
         try:
             prepared = self._prepare_step(batch, state, scenario_step)
         except BaseException:
+            if self._step_progress is not None:
+                self._failed_step = {"failed_stage": self._step_progress.phase}
             self._step_progress = None
             raise
         progress = self._step_progress
@@ -997,8 +1099,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         if step_dir is not None:
             metrics["step_record"] = str(step_dir)
         # From here the step is under way for the request page; the proposer runs next.
+        self._step_calls = None
+        self.step_request_id = None if batch.request is None else batch.request.id
         self._step_progress = StepProgress(
-            request_id=None if batch.request is None else batch.request.id,
+            request_id=self.step_request_id,
             phase="proposing",
             started_at=time.time(),
             step_record=None if step_dir is None else str(step_dir),
@@ -1057,8 +1161,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                 self._write_record(step_dir, RECORD_MUTATIONS_FILE, [])
                 return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": str(error)})
         else:
-            models = _budgeted_bindings(self._models, self._max_model_calls_per_step, record)
+            calls = _StepCalls(self._max_model_calls_per_step, record)
+            self._step_calls = calls
+            models = _budgeted_bindings(self._models, calls)
             extra: dict[str, Any] = {}
+            if self._propose.runs_agent:
+                # No agent executor configured: the proposer gets None and answers without an agent.
+                extra["agent_host"] = self._agent_host(step_dir, calls)
+                if extra["agent_host"] is None and batch.request is not None:
+                    calls.note("proposer", "the agent proposer is off on this host; the text proposer answers")
             if self._propose_accepts_manifest:
                 extra["manifest"] = manifest
             if self._propose_accepts_rejected:
@@ -1167,6 +1278,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             self._step_progress = replace(progress, phase="evaluating", episodes_total=len(pairings))
         scored = self._evaluate_pairings(pairings)
         runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
+        tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
         scores = {side: tuple(run.score for run in runs[side]) for side in sides}
         metrics: dict[str, Any] = {
             "candidate_scores": scores.get("candidate", ()),
@@ -1184,6 +1296,21 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics[f"{side}_agents"] = _sum_agents(run.agents for run in runs[side])
             # Per episode, in pairing order: the root's stage path and how its turn ended.
             metrics[f"{side}_paths"] = tuple(run.path for run in runs[side])
+        if "candidate" in sides:
+            # What the first candidate episodes were graded on, so a rejected step names the task, the reply and why.
+            metrics["candidate_episodes"] = [
+                {
+                    "task": clip_redacted(task, EPISODE_SUMMARY_CHARS),
+                    "score": run.score,
+                    "failure": (
+                        None if run.failure is None else clip_redacted(run.failure.cause, EPISODE_SUMMARY_CHARS)
+                    ),
+                    "reply": None if run.reply is None else clip_redacted(run.reply, EPISODE_SUMMARY_CHARS),
+                    # Only when missing, so a summary of an ordinary episode keeps its shape.
+                    **({} if run.transcript_read else {"transcript_read": False}),
+                }
+                for task, run in list(zip(tasks["candidate"], runs["candidate"], strict=True))[:EPISODE_SUMMARIES]
+            ]
         if sides != EVALUATION_SIDES:
             metrics["evaluation_sides"] = list(sides)
         return EvaluationResult(evaluator="harness_episode_pairs", evaluator_version="1", metrics=metrics)
@@ -1288,8 +1415,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["mutations"] = [_mutation_record(mutation) for mutation in candidate.mutations]
 
         if candidate.proposal_id is not None and self.proposals is not None:
+            # Filed on every settlement: a candidate evaluated again after a stale refusal files its latest decision.
             selection_result = {"step": int(state["steps"]), "selected": decision.selected, "reason": decision.reason}
             self.proposals.settle(candidate.proposal_id, selection_result)
+            self.settled_proposals.add(candidate.proposal_id)
 
         if decision.selected:
             entries = [dict(entry) for entry in candidate.candidate_entries]
@@ -1314,19 +1443,65 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._loader.root.update([copy.deepcopy(entry) for entry in entries])
         return TrainStepResult({**state, "entries": entries}, metrics)
 
+    @property
+    def stale_result_policy(self) -> StaleResultPolicy:
+        """Episodes compare candidate and current under one set of weights, so a result survives a weights change
+        as the recipe's ``on_stale`` says: merged by default."""
+        return self.on_stale
+
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Discard this backend's render source after its commit is durable."""
         artifact = self._rendered_publications.pop(int(state["steps"]), None)
         if artifact is not None:
             artifact.discard()
+        # The tree follows the durable state, whatever settlement or a subclass left in it.
+        self._loader.root.update([copy.deepcopy(entry) for entry in state["entries"]])
+        # The step is over: no earlier settlement can be aborted any more.
+        self.settled_proposals.clear()
+
+    def prepare_reevaluation(self, prepared: PreparedStep) -> PreparedStep:
+        """The kept candidate with a fresh attempt directory for its episodes, shown as evaluating again.
+
+        The proposer files stay with the first attempt; the new directory
+        names it in ``reevaluation.json`` and receives the episodes.
+        """
+        candidate = self._candidate_from(prepared)
+        metrics = dict(prepared.metrics)
+        step_dir = None
+        if candidate.record_dir is not None:
+            step_dir = self._claim_step_dir(int(prepared.state["steps"]))
+            self._current_step_record = step_dir
+            metrics["step_record"] = str(step_dir)
+            self._write_record(step_dir, RECORD_REEVALUATION_FILE, {"first_attempt": str(candidate.record_dir)})
+        self._step_calls = None
+        self._step_progress = StepProgress(
+            request_id=self.step_request_id,
+            phase="evaluating",
+            started_at=time.time(),
+            step_record=None if step_dir is None else str(step_dir),
+        )
+        return replace(prepared, candidate=replace(candidate, record_dir=step_dir), metrics=metrics)
 
     def abort_step(self, prepared: PreparedStep) -> None:
         self._step_progress = None
         candidate = self._candidate_from(prepared)
+        # The candidate reached its evaluation: the skip row keeps what was proposed and why, and says where it
+        # stopped, so the page does not read the step as one that never got that far.
+        self._failed_step = {
+            "failed_stage": "evaluating",
+            "mutations": [_mutation_record(mutation) for mutation in candidate.mutations],
+            **{key: prepared.metrics[key] for key in ("proposal_notes",) if key in prepared.metrics},
+        }
         self._loader.root.update([dict(entry) for entry in candidate.current_entries])
-        if candidate.proposal_id is not None and self.proposals is not None:
-            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own.
+        if (
+            candidate.proposal_id is not None
+            and self.proposals is not None
+            and candidate.proposal_id not in self.settled_proposals
+        ):
+            # Filed, not left in claimed/ forever: the inbox never returns to a claimed file on its own. A
+            # proposal an earlier evaluation settled keeps that decision when its second evaluation fails.
             self.proposals.refuse(candidate.proposal_id, "step aborted before a result")
+        self.settled_proposals.clear()
 
     @classmethod
     def _candidate_from(cls, prepared: PreparedStep) -> HarnessCandidate:
@@ -1348,8 +1523,24 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         return read_step_records(self._step_record_dir, directory, relative)
 
     def failed_step_metrics(self) -> Mapping[str, Any]:
-        """Keep the failed attempt's exact directory when the trainer consumes its instruction after reload."""
-        return {} if self._current_step_record is None else {"step_record": str(self._current_step_record)}
+        """Keep the failed attempt's exact directory when the trainer consumes its instruction after reload, the
+        phase it failed in and, past a candidate, its proposal."""
+        record = {} if self._current_step_record is None else {"step_record": str(self._current_step_record)}
+        return {**record, **self._failed_step}
+
+    def _agent_host(self, step_dir: Path | None, calls: ProposerCalls) -> AgentHost | None:
+        """What an agent proposer runs in this step, or ``None`` when the deployment configured no agent."""
+        if self._agent_executor is None:
+            return None
+        return AgentHost(
+            descriptor=self._descriptor,
+            binary=self._binary,
+            executor=self._agent_executor,
+            step_dir=step_dir,
+            calls=calls,
+            timeout_s=self._agent_timeout_s,
+            trial_timeout_s=self._agent_trial_timeout_s,
+        )
 
     def _claim_step_dir(self, step: int) -> Path | None:
         """Create and return a fresh record directory for ``step``; ``None`` with the record off."""
@@ -1529,8 +1720,24 @@ class _ScoredEpisode:
     agents: dict[str, dict[str, int]] = field(default_factory=dict)
     #: The root's stage path and end reason; ``None`` when no trajectory was read.
     path: dict[str, Any] | None = None
+    #: The final assistant text the trajectory holds, the reply a text grader reads; ``None`` when it holds none.
+    reply: str | None = None
+    #: Whether the reader found a session log; a scored episode without one left a text grader nothing to read.
+    transcript_read: bool = True
     #: Remote workers return the kept trajectory; the driver owns its durable path.
     record_archive: bytes | None = field(default=None, repr=False)
+
+
+#: How many candidate episodes a step's evaluation summarizes, and how much of each text it keeps: a summary for
+#: the pages, never the traffic.
+EPISODE_SUMMARIES = 8
+EPISODE_SUMMARY_CHARS = 240
+
+
+def clip_redacted(text: str, limit: int) -> str:
+    """``text`` redacted as the record is, cut at ``limit`` characters with an ellipsis marker."""
+    text = redact_secret_shaped(text).strip()
+    return text if len(text) <= limit else text[: limit - 3].rstrip() + "..."
 
 
 def _write_episode_record(

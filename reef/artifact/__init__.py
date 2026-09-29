@@ -44,6 +44,7 @@ from reef.artifact.artifact import (
     ArtifactValidator,
     LiveWeightArtifactRef,
 )
+from reef.artifact.composite import compose_release
 from reef.artifact.git_lfs import GitLFSRepositoryBackend
 from reef.artifact.memory import InMemoryRepositoryBackend
 from reef.artifact.peft import AdapterArtifactError, PEFTValidator, read_peft_config
@@ -94,6 +95,7 @@ __all__ = [
     "RepositoryBackend",
     "RepositoryBackendFactory",
     "StagedReleaseRepositoryBackend",
+    "compose_release",
     "download_huggingface_snapshot",
     "parse_artifact_source",
     "read_peft_config",

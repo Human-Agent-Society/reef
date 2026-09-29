@@ -18,7 +18,7 @@ from reef.runtime.interfaces import (
 from reef.runtime.recovery import FileTrainingJobStore
 from reef.runtime.scheduler import TrainingExecution, training_job_id
 
-PAYLOAD = {"rollout_id": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
+PAYLOAD = {"scenario_step": 0, "samples": [["sample-1"]], "expected_runtime_load_id": "engine:0"}
 
 
 class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
@@ -26,13 +26,14 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
 
     def __init__(self, root):
         self.path = root / ".reef-latest-job.json"
-        self._checkpoint = TrainingCheckpoint(0, root / "checkpoint")
+        self._checkpoint = TrainingCheckpoint(0, root / "checkpoint", scenario_step=0)
         self.events = []
         self.fail = None
         self.early = None
         self.reserved = False
         self.state = TrainingJobState()
         self.prior = None
+        self.payload = None
         self._config = TrainingCoordinationConfig(save_hf_template=None)
         self._context = TrainingContext()
 
@@ -86,8 +87,9 @@ class MemoryTrainingBackend(TrainingBackend, PreparedTrainingJob):
             raise RuntimeError(f"failed {name}")
 
     @contextmanager
-    def prepare(self, payload, *, job_id, rollout_id, prior_marker):
+    def prepare(self, payload, *, job_id, scenario_step, prior_marker):
         self.prior = prior_marker
+        self.payload = payload
         self.reserved = True
         try:
             self.event("prepare")
@@ -204,7 +206,26 @@ def test_cleanup_failure_after_record_replays_all_metrics(backend):
     assert backend.events == []
 
 
-@pytest.mark.parametrize("status", ["CHECKPOINT", "READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE", "REJECTED"])
+def test_a_rejected_job_trains_its_batch_again_from_the_start(backend):
+    # The rejected checkpoint was refused and can never be published; the same batch is a new job.
+    coordinator(backend).execute(PAYLOAD)
+    marker = markers.read_marker(backend.path)
+    marker.update(status="REJECTED", runtime_load_id="engine:1", commit_acknowledged=True)
+    markers.write_marker(backend.path, marker)
+    backend.events.clear()
+    backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path.with_name("checkpoint-1"), scenario_step=0)
+    result = coordinator(backend).execute(PAYLOAD)
+    assert result.outcome == "checkpoint"
+    assert [name for name, _ in backend.events] == ["prepare", "train", "save", "release"]
+    assert markers.read_marker(backend.path)["status"] == "CHECKPOINT"
+
+
+def test_job_identity_ignores_the_processor_batch_number():
+    # A reload numbers the same rows again; the identity is the rows.
+    assert training_job_id({**PAYLOAD, "batch_id": "s:x:7"}) == training_job_id({**PAYLOAD, "batch_id": "s:x:1"})
+
+
+@pytest.mark.parametrize("status", ["CHECKPOINT", "READY_TO_COMMIT", "HEAD_COMMITTED", "COMPLETE"])
 def test_replay_skips_backend_for_every_replayable_state(backend, status):
     coordinator(backend).execute(PAYLOAD)
     marker = markers.read_marker(backend.path)
@@ -241,17 +262,67 @@ def test_job_identity_preserves_scenarios_but_excludes_staleness_fences():
     assert training_job_id(PAYLOAD) != training_job_id({**PAYLOAD, "expected_runtime_load_id": "new"})
 
 
+def test_every_job_marker_names_its_owner_and_the_owner_is_no_part_of_the_identity(backend):
+    """A runtime that trains one scenario per process names the owner the payload carries in the marker, so a delete
+    can tell whose job is out after a restart binds another registration."""
+    assert training_job_id({**PAYLOAD, "owner": "c"}) == training_job_id(PAYLOAD)
+    coordinator(backend).execute({**PAYLOAD, "owner": "c"})
+    marker = markers.read_marker(backend.path)
+    assert marker["scenario"] == "c" and marker["job_id"] == training_job_id(PAYLOAD)
+    # The same batch without the owner is the same job: it replays instead of training again.
+    backend.events.clear()
+    assert coordinator(backend).execute(PAYLOAD).outcome == "checkpoint"
+    assert backend.events == []
+    # A runtime training several scenarios names the adapter's scenario, the one its checkpoint carries.
+    backend.path.unlink()
+    backend.checkpoint = TrainingCheckpoint(
+        4, backend.checkpoint.path.with_name("checkpoint-4"), scenario_step=0, scenario="slot-a"
+    )
+    coordinator(backend).execute({**PAYLOAD, "scenario": "slot-a", "owner": "slot-a", "samples": [["s2"]]})
+    assert markers.read_marker(backend.path)["scenario"] == "slot-a"
+
+
 def test_scenario_steps_can_use_a_separate_global_checkpoint_index(backend):
-    backend.checkpoint = TrainingCheckpoint(12, backend.checkpoint.path, "scenario-a", 0)
+    backend.checkpoint = TrainingCheckpoint(12, backend.checkpoint.path, scenario_step=0, scenario="scenario-a")
     coordinator(backend).execute({**PAYLOAD, "scenario": "scenario-a"})
     marker = markers.read_marker(backend.path)
     assert (marker["rollout_id"], marker["scenario"], marker["scenario_step"]) == (12, "scenario-a", 0)
 
 
+def test_a_job_keeps_its_identity_when_another_component_moved_the_scenario_step(backend):
+    # A composite's other components advance the scenario step while a weight job is out;
+    # the retry of the same batch at the new step replays the job instead of conflicting with it.
+    assert training_job_id(PAYLOAD) == training_job_id({**PAYLOAD, "scenario_step": 4})
+    backend.checkpoint = TrainingCheckpoint(0, backend.checkpoint.path, scenario_step=0)
+    first = coordinator(backend).execute(PAYLOAD)
+    events = list(backend.events)
+    later = coordinator(backend).execute({**PAYLOAD, "scenario_step": 4})
+    assert (later.outcome, later.training_job_id) == (first.outcome, first.training_job_id)
+    assert backend.events == events
+    assert markers.read_marker(backend.path)["scenario_step"] == 0
+
+
+@pytest.mark.parametrize(
+    "scenario, scenario_step", [(None, -1), (None, True), (None, None), ("scenario-a", None), ("", 0)]
+)
+def test_checkpoint_refuses_a_bad_scenario_or_step(backend, scenario, scenario_step):
+    with pytest.raises(ValueError, match="checkpoint scenario"):
+        TrainingCheckpoint(0, backend.checkpoint.path, scenario_step=scenario_step, scenario=scenario)
+
+
+def test_scenario_steps_travel_beside_the_global_checkpoint_index(backend):
+    # The other components of a composite advance the scenario step between two weight steps.
+    backend.checkpoint = TrainingCheckpoint(1, backend.checkpoint.path, scenario_step=4)
+    coordinator(backend).execute({**PAYLOAD, "scenario_step": 4})
+    marker = markers.read_marker(backend.path)
+    assert (marker["rollout_id"], marker["scenario_step"]) == (1, 4)
+    assert "scenario" not in marker
+
+
 @pytest.mark.parametrize("invalid", [-1, True, "0", None])
 def test_invalid_step_is_rejected_before_preparation(backend, invalid):
-    with pytest.raises(ValueError, match="rollout_id"):
-        coordinator(backend).execute({**PAYLOAD, "rollout_id": invalid})
+    with pytest.raises(ValueError, match="scenario_step"):
+        coordinator(backend).execute({**PAYLOAD, "scenario_step": invalid})
     assert backend.events == []
 
 
@@ -334,3 +405,24 @@ def test_training_and_publication_share_progress_and_keep_serving_unchanged_unti
     assert not publisher.paused
     assert backend.state.phase == "serving"
     assert coordinator(backend).execute(PAYLOAD).outcome == "complete"
+
+
+def test_only_a_marker_of_a_job_still_out_must_name_its_scenario_step(tmp_path):
+    """A settled marker an earlier release left without ``scenario_step`` does not stop a start; a job still out is
+    finished by the step it trained, so its marker must name it."""
+    path = tmp_path / ".reef-latest-job.json"
+    checkpoint = tmp_path / "checkpoint"
+    checkpoint.mkdir()
+    settled = {
+        "status": "COMPLETE",
+        "job_id": "earlier",
+        "rollout_id": 4,
+        "checkpoint_path": str(checkpoint),
+        "runtime_load_id": "engine:4",
+        "commit_acknowledged": True,
+    }
+    markers.write_marker(path, settled)
+    assert markers.read_marker(path) == settled
+    markers.write_marker(path, {**settled, "status": "CHECKPOINT", "commit_acknowledged": False})
+    with pytest.raises(RuntimeError, match="scenario step"):
+        markers.read_marker(path)

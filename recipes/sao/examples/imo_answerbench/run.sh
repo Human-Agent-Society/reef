@@ -9,7 +9,7 @@ export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
 mkdir -p work
 
 # Start the Reef training stack, stop it again when this script exits.
-python3 -m reef serve -c "$PWD/serve.yaml" > work/reef.log 2>&1 &
+python3 -m reef serve -c "$PWD/${SAO_SERVE_YAML:-serve.yaml}" > work/reef.log 2>&1 &
 reef_pid=$!
 trap 'kill "$reef_pid" 2>/dev/null || true; wait "$reef_pid" 2>/dev/null || true' EXIT
 trap 'exit 130' INT
@@ -25,4 +25,5 @@ if ! kill -0 "$reef_pid" 2>/dev/null; then
     exit 1
 fi
 
-python3 run.py
+# run.py is the Harbor smoke loop; stream.py is the paper-shaped streaming driver.
+python3 "${SAO_DRIVER:-run.py}"

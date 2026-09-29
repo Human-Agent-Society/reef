@@ -72,62 +72,6 @@ def test_append_retry_and_scenario_reads(records: RecordStore) -> None:
     assert records.replay("code") == (other,)
 
 
-def test_retirement_purge_and_retry_receipts(records: RecordStore) -> None:
-    original = record("first")
-    other = record("other", "code")
-    records.append(original)
-    records.append(other)
-    before_compaction = records.audit_page("math")[0]
-    assert before_compaction.compacted_at is None
-    compacted_ids = frozenset({original.agent_record_id, other.agent_record_id})
-    metadata = {"step": 1}
-    records.compact("math", compacted_ids, receipt_id="step-1", receipt_metadata=metadata)
-    retired = records.get_for_audit("math", original.agent_record_id)
-    assert retired is not None
-    assert retired.item == original
-    assert retired.compacted_at is not None
-    assert records.count("math") == 0
-    assert records.replay("math") == ()
-    assert records.replay_page("math") == ()
-    assert records.get("math", original.agent_record_id) is None
-    assert records.get("code", other.agent_record_id) == other
-    assert records.audit_page("math") == (retired,)
-
-    records.compact("math", compacted_ids, receipt_id="step-1", receipt_metadata=metadata)
-    assert records.get_for_audit("math", original.agent_record_id) == retired
-    with pytest.raises(RecordConflict):
-        records.compact("math", compacted_ids, receipt_id="step-1", receipt_metadata={"step": 2})
-    receipts = records.compaction_receipts("math")
-    assert len(receipts) == 1
-    assert receipts[0]["receipt_id"] == "step-1"
-    assert receipts[0]["compacted_ids"] == tuple(sorted(compacted_ids))
-    assert receipts[0]["metadata"] == metadata
-    assert records.compaction_receipts("code") == ()
-
-    assert records.purge_compacted("math", before=retired.compacted_at + 1, limit=1) == 1
-    assert records.get_for_audit("math", original.agent_record_id) is None
-    assert records.compaction_receipts("math") == receipts
-    assert records.append_result(original).inserted is False
-    assert records.existing_receipt(original) is not None
-    with pytest.raises(RecordConflict):
-        records.append(replace(original, payload={"value": "changed"}))
-    assert records.count("math") == 0
-    records.append(record("later"))
-    assert records.replay_page("math")[0][0] > before_compaction.sequence
-
-
-def test_reports_referencing_retired_records_keep_retry_protection(records: RecordStore) -> None:
-    original = record("first")
-    records.append(original)
-    records.compact("math", frozenset({original.agent_record_id}))
-    report = record("late", references=(original.agent_record_id,))
-    assert records.append_result(report).inserted is False
-    assert records.existing_receipt(report) is not None
-    assert records.count("math") == 0
-    with pytest.raises(RecordConflict):
-        records.append(replace(report, payload={"value": "changed"}))
-
-
 class TransactionRecordStore(SQLRecordStore):
     """Exercise shared SQL behavior with caller-owned tables and transactions."""
 
@@ -166,7 +110,6 @@ def custom_record_tables(metadata: MetaData) -> RecordTables:
             Column("payload_json", Text, nullable=False),
             Column("references_json", Text, nullable=False),
             Column("artifact_json", Text),
-            Column("compacted_at", Float),
             Column("body_bytes", Integer, nullable=False),
             sqlite_autoincrement=True,
         ),
@@ -181,9 +124,19 @@ def custom_record_tables(metadata: MetaData) -> RecordTables:
             metadata,
             Column("scenario", Text, primary_key=True),
             Column("receipt_id", Text, primary_key=True),
-            Column("compacted_ids_json", Text, primary_key=True),
+            Column("consumed_ids_json", Text, nullable=False),
+            Column("consumed_ids_sha256", Text, primary_key=True),
             Column("metadata_json", Text, nullable=False),
             Column("recorded_at", Float, nullable=False),
+        ),
+        Table(
+            "custom_eviction",
+            metadata,
+            Column("scenario", Text, primary_key=True),
+            Column("record_count", Integer, nullable=False),
+            Column("body_bytes", Integer, nullable=False),
+            Column("first_sequence", Integer, nullable=False),
+            Column("last_sequence", Integer, nullable=False),
         ),
     )
 
@@ -201,24 +154,24 @@ def test_shared_sql_operations_use_supplied_tables_and_join_the_outer_transactio
             original = record("first")
             with pytest.raises(RuntimeError, match="abort outer transaction"), connection.begin():
                 records.append(original)
-                records.compact("math", frozenset({"first"}), receipt_id="step", receipt_metadata={"step": 1})
-                assert len(records.compaction_receipts("math")) == 1
+                records.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": 1})
+                assert len(records.consumption_receipts("math")) == 1
                 raise RuntimeError("abort outer transaction")
 
             committed = replace(original, payload={"value": "replacement"})
             with connection.begin():
                 assert records.audit_page("math") == ()
-                assert records.compaction_receipts("math") == ()
+                assert records.consumption_receipts("math") == ()
                 assert records.existing_receipt(original) is None
                 assert records.append_result(committed).inserted
-                records.compact("math", frozenset({"first"}), receipt_id="step", receipt_metadata={"step": 2})
+                records.record_consumption("math", frozenset({"first"}), receipt_id="step", metadata={"step": 2})
                 records.append(record("second"))
 
             with connection.begin():
                 assert records.append_result(committed).inserted is False
-                assert [entry.agent_record_id for entry in records.replay("math")] == ["second"]
+                assert [entry.agent_record_id for entry in records.replay("math")] == ["first", "second"]
                 assert [entry.item.agent_record_id for entry in records.audit_page("math")] == ["first", "second"]
-                assert records.compaction_receipts("math")[0]["metadata"] == {"step": 2}
+                assert records.consumption_receipts("math")[0]["metadata"] == {"step": 2}
             records.close()
     finally:
         engine.dispose()
@@ -258,3 +211,82 @@ def test_retry_after_outer_rollback_returns_the_other_stores_canonical_record(ch
             other.close()
     finally:
         engine.dispose()
+
+
+def test_batch_commit_rollback_and_retired_retries(records: RecordStore) -> None:
+    first, second = record("first"), record("second")
+    with pytest.raises(RecordConflict):
+        records.append_many([first, second, replace(first, payload={"changed": True})])
+    assert records.count("math") == 0
+    assert records.existing_receipt(first) is None
+    assert records.append_many([first, second, first]) == (
+        AppendResult(first, True),
+        AppendResult(second, True),
+        AppendResult(first, False),
+    )
+    assert [item.agent_record_id for _, item in records.replay_page("math")] == ["first", "second"]
+    with pytest.raises(ValueError, match="one scenario"):
+        records.append_many([record("third"), record("other", "other")])
+    assert records.count("math") == 2
+    records.record_consumption("math", frozenset({"first"}), receipt_id="skip", metadata={})
+    assert records.append_many([first])[0].inserted is False
+    with pytest.raises(RecordConflict):
+        records.append_many([record("third"), replace(first, payload={"changed": True})])
+    assert records.get("math", "third") is None
+
+
+def test_batch_uses_one_write_transaction_and_observes_only_committed_records(tmp_path):
+    from sqlalchemy import event
+
+    from reef.storage.observer import ObservedRecordStore, RecordObserver
+
+    class Observer(RecordObserver):
+        def __init__(self):
+            self.accepted = []
+
+        def record_accepted(self, item):
+            self.accepted.append(item.agent_record_id)
+
+    inner = SQLiteRecordStore(tmp_path / "batch.sqlite3")
+    observer = Observer()
+    store = ObservedRecordStore(inner, observer)
+    transactions = []
+
+    def committed(connection):
+        transactions.append("commit")
+
+    event.listen(inner._engine, "commit", committed)
+    try:
+        store.append_many([record(str(index)) for index in range(100)])
+        assert transactions == ["commit"]
+        assert observer.accepted == [str(index) for index in range(100)]
+        with pytest.raises(RecordConflict):
+            store.append_many([record("new"), replace(record("0"), payload={"changed": True})])
+        assert "new" not in observer.accepted
+        assert transactions == ["commit"]
+    finally:
+        store.close()
+
+
+def test_consumption_receipts_preserve_bodies_and_reject_conflicting_retries(records: RecordStore) -> None:
+    original = record("source")
+    records.append(original)
+    ids = frozenset({"source"})
+    metadata = {"outcome": "stale", "metrics": {"dropped": 1}}
+    records.record_consumption("math", ids, receipt_id="batch-1", metadata=metadata)
+    [receipt] = records.consumption_receipts("math")
+    assert receipt["consumed_ids"] == ("source",)
+    assert receipt["metadata"] == metadata
+    records.record_consumption("math", ids, receipt_id="batch-1", metadata=metadata)
+    assert records.consumption_receipts("math") == (receipt,)
+    with pytest.raises(RecordConflict, match="different content"):
+        records.record_consumption("math", ids, receipt_id="batch-1", metadata={"outcome": "changed"})
+    assert records.consumption_receipts("math") == (receipt,)
+    assert records.consumption_receipts("code") == ()
+    assert records.get("math", "source") == original
+    assert records.replay("math") == (original,)
+    assert records.append_result(original).inserted is False
+    # Storage accepts feedback independently of whether a consumer processed the source.
+    assert records.append_result(record("late", references=("source",))).inserted
+    with pytest.raises(ValueError, match="non-empty"):
+        records.record_consumption("math", ids, receipt_id="", metadata={})

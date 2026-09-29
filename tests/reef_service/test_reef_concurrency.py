@@ -50,7 +50,7 @@ class CountingRuntime(StubTrainingRuntime):
         del batch, objective
         return PreparedTrainingStep(
             action="train",
-            payload={"rollout_id": scenario_step},
+            payload={"scenario_step": scenario_step},
             next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
             metrics={},
         )
@@ -59,7 +59,7 @@ class CountingRuntime(StubTrainingRuntime):
         with self._lock:
             self.train_calls += 1
             version = f"w{self.train_calls}"
-        job_id = f"job-{payload['rollout_id']}"
+        job_id = f"job-{payload['scenario_step']}"
         return ModelCandidate(
             candidate_id=job_id,
             training_job_id=job_id,

@@ -39,10 +39,35 @@ class ScenarioReleases:
         self._store = store
         self._publication_lock = publication_lock
         self._creation_artifact = self._resolve_creation_artifact(scenario_step)
+        self.recorded_creation_components: Mapping[str, str] | None = None
+        self.creation_components_read = False
+        self.creation_read_failed_at: int | None = None
 
     @property
     def creation_artifact(self) -> ArtifactRef:
         return self._creation_artifact
+
+    def creation_components(self, scenario_step: int, *, retry: bool = False) -> Mapping[str, str] | None:
+        """The content id of each component the creation artifact binds; ``None`` without a manifest or when it cannot be read.
+
+        The creation artifact has no commit record to carry its manifest, so
+        it is read from the release once and kept. A read that failed is
+        asked again after the next commit, or at once when ``retry`` says so:
+        on a remote backend a read is a fetch, which a page polled every few
+        seconds must not repeat while the remote is away.
+        """
+        if not self.creation_components_read:
+            if self.creation_read_failed_at == scenario_step and not retry:
+                return None
+            try:
+                manifest = self._artifacts.resolve(self._creation_artifact).components
+            except ArtifactError:
+                self.creation_read_failed_at = scenario_step
+                return None
+            self.creation_components_read = True
+            if manifest is not None:
+                self.recorded_creation_components = manifest.content_ids
+        return self.recorded_creation_components
 
     def releases(self, scenario_step: int) -> tuple[dict[str, Any], ...]:
         """List committed releases newest first."""
@@ -69,6 +94,9 @@ class ScenarioReleases:
                     high_water_offset=record.high_water_offset,
                     metrics=record.metrics,
                     pending=record.pending,
+                    component=record.component,
+                    base_release_id=record.base_release_id,
+                    components=record.components,
                 )
                 for record in records
             )
@@ -85,12 +113,29 @@ class ScenarioReleases:
             return tuple(reversed(rows))
 
     def find_release(self, release_id: str) -> tuple[ArtifactRef, bool] | None:
+        """The release and whether it has durable bytes; a step that published nothing does not hide them.
+
+        A rejected or skipped step records the head's own reference without a
+        checkpoint, so the newest record naming a release is not the one that
+        published it: the release is restorable when any record of it is.
+        """
         records = () if not self._store.durable else self._store.history()
+        found: tuple[ArtifactRef, bool] | None = None
         for record in reversed(records):
             if record.artifact_ref.release_id == release_id:
-                return record.artifact_ref, record.checkpoint
+                if record.checkpoint:
+                    return record.artifact_ref, True
+                if found is None:
+                    found = (record.artifact_ref, False)
         if self._creation_artifact.release_id == release_id:
+            # A rejected first step records the creation without a checkpoint; the creation has its own bytes.
             return self._creation_artifact, True
+        if found is not None:
+            return found
+        current = self._artifacts.current
+        if current.release_id == release_id:
+            # Without a durable log the served release is known by the chain alone.
+            return current, False
         return None
 
     def _resolve_creation_artifact(self, scenario_step: int) -> ArtifactRef:
@@ -132,15 +177,29 @@ class ScenarioReleases:
         return None
 
     def entries_for_version(self, release_id: str) -> tuple[Mapping[str, Any], ...] | None:
-        """The composition entries the training step that published ``release_id`` committed, if logged."""
+        """The composition entries the training step that published ``release_id`` committed, if logged.
+
+        A promote or rollback release serves another release's tree: its
+        entries are the ones the training step behind that release logged, so
+        the lookup follows ``rollback_target_release_id`` until it reaches a
+        training record."""
         if not self._store.durable:
             return None
-        for record in self._store.history():
-            if record.artifact_ref.release_id == release_id and record.operation == "training":
+        history = list(self._store.history())
+        seen: set[str] = set()
+        while release_id not in seen:
+            seen.add(release_id)
+            record = next((item for item in history if item.artifact_ref.release_id == release_id), None)
+            if record is None:
+                return None
+            if record.operation == "training":
                 entries = (record.algorithm_state or {}).get("entries")
                 if isinstance(entries, Sequence) and not isinstance(entries, str):
                     return tuple(dict(entry) for entry in entries if isinstance(entry, Mapping))
                 return None
+            if not isinstance(record.rollback_target_release_id, str) or not record.rollback_target_release_id:
+                return None
+            release_id = record.rollback_target_release_id
         return None
 
     def artifact_for_version(self, release_id: str) -> Artifact:
@@ -197,6 +256,9 @@ class ScenarioReleases:
         high_water_offset: int = 0,
         metrics: Mapping[str, Any] | None = None,
         pending: bool = False,
+        component: str | None = None,
+        base_release_id: str | None = None,
+        components: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         row: dict[str, Any] = {
             "release_id": artifact_ref.release_id,
@@ -220,4 +282,10 @@ class ScenarioReleases:
             row["runtime_load_id"] = artifact_ref.runtime_load_id
         if metrics is not None:
             row["metrics"] = dict(metrics)
+        if component is not None:
+            row["component"] = component
+        if base_release_id is not None:
+            row["base_release_id"] = base_release_id
+        if components is not None:
+            row["components"] = dict(components)
         return row

@@ -193,7 +193,7 @@ class MetaHarnessRecipe(CordisRecipe):
             propose=propose,
             candidate_plugin=_PopulationPluginFactory(store),
         )
-        backend = MetaHarnessBackend(population_store=store, **bound._backend_kwargs())
+        backend = MetaHarnessBackend(population_store=store, **bound._backend_kwargs(scenario))
         return bound._build_trainer(
             scenario,
             records,

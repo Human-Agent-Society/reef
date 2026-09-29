@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shlex
 import signal
 import sys
 import tempfile
@@ -25,7 +26,6 @@ from typing import Any
 
 import yaml
 
-from reef.recipe.base import WeightTrainingRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.deployment import RuntimeConfigError
@@ -54,6 +54,7 @@ from reef.service.deploy.deployment_config import (
     normalize_component_config,
     normalize_component_layout,
     reject_null_settings,
+    selected_weight_training,
     translate_layout,
     translate_references,
 )
@@ -115,6 +116,8 @@ class _Stack:
         self._stopping = threading.Event()
         self._unexpected_exit = threading.Event()
         self._closed = False
+        self.stop_requested = False
+        self.force_stop_requested = False
         self._ray_runtime: RayRuntimeLease | None = None
 
     def _is_alive(self, name: str) -> bool:
@@ -266,7 +269,10 @@ class _Stack:
         _log(f"stack up. logs: {self.run_dir}/*.log")
         hint = install_hint(self.config)
         if hint is not None:
-            _log(f"install the harness in another terminal: {hint}")
+            _log(
+                "install the harness in another terminal; keep its install root, the last argument, outside the "
+                f"project the agent works in: {hint}"
+            )
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -288,14 +294,22 @@ class _Stack:
 
     def block(self) -> None:
         def _request_stop(signum: int, frame: FrameType | None) -> None:
-            _log("received signal, shutting down")
-            self._stopping.set()
+            # A signal can interrupt Event.wait/set or stderr while its lock is
+            # held. Record intent only; the main loop performs locking and I/O.
+            if self.stop_requested:
+                self.force_stop_requested = True
+            self.stop_requested = True
 
         signal.signal(signal.SIGTERM, _request_stop)
         signal.signal(signal.SIGINT, _request_stop)
         watcher = threading.Thread(target=self._watchdog, daemon=True)
         watcher.start()
-        self._stopping.wait()
+        while not self._stopping.is_set():
+            if self.stop_requested:
+                _log("received signal, shutting down (press Ctrl-C again to skip the grace period)")
+                self._stopping.set()
+                break
+            self._stopping.wait(timeout=0.1)
         watcher.join(timeout=15)
 
     def shutdown(self, grace: float = _DEFAULT_GRACE_TIMEOUT) -> None:
@@ -312,7 +326,7 @@ class _Stack:
                 _log(f"{name}: stop RPC failed: {exc}")
         deadline = time.monotonic() + max(0, grace)
         pending = ordered
-        while pending and time.monotonic() < deadline:
+        while pending and not self.force_stop_requested and time.monotonic() < deadline:
             living = []
             for name, executor in pending:
                 try:
@@ -321,8 +335,10 @@ class _Stack:
                 except Exception:
                     living.append((name, executor))
             pending = living
-            if pending:
+            if pending and not self.force_stop_requested:
                 time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+        if pending and self.force_stop_requested:
+            _log("received another signal, forcing process cleanup")
         for name, executor in ordered:
             try:
                 executor.rpc(0, "shutdown", kwargs={"grace": 0}, timeout=15)
@@ -347,9 +363,15 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
 
     Printed when the stack is up so nobody copies it from a README: the
     address the service listens on (loopback when it binds every interface),
-    the adapter the deployment evolves, and the token the config holds."""
-    evolution = config.get("evolution")
-    adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
+    the adapter the deployment evolves, and the token the config holds. The
+    token is exported once, so curl's header and the script, whose binding
+    takes it from ``REEF_TOKEN``, read the same value: a script run without it
+    would install a harness every call of which answers 401. The script
+    installs under ``~/reef-harness/<scenario>`` by default, outside the
+    project the agent works in."""
+    # A schema-version 2 file (the shipped profiles) resolves the recipe's evolution section under reef; an
+    # unversioned file keeps it at the top level.
+    adapter = config_value(config, "reef", "evolution", "adapter") or config_value(config, "evolution", "adapter")
     if not isinstance(adapter, str) or not adapter:
         return None
     host = str(config_value(config, "reef", "host", default="127.0.0.1"))
@@ -361,8 +383,11 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
         tokens = config.get("reef", {}).get("tokens") if isinstance(config.get("reef"), Mapping) else None
         if isinstance(tokens, list) and tokens:
             token = str(tokens[0])
-    header = f"-H 'Authorization: Bearer {token}' " if token else ""
-    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash"
+    url = f"'http://{host}:{port}/reef/harness/install?adapter={adapter}'"
+    if token:
+        header = '-H "Authorization: Bearer $REEF_TOKEN"'
+        return f"export REEF_TOKEN={shlex.quote(str(token))}; curl -fsS {header} {url} | bash"
+    return f"curl -fsS {url} | bash"
 
 
 def _component_selection(
@@ -411,7 +436,6 @@ def resolve_deployment_config(
     try:
         arguments = component_config_arguments(selected)
         recipe_type = recipe_class_for(config_value(selected, "reef", "recipe") or "recipe")
-        training = recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe)
         if versioned:
             config = normalize_component_layout(config, arguments)
         if versioned or standard:
@@ -427,6 +451,8 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
+        # A component named through ${VAR} is only known once the environment is applied.
+        training = recipe_type is not None and selected_weight_training(recipe_type, config) is not None
         if versioned or standard:
             reject_null_settings(config, arguments)
         if standard:
@@ -515,6 +541,7 @@ def _run_orchestrator(
         # block() installs the steady-state handler only after every service is
         # ready. Until then, interruption must unwind start() and stop its peers.
         previous_sigterm = signal.signal(signal.SIGTERM, interrupt_startup)
+        previous_sigint = signal.getsignal(signal.SIGINT)
         try:
             try:
                 stack.start()
@@ -527,8 +554,11 @@ def _run_orchestrator(
             # Startup signals unwind the launch tasks before final cleanup.
             stack._stopping.set()
         finally:
-            signal.signal(signal.SIGTERM, previous_sigterm)
-            stack.shutdown()
+            try:
+                stack.shutdown()
+            finally:
+                signal.signal(signal.SIGTERM, previous_sigterm)
+                signal.signal(signal.SIGINT, previous_sigint)
         return stack.exit_code
     finally:
         if temp_config_path is not None:

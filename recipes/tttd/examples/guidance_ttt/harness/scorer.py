@@ -14,6 +14,7 @@ judge stays external and authoritative.
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import urllib.error
@@ -91,22 +92,12 @@ class JudgeScorer(Scorer):
         self.base_dir = Path(base_dir).expanduser().resolve() if base_dir else None
 
     def __call__(self, code: str) -> VerificationResult:
-        try:
-            result = self.evaluate(code)
-        except JudgeUnavailableError as exc:
-            return VerificationResult(
-                reward=0.0,
-                raw_score=None,
-                valid=False,
-                status="environment_error",
-                message=str(exc),
-                artifacts={"code": code},
-            )
+        result = self.evaluate(code)
         artifacts = {"code": code, **(result.artifacts or {})}
         if not result.valid:
             return VerificationResult(
-                reward=0.0,
-                raw_score=None,
+                reward=float(result.score or 0.0),
+                raw_score=result.artifacts.get("score_unbounded"),
                 valid=False,
                 status="invalid",
                 message=result.message,
@@ -115,7 +106,7 @@ class JudgeScorer(Scorer):
         score = 0.0 if result.score is None else float(result.score)
         return VerificationResult(
             reward=score,
-            raw_score=score,
+            raw_score=float(result.artifacts.get("score_unbounded", score)),
             valid=True,
             status="valid",
             message=result.message or f"judge score: {score:.2f}",
@@ -162,18 +153,28 @@ class JudgeScorer(Scorer):
 
             if result is not None:
                 status = str(result.get("status") or "")
+                if status == "environment_error" or result.get("failureDomain") == "infrastructure":
+                    raise JudgeUnavailableError(str(result.get("message") or "judge infrastructure failure"))
                 if status == "done":
                     try:
-                        score = float(result.get("score", 0.0))
-                    except (TypeError, ValueError) as exc:
+                        score = float(result["score"])
+                        raw_score = float(result.get("scoreUnbounded", score))
+                    except (KeyError, TypeError, ValueError) as exc:
                         raise JudgeUnavailableError("the judge returned a non-numeric score") from exc
-                    artifacts.update(
-                        judge_status=status,
-                        score_unbounded=result.get("scoreUnbounded"),
-                    )
+                    if not math.isfinite(score) or not math.isfinite(raw_score) or score < 0:
+                        raise JudgeUnavailableError("the judge returned a non-finite or negative reward")
+                    valid = result.get("valid", True)
+                    partial = result.get("trainingRewardOnInvalid", False)
+                    if not isinstance(valid, bool) or not isinstance(partial, bool):
+                        raise JudgeUnavailableError("judge validity flags must be booleans")
+                    details = result.get("artifacts", {})
+                    if not isinstance(details, dict):
+                        raise JudgeUnavailableError("judge artifacts must be an object")
+                    artifacts.update(details)
+                    artifacts.update(judge_status=status, score_unbounded=raw_score)
                     return JudgeResult(
-                        valid=True,
-                        score=score,
+                        valid=valid,
+                        score=score if valid or partial else 0.0,
                         message=str(result.get("message") or "accepted"),
                         artifacts=artifacts,
                     )
@@ -187,7 +188,7 @@ class JudgeScorer(Scorer):
                 time.sleep(delay_s)
 
         artifacts["judge_status"] = "timeout"
-        return JudgeResult(False, None, f"evaluation timed out after {self.timeout_s:g}s", artifacts)
+        raise JudgeUnavailableError(f"evaluation timed out after {self.timeout_s:g}s")
 
 
 def _submit(judge_url: str, *, problem_id: str, language: str, code: str, timeout_s: float) -> str:

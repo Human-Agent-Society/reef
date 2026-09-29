@@ -3,7 +3,9 @@ from __future__ import annotations
 import contextlib
 import os
 import signal
+import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 
@@ -847,3 +849,87 @@ def test_stack_installs_signal_handlers_before_starting_watchdog(tmp_path: Path,
     stack.block()
 
     assert started == [True]
+
+
+@pytest.mark.unit
+def test_stack_signal_during_event_wait_does_not_deadlock(tmp_path: Path) -> None:
+    # Isolate the real signal and non-reentrant Event lock: a regression must
+    # time out a child process, not leave the pytest runner deadlocked.
+    program = textwrap.dedent(
+        """
+        import signal
+        import threading
+        from pathlib import Path
+        from reef.service.deploy import orchestrator
+
+        class InterruptDuringWait(threading.Event):
+            def wait(self, timeout=None):
+                with self._cond:
+                    signal.raise_signal(signal.SIGINT)
+                return super().wait(0)
+
+        class Watcher:
+            def __init__(self, **kwargs):
+                pass
+            def start(self):
+                pass
+            def join(self, timeout):
+                pass
+
+        stack = orchestrator._Stack({}, [], Path.cwd(), 60, Path('unused.yaml'))
+        stack._stopping = InterruptDuringWait()
+        orchestrator.threading.Thread = Watcher
+        stack.block()
+        assert stack._stopping.is_set()
+        """
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", program], cwd=tmp_path, capture_output=True, text=True, timeout=15, check=False
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stderr.count("received signal, shutting down") == 1
+
+
+@pytest.mark.unit
+def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -> None:
+    from reef.runtime.executor.uniproc import UniProcExecutor
+    from reef.service.deploy import orchestrator
+
+    stack = orchestrator._Stack({}, [], tmp_path, 60, tmp_path / "serve.yaml")
+    handlers = {}
+    stopped = []
+    monkeypatch.setattr(orchestrator.signal, "signal", lambda signum, handler: handlers.setdefault(signum, handler))
+
+    class Watcher:
+        def start(self):
+            handlers[signal.SIGINT](signal.SIGINT, None)
+
+        def join(self, timeout):
+            pass
+
+    class Worker:
+        def request_stop(self):
+            stopped.append("requested")
+
+        def tree_alive(self):
+            handlers[signal.SIGINT](signal.SIGINT, None)
+            return True
+
+        def shutdown(self, grace):
+            stopped.append(grace)
+
+        def read_log(self, name, offset):
+            return "", offset
+
+    def unexpected_wait(seconds):
+        pytest.fail("the second signal should skip the remaining grace period")
+
+    monkeypatch.setattr(orchestrator.threading, "Thread", lambda **kwargs: Watcher())
+    stack.block()
+    # Restore real threads before the executor creates its RPC worker.
+    monkeypatch.undo()
+    monkeypatch.setattr(orchestrator.time, "sleep", unexpected_wait)
+    stack._executors["service"] = UniProcExecutor.from_workers([Worker()])
+    stack.shutdown(grace=30)
+
+    assert stopped == ["requested", 0]

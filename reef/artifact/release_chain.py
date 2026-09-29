@@ -65,6 +65,11 @@ class ArtifactReleaseChain:
     def stage(self, step: int, artifact: Artifact, *, parent: ArtifactRef | None = None) -> Artifact:
         return self._repository.stage(step, artifact, parent=self.checkpoint if parent is None else parent)
 
+    def stage_composed(
+        self, step: int, components: Mapping[str, Artifact], *, parent: ArtifactRef | None = None
+    ) -> Artifact:
+        return self._repository.stage_composed(step, components, parent=self.checkpoint if parent is None else parent)
+
     def publish(
         self,
         artifact: Artifact,

@@ -1,8 +1,8 @@
 """Serving capabilities a scenario exposes for its frozen release.
 
-``Surface`` is a frozen composition of optional capabilities — ``loader``,
-``inference``, ``files`` — and callers inspect fields, never subclass
-identity. The invariant is version fidelity: the consumer observes exactly
+``Surface`` is a frozen composition of named components, each binding
+optional capabilities — ``validator``, ``loader``, ``inference``, ``files`` —
+and callers inspect fields, never subclass identity. The invariant is version fidelity: the consumer observes exactly
 the frozen version, and Reef records the exchange against it. The design,
 every call site, and the bundled surfaces are documented at
 https://reefinfra.ai/docs/developer-guide/surface/.
@@ -17,6 +17,7 @@ from reef.surface.base import (
     AdapterWeightRuntime,
     ArtifactActivator,
     ArtifactLoader,
+    ComponentSurface,
     FileTree,
     InferenceHooks,
     InferenceLease,
@@ -25,6 +26,7 @@ from reef.surface.base import (
     Surface,
     WeightRuntime,
 )
+from reef.surface.config import ConfigInferenceHooks, ConfigValidator, create_config_surface
 from reef.surface.files import TextFileTree
 from reef.surface.harnesses import create_harness_surface
 from reef.surface.skills import RequestSkillLayer, SkillLayer, create_skill_surface, validate_tree
@@ -34,6 +36,9 @@ __all__ = [
     "AdapterWeightRuntime",
     "ArtifactActivator",
     "ArtifactLoader",
+    "ComponentSurface",
+    "ConfigInferenceHooks",
+    "ConfigValidator",
     "FileTree",
     "InferenceHooks",
     "InferenceLease",
@@ -48,6 +53,7 @@ __all__ = [
     "WeightLoader",
     "WeightRuntime",
     "adapter_name",
+    "create_config_surface",
     "create_harness_surface",
     "create_skill_surface",
     "create_weight_surface",

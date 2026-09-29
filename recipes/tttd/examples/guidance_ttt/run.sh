@@ -1,49 +1,42 @@
-#!/bin/bash
-# Serve + run. Setup (once): see README. State and logs go to ./work.
-#
-# Two services must already be reachable: the privileged FrontierCS/go-judge
-# on port 8081 and the frozen executor on port 8000. This script starts the
-# third, Reef's Qwen3-8B LoRA training stack, and then runs one Harbor trial
-# that owns the complete Guidance-TTT trajectory.
-set -e
+#!/usr/bin/env bash
+# Run from a Linux GPU allocation with the task judge and frozen executor ready.
+set -euo pipefail
 cd "$(dirname "$0")"
-
-# Limit the locally managed Ray cluster to this training stack's GPU pool.
-# On an external cluster, its node configuration determines GPU visibility.
-export CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-0,1}
-mkdir -p work/polyomino_packing
-
-# Download the model on first run (serve.yaml expects it at work/model).
-if [ ! -f work/model/config.json ]; then
-    huggingface-cli download Qwen/Qwen3-8B --local-dir work/model
+export GUIDANCE_TASK="${GUIDANCE_TASK:-polyomino_packing}"
+case "$GUIDANCE_TASK" in
+    polyomino_packing|lasso_path|ahc058|trimul) ;;
+    *) echo "Unknown GUIDANCE_TASK: $GUIDANCE_TASK" >&2; exit 2 ;;
+esac
+export GUIDANCE_CONFIG="${GUIDANCE_CONFIG:-$PWD/serve.yaml}"
+export GUIDANCE_STATE_DIR="${GUIDANCE_STATE_DIR:-$PWD/work/$GUIDANCE_TASK}"
+export GUIDANCE_MODEL="${GUIDANCE_MODEL:-Qwen/Qwen3-8B}"
+export GUIDANCE_MODEL_PATH="${GUIDANCE_MODEL_PATH:-$PWD/work/models/${GUIDANCE_MODEL##*/}}"
+export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
+export GUIDANCE_STATE_DIR="$(python3 -c 'from pathlib import Path; import os; print(Path(os.environ["GUIDANCE_STATE_DIR"]).resolve())')"
+export GUIDANCE_MODEL_PATH="$(python3 -c 'from pathlib import Path; import os; print(Path(os.environ["GUIDANCE_MODEL_PATH"]).resolve())')"
+# Reject grid mismatches before downloading weights or starting GPU workers.
+python3 -c 'from harness.config import RunConfig; RunConfig.load().validate_state()'
+mkdir -p "$GUIDANCE_STATE_DIR"
+if [ ! -f "$GUIDANCE_MODEL_PATH/config.json" ]; then
+    hf download "$GUIDANCE_MODEL" --local-dir "$GUIDANCE_MODEL_PATH"
 fi
-
-# slime binds the training engines' router to this machine's IP (not
-# localhost), so the stack dials that same IP.
-export REEF_INFERENCE_HOST=$(hostname -I | awk '{print $1}')
-export NO_PROXY=$REEF_INFERENCE_HOST
-
-# Start the Reef training stack. The Harbor controller waits for the final
-# durable training commit before this script exits and stops the stack.
-python3 -m reef serve -c "$PWD/serve.yaml" > work/polyomino_packing/reef.log 2>&1 &
+export REEF_INFERENCE_HOST="${REEF_INFERENCE_HOST:-$(hostname -I | awk '{print $1}')}"
+export NO_PROXY="${NO_PROXY:+$NO_PROXY,}127.0.0.1,localhost,$REEF_INFERENCE_HOST"
+python3 -m reef serve -c "$GUIDANCE_CONFIG" > "$GUIDANCE_STATE_DIR/reef.log" 2>&1 &
 reef_pid=$!
 cleanup() {
     kill "$reef_pid" 2>/dev/null || true
     wait "$reef_pid" 2>/dev/null || true
 }
 trap cleanup EXIT
-
-# Ray + Slime/Megatron + SGLang take minutes to come up.
-# Fail with the service log instead of waiting forever if boot fails.
+service_url="$(python3 -c 'from harness.config import RunConfig; print(RunConfig.load().service_url)')"
 ready_deadline=$((SECONDS + 3600))
-while ! curl -sf http://127.0.0.1:8900/healthz > /dev/null; do
+while ! curl -sf "$service_url/healthz" > /dev/null; do
     if ! kill -0 "$reef_pid" 2>/dev/null || (( SECONDS >= ready_deadline )); then
-        tail -n 100 work/polyomino_packing/reef.log >&2
+        tail -n 100 "$GUIDANCE_STATE_DIR/reef.log" >&2
         echo "run.sh: the Reef stack did not become ready" >&2
         exit 1
     fi
     sleep 5
 done
-
-# Run the learning loop.
 python3 run.py

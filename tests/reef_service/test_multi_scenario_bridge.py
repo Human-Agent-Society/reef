@@ -91,7 +91,7 @@ class _SlottedGroup:
     def restore_runtime_load_id_for_republication(self, runtime_load_id):
         self.version.sequence = int(runtime_load_id.rsplit(":", 1)[1]) - 1
 
-    def save_model(self, rollout_id, force_sync=False):
+    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
         checkpoint = Path(self.template.format(rollout_id=rollout_id))
         checkpoint.mkdir(parents=True)
         (checkpoint / "weights").write_text("hf", encoding="utf-8")
@@ -242,7 +242,7 @@ def _actor(
 
 def _job(scenario: str, step: int, producing: str, *, max_staleness: int | None = None) -> dict:
     payload = _payload([_sao_row(f"{scenario}-{step}", producing_runtime_load_id=producing)])
-    payload.update(scenario=scenario, rollout_id=step, expected_runtime_load_id=producing)
+    payload.update(scenario=scenario, scenario_step=step, expected_runtime_load_id=producing)
     if max_staleness is not None:
         payload.update(max_staleness=max_staleness, producing_runtime_load_ids=[producing])
     return payload
@@ -260,6 +260,26 @@ def _run(actor, payload):
 @pytest.fixture
 def _local_ray_get(monkeypatch):
     monkeypatch.setattr(ray, "get", lambda value, **kwargs: value)
+
+
+@pytest.mark.unit
+def test_a_restart_after_a_rejected_job_brings_that_scenario_back_from_its_history(tmp_path, _local_ray_get) -> None:
+    version = _EngineVersion(0)
+    actor, _, _, _ = _actor(tmp_path, version)
+    assert _run(actor, _job("a", 0, "inc:0")).outcome == "complete"  # a serves inc:1
+    assert _run(actor, _job("b", 0, "inc:1")).outcome == "complete"  # b serves inc:2
+    checkpoint = actor.execute_training_job(_job("a", 1, "inc:2"))
+    assert checkpoint.outcome == "checkpoint"
+    actor.reject_training_candidate(checkpoint.training_job_id)
+    assert actor.health()["training_job"]["status"] == "REJECTED"
+
+    restarted, group2, _, _ = _actor(tmp_path, _EngineVersion(2), start_rollout_id=3)
+    after = restarted.health()
+    # Routing still names a's committed adapter, so the engine holds it again.
+    assert after["lora_adapters"]["a"]["adapter"] == scenario_adapter_name("a", "inc:1")
+    assert ("a", scenario_adapter_name("a", "inc:1")) in group2.published
+    assert ("b", scenario_adapter_name("b", "inc:2")) in group2.published
+    assert set(after["adapter_residency"]["scenarios"]) == {"a", "b"}
 
 
 @pytest.mark.unit
@@ -294,7 +314,7 @@ def test_scenarios_take_turns_in_the_slot_and_publish_versioned_names(tmp_path, 
     health = actor.health()
     assert health["lora_mode"] == "scenario" and health["lora_adapter"] is None
     assert health["lora_adapters"]["b"]["runtime_load_id"] == "inc:2"
-    assert health["training_job"]["scenario"] == "a" and health["training_job"]["rollout_id"] == 1
+    assert health["training_job"]["scenario"] == "a" and health["training_job"]["scenario_step"] == 1
 
 
 @pytest.mark.unit

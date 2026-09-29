@@ -1,0 +1,133 @@
+# SAO at the paper's batch: Qwen3-30B-A3B-Thinking-2507, SAO_TRAIN_NODES training nodes
+# (TP8 actor per node, data parallel across nodes, critic colocated) and
+# SAO_ROLLOUT_GPUS engine GPUs on
+# other nodes of the same Ray cluster (RAY_ADDRESS), TP4 per engine. Group
+# size 1, SAO_BATCH (128) rollouts of different prompts per optimizer step,
+# fed by stream.py with SAO_IN_FLIGHT rollouts open. Weights reach the
+# engines by NCCL broadcast after every step. Generation window 24k.
+
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: 8900
+  token: reef-local
+  run-dir: work/stack
+  ready-timeout: 3600
+
+inference:
+  num-gpus: "${SAO_ROLLOUT_GPUS}"
+  tensor-parallel-size: "4"
+  # A 61k-token thinking rollout takes many minutes; the backend timeout must
+  # cover it, and the retry deadline must cover a retry of it.
+  timeout-s: 1800
+  retry-timeout-s: 7200
+  retry-max-s: 60
+  options:
+    router-port: "30000"
+    # Required by Reef's SGLang inference backend (#432).
+    disable-radix-cache: true
+    incremental-streaming-output: true
+    # Eight concurrent 61k-token rollouts: the KV pool must leave room for the
+    # prefill logits of a chunk (all-gathered across TP with return_logprob),
+    # which is what ran out of memory at the default fraction after the first
+    # weight update.
+    mem-fraction-static: "0.8"
+    chunked-prefill-size: "8192"
+    max-running-requests: "32"
+  model-path: ~/models/Qwen3-30B-A3B-Thinking-2507
+recipe:
+  implementation: recipes.sao.recipe:SAORecipe
+  config:
+    batch-size: ${SAO_BATCH}           # MUST equal training.config.global_batch_size
+    max-staleness: 4
+    # Artifacts are full model copies. Publishing one paused generation long enough for the
+    # SGLang scheduler watchdog (300 s) to kill the engines; keep the HF exports instead.
+    checkpoint-every-n-versions: 100000
+training:
+  backend: slime
+  colocate: false
+  ready-timeout: 1800
+  timeout-s: 14400
+  config:
+    checkpoint_dir: ${SAO_CKPT_DIR}
+    global_batch_size: ${SAO_BATCH}
+  options:
+    megatron-to-hf-mode: "bridge"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "100000"
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    # Qwen3-30B-A3B architecture flags Reef does not derive from the HF config.
+    padded-vocab-size: "151936"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    qk-layernorm: true
+    normalization: "RMSNorm"
+    moe-token-dispatcher-type: "alltoall"
+    moe-router-topk: "8"
+    moe-grouped-gemm: true
+    moe-router-dtype: "fp32"
+    moe-permute-fusion: true
+    moe-aux-loss-coeff: "0"
+    # Topology: one node, TP8 / PP1 / EP8, sequence parallel, full recompute.
+    actor-num-nodes: "${SAO_TRAIN_NODES}"
+    actor-num-gpus-per-node: "8"
+    num-gpus-per-node: "8"
+    tensor-model-parallel-size: "8"
+    pipeline-model-parallel-size: "1"
+    expert-model-parallel-size: "8"
+    expert-tensor-parallel-size: "1"
+    sequence-parallel: true
+    recompute-granularity: "full"
+    recompute-method: "uniform"
+    recompute-num-layers: "1"
+    # Paper generation window (61,440 of a 65,536 sequence).
+    seq-length: "28672"
+    rollout-max-response-len: "24576"
+    optimizer: "adam"
+    no-save-optim: true
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "32768"
+    log-probs-max-tokens-per-gpu: "32768"
+    # The coordinator verifies the exports from wherever Reef schedules it, so
+    # the README runs kept SAO_CKPT_DIR on shared storage; keep its footprint
+    # bounded by pruning old exports.
+    reef-checkpoint-max-storage: "1500GB"
+    lr: "1e-6"
+    lr-decay-style: "constant"
+    loss-type: "policy_loss"
+    use-rollout-logprobs: true
+    use-critic: true
+    eps-clip: "0.3"
+    eps-clip-high: "5.0"
+    critic-steps-per-actor: "2"
+    critic-lr: "5e-6"
+    # The critic never serves and no run resumes; its checkpoint is not needed.
+    critic-save-interval: "100000"
+    num-critic-only-steps: "10"
+    sao-length-adaptive-lambda: true
+    sao-lambda-alpha: "1.5"
+    gamma: "1.0"
+    lambd: "1.0"
+    entropy-coef: "0.0"
+    n-samples-per-prompt: "1"
+storage:
+  # Every update publishes a full copy of the model (tens of GB); keep the
+  # artifact repository and caches beside the checkpoints on local disk.
+  artifact-repository: ${SAO_CKPT_DIR}/artifacts.git
+  artifact-work-dir: ${SAO_CKPT_DIR}/artifact-work
+  artifact-cache-dir: ${SAO_CKPT_DIR}/artifact-cache
+  agent-record-dir: work/agent-record
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    tags: []
+    mode: online
+    directory: work/wandb
+    upload_checkpoints: false

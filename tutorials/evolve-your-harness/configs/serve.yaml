@@ -1,16 +1,18 @@
 # The stack `run.sh` starts: one Reef service on port 8900, state under
 # the example's ./work directory.
 #
-# This file also carries the harness_evolve recipe sections (implementation, model,
-# evolution, data). The recipe registry reads named recipe configs from
-# REEF_RECIPE_CONFIG_DIR, so run.sh copies those four sections into
-# work/recipes/harness_evolve.yaml, together with optional execution/executors sections.
+# This file also carries the harness_evolve recipe (the `recipe` section) and the
+# model binding it shares with the service (the `inference` section). The recipe
+# registry reads named recipe configs from REEF_RECIPE_CONFIG_DIR, so run.sh copies
+# those sections into work/recipes/harness_evolve.yaml, together with optional
+# execution/executors sections.
 
 schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
-  token: reef-local
+  # Unset REEF_TOKEN leaves this loopback demo without authentication; set it to require a Bearer token.
+  token: ${REEF_TOKEN}
   # The OpenAI-compatible provider (no /v1 suffix) and the model under test.
   # Reef proxies recorded traffic here, the proposer's calls go here, and
   # evaluation episodes are pointed here - nothing else ever sees it.

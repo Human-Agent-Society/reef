@@ -21,12 +21,13 @@ from typing import Any
 
 from reef.core.config import config_value
 from reef.inference.deployment import inference_service_for
-from reef.recipe import RecipeConfigError, WeightTrainingRecipe
+from reef.recipe import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.deployment import ComponentHealth
 from reef.runtime.deployment import ModelDeployment as ModelDeployment
 from reef.runtime.deployment import ModelDeploymentPlan, ModelPlanSource
 from reef.service.deploy.config_utils import load_config
+from reef.service.deploy.deployment_config import selected_weight_training
 from reef.service.deploy.training import training_deployment_for
 from reef.train.deployment import TrainingDeploymentPlan
 
@@ -191,11 +192,15 @@ def _resolve_training_recipe(config: Mapping[str, Any]) -> tuple[str, str]:
         raise RuntimeError("REEF_CONFIG must define reef.recipe")
     try:
         recipe_class = recipe_class_for(recipe)
+        weight_type = None if recipe_class is None else selected_weight_training(recipe_class, config)
     except RecipeConfigError as exc:
         raise RuntimeError(f"cannot load reef.recipe {recipe!r}: {exc}") from exc
-    if recipe_class is None or not issubclass(recipe_class, WeightTrainingRecipe):
-        raise RuntimeError(f"model driver requires reef.recipe to name a WeightTrainingRecipe class, got {recipe!r}")
-    loss_family = recipe_class.training_spec().loss_family.strip()
+    if weight_type is None:
+        raise RuntimeError(
+            f"model driver requires reef.recipe to name a WeightTrainingRecipe class or a recipe with a "
+            f"weight training component, got {recipe!r}"
+        )
+    loss_family = weight_type.training_spec().loss_family.strip()
     return loss_family, recipe
 
 

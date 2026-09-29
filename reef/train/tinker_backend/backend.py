@@ -146,14 +146,13 @@ class TinkerTrainingBackend(TrainingBackend):
         payload: Mapping[str, Any],
         *,
         job_id: str,
-        rollout_id: int,
+        scenario_step: int,
         prior_marker: Mapping[str, Any] | None,
     ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
         scenario = payload.get("scenario")
         if not isinstance(scenario, str) or not scenario:
             raise ValueError("Tinker trains one adapter per scenario; the job must name its scenario")
-        # Scenario steps are per scenario; the checkpoint index is one sequence across all of them.
-        scenario_step = rollout_id
+        # The checkpoint index is the backend's own sequence across all scenarios, not the scenario step.
         rollout_id = self._context.next_rollout_id
         directory = Path(self._template.format(rollout_id=rollout_id))
         if directory.exists() or directory.is_symlink():
@@ -164,7 +163,7 @@ class TinkerTrainingBackend(TrainingBackend):
             raise ValueError("a Tinker training job needs at least one non-empty optimizer batch")
         yield _TinkerPreparedJob(
             self,
-            TrainingCheckpoint(rollout_id, directory, scenario, scenario_step),
+            TrainingCheckpoint(rollout_id=rollout_id, path=directory, scenario_step=scenario_step, scenario=scenario),
             incumbent=self._incumbent(scenario)[0],
             batches=batches,
             loss=loss,

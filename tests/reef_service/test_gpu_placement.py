@@ -68,8 +68,14 @@ def test_real_ray_reservation_orders_bundles_by_node_and_device(monkeypatch):
             assert training.gpu_ids == [0, 1] and inference.gpu_ids == [2, 3]
             assert set(training.bundle_indices).isdisjoint(inference.bundle_indices)
             assert training.group is inference.group
+            assert reservation.training_node_id == ray.get_runtime_context().get_node_id()
         finally:
             reservation.release()
+        hosted = reserve_model_gpus(ModelGpuLayout(training_gpus=0, inference_gpus=2), wait_log_interval_s=1)
+        try:
+            assert hosted.training_node_id is None
+        finally:
+            hosted.release()
         assert not ray.util.placement_group_table() or all(
             entry["state"] == "REMOVED" for entry in ray.util.placement_group_table().values()
         )

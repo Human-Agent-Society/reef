@@ -5,12 +5,14 @@
   <img src="docs/assets/reef-logo-light.svg" alt="Reef" width="220">
 </picture>
 
-<h3>Continual learning infra for self-improving agents</h3>
+<h3>Infrastructure for continually self‑improving agents</h3>
 
 [![CI](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml/badge.svg)](https://github.com/Human-Agent-Society/reef/actions/workflows/ci.yml)
 [![PyPI package: reef-infra](https://img.shields.io/pypi/v/reef-infra?label=PyPI%3A%20reef-infra&logo=pypi&logoColor=white)](https://pypi.org/project/reef-infra/)
 [![Python](https://img.shields.io/badge/python-3.12%2B-3776AB?logo=python&logoColor=white)](pyproject.toml)
 [![License](https://img.shields.io/badge/license-Apache--2.0-green)](LICENSE)
+
+<a href="https://trendshift.io/repositories/204783?utm_source=trendshift-badge&amp;utm_medium=badge&amp;utm_campaign=badge-trendshift-204783" target="_blank" rel="noopener noreferrer"><img src="https://trendshift.io/api/badge/trendshift/repositories/204783/daily?language=Python" alt="Human-Agent-Society%2Freef | Trendshift" width="250" height="55"/></a>
 
 English | [中文](README.zh.md)
 
@@ -210,8 +212,7 @@ reef serve --recipe reefine \
   --inference.upstream-url http://127.0.0.1:11434 \
   --inference.upstream-model gemma4:26b
 ```
-
-The example connects to a local Ollama server. For another provider, change
+For another provider, change
 `--inference.upstream-url` and `--inference.upstream-model`, and set
 `REEF_UPSTREAM_API_KEY` if authentication is required. With this configuration, Reef
 listens on `127.0.0.1:8901` without authentication (set `REEF_TOKEN` before
@@ -231,15 +232,30 @@ curl -fsS -H "Content-Type: application/json" \
 curl -fsS -H "x-reef-scenario: my-harness" \
   'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
 
-reef-pi harness "when I ask you to fix a bug, reproduce it with a failing test first"
+reef-pi evolve "when I ask you to fix a bug, reproduce it with a failing test first"
 ```
 
-Inside a `reef-pi` session, `/reef-harness <text>` files the same ask. The served
+The script installs into `~/reef-harness/<scenario>` (here
+`~/reef-harness/my-harness`); `bash -s -- <dir>` names another install root.
+Keep any install root outside the project the agent works in: a session can
+write files in its project, so with the install root there it could change
+what the next session runs. The same holds for the Python environment the
+install bakes into `reef-pi` and the Reef checkout it imports: code there runs
+as you when `reef-pi` starts. For codex and dsh, keep them out of `/tmp` and
+`$TMPDIR` too: their sandboxes let a command write there as well. The check
+`reef-pi` runs before a session holds only against a session that can write
+just its project, `/tmp` and `$TMPDIR`; pi runs commands with no sandbox (see
+[Recover a changed installation](https://reefinfra.ai/docs/user-guide/evolve-your-harness/#recover-a-changed-installation)).
+
+Inside a `reef-pi` session, `/reefine <text>` files the same ask. The served
 model writes the change as a skill, a rules entry, an agent command, or a pi
-extension, and the next session's update notice offers the install; a step that
+extension. Where the host can isolate it (Linux with `bwrap` and `pasta`, as a
+non-root user), or with `REEF_PROPOSER_SANDBOX=none` on a machine you trust, it
+works as a coding agent that runs the changed harness before handing the change
+back. The next session's update notice offers the install; a step that
 settles while you are between turns offers its install right away. Review the
-versions with `/reef-versions`, which opens a step's page, and install one with
-`/reef-versions <step> install`. To change the model, restart
+versions with `/versions`, which opens a step's page, and install one with
+`/versions <version> install`. To change the model, restart
 `reef serve` with another `--inference.upstream-model` and rerun the install
 command: installation writes the model ID into the local harness configuration.
 See the [Reefine tutorial](tutorials/reefine/README.md) for scripted bug-fix and

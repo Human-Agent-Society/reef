@@ -10,7 +10,7 @@ from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch, trajectories
 from reef.runtime.interfaces import PreparedTrainingStep
 from reef.train.algos.registry import resolve_objective
-from reef.train.algos.schedule import materialize_schedule, schedule_seed
+from reef.train.algos.schedule import batch_schedule_seed, materialize_schedule
 from reef.train.tinker_backend.losses import TokenRow, resolve_tinker_loss
 
 
@@ -59,7 +59,7 @@ def prepare_tinker_step(
         if scheduling.remainder == "error" and batch_size > len(set(rollout_ids)):
             raise ValueError("Tinker configured batch_size exceeds the available comparison sets")
         scheduling = replace(scheduling, batch_size=min(batch_size, len(set(rollout_ids))))
-    schedule = materialize_schedule(rollout_ids, scheduling, seed=schedule_seed(batch.batch_id))
+    schedule = materialize_schedule(rollout_ids, scheduling, seed=batch_schedule_seed(batch))
     batches: list[list[dict[str, Any]]] = []
     cursor = 0
     next_rollout = 0

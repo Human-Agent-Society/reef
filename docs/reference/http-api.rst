@@ -7,6 +7,9 @@ at ``/v1/messages``. It forwards each
 request to the runtime unchanged. It adds a small set of ``/reef/*`` routes for
 feedback, scenarios, artifacts, and status.
 
+The service accepts request bodies up to 64 MiB so coding agents can send
+large contexts. Record import routes retain their 1 MiB limit.
+
 For a complete request, receipt, and feedback example, start with the
 `inference and feedback quickstart <../getting-started/quickstart.rst>`__.
 To put the release routes into practice, follow the `agent harness tutorial
@@ -21,68 +24,89 @@ To put the release routes into practice, follow the `agent harness tutorial
 Routes
 ------
 
-+--------------------------------------------------------+---------------------------------------------------+
-| Route                                                  | Response                                          |
-+========================================================+===================================================+
-| ``GET /healthz``                                       | readiness; the only unauthenticated route         |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/chat/completions``                          | OpenAI-format inference                           |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/responses``                                 | OpenAI Responses-format inference                 |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/messages``                                  | Anthropic-format inference                        |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /v1/messages/count_tokens``                     | count request tokens; recorded like any inference |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/report``                                  | submit feedback about one or more receipts        |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/train``                                   | enqueue one training instruction                  |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios``                                | every known scenario and current release          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios``                               | create a scenario explicitly                      |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/update``             | update the scenario training mode                 |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/contract``            | what this scenario accepts                        |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/records``             | retained record metadata                          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/commits``             | paginated committed metadata                      |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/records/{record_id}`` | one retained record and its trace payload         |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/scenarios/{scenario}/releases``            | ``{scenario, releases}``, newest first            |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/rollback``           | republish an earlier release as the head          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/scenarios/{scenario}/promote``            | serve a release held for review                   |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``DELETE /reef/scenarios/{scenario}``                  | remove a scenario; its state is archived          |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness``                                  | the served harness tree                           |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases``                         | the harness release catalog, oldest first         |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/page``             | one HTML page per catalog step: why, design, what |
-|                                                        | changed, review, result, setup, chain             |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/requests/{record_id}/page``        | one HTML page per filed harness request: its      |
-|                                                        | step's state, then the result; reloads itself     |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/requests/{record_id}/progress``    | the same reading as JSON: the step's phase, for a |
-|                                                        | client with no browser to open the page           |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/releases/{step}/records``          | retained raw step file inventory or file body     |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``POST /reef/harness/proposals``                       | an agent's proposed tree change, admitted or not  |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/install``                          | a shell script that installs the tree             |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/harness/adapters``                         | every harness adapter this process resolves       |
-+--------------------------------------------------------+---------------------------------------------------+
-| ``GET /reef/status``                                   | training, serving, and storage state              |
-+--------------------------------------------------------+---------------------------------------------------+
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| Route                                                                            | Response                                          |
++==================================================================================+===================================================+
+| ``GET /healthz``                                                                 | readiness; the only unauthenticated route         |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/chat/completions``                                                    | OpenAI-format inference                           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/responses``                                                           | OpenAI Responses-format inference                 |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/messages``                                                            | Anthropic-format inference                        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/messages/count_tokens``                                               | count request tokens; recorded like any inference |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/evaluation/v1/{route}``                        | one of the inference routes above, served for     |
+|                                                                                  | the named scenario and kept by nobody: what a     |
+|                                                                                  | recipe's evaluation episodes call; a flat         |
+|                                                                                  | release's request hooks stay out, since the       |
+|                                                                                  | episode runs a candidate of it. It serves a       |
+|                                                                                  | scenario loaded in this process and never creates |
+|                                                                                  | one: 404 for a scenario deleted under its episode |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/components/{component}/evaluation/v1/{route}`` | the same for a candidate of one component of a    |
+|                                                                                  | composed release: every other component's hooks   |
+|                                                                                  | run (weights, request defaults), the named one's  |
+|                                                                                  | stay out; 404 for a component it does not serve   |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /v1/images``, ``/v1/embeddings``,                                         | multimodal call, relayed by the recipe to its     |
+| ``/v1/audio/speech``, ``/v1/decisions``                                          | gateway; not recorded, 501 when it offers none    |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records``                                                           | import one existing inference or report           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/records/batch``                                                     | atomically import a batch of records              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/report``                                                            | submit feedback about one or more receipts        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/train``                                                             | enqueue one training instruction                  |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios``                                                          | every known scenario, current release and harness |
+|                                                                                  | adapter                                           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios``                                                         | create a scenario explicitly                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/update``                                       | update the scenario training mode                 |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/contract``                                      | what this scenario accepts                        |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/records``                                       | retained record metadata                          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/commits``                                       | paginated committed metadata                      |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/records/{record_id}``                           | one retained record and its trace payload         |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/scenarios/{scenario}/releases``                                      | ``{scenario, releases}``, newest first            |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/rollback``                                     | republish an earlier release as the head          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/scenarios/{scenario}/promote``                                      | serve a release held for review                   |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``DELETE /reef/scenarios/{scenario}``                                            | remove a scenario; its state is archived          |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness``                                                            | the served harness tree                           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases``                                                   | the harness release catalog, oldest first         |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases/{step}/page``                                       | one HTML page per catalog step: why, design, what |
+|                                                                                  | changed, review, result, setup, chain             |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/requests/{record_id}/page``                                  | one HTML page per filed harness request: its      |
+|                                                                                  | step's state, then the result; reloads itself     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/requests/{record_id}/progress``                              | the same reading as JSON: the step's phase, for a |
+|                                                                                  | client with no browser to open the page           |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/releases/{step}/records``                                    | retained raw step file inventory or file body     |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``POST /reef/harness/proposals``                                                 | an agent's proposed tree change, admitted or not  |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/install``                                                    | a shell script that installs the tree             |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/harness/adapters``                                                   | every harness adapter this process resolves       |
++----------------------------------------------------------------------------------+---------------------------------------------------+
+| ``GET /reef/status``                                                             | training, serving, and storage state              |
++----------------------------------------------------------------------------------+---------------------------------------------------+
 
 Headers
 -------
@@ -95,7 +119,9 @@ Headers
 |                                   | workload a record belongs to.                           |
 +-----------------------------------+---------------------------------------------------------+
 | ``Authorization: Bearer <token>`` | every route except ``GET /healthz``, when auth is       |
-|                                   | configured.                                             |
+|                                   | configured; with no Authorization header, ``x-api-key`` |
+|                                   | carries the token. The evaluation routes also accept    |
+|                                   | the token the service issues the recipe at startup.     |
 +-----------------------------------+---------------------------------------------------------+
 | ``x-reef-release-id``             | optional: bind a new scenario to this starting release; |
 |                                   | on an existing scenario it must name the bound starting |
@@ -104,10 +130,30 @@ Headers
 |                                   | specific release, use ``?release_id=`` on the harness   |
 |                                   | manifest or install route.                              |
 +-----------------------------------+---------------------------------------------------------+
-| ``x-reef-tag-<name>``             | optional on inference: opaque key/value context stored  |
-|                                   | on the record under ``metadata.tags``, for a processor  |
-|                                   | to correlate on. Reef never reads a value.              |
+| ``x-reef-tag-<name>``             | optional on inference: context stored under             |
+|                                   | ``metadata.tags``. The ``release`` tag can select the   |
+|                                   | record's release; see `Client release tags`_ below.     |
 +-----------------------------------+---------------------------------------------------------+
+
+Client release tags
+~~~~~~~~~~~~~~~~~~~
+
+``x-reef-tag-release`` identifies the harness release installed by the client.
+Reef uses it as the inference record's ``artifact_ref`` only when all three
+conditions hold:
+
+- The scenario serves files for clients to pull.
+- Its surface has no inference hooks, and it has no training runtime.
+- The tag names a release in that scenario's catalog.
+
+Otherwise the record names the current served release, including when the tag
+is absent or unknown. The tag does not change which release serves inference.
+
+For example, a harness client installed release A before the service published
+B. If these conditions hold, its calls tagged with A are recorded against A;
+an untagged call or a call tagged with an unknown release is recorded against B.
+This tag is separate from ``x-reef-release-id``, which binds a scenario to its
+starting release.
 
 Scenario model settings
 -----------------------
@@ -121,6 +167,130 @@ defaults. Responses redact the API key and report ``has_api_key`` instead.
 
 See `Scenario model configuration <../user-guide/scenario-models.rst>`__ for
 protocols, persistence and model bindings used throughout evolution.
+
+Import records for cold-start learning
+--------------------------------------
+
+``POST /reef/records`` accepts an existing inference or report without calling
+an inference provider. It uses the usual Bearer token and ``x-reef-scenario``
+header. Submit one record per request and use a stable ``agent_record_id``:
+
+.. code:: bash
+
+   curl -f http://127.0.0.1:8900/reef/records \
+     -H "Authorization: Bearer $REEF_TOKEN" \
+     -H 'x-reef-scenario: my-agent' \
+     -H 'Content-Type: application/json' \
+     -d '{
+       "agent_record_id": "offline-0001",
+       "request_type": "inference",
+       "payload": {
+         "model": "example-model",
+         "messages": [{"role": "user", "content": "What is 2 + 2?"}],
+         "response": {"choices": [{"message": {"role": "assistant", "content": "4"}}]}
+       }
+     }'
+
+The response is ``{"agent_record_id":"offline-0001","scenario":"my-agent",
+"request_type":"inference"}``. HTTP 200 acknowledges record admission; it does
+not mean a training step has finished. Identical retries return the existing
+receipt, including after capacity eviction; reusing the ID with different content
+returns HTTP 409. Authentication failures return 401 and invalid envelopes,
+report schemas or references return 400. Scenario selection comes only from
+headers; envelope fields other than the three shown above are rejected.
+
+``request_type`` may be ``inference`` or ``report``. Inference payloads follow
+the selected recipe's recorded-input contract: native provider request fields
+with an existing ``response``, or another complete example that its processor
+understands. Import does not synthesize missing training tensors, run inference,
+or assign the current serving artifact to externally generated examples.
+Reports use the same schema and reference validation as ``POST /reef/report``;
+import referenced inferences first. Training instructions use ``POST /reef/train``.
+
+For existing datasets, use the batch endpoint and resumable JSONL importer
+below. Both endpoints retain the existing 1 MiB HTTP request-body limit.
+
+Imported records enter the same scenario storage and wake the same training
+worker as live traffic. Keep the same scenario header when subsequently calling
+``POST /v1/chat/completions``: its records continue through the existing
+processor, with no processor replacement or end-of-dataset signal. A processor
+that needs reward/report feedback still needs it for both imported and live
+records; submit each example's feedback promptly so completed batches can drain.
+For example, feedback for the imported record can be sent as:
+
+.. code:: json
+
+   {"agent_record_id": "offline-score-0001", "request_type": "report",
+    "payload": {"references": ["offline-0001"], "score": 1.0}}
+
+Batching, buffering, retention and training policy remain owned by the selected
+recipe and processor. Uploading can overlap training; this API adds no dataset
+epochs, cold-start completion barrier, or automatic algorithm switch. To start
+chat traffic after cold-start training has finished, use the recipe's progress
+and commit status to determine when its imported examples have been consumed.
+
+Batch imports and resume
+~~~~~~~~~~~~~~~~~~~~~~~~
+
+``POST /reef/records/batch`` accepts ``{"records": [record, ...]}``, where each
+record uses the same three-field envelope as ``POST /reef/records``. The batch
+must contain 1 to 1000 records and fit within the 1 MiB request-body limit.
+All records share the request's scenario, release and tag headers. Put an
+inference before reports that reference it, including within the same batch.
+
+Reef validates the entire batch and persists it in one database transaction.
+Malformed records or missing references return 400; conflicting IDs return
+409. Neither failure persists any new records from the batch. Identical retries
+are accepted, including after training or capacity eviction. Oversized requests return
+413. The response is ``{"records": [receipt, ...]}``, in input order, with the
+same receipt fields as the single-record endpoint. A successful import wakes
+the existing consumer once after commit. Atomicity applies to one request,
+not the entire dataset or subsequent training.
+
+On the user machine, install the standalone ``reef-client`` package; no Reef
+service or training dependencies are needed. For a large local dataset, save
+one envelope per line in an immutable UTF-8 JSONL file. Keep original record IDs
+and report references; the importer does not generate new IDs or convert
+arbitrary dataset schemas.
+
+.. code:: bash
+
+   # Authentication is read from REEF_TOKEN when set.
+   reef-client import records.jsonl --url http://127.0.0.1:8900 --scenario my-agent
+
+The CLI reads incrementally and sends batches limited by both ``--batch-size``
+(default 128 records) and ``--max-batch-bytes`` (default 524288 bytes). Only a
+bounded batch and one look-ahead record are buffered. The defaults are starting
+settings, not throughput guarantees. A single JSONL line must fit the byte
+limit; increase it, below 1048576, for larger records.
+
+Progress is saved to ``records.jsonl.reef-import.json``, or ``--progress PATH``.
+It contains the destination, scenario, source checksum and last acknowledged
+byte offset/count; it contains no token or record payloads. Each invocation
+first hashes the complete file with bounded memory to verify its identity,
+then seeks to the saved offset. The source must remain unchanged during import.
+A local file lock prevents simultaneous use of the same checkpoint.
+
+Run the same command after interruption to continue. Transient connection
+failures and HTTP 408, 429, 500, 502, 503 or 504 are retried up to ``--retries``
+(default 3) with backoff and unchanged IDs. If a reply is lost after commit,
+server deduplication prevents the replayed batch from being inserted again.
+Permanent errors stop without advancing that batch's checkpoint. Earlier
+acknowledged batches remain stored. A modified source or different destination
+requires a separate progress file; existing IDs still deduplicate at the server.
+The reported count includes every acknowledged source row, including retries
+of records already present, and does not count completed training samples.
+
+This importer supports local JSONL on platforms with POSIX file locking, including
+Linux and macOS. Parquet/Hugging Face schema conversion and server-side S3 import
+jobs are not part of this interface. Import completion acknowledges storage;
+use the scenario's training progress before treating cold-start learning as done.
+
+The upload buffer limit does not bound processor memory. Report-based processors
+may retain inference records while waiting for feedback; placing all inferences
+before all reports can therefore build a large in-memory backlog. Where possible,
+place reports close to their referenced inferences. Large-dataset throughput and
+end-to-end memory use require measurement with the selected recipe.
 
 Manual training
 ---------------
@@ -180,7 +350,9 @@ to them; with none queued the step batches as ``auto`` does.
      -H "Content-Type: application/json" \
      -d '{"agent_record_id":"change-001","text":"Add a skill that runs tests before answering", "session":"session-1", "release_id":"release-1"}'
 
-The response is ``{agent_record_id, scenario, request_type: "train"}``.
+The response is ``{agent_record_id, scenario, request_type: "train"}``,
+plus ``page_path``, the request's page with the query a browser opens it by
+(see Request page).
 HTTP 200 acknowledges durable acceptance, not successful training. Requests
 are executed one at a time by the normal training worker; later requests
 do not change a step already in flight. A step that fails with an
@@ -227,8 +399,17 @@ A request step that produced nothing records ``failure``, why: the model
 call failed (how long it took, the reply budget and the endpoint's error)
 or the reply held no usable entry. Other methods may write other keys.
 
+An optional ``client`` reports the requesting machine, so a proposer builds
+for it rather than for the sandbox it tries changes in: ``platform``,
+``arch`` and ``release`` (short words) and ``commands``, a map of command
+names to whether each is on the machine's PATH (at most 64). ``reef-pi`` and
+pi's ``/reefine`` send one, reading the PATH without running anything.
+It only informs the proposer: what does not fit that shape is dropped, never
+a reason to refuse the request, and ``training_request.client`` carries what
+was kept.
+
 Supply ``agent_record_id`` to retry safely: an identical request is accepted
-without another step, including after record compaction; reusing the id with
+without another step, including after capacity eviction; reusing the id with
 different content returns HTTP 409. Without it, each submission gets a fresh
 id. Empty text, text longer than 4000 characters, missing or non-string
 session/release fields, or a request to an ``auto`` scenario returns HTTP 400.
@@ -270,8 +451,10 @@ unknown scenario returns HTTP 404 and you create it first:
 |                                             | content_id}``; 201 created, 200 already     |
 |                                             | existed                                     |
 +---------------------------------------------+---------------------------------------------+
-| ``GET /reef/scenarios``                     | every known scenario and its current        |
-|                                             | release once loaded                         |
+| ``GET /reef/scenarios``                     | every known scenario, its current release   |
+|                                             | once loaded and, for a harness recipe, the  |
+|                                             | ``adapter`` its tree is rendered for, also  |
+|                                             | while the scenario loads                    |
 +---------------------------------------------+---------------------------------------------+
 | ``GET /reef/scenarios/{scenario}/contract`` | ``{scenario, processor,                     |
 |                                             | required_request_types, training_mode,      |
@@ -290,7 +473,15 @@ log move under ``<agent_record_dir>/archived/``, the recipe's own directories
 scenario's ref in the artifact repository is renamed into
 ``refs/reef/archived/``, so every release it published stays reachable. The
 base artifact, the shared head and releases other scenarios may fork from
-stay where they are. A step in flight for the scenario ends without a commit.
+stay where they are. A local step in flight for the scenario ends without a
+commit. While a weight training job of the scenario is out at its backend the
+request answers 409: the job could neither commit nor be acknowledged without
+its scenario, and its marker would keep inference admission closed for every
+scenario on the runtime. Retry once the job has committed or been rejected.
+The job's marker names the scenario that owns it, so deleting any other
+scenario goes through, a registration left by a create the runtime refused
+included: deleting that one and restarting lets the owner bind again and
+finish its job.
 Only a local artifact repository can be archived; a remote one answers 501.
 
 For a scenario that trains weights the deletion is Reef-side: the training
@@ -345,8 +536,10 @@ Send the same body you would send to the provider. Reef never touches your
 sampling parameters. 
 
 Before calling the model, Reef reads the scenario's current artifact ref and
-builds the request against that release. The stored exchange uses the same ref,
-so an update completing mid-request does not change what the receipt records.
+builds the request against that release. The stored exchange normally uses
+that frozen ref, even if an update completes mid-request. For a scenario that
+only delivers files to clients, `Client release tags`_ describes when the
+record instead names the client's installed harness release.
 
 On a weight-serving deployment it adds engine
 bookkeeping keys: ``lora_path`` to address the served adapter and
@@ -374,7 +567,16 @@ carries ``x-reef-release-id``: the release ``GET /reef/harness`` serves when
 the response is written, so a head that moves during the call shows on the
 next one. A resident ``reef-native serve`` process compares it with the
 release it mounted and learns of a new head on its next model call, with no
-extra request. A weight serving scenario sends no such header.
+extra request. A weight serving scenario sends no such header, and neither
+does the evaluation route, whose caller runs a candidate and follows no head.
+
+A composite recipe's evaluation calls come through these routes; a recipe of
+one component calls its runtime's endpoint directly, as before composites.
+The evaluation calls do not present a service token. When auth is configured,
+the service issues a random token at startup that opens the evaluation routes
+alone, and hands it to the recipe: the episodes and proposer run candidate
+code, which can then sample the served release but reach no other route. A
+restart issues a new one.
 
 Response
 ~~~~~~~~
@@ -475,15 +677,13 @@ conflict rather than overwriting. Reef keeps track of consumed records so
 retried reports and late reports whose references already trained are not
 counted twice.
 
-Training compaction retires records without deleting their original payloads.
-Reef's explicit Python audit reads can inspect retained requests, responses,
-references, and compaction timestamps; ordinary training reads exclude retired
-records. There is no new HTTP record-query endpoint. Separate background
-retention limits compacted bodies to 7 days and a shared 20 GiB by default;
-see `Configuration <configuration.rst>`__ for scope and `Python API <python-api.rst>`__
-for audit and purge methods. A compaction timestamp alone does not prove that a record was
-used for learning: per-step ``consumed_ids`` in the commit log identifies that
-relationship.
+Training records remain readable after consumption. Storage evicts the oldest
+bodies only when the shared capacity budget is exceeded (20 GiB by default),
+with warnings and durable loss totals. Audit endpoints expose retained requests,
+responses and references. Per-step ``consumed_ids`` records processed
+inputs, including intentional skips, rather than proving a model update.
+See `Configuration <configuration.rst>`__ and `Python API <python-api.rst>`__.
+
 
 Receiving an update
 -------------------
@@ -505,18 +705,26 @@ Harness artifacts
 | Route                          | Response                                                      |
 +================================+===============================================================+
 | ``GET /reef/harness``          | ``{release_id, content_id, parent_release_id, files,          |
-|                                | evaluation, requires}``, plus an ``x-reef-release-id``        |
-|                                | response header                                               |
+|                                | evaluation, requires}``, plus ``components`` (each component  |
+|                                | name to its content id) when the release binds several, and   |
+|                                | an ``x-reef-release-id`` response header                      |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/releases`` | ``{scenario, releases}``, oldest first, each training row     |
-|                                | carrying the evaluation metrics of the publishing step        |
+|                                | carrying the evaluation metrics of the publishing step and    |
+|                                | ``page_path``, its step's page with the query a browser opens |
+|                                | it by                                                         |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/install``  | a self-contained POSIX shell script that installs the vendor  |
 |                                | binary, writes the tree, and writes the adapter's model       |
 |                                | binding at the address the request reached (a gateway in      |
 |                                | front names it in ``x-forwarded-host`` and                    |
 |                                | ``x-forwarded-proto``), the token filled from ``REEF_TOKEN``  |
-|                                | when the script runs                                          |
+|                                | when the script runs; it records the sha256 of each tree file |
+|                                | it wrote (for pi's ``settings.json``, the value of each key   |
+|                                | but pi's own preferences) and that address in                 |
+|                                | ``~/.reef/installs``, and writes the ``reef-<adapter>``       |
+|                                | wrapper beside that record, which checks it before a session  |
+|                                | starts                                                        |
 +--------------------------------+---------------------------------------------------------------+
 | ``GET /reef/harness/adapters`` | ``{adapters}`` — every harness adapter this process resolves, |
 |                                | each with ``name``, ``binary``, ``trajectory_format``,        |
@@ -641,7 +849,7 @@ directories.
 Harness requests
 ~~~~~~~~~~~~~~~~
 
-``reef-<adapter> harness "<request>"`` and pi's ``/reef-harness <request>``
+``reef-<adapter> harness "<request>"`` and pi's ``/reefine <request>``
 submit the user's instruction through ``POST /reef/train``, described under
 `Manual training <#manual-training>`__. Set ``data.training_mode: hybrid``
 (the deployment keeps learning from failures) or ``manual``, or switch an
@@ -683,7 +891,24 @@ install routes keep serving the previous head, and ``?release_id=`` can pull
 the pending tree for a trial install. ``POST /reef/scenarios/{scenario}/promote``
 with ``{"release_id": "..."}`` serves it by the same republish path as
 rollback, so the promotion is itself a commit record with
-``operation: promote`` and the promoted tree becomes a new release.
+``operation: promote`` and the promoted tree becomes a new release. In a
+scenario with several components the promote publishes the held release's
+changed component on the combination served now, and it is listed as a
+harness release only when the tree changed.
+
+In a scenario with several components, ``GET /reef/harness/releases``, the
+release pages and ``GET /reef/harness`` speak of the releases that changed the
+pulled tree: another component's step, or a rollback or promote that restored
+other weights under the same tree, is not listed and is no new head. In the
+rows listed, ``parent_release_id`` names the previous listed release, the one
+the tree descends from, and ``composed_parent_release_id`` the release the
+combination was published on; a rejected or skipped step, which published
+nothing, is named by the listed release it ran on (``composed_release_id``
+keeps the combination served then); and a rollback or promote whose target
+is not listed names the listed release that target carried
+(``composed_rollback_target_release_id`` keeps the target). Every release
+stays addressable by id through ``?release_id=`` on the manifest and install
+routes.
 
 Version page
 ~~~~~~~~~~~~
@@ -751,9 +976,9 @@ than nine digits, is HTTP 404 too. The row itself rides in a
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: code-repair" \
      "$REEF_URL/reef/harness/releases/3/page" > harness-step-3.html
 
-On pi, ``/reef-versions`` in a ``reef-pi`` session lists the chain, and
-``/reef-versions 3`` offers to open this page in the browser, printing the URL
-when the offer is declined. ``/reef-versions 3 install`` installs that release,
+On pi, ``/versions`` in a ``reef-pi`` session lists the chain, and
+``/versions v3`` offers to open this page in the browser, printing the URL
+when the offer is declined. ``/versions v3 install`` installs that release,
 promoting it first when it is still held back from the served head.
 
 Request page
@@ -762,7 +987,7 @@ Request page
 ``GET /reef/harness/requests/{record_id}/page`` answers one self contained
 HTML page (``text/html``, no asset, ``Cache-Control: no-store``) for a filed
 harness request, ``record_id`` being the ``agent_record_id`` that
-``POST /reef/train`` answered; ``reef-pi harness`` and pi's ``/reef-harness``
+``POST /reef/train`` answered; ``reef-pi evolve`` and pi's ``/reefine``
 print the link. Until the step settles the page reloads itself every five
 seconds. A four-stage progress strip and a status badge summarize the
 request. The responsive layout places Request beside Progress on desktop
@@ -777,13 +1002,20 @@ the request, ``proposing`` while the served model writes the change,
 step record directory when the backend reports them, and the time into the
 step), ``running`` while the trainer holds the request and the backend
 reports no phase, and ``settling`` while the row that consumed the record
-lands. The catalog row whose ``metrics.training_request.id`` is the record
+lands. While a step holds the request, Activity lists what the proposer has
+done so far, newest first, each line at its time into the step and the
+newest with how long ago it happened: every model call as it starts and
+as it answers (its seconds and tokens, or its error), and for the agent
+proposer each tool the agent calls, each admission check, each trial with
+its exit and multimodal calls, and each multimodal call with its status;
+failed lines are marked. The page lists the latest 80; the step record
+keeps every call. The catalog row whose ``metrics.training_request.id`` is the record
 id settles the page: the reload stops and Progress gives way to Result
 (the result as the version page words it, what it means and the next
 action, a failed instruction's ``error``, ``proposal_notes.failure`` as
 ``proposer failure``, the release id and a link to the version page), What
 changed (each mutation's op, id and kind; labeled Proposed changes for
-pending, rejected or skipped steps) and, when the step recorded a review,
+pending, rejected, skipped or failed steps) and, when the step recorded a review,
 Review (its result and the points it left uncovered). Published and pending
 results show the session command to install or promote when the person is
 ready, alongside a link to the version page. An unknown
@@ -794,12 +1026,17 @@ as JSON (``Cache-Control: no-store``), for a client that polls rather than a
 browser that renders: ``request_id``, ``settled``, ``step`` (the step the
 row landed as once it settles, else null), ``state`` (the page's own
 ``queued``, ``proposing``, ``evaluating``, ``running`` or ``settling``, and
-the settled row's result once a row answers the request), ``meaning`` (the
+the settled row's result once a row answers the request, including ``failed``
+when a skipped step records a proposer failure or execution error), ``meaning`` (the
 words the page prints beside the state, null once settled), and, while a
-step holds this request, ``started_at``, ``episodes_total`` and
-``step_record`` from the backend's progress. The phase is what the pi
-extension's spinner names while the step runs. Unlike the two pages this is
-an ordinary route: it reads the headers alone, and a ``?token=`` is HTTP
+step holds this request, ``started_at``, ``episodes_total``,
+``step_record`` and ``activity`` (the Activity lines oldest first, each
+``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
+``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
+empty otherwise) from the backend's progress. The phase is what the pi
+extension's spinner names while the step runs, and opening the spinner lists
+the latest four activity lines. Unlike the two pages this is
+an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP
 401. An unknown id, or one that is not a training instruction, is HTTP 404
 naming it.
 
@@ -812,18 +1049,28 @@ phase ``evaluating``. Reviews and settled proposals store their outcome under
 for existing clients.
 
 Both pages are links a person opens in a browser, which sends no header, so
-they also take the scenario and the token as query parameters,
-``?scenario=<name>&token=<token>``, in place of ``x-reef-scenario`` and
+they also take the scenario and a credential as query parameters,
+``?scenario=<name>&key=<page key>``, in place of ``x-reef-scenario`` and
 ``Authorization: Bearer``; a header wins when present, and each page's links
-to the other carry the parameters it was opened with.
-The token then sits in the URL, in the browser's history and in whatever
-logs request lines, so a deployment that hands out such links is a local
-one. Every other route reads the headers alone; a ``?token=`` elsewhere is
-HTTP 401.
+to the other carry the parameters it was opened with. Clients never build
+these links: ``POST /reef/train`` answers ``page_path`` for the request's
+page and ``GET /reef/harness/releases`` one per row for its step's page,
+and a client prints its service URL followed by that path. The path's query
+holds the page key when the request presented a service token (an
+evaluation token gets none, and with authentication off the query names
+the scenario alone). The key opens these two pages of that one scenario and
+no other route, a request whose ``x-reef-scenario`` header names another
+scenario is HTTP 401, and the token cannot be read back from it (the
+service derives it as an HMAC SHA-256 of the scenario keyed by the token's
+digest). The links ``reef-<adapter>`` and pi's extension print carry it,
+since a session's model reads them and a session's traffic is captured.
+The token itself is never read from a query: ``?token=`` is HTTP 401 on
+every route, the pages included. Every other route reads the headers alone;
+a ``?key=`` elsewhere is HTTP 401.
 
 .. code:: text
 
-   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&token=<token>
+   $REEF_URL/reef/harness/requests/<record_id>/page?scenario=<scenario>&key=<page key>
 
 Retained step files
 ~~~~~~~~~~~~~~~~~~~
@@ -851,7 +1098,7 @@ request headers, assistant messages and tool events; reconstructed inputs are
 not exact provider request bodies. They do not retain provider response IDs,
 and a compaction event may prevent complete input reconstruction. Reads neither
 copy records into another store nor change retention. Step files remain separate
-from compacted online record-body retention.
+from online record-body capacity eviction.
 
 Status
 ------
@@ -880,11 +1127,27 @@ an update is being trained or published.
          "inference_admission": {"...": "..."}
        }
      },
-     "serving": {"...": "..."}
+     "serving": {"...": "..."},
+     "training_job": {"status": "CHECKPOINT", "training_job_id": "9c41...", "owner": "hello-reef"}
    }
 
 ``error`` and ``preload_errors`` report asynchronous training and preload
-failures. ``batch_ready`` says whether the processor has a batch waiting.
+failures. ``training_job`` is the weight job the training runtime holds out:
+its marker ``status``, its ``training_job_id`` and its ``owner``, the scenario
+a delete refuses (see Deleting a scenario). It is ``null`` when no job is out
+or the recipe trains no weights, and ``{"error": ...}`` when the runtime could
+not be read. ``batch_ready`` says whether the processor has a batch waiting.
+A scenario whose recipe runs one trainer per release component adds a
+``components`` object: for each component, its own ``batch_ready``,
+``training_mode``, ``processor`` status, ``last_committed_step`` (with
+the ``base_release_id`` that step was prepared against), and
+``stale_refusals_total``, how many of its results were refused because
+another trainer's commit had replaced their base since this process
+started. The scenario-wide ``batch_ready``, ``training_mode`` and ``processor`` describe the trainer that steps: the one with a dispatched backend, else the first with a candidate backend, else the first listed; the scenario-wide ``last_committed_step`` is the latest commit of any component. In a scenario of several trainers, every new training row from
+``GET /reef/scenarios/{scenario}/releases`` carries ``component``, the
+trainer that made it, and ``base_release_id``, the release its batch was
+reserved against; a scenario of one trainer, and rows written before Reef
+named components, carry neither.
 ``last_committed_step`` reports the latest durable training step number,
 commit time, and its recipe-owned metrics; it is ``null`` before the first
 training commit. This distinguishes a step still in flight from a completed
@@ -907,8 +1170,9 @@ Status codes
 |        | scenario-scoped route, or a report violating the recipe's   |
 |        | declared schema                                             |
 +--------+-------------------------------------------------------------+
-| 401    | missing or wrong bearer token; the two harness pages also   |
-|        | read ``?token=`` (see Request page)                         |
+| 401    | missing or wrong bearer token, or ``x-api-key`` when no     |
+|        | Authorization header is sent; the two harness pages also    |
+|        | read ``?key=`` (see Request page)                           |
 +--------+-------------------------------------------------------------+
 | 403    | relayed from the upstream provider. Reef issues none of its |
 |        | own: an unaccepted token is 401, and per-scenario           |
@@ -970,12 +1234,16 @@ Record and commit history
 -------------------------
 
 ``GET /reef/scenarios/{scenario}/records`` reads retained record metadata,
-including compacted records. ``after_sequence`` defaults to 0 and ``limit``
-defaults to 50 (1–100). Records are oldest first; ``next_after_sequence`` is
-null at the end. Each row contains ``sequence``, ``agent_record_id``,
-``request_type``, ``created_at``, ``compacted_at``, ``references``, the recorded
-``artifact_ref``, and the payload's ``score`` field. No record payload or
-learning classification is included.
+including consumed records. ``after_sequence`` defaults to 0 and ``limit``
+defaults to 50 (1 to 100). ``request_type`` (``inference``, ``report`` or
+``train``) lists one type only; another value is HTTP 400. Records are oldest
+first; ``next_after_sequence`` is null at the end. Each row contains
+``sequence``, ``agent_record_id``, ``request_type``, ``created_at``,
+``references``, the recorded ``artifact_ref``, and the payload's ``score``
+field. No record payload or learning classification is included. An inference
+record's ``artifact_ref`` names the release that served the call, except when
+the conditions in `Client release tags`_ select the client's installed harness
+release.
 
 ``GET /reef/scenarios/{scenario}/records/{record_id}`` returns that metadata
 and the stored ``payload``. A missing body returns 404: it may have expired or
@@ -1006,5 +1274,4 @@ cached commit log; the response is bounded, not a new persisted index.
 
 Reef does not join these endpoints into learning links or assign learning
 states, human-readable explanations, policy capability flags, or evaluation
-results. The console owns that interpretation. In particular, compaction
-alone is not proof of consumption, and consumption is not proof of promotion.
+results. The console owns that interpretation. Consumption is not proof of promotion.

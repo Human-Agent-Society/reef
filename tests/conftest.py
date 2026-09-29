@@ -33,6 +33,8 @@ for _cookbook_package in (
     "reef.train.cordis_backend",
     "recipes.openclawrl",
     "recipes.sao",
+    "recipes.sdft",
+    "recipes.sdpo",
     "recipes.tttd",
 ):
     importlib.import_module(_cookbook_package)

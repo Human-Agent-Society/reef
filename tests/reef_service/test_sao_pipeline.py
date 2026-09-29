@@ -124,7 +124,7 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
 
     # Objective defaults live with the Slime implementation. The Reef recipe
     # owns only batching and checkpoint cadence.
-    assert recipe.batch_size == 1
+    assert recipe.batch_size == 128
     assert recipe.checkpoint_strategy == EveryNVersions(1)
 
 
@@ -249,7 +249,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -262,7 +262,7 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -272,7 +272,7 @@ def test_processor_rejects_non_finite_report_scores() -> None:
     with pytest.raises(ReportValidationError, match="finite"):
         processor.ingest(_sao_report("r1", "i1", float("nan")))
     assert not processor.ready()
-    assert processor.retention_decision().protected_agent_record_ids == {"i1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1"})
 
 
 @pytest.mark.unit
@@ -284,7 +284,7 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
     prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)
-    assert processor.retention_decision().protected_agent_record_ids == {"i1", "r1"}
+    assert processor.releasable_record_ids().isdisjoint({"i1", "r1"})
 
 
 @pytest.mark.unit
@@ -308,12 +308,12 @@ def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_fi
                 processor.ingest(item)
         else:
             processor.ingest(item)
-        processor.retention_decision()  # a read between arrivals must not latch the release
+        processor.releasable_record_ids()  # a read between arrivals must not latch the release
 
     batch = processor.build_batch()
     assert [source_record_id(sample) for sample in batch.items] == ["i1"]
     processor.acknowledge(batch.batch_id)
-    assert processor.retention_decision().releasable_agent_record_ids == frozenset({"retry", "i1"})
+    assert processor.releasable_record_ids() == frozenset({"retry", "i1"})
 
 
 # --- backend preparation ---------------------------------------------------
@@ -388,7 +388,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         assert prepared.payload is not None
         payload = {
             **prepared.payload,
-            "rollout_id": scenario_step,
+            "scenario_step": scenario_step,
             "reward": trajectory_reward(sample),
             "expected_runtime_load_id": sample.training.get("runtime_load_id", None),
         }
@@ -400,14 +400,14 @@ class _StubTrainingRuntime(StubTrainingRuntime):
         )
 
     def train_candidate(self, payload):
-        rollout_id = payload["rollout_id"]
-        existing = self.completed.get(rollout_id)
+        scenario_step = payload["scenario_step"]
+        existing = self.completed.get(scenario_step)
         if existing is not None:
             return existing
         if payload["expected_runtime_load_id"] != self._served_version:
             raise StaleCandidate
         self.jobs.append(dict(payload))
-        job_id = f"job-{rollout_id}"
+        job_id = f"job-{scenario_step}"
         checkpoint = self.checkpoint_root / job_id
         checkpoint.mkdir(parents=True)
         result = ModelCandidate(
@@ -419,7 +419,7 @@ class _StubTrainingRuntime(StubTrainingRuntime):
             # rollout metrics here; the shapes are asserted in test_sao_bridge.
             training_metrics={"sao/critic_updates": 2, "sao/actor_trained": 1},
         )
-        self.completed[rollout_id] = result
+        self.completed[scenario_step] = result
         return result
 
     def activate_candidate(self, candidate):
@@ -446,7 +446,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
     initial.mkdir()
 
     dispatcher = Dispatcher(
-        SAORecipe(**runtime_bindings(runtime)),
+        SAORecipe(batch_size=1, **runtime_bindings(runtime)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -463,7 +463,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
 
         assert len(runtime.jobs) == 1
         job = runtime.jobs[0]
-        assert job["rollout_id"] == 0
+        assert job["scenario_step"] == 0
         assert job["loss"] == "sao"
         # SAO defers advantages to the critic in the backend; reef ships none.
         assert "advantages" not in job
@@ -480,6 +480,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config={
+            "data": {"batch_size": 1},
             "evaluation": {
                 "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
                 "config": {
@@ -487,7 +488,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
                     "threshold": 0.8,
                     "token_env": "EVALUATION_TOKEN",
                 },
-            }
+            },
         },
         **runtime_bindings(runtime),
     )
@@ -529,7 +530,7 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
 
     dispatcher = Dispatcher(
-        SAORecipe(**runtime_bindings(runtime), checkpoint_strategy=EveryNVersions(99)),
+        SAORecipe(batch_size=1, **runtime_bindings(runtime), checkpoint_strategy=EveryNVersions(99)),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -568,7 +569,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
     def _make_dispatcher() -> Dispatcher:
         return Dispatcher(
-            SAORecipe(**runtime_bindings(runtime)),
+            SAORecipe(batch_size=1, **runtime_bindings(runtime)),
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,
@@ -614,8 +615,8 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
 @pytest.mark.integration
 def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
-    # A second rollout after a fresh Trainer built from the persisted algorithm
-    # state must resume the step counter, mirroring recovery from a checkpoint.
+    # Restore algorithm state and record progress as scenario recovery does;
+    # retained records from the first rollout must not train again.
     database = tmp_path / "records.sqlite3"
     first_inference = _sao_inference("i1")
     first_report = _sao_report("r1", "i1", 1.0)
@@ -637,7 +638,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         assert result is not None
         prepared = first.prepare_commit(result)
         first.commit(prepared)
-        first.apply_compaction(prepared.compacted_ids)
+        assert first_store.count("math") == 4
 
     with SQLiteRecordStore(database) as second_store:
         second = Trainer.build(
@@ -645,8 +646,10 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
             second_store,
             processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
             candidate_backend=_StateOnlySaoBackend(),
-            algorithm_state={"steps": 1},
+            algorithm_state=prepared.algorithm_state,
         )
+        second.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids)
+        second.restore_record_progress(after_sequence=prepared.high_water_sequence, offset=prepared.high_water_offset)
         assert second.state == {"steps": 1}
         assert second.reserve_training_batch() is not None
         assert source_record_id(second.pending_batch.items[0]) == "i2"

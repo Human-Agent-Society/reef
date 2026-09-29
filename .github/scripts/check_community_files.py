@@ -58,9 +58,8 @@ def pattern_matches(pattern: str, paths: list[str]) -> bool:
     return any(fnmatch.fnmatchcase(path, normalized) for path in paths)
 
 
-def validate_codeowners(paths: list[str]) -> set[str]:
+def validate_codeowners(paths: list[str]) -> None:
     codeowners = ROOT / ".github" / "CODEOWNERS"
-    owners: set[str] = set()
     errors = 0
     for number, raw_line in enumerate(codeowners.read_text().splitlines(), 1):
         line = raw_line.strip()
@@ -82,22 +81,8 @@ def validate_codeowners(paths: list[str]) -> set[str]:
             if not owner.startswith("@") or not all(GITHUB_LOGIN.fullmatch(part) for part in owner[1:].split("/", 1)):
                 fail(f"CODEOWNERS:{number}: invalid owner: {owner}")
                 errors += 1
-            owners.add(owner.removeprefix("@").split("/", 1)[-1])
     if errors:
         raise ValueError("invalid CODEOWNERS")
-    return owners
-
-
-def validate_oncall(owners: set[str]) -> None:
-    path = ROOT / ".github" / "merge-oncall.json"
-    config = json.loads(path.read_text())
-    if set(config) != {"login"}:
-        raise ValueError("merge-oncall.json must contain exactly the 'login' key")
-    login = config["login"]
-    if not isinstance(login, str) or not GITHUB_LOGIN.fullmatch(login):
-        raise ValueError("merge-oncall.json contains an invalid GitHub login")
-    if login not in owners:
-        raise ValueError("the merge oncall must also appear in CODEOWNERS")
 
 
 def validate_labels() -> set[str]:
@@ -205,8 +190,7 @@ def validate_workflows() -> None:
 def main() -> int:
     try:
         paths = tracked_files()
-        owners = validate_codeowners(paths)
-        validate_oncall(owners)
+        validate_codeowners(paths)
         labels = validate_labels()
         validate_issue_templates(labels)
         validate_workflows()

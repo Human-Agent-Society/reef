@@ -10,6 +10,7 @@ the update, and runs the update through it too, ending with the reload line.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import shutil
@@ -522,7 +523,8 @@ def test_the_notice_offers_the_setup_through_the_wrapper_then_the_update_through
     """With a wrapper on disk and a UI, an unmet head is offered as a setup first: each unmet item is asked once,
     an env value through the input (the prompt as its title) and handed over as one argument, a check through a
     confirm and run by name, one line per item. Then the update is offered, names the wrapper's update, runs it,
-    and ends with the reload line. The wrapper is the exported path, else the one beside the release file."""
+    and ends with the reload line. The wrapper is the exported path, else the one the install wrote outside the
+    tree, in ~/.reef/installs."""
     wrapper = _wrapper(tmp_path / "bin" / "reef-pi")
     answers = {**LISTED, "update": {"stdout": "installed v2\n"}}
     events, stderr = _notice(
@@ -550,8 +552,11 @@ def test_the_notice_offers_the_setup_through_the_wrapper_then_the_update_through
         {"kind": "exec", "command": wrapper, "args": ["update"]},
         {"kind": "notify", "message": "Installed release v2. Type /reload to load it now.", "type": "info"},
     ]
-    # Without the exported path the wrapper beside the release file serves; Skip at the offer runs no update.
-    beside = _wrapper(tmp_path / "reef-pi")
+    # Without the exported path the wrapper the install wrote outside the tree serves, in ~/.reef/installs under the
+    # sha256 of the resolved install root; Skip at the offer runs no update.
+    home = tmp_path / "home"
+    root_digest = hashlib.sha256(os.fsencode(os.path.realpath(tmp_path))).hexdigest()
+    installed_wrapper = _wrapper(home / ".reef" / "installs" / root_digest / "reef-pi")
     events, _ = _notice(
         tmp_path,
         SETUP_RELEASES,
@@ -559,10 +564,11 @@ def test_the_notice_offers_the_setup_through_the_wrapper_then_the_update_through
         TEST_CONFIRM=json.dumps([True]),
         TEST_INPUT=json.dumps(["AC1"]),
         TEST_EXEC=json.dumps(answers),
+        HOME=str(home),
     )
-    assert [event["command"] for event in events if event["kind"] == "exec"] == [beside] * 3
+    assert [event["command"] for event in events if event["kind"] == "exec"] == [installed_wrapper] * 3
     assert [event["kind"] for event in events][-2:] == ["notify", "select"]
-    (tmp_path / "reef-pi").unlink()
+    Path(installed_wrapper).unlink()
     # Nothing unmet with a wrapper: the offer alone, naming the wrapper's update; its failure is said as before.
     checked = [{"name": "TWILIO_SID", "check": "TWILIO_SID"}, {"name": "notify", "check": "true"}]
     events, _ = _notice(

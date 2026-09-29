@@ -128,7 +128,7 @@ class InMemoryRepositoryBackend(StagedReleaseRepositoryBackend):
         path = self._storage.paths.get(ref.release_id)
         if path is None or not path.is_dir():
             raise ArtifactMaterializationError(f"release does not exist: {ref.release_id}")
-        return Artifact(ref, None, local_path=path)
+        return Artifact(ref, None, local_path=path, metadata=self._storage.metadata.get(ref.release_id))
 
     def publish(
         self,

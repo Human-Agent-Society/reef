@@ -15,6 +15,9 @@ class ProcessorContext:
     report_type: type[ReportBase] | None = None
     experiment_logger: ExperimentLogger = field(default_factory=NullExperimentLogger)
     training_mode: str = "auto"
+    #: The contract the scenario's ingress admits, when it is wider than ``report_type``: a report it
+    #: accepts and ``report_type`` refuses is another component's, and this processor releases it.
+    admitted_report_type: type[ReportBase] | None = None
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual", "hybrid"):

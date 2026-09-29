@@ -92,6 +92,15 @@ Release chain
 A scenario's history of accepted updates, each release carrying its parent. A
 durable release can be restored when its surface and runtime support rollback.
 
+Component
+---------
+
+One named part of a release's content, such as ``weights``, ``harness``, or
+``skills``. A recipe's surface declares the components its releases bind and
+how each is admitted, loaded, injected, and read. A one-component release is
+flat; a release with several keeps one directory per component and a manifest
+naming each component's ``content_id``.
+
 Candidate selection
 -------------------
 

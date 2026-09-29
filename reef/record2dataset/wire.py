@@ -120,6 +120,15 @@ def checked_optional_number(value: object, label: str) -> float | None:
     return float(value)
 
 
+def checked_reward_map(value: Mapping[object, object], label: str) -> dict[str, float]:
+    result: dict[str, float] = {}
+    for name, reward in value.items():
+        if isinstance(reward, bool) or not isinstance(reward, (int, float)):
+            raise WireError(f"{label} must map names to numbers")
+        result[str(name)] = float(reward)
+    return result
+
+
 def play_document(play: TaskPlay) -> dict[str, object]:
     """One played episode as JSON: what the verifier said and what reached Reef."""
     return {
@@ -155,7 +164,7 @@ def play_from_document(document: object) -> TaskPlay:
         name=checked_string(fields, "name", label="a played episode"),
         episode_id=checked_string(fields, "episode_id", label="a played episode"),
         reward=checked_optional_number(fields.get("reward"), "reward"),
-        rewards={str(name): float(value) for name, value in rewards.items()},
+        rewards=checked_reward_map(rewards, "a played episode's rewards"),
         error=error,
         receipts=tuple(receipts),
         failed_calls=failed_calls,

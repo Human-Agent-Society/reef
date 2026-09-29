@@ -1,0 +1,18 @@
+# What reef's reefine proposer is told about Terminus 2: see reef.harness.adapters.harness_facts.
+title: Terminus 2
+command: >-
+  Terminus 2 has no session a person types in: a person's words reach the model only as a Harbor task's
+  instruction, and each run is one task. An agent_command renders as a skill, listed in available_skills beside
+  the others, which the model may open while it works on a task; nothing marks it as a command and nobody types
+  it. A run has no reply a person reads: what a person sees is the files the task leaves in the container, the
+  verifier's reward and the trial's trajectory, so a design names those as its visible result.
+tools: >-
+  keystrokes into a tmux shell in the task's Linux container, where curl reaches the web when the task allows
+  network access; no web search tool of its own
+mode: >-
+  No state outlives a trial: the container, its files and the conversation end with the task, so a mode can only
+  be rules and skills the model reads during one task, and nothing can turn one on or off. A request for a mode a
+  person enters and leaves cannot be met on this harness: the review lists that point under limits.
+machine: >-
+  Every run happens inside a Harbor task's Linux container, not on the user's machine: build for Linux, and rely
+  only on a shell and what the task's image has.

@@ -61,13 +61,13 @@ padding:6px 12px;font-size:12px;background:var(--card);white-space:nowrap}
 .status:before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
 .tone-selected,.tone-promoted{--status:var(--good);--status-bg:var(--good-bg)}
 .tone-pending,.tone-skipped{--status:var(--warn);--status-bg:var(--warn-bg)}
-.tone-rejected{--status:var(--bad);--status-bg:var(--bad-bg)}
+.tone-rejected,.tone-failed{--status:var(--bad);--status-bg:var(--bad-bg)}
 .tone-queued,.tone-proposing,.tone-evaluating,.tone-running,.tone-settling,.tone-creation,.tone-promote,
 .tone-rollback,.tone-recovery,.tone-unknown{--status:var(--accent);--status-bg:var(--soft)}
 .status{color:var(--status);background:var(--status-bg);border-color:transparent}
 .selected,.promoted,.complete{color:var(--good)}
 .pending,.skipped,.partial,.queued,.proposing,.evaluating,.running,.settling{color:var(--warn)}
-.rejected{color:var(--bad)}.creation,.promote,.rollback,.recovery,.unknown{color:var(--accent)}
+.rejected,.failed{color:var(--bad)}.creation,.promote,.rollback,.recovery,.unknown{color:var(--accent)}
 /* A status word inside a pill takes the pill's tone, which the hero and the summary set. */
 .status span{color:inherit}
 .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:28px;min-width:0;box-shadow:var(--shadow)}
@@ -106,6 +106,7 @@ STATUS_LABELS = {
     "pending": "Ready for review",
     "rejected": "Not selected",
     "skipped": "No changes",
+    "failed": "Failed",
     "complete": "Complete",
     "partial": "Partial",
     "creation": "Starting point",
@@ -121,7 +122,7 @@ def escape(value: Any) -> str:
 
 
 def tone(state: str) -> str:
-    """The first word of a state, which is its CSS class: ``promoted at step 5`` tones as ``promoted``."""
+    """The first word of a state, which is its CSS class: ``promoted at v5`` tones as ``promoted``."""
     return state.split(" ")[0]
 
 
@@ -130,7 +131,7 @@ def status_label(state: str) -> str:
     label = STATUS_LABELS.get(state)
     if label is not None:
         return label
-    # A composed state, "promoted at step 5", keeps its tail: only the leading word is renamed.
+    # A composed state, "promoted at v5", keeps its tail: only the leading word is renamed.
     first, separator, rest = state.partition(" ")
     named = STATUS_LABELS.get(first)
     if named is not None and separator:

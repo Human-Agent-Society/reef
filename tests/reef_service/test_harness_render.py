@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import tomllib
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -130,7 +131,11 @@ def test_codex_accepts_admitted_model_tuning() -> None:
 
 
 def test_codex_requires_the_responses_dialect() -> None:
-    with pytest.raises(ModelBindingError, match="declares no model_binding for the 'openai' api"):
+    # The error names the serve flag that picks the dialect the adapter declares.
+    with pytest.raises(
+        ModelBindingError,
+        match=r"declares no model_binding for the .openai. api .*serve with --inference.upstream-api responses",
+    ):
         ModelBinding("http://up", "m").compose_nodes(get_adapter("codex"))
 
 
@@ -279,6 +284,8 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
         "base_url": "http://127.0.0.1:9/v1",
         "api_key": "k-1",
     }
+    # An OpenRouter host is hermes's own provider, whose key it reads from the environment or its home's .env.
+    assert files["hermes/.env"] == "OPENAI_API_KEY=k-1\n"
     assert config["agent"] == {"max_turns": 40}
     # The defaults that keep an episode hermetic and single request, and the second skill root.
     assert config["approval"] == {"tirith_enabled": False}
@@ -383,6 +390,32 @@ def test_claude_quirk_rejects_reopened_hermetic_switches() -> None:
         render_composition([("config", {"data": {"env": {"DISABLE_AUTOUPDATER": "0"}}})], get_adapter("claude"))
 
 
+@pytest.mark.parametrize("key", ["DISABLE_UPDATES", "DISABLE_AUTOUPDATER", "disable_updates"])
+@pytest.mark.parametrize("value", ["x", "maybe", "2", "1"])
+def test_claude_quirk_refuses_a_tree_that_sets_the_updater_switches(key: str, value: str) -> None:
+    """Claude Code copies settings.env over its environment and reads the updater switches as on only for 1, true,
+    yes or on, so a tree must not set them at all: the episode env and reef-claude's client_env own them. Windows
+    matches env names in any case."""
+    with pytest.raises(RenderError, match=f"must not set {key} in settings.env"):
+        render_composition([("config", {"data": {"env": {key: value}}})], get_adapter("claude"))
+
+
+def test_claude_quirk_renders_a_tree_env_without_the_updater_switches() -> None:
+    assert "env" not in json.loads(render_composition([], get_adapter("claude"))["claude/settings.json"])
+    node = ("config", {"data": {"env": {"BASH_MAX_TIMEOUT_MS": "600000"}}})
+    rendered = json.loads(render_composition([node], get_adapter("claude"))["claude/settings.json"])
+    assert rendered["env"] == {"BASH_MAX_TIMEOUT_MS": "600000"}
+
+
+@pytest.mark.parametrize("value", [None, "enable", False])
+def test_claude_quirk_keeps_deep_link_registration_off(value: object) -> None:
+    """An interactive reef-claude run must not register the pinned binary as the person's claude-cli:// handler."""
+    rendered = json.loads(render_composition([], get_adapter("claude"))["claude/settings.json"])
+    assert rendered["disableDeepLinkRegistration"] == "disable"
+    with pytest.raises(RenderError, match="disableDeepLinkRegistration"):
+        render_composition([("config", {"data": {"disableDeepLinkRegistration": value}})], get_adapter("claude"))
+
+
 def test_bundled_adapters_are_discoverable() -> None:
     assert set(available_adapters()) >= {"claude", "codex", "dsh", "opencode", "pi"}
 
@@ -395,11 +428,40 @@ def test_pi_descriptor_declares_what_an_interactive_run_needs() -> None:
     assert descriptor.client_tools == (("rg", "ripgrep"), ("fd", "fd"))
 
 
+def test_claude_descriptor_turns_deep_link_registration_off_on_the_command_line() -> None:
+    """Claude Code skips a whole settings.json that fails its schema, so reef-claude passes the setting as flag
+    settings, which no tree can change."""
+    assert get_adapter("claude").client_args == ("--settings", '{"disableDeepLinkRegistration":"disable"}')
+
+
+def test_claude_descriptor_names_its_version_flags_and_turns_its_own_updater_off() -> None:
+    """A version flag gets nothing ahead of it. Claude Code's own update and install commands, and its background
+    updater, would install the latest release over the person's claude, so a reef-claude run turns them off."""
+    descriptor = get_adapter("claude")
+    assert descriptor.client_version_args == ("--version", "-v", "-V")
+    assert descriptor.client_env == {"DISABLE_AUTOUPDATER": "1", "DISABLE_UPDATES": "1"}
+
+
+@pytest.mark.parametrize("key", ["client_args", "client_version_args"])
+@pytest.mark.parametrize("value", ["--settings", [1], [""]])
+def test_descriptor_client_argument_lists_are_lists_of_strings(tmp_path, key: str, value: object) -> None:
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "claude" / "descriptor.yaml").read_text())
+    data[key] = value
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=f"'{key}'"):
+        load_descriptor(target)
+
+
 def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:
     """A reef-<adapter> run keeps what the binary's resume and first-run setup read in the installed tree."""
-    kept = {name: get_adapter(name).client_state for name in ("pi", "claude", "codex", "hermes", "dsh")}
+    kept = {
+        name: tuple(replace(state, preference_keys=()) for state in get_adapter(name).client_state)
+        for name in ("pi", "claude", "codex", "hermes", "dsh")
+    }
     assert kept == {
-        "pi": (ClientState("pi-agent/sessions", "directory"),),
+        # pi writes settings.json in place at its first interactive start (lastChangelogVersion).
+        "pi": (ClientState("pi-agent/sessions", "directory"), ClientState("pi-agent/settings.json", "file")),
         "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
         "codex": (ClientState("codex/sessions", "directory"),),
         "hermes": (ClientState("hermes/state.db", "sqlite"),),
@@ -418,6 +480,14 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
         ({"kind": "directory"}, "'path'"),
         ({"path": "sessions", "kind": "directory"}, "not below 'pi-agent'"),
         ({"path": "pi-agent", "kind": "directory"}, "not below 'pi-agent'"),
+        (
+            {"path": "pi-agent/sessions", "kind": "directory", "preference_keys": ["theme"]},
+            "'preference_keys' is for a 'file' entry",
+        ),
+        (
+            {"path": "pi-agent/settings.json", "kind": "file", "preference_keys": "theme"},
+            "'preference_keys' must be a list",
+        ),
     ],
 )
 def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path, entry, message: str) -> None:
@@ -430,6 +500,63 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
         load_descriptor(target)
 
 
+def test_a_client_state_file_that_is_a_config_target_names_the_keys_the_binary_may_change() -> None:
+    """The install writes a config target and the check skips client state, so a client state file that is also a
+    config target (pi's settings.json) names the keys its binary may change; the check covers every other key."""
+    for name in available_adapters():
+        descriptor = get_adapter(name)
+        targets = {target.path for target in descriptor.config_targets.values()}
+        for state in descriptor.client_state:
+            assert state.kind != "file" or state.path not in targets or state.preference_keys, (name, state.path)
+
+
+def test_pi_settings_keys_that_load_code_are_not_preference_keys() -> None:
+    """From these settings keys pi 0.84.2 loads code, skills, prompts or themes, runs a program, or decides whose code
+    loads, so none of them may be a key a session changes unchecked."""
+    (settings,) = [state for state in get_adapter("pi").client_state if state.path == "pi-agent/settings.json"]
+    checked_keys = {
+        "packages",
+        "extensions",
+        "skills",
+        "prompts",
+        "themes",
+        "shellPath",
+        "shellCommandPrefix",
+        "npmCommand",
+        "externalEditor",
+        "defaultProjectTrust",
+    }
+    assert checked_keys.isdisjoint(settings.preference_keys)
+    # What pi writes by itself, and what /model saves.
+    assert {"lastChangelogVersion", "theme", "defaultModel", "defaultProvider"} <= set(settings.preference_keys)
+
+
+def test_pi_settings_keys_pi_rewrites_on_load_are_rendered_in_their_new_form() -> None:
+    """pi 0.84.2 rewrites queueMode, a boolean websockets and a skills object when it loads settings.json and writes
+    the new form back on its next save; the render writes that form, so pi's save changes no key the check covers."""
+    files = render_composition(
+        [
+            (
+                "config",
+                {
+                    "data": {
+                        "queueMode": "all",
+                        "websockets": False,
+                        "skills": {"customDirectories": ["extra"], "enableSkillCommands": True},
+                    }
+                },
+            )
+        ],
+        get_adapter("pi"),
+    )
+    assert json.loads(files["pi-agent/settings.json"]) == {
+        "steeringMode": "all",
+        "transport": "sse",
+        "skills": ["extra"],
+        "enableSkillCommands": True,
+    }
+
+
 def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
     files = render_composition(
         [("skill", {"name": "notes", "text": "# Notes skill\n\nKeep short notes.\n"})], get_adapter("pi")
@@ -440,3 +567,72 @@ def test_pi_skill_without_frontmatter_gets_name_and_description() -> None:
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], get_adapter("pi"))["pi-agent/skills/own/SKILL.md"] == own[1]["text"]
+
+
+@pytest.mark.parametrize("reasoning", [True, False])
+def test_codex_catalog_uses_bound_capabilities(reasoning: bool) -> None:
+    from reef.core.model_metadata import ModelMetadata
+
+    descriptor = get_adapter("codex")
+    binding = ModelBinding("http://up", "custom/model", api="responses", metadata=ModelMetadata(640_000, reasoning))
+    files = render_composition(binding.compose_nodes(descriptor), descriptor)
+    config = tomllib.loads(files["codex/config.toml"])
+    assert config["model_catalog_json"] == "models.json"
+    model = next(model for model in json.loads(files["codex/models.json"])["models"] if model["slug"] == binding.model)
+    assert model["slug"] == binding.model
+    assert model["context_window"] == model["max_context_window"] == 640_000
+    assert bool(model["supported_reasoning_levels"]) is reasoning
+    assert model["supports_reasoning_summary_parameter"] is reasoning
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"context_window": True, "reasoning": True},
+        {"context_window": 0, "reasoning": True},
+        {"context_window": 100, "reasoning": "yes"},
+        {"context_window": 100, "reasoning": True, "base_instructions": "override"},
+    ],
+)
+def test_codex_rejects_invalid_model_metadata(metadata: dict[str, object]) -> None:
+    with pytest.raises(RenderError, match="codex model"):
+        render_composition(
+            [("config", {"target": "models", "data": {"models": {"m": metadata}}})], get_adapter("codex")
+        )
+
+
+@pytest.mark.parametrize(
+    ("model", "native_model"),
+    [
+        ("gpt-5.4", "gpt-5.4"),
+        ("openai/gpt-5.4", "gpt-5.4"),
+        ("gpt-5.4-2026-03-05", "gpt-5.4"),
+        ("gpt-5.4-mini", "gpt-5.4-mini"),
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("openai/gpt-6-astra", "gpt-6-astra"),
+    ],
+)
+@pytest.mark.parametrize("reasoning", [True, False])
+def test_codex_overrides_native_capabilities_and_keeps_instructions(
+    model: str, native_model: str, reasoning: bool
+) -> None:
+    from reef.core.model_metadata import ModelMetadata
+    from reef.harness.adapters.codex.quirks import bundled_model_catalog
+
+    descriptor = get_adapter("codex")
+    binding = ModelBinding("http://up", model, api="responses", metadata=ModelMetadata(640_000, reasoning))
+    files = render_composition(binding.compose_nodes(descriptor), descriptor)
+    assert tomllib.loads(files["codex/config.toml"])["model_catalog_json"] == "models.json"
+    bundled = bundled_model_catalog()
+    catalog = {entry["slug"]: entry for entry in json.loads(files["codex/models.json"])["models"]}
+    native = bundled[native_model]
+    expected = {
+        **native,
+        "slug": model,
+        "context_window": 640_000,
+        "max_context_window": 640_000,
+        "supports_reasoning_summary_parameter": reasoning,
+        "supported_reasoning_levels": native["supported_reasoning_levels"] if reasoning else [],
+        "default_reasoning_level": native["default_reasoning_level"] if reasoning else None,
+    }
+    assert catalog == {**bundled, model: expected}
