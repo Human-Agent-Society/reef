@@ -2,20 +2,37 @@
 
 When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
 
-  Checks the installed release's requirements before starting the proxy or
-  agent. Unmet items print their setup hints and exit 3. Required programs
-  must still be on PATH, even when setup previously checked them off.
+  First checks the files the install wrote against what it recorded in
+  ``~/.reef/installs``, outside the install root: a file that changed since
+  or is reached through a link (client state aside, but for the keys of pi's
+  ``settings.json`` outside its preferences) is named and the wrapper exits
+  3, and ``update`` restores it; an install root that now leads through a
+  link is refused the same way. A tree no install recorded is not checked, and the
+  wrapper says so on stderr. The install writes the wrapper itself beside the
+  record, outside the tree, since it runs the check. Then checks the
+  installed release's requirements before starting the proxy or agent.
+  Unmet items print their setup hints and exit 3. Required programs must
+  still be on PATH, even when setup previously checked them off.
 
   1. Starts a local capture proxy (``reef_client.serve``) that forwards to
      Reef, injecting ``x-reef-scenario`` so the user's agent binary never
      needs to know about Reef headers.
   2. Rewrites the provider config in a temp copy of the composition to point
-     the agent at the proxy instead of Reef directly.
+     the agent at the proxy instead of Reef directly. The copy is made in
+     ``$XDG_CACHE_HOME/reef-harness/sessions`` (``~/.cache`` by default),
+     never in TMPDIR, which the codex and dsh sandboxes can write. With a
+     record, the copy holds copies of the files the install wrote and links
+     to the client state, nothing else; a link a session put at a client
+     state path is removed first, but at a recorded settings file the check
+     refuses it.
   3. Runs the agent binary as a subprocess, with the adapter's
      ``client_args`` ahead of the person's arguments unless the first is one
-     of its ``client_version_args``.
+     of its ``client_version_args``. SIGHUP (the terminal closed) and SIGTERM
+     are passed to the agent; once it exits, the steps below still run and
+     the wrapper exits 128 plus the signal number.
   4. After the agent exits, persists the captured receipts (the
-     ``x-reef-agent-record-id`` values from each response) to disk.
+     ``x-reef-agent-record-id`` values from each response) to disk and
+     removes the temp copy.
 
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
@@ -164,8 +181,10 @@ lines, mode 0600, written by ``setup`` alone. A session run through the
 wrapper gets each variable unless the shell already sets it (the shell
 wins); the values never enter the tree and are never sent anywhere. The
 wrapper also exports ``REEF_HARNESS_WRAPPER``, the path of the ``reef-<adapter>``
-script at the install root, so an extension in the agent can run ``update``
-and ``setup`` from the session.
+script in ``~/.reef/installs/<sha256 of the install root>``, beside the
+record (at the install root, for an install made before Reef wrote it
+there), so an extension in the agent can run ``update`` and ``setup`` from
+the session.
 """
 
 from __future__ import annotations
@@ -179,6 +198,7 @@ import os
 import re
 import shlex
 import shutil
+import signal
 import socket
 import sqlite3
 import subprocess
@@ -196,6 +216,7 @@ from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
+from types import FrameType
 from typing import Any
 
 import yaml
@@ -204,7 +225,7 @@ from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_han
 from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
 from reef.harness.episodes.vendor_install import version_probe_env
 from reef.harness.episodes.version_check import ships_version_check
 from reef.harness.step_result import design_sections, next_action, rejection_text
@@ -511,17 +532,47 @@ def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port:
         dst.write_text(text, encoding="utf-8")
 
 
-def _create_temp_composition(adapter: str, compose_dir: str, proxy_port: int) -> str:
-    """Symlink the composition into a temp dir, overriding the binding files."""
+def _create_temp_composition(
+    adapter: str,
+    compose_dir: str,
+    proxy_port: int,
+    copied: Sequence[PurePosixPath] | None = None,
+    linked: Sequence[PurePosixPath] = (),
+) -> str:
+    """Build the composition in a temp dir, overriding the binding files.
+
+    The temp dir is made in ``$XDG_CACHE_HOME/reef-harness/sessions``
+    (``~/.cache`` by default), readable by the person alone. ``copied`` names the files below the composition directory the
+    install recorded, each copied with its mode into real directories, and
+    ``linked`` the client state, linked one by one, so a file added to the
+    installed tree after the install never reaches a session, what the
+    binary writes over a copied file stays in the temp copy, and a binary
+    that skips a linked file (Codex skips a linked ``SKILL.md``) still reads
+    the tree. A recorded file that is a link now is not copied, so the copy
+    never reads through a link. None links every top-level item, for a tree
+    the install recorded nothing for."""
     compose = Path(compose_dir)
-    temp_dir = tempfile.mkdtemp(prefix="reef-harness-")
+    # The person's cache directory, never TMPDIR or /tmp: Codex's workspace-write sandbox and the dsh sandbox let a
+    # command write those, and the copy holds the config the agent reads again during the session (codex reads its
+    # config.toml and rules again on /new) and the binding with the token.
+    copies_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "reef-harness" / "sessions"
+    copies_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix="reef-harness-", dir=copies_dir)
     temp = Path(temp_dir)
 
-    for item in compose.iterdir():
-        dst = temp / item.name
-        if dst.exists() or dst.is_symlink():
+    for relative in copied or ():
+        src, dst = compose / relative, temp / relative
+        if src.is_symlink() or not src.is_file():
             continue
-        os.symlink(item, dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        shutil.copymode(src, dst)
+    for relative in [PurePosixPath(item.name) for item in compose.iterdir()] if copied is None else linked:
+        src, dst = compose / relative, temp / relative
+        if dst.exists() or dst.is_symlink() or not (src.exists() or src.is_symlink()):
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(src, dst)
 
     _rewrite_config(adapter, compose, temp, proxy_port)
     return temp_dir
@@ -713,9 +764,13 @@ def _release_file_path(compose_dir: str) -> Path:
 
 
 def _read_release_info(compose_dir: str) -> dict[str, Any] | None:
-    """The release file beside the installed tree as a dict; None when there is none or it is not JSON."""
+    """The release file beside the installed tree as a dict; None when there is none, it is not JSON, or it is not a
+    regular file (a FIFO there would block the read)."""
+    path = _release_file_path(compose_dir)
+    if not path.is_file():
+        return None
     try:
-        record = json.loads(_release_file_path(compose_dir).read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return record if isinstance(record, dict) else None
@@ -723,10 +778,170 @@ def _read_release_info(compose_dir: str) -> dict[str, Any] | None:
 
 def _write_release_info(compose_dir: str, record: Mapping[str, Any]) -> None:
     # Written beside and renamed over, so a session starting meanwhile reads the old record or the new, never half.
+    # O_EXCL after the unlink: a link a session put at the staging name is removed, never written through.
     release_file = _release_file_path(compose_dir)
     staging = release_file.with_name(f".{release_file.name}.part")
-    staging.write_text(json.dumps(dict(record), indent=2) + "\n", encoding="utf-8")
+    staging.unlink(missing_ok=True)
+    file_descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(record), indent=2) + "\n")
     os.replace(staging, release_file)
+
+
+def wrapper_directory(install_root: Path) -> Path:
+    """``~/.reef/installs/<sha256 of install_root>``, outside the root: the install writes the ``reef-<adapter>``
+    wrapper in it, and the record beside it, the same name with ``.json`` added. ``install_root`` is hashed as given,
+    so it must be the resolved root the install named, as the wrapper bakes it."""
+    return Path.home() / ".reef" / "installs" / hashlib.sha256(os.fsencode(install_root)).hexdigest()
+
+
+def read_install_record(compose_dir: str) -> dict[str, Any] | None:
+    """What the install script recorded for this install root: ``install_root``, ``service_url`` (the address the
+    script was served from), ``release_file`` (the checksum of the release file without its check offs), ``files``
+    (each file it wrote, relative to the root, with its sha256) and ``settings`` (for a JSON file the binary writes
+    too, its ``preference_keys`` and the ``checked_values`` of every other key). None when no install recorded one.
+
+    The record is beside the wrapper, outside the tree: the tree may sit in the project a session can write, and the
+    record must not. The root is the composition directory's parent as the wrapper names it, the resolved root the
+    install wrote, not resolved again: a link a session put at the root, or at the composition directory, would
+    move the lookup elsewhere."""
+    install_root = Path(compose_dir).parent
+    try:
+        record = json.loads(wrapper_directory(install_root).with_suffix(".json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("install_root") != str(install_root):
+        return None
+    return record
+
+
+def recorded_install_files(record: Mapping[str, Any]) -> dict[str, str]:
+    """The record's files, each root-relative path with its sha256."""
+    files = record.get("files")
+    if not isinstance(files, Mapping):
+        return {}
+    return {str(relative): str(checksum) for relative, checksum in files.items()}
+
+
+def recorded_settings(
+    descriptor: AdapterDescriptor, record: Mapping[str, object]
+) -> dict[str, tuple[frozenset[str], Mapping[str, object]]]:
+    """Each recorded file the binary writes too (a ``client_state`` file with ``preference_keys``), with the
+    preference keys the record lets it change and the value the install wrote for every other key. A file the record
+    keeps no entry of that shape for, a damaged record or one written before Reef checked settings, gets none of
+    either, so every key counts as changed and the start is refused until ``update`` records it again."""
+    entries = record.get("settings")
+    files = recorded_install_files(record)
+    checks: dict[str, tuple[frozenset[str], Mapping[str, object]]] = {}
+    for state in descriptor.client_state:
+        if not state.preference_keys or state.path not in files:
+            continue
+        entry = entries.get(state.path) if isinstance(entries, Mapping) else None
+        preference_keys = entry.get("preference_keys") if isinstance(entry, Mapping) else None
+        checked_values = entry.get("checked_values") if isinstance(entry, Mapping) else None
+        if isinstance(preference_keys, list) and isinstance(checked_values, Mapping):
+            checks[state.path] = (frozenset(str(key) for key in preference_keys), checked_values)
+        else:
+            checks[state.path] = (frozenset(), {})
+    return checks
+
+
+def changed_settings(
+    path: Path, preference_keys: frozenset[str], checked_values: Mapping[str, object]
+) -> list[str] | None:
+    """The top-level keys of the JSON object at ``path``, outside ``preference_keys``, whose value is not the one in
+    ``checked_values`` (a key added or removed included), sorted; None when the file is not a JSON object."""
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(settings, dict):
+        return None
+    current = {key: value for key, value in settings.items() if key not in preference_keys}
+    return sorted(
+        key
+        for key in current.keys() | checked_values.keys()
+        if key not in current or key not in checked_values or current[key] != checked_values[key]
+    )
+
+
+def is_client_state(descriptor: AdapterDescriptor, relative: PurePosixPath) -> bool:
+    """Whether a root-relative path is client state or lies below it: the binary's to write, and not checked but for
+    the keys of a recorded settings file outside its preference keys."""
+    states = [PurePosixPath(state.path) for state in descriptor.client_state]
+    return any(relative == state or state in relative.parents for state in states)
+
+
+def link_on_path(install_root: Path, relative: str) -> str | None:
+    """How a link reaches ``relative`` below ``install_root``, in the words the refusal prints; None when none does.
+
+    The install writes a recorded file where it is, so a link at the file,
+    a link at a directory above it (the composition directory included) or
+    a second hard link to it would take that write elsewhere."""
+    parts = PurePosixPath(relative).parts
+    for depth in range(1, len(parts) + 1):
+        part = PurePosixPath(*parts[:depth])
+        if (install_root / part).is_symlink():
+            return "a link" if depth == len(parts) else f"{part} is a link"
+    path = install_root / relative
+    if path.is_file() and path.stat().st_nlink > 1:
+        return "a hard link"
+    return None
+
+
+def changed_install_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapping[str, Any]) -> list[str]:
+    """The files the install recorded that differ from the record now, relative to the install root.
+
+    A file is changed when it is gone, holds other bytes, is reached
+    through a link, or is not a regular file (a FIFO, say); the last two are
+    named after it: the next install would write through the link, a link
+    that reads the same bytes would pass as the file, and the install refuses
+    what is not a regular file until it is removed. Client state is skipped,
+    except a JSON file the binary writes too (pi's ``settings.json``): there
+    every key but the binary's preferences must hold the value the install
+    wrote, and the keys that do not are named after it. The release file
+    counts by the part the install wrote, without the check offs ``setup``
+    adds."""
+    install_root = Path(str(record["install_root"]))
+    settings_checks = recorded_settings(descriptor, record)
+    changed = []
+    for relative, checksum in sorted(recorded_install_files(record).items()):
+        if relative not in settings_checks and is_client_state(descriptor, PurePosixPath(relative)):
+            continue
+        path = install_root / relative
+        link = link_on_path(install_root, relative)
+        if link is not None:
+            changed.append(f"{relative} ({link})")
+        elif path.exists() and not path.is_file():
+            changed.append(f"{relative} (not a regular file)")
+        elif relative in settings_checks and path.is_file():
+            keys = changed_settings(path, *settings_checks[relative])
+            if keys is None:
+                changed.append(f"{relative} (not a JSON object)")
+            elif keys:
+                changed.append(f"{relative} (keys: {', '.join(keys)})")
+        elif not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
+            changed.append(relative)
+    release_checksum = record.get("release_file")
+    if isinstance(release_checksum, str):
+        release_path = install_root / HARNESS_RELEASE_FILE
+        link = link_on_path(install_root, HARNESS_RELEASE_FILE)
+        info = _read_release_info(compose_dir)
+        written = {key: value for key, value in (info or {}).items() if key != "setup"}
+        text = json.dumps(written, indent=2) + "\n"
+        if link is not None:
+            changed.append(f"{HARNESS_RELEASE_FILE} ({link})")
+        elif release_path.exists() and not release_path.is_file():
+            changed.append(f"{HARNESS_RELEASE_FILE} (not a regular file)")
+        elif info is None or hashlib.sha256(text.encode("utf-8")).hexdigest() != release_checksum:
+            changed.append(HARNESS_RELEASE_FILE)
+    return changed
+
+
+def recorded_service_url(compose_dir: str) -> str | None:
+    """The Reef address the install recorded, without ``/v1``; None when no install recorded one."""
+    service_url = (read_install_record(compose_dir) or {}).get("service_url")
+    return _strip_v1(service_url.rstrip("/")) if isinstance(service_url, str) and service_url else None
 
 
 #: The values the person gave ``setup`` for ``env`` items, beside the release file; ``run_agent`` reads it.
@@ -740,9 +955,14 @@ def _env_file_path(compose_dir: str) -> Path:
 
 
 def _read_env_file(compose_dir: str) -> dict[str, str]:
-    """The env file as a dict, ``NAME=VALUE`` per line; blank lines, ``#`` comments and lines without ``=`` are skipped."""
+    """The env file as a dict, ``NAME=VALUE`` per line; blank lines, ``#`` comments and lines without ``=`` are skipped.
+
+    Only a regular file is read: a FIFO a session put there would block the start."""
+    path = _env_file_path(compose_dir)
+    if not path.is_file():
+        return {}
     try:
-        lines = _env_file_path(compose_dir).read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return {}
     values: dict[str, str] = {}
@@ -832,6 +1052,21 @@ def _item_line(item: Mapping[str, Any]) -> str:
     return f"{item['name']} ({item.get('kind', 'unknown')})" + (f": {check}" if check else "")
 
 
+def keep_client_files(kept: Mapping[ClientState, PurePosixPath], temp: Path, compose: Path) -> None:
+    """Copy each ``file`` kind of client state the binary wrote in the temp copy into the installed tree."""
+    for state, relative in kept.items():
+        written = temp / relative
+        # A file still linked was written through the link; a real one is new, or renamed over the link.
+        if state.kind != "file" or written.is_symlink() or not written.is_file():
+            continue
+        destination = compose / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, staging = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}-")
+        os.close(file_descriptor)
+        shutil.copy2(written, staging)  # with its mode: dsh refuses credentials readable beyond their owner
+        os.replace(staging, destination)
+
+
 #: Where an adapter's binary keeps the sessions a person resumes, and the file name around a session's id. The
 #: binary's own exit hint names the bare vendor command, which runs outside this install and its proxy.
 RESUMABLE_SESSION_LAYOUTS = {"hermes": ("sessions", "session_", ".json")}
@@ -851,11 +1086,50 @@ def resumable_session_mtimes(adapter: str, compose_dir: str) -> dict[str, float]
 
 
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
+    descriptor = get_adapter(adapter)
+    install_root = Path(compose_dir).parent.resolve()
+    # A session can write a tree installed in its project, and the next session must not run what it wrote.
+    install_record = read_install_record(compose_dir)
+    if install_record is not None and install_root != Path(compose_dir).parent:
+        # The install names the resolved root, so a link on the way to it (at the root or a directory above it) is
+        # new, and following it would check and run a tree the install never wrote; update would install there too.
+        print(
+            f"reef-{adapter}: cannot start agent; {Path(compose_dir).parent} now leads through a link to "
+            f"{install_root}, which the install did not make: remove the link and run the install command again",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    if install_record is None and descriptor.install is not None:
+        # Said on every such start: an unchecked start must not look like a checked one.
+        print(
+            f"reef-{adapter}: {install_root} has no install record, so its files were not checked before this "
+            f"session; reef-{adapter} update records them",
+            file=sys.stderr,
+        )
+    changed = [] if install_record is None else changed_install_files(descriptor, compose_dir, install_record)
+    if changed:
+        print(
+            f"reef-{adapter}: cannot start agent; these files in {install_root} changed since the install wrote them:",
+            file=sys.stderr,
+        )
+        for changed_path in changed:
+            print(f"  {changed_path}", file=sys.stderr)
+        print(
+            f"reef-{adapter}: run reef-{adapter} update to restore them, then start the agent again",
+            file=sys.stderr,
+        )
+        sys.exit(3)
     upstream = _reef_url_of(adapter, compose_dir)
 
     record = _read_release_info(compose_dir) or {}
     release = _installed_release(compose_dir)
-    stored = _read_env_file(compose_dir)
+    if install_record is None:
+        stored = _read_env_file(compose_dir)
+    else:
+        # The check above covers the release file, so these env items are the release's own: another line in the
+        # env file, which a session can write too, never reaches the agent's environment.
+        wanted = {_env_variable(item) for item in _named_items(record.get("requires")) if item.get("kind") == "env"}
+        stored = {name: value for name, value in _read_env_file(compose_dir).items() if name in wanted}
     checked = {item["name"]: item for item in _named_items(record.get("setup"))}
     unmet = []
     missing_programs: set[str] = set()
@@ -893,24 +1167,46 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     except WrapperError as exc:
         sys.exit(f"reef-{adapter}: {exc}")
 
-    descriptor = get_adapter(adapter)
     # The temp copy is removed after the run: state kept in the installed tree is linked into it
     # instead, so a later run finds the sessions and settings an earlier run saved.
-    kept = {
-        state: PurePosixPath(state.path).relative_to(descriptor.compose_relocation()[1])
-        for state in descriptor.client_state
-    }
+    subdir = PurePosixPath(descriptor.compose_relocation()[1])
+    kept = {state: PurePosixPath(state.path).relative_to(subdir) for state in descriptor.client_state}
     for state, relative in kept.items():
         path = Path(compose_dir) / relative
+        # A link here, which a session can make in a tree it can write, would take the binary's writes wherever it
+        # points, outside the tree too. The install writes client state only as a recorded settings file, whose link
+        # the check above refuses; here the link goes, and the state is the tree's own again. Removing a link leaves
+        # what it points at as it was.
+        for depth in range(1, len(relative.parts) + 1):
+            part = Path(compose_dir, *relative.parts[:depth])
+            if part.is_symlink():
+                target = os.readlink(part)
+                part.unlink()
+                print(
+                    f"reef-{adapter}: {part.relative_to(Path(compose_dir).parent)} in {install_root} was a link to "
+                    f"{target}; removed the link, and the session keeps this state in the tree",
+                    file=sys.stderr,
+                )
+                break
         if state.kind == "directory":
             path.mkdir(parents=True, exist_ok=True)
         elif state.kind == "sqlite" and not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             with contextlib.closing(sqlite3.connect(path)) as database:
                 database.execute("VACUUM")  # writes the database header, so the file is a database
-    temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
+    # With a record, the session gets copies of the files the install wrote and the client state, nothing else in
+    # the tree.
+    copied: list[PurePosixPath] | None
+    if install_record is None:
+        copied = None
+    else:
+        recorded = [PurePosixPath(relative) for relative in recorded_install_files(install_record)]
+        copied = sorted(
+            path.relative_to(subdir)
+            for path in recorded
+            if subdir in path.parents and not is_client_state(descriptor, path)
+        )
     env = os.environ.copy()
-    env[env_var] = temp_dir
     # What an interactive run needs beyond the episode env; the person's own setting wins.
     for key, value in descriptor.client_env.items():
         env.setdefault(key, value)
@@ -920,21 +1216,25 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             env[key] = value
     # The update notice extension needs the service address, the scenario,
     # and the true install root; the relocated temp copy carries none of them.
-    install_root = Path(compose_dir).resolve().parent
     env["REEF_SERVICE_URL"] = upstream
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(install_root)
-    wrapper = install_root / f"reef-{adapter}"
+    # The wrapper the install wrote, so an extension can run its update and setup from the session: beside the
+    # record, where a session that can write only its project cannot rewrite it (its record removed or not), or in
+    # the tree for an install made before Reef wrote it there.
+    installed_wrapper = wrapper_directory(install_root) / f"reef-{adapter}"
+    wrapper = installed_wrapper if installed_wrapper.is_file() else install_root / f"reef-{adapter}"
     if wrapper.is_file():
-        # The wrapper the install wrote, so an extension can run its update and setup from the session.
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
     # The session tag every call of this run carries, so a request filed from inside the session names it.
     env["REEF_HARNESS_SESSION"] = tags["session"]
     # An evolved tool that starts a second agent session finds this harness's own binary first, and a command
-    # that runs reef-<adapter> by name reaches this install's wrapper, not the one another install linked.
-    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), str(install_root), env.get("PATH", "")])
+    # that runs reef-<adapter> by name reaches this install's wrapper, not the one another install linked. For an
+    # install that wrote its wrapper beside the record that is the wrapper's own directory, never the tree, where a
+    # program a session adds (a node, say) would run in the next session unchecked.
+    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), str(wrapper.parent), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
@@ -943,25 +1243,48 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     # Ahead of the person's arguments: a binary that reads the last of a repeated flag keeps the person's.
     # A version flag starts no session, and a binary may take it only when nothing is ahead of it.
     leading_args = () if args and args[0] in descriptor.client_version_args else descriptor.client_args
+    # A closed terminal (SIGHUP) or a kill (SIGTERM) would end the wrapper before its cleanup, leaving the temp
+    # copy, whose binding holds the token, behind: pass the signal to the agent, wait for it, then clean up.
+    received: list[int] = []
+    agent: subprocess.Popen[bytes] | None = None
+
+    def forward(signum: int, frame: FrameType | None) -> None:
+        received.append(signum)
+        if agent is not None:
+            agent.send_signal(signum)
+
+    # A signal the caller ignores (nohup) stays ignored, for the agent too.
+    previous = {
+        signum: signal.signal(signum, forward)
+        for signum in (signal.SIGHUP, signal.SIGTERM)
+        if signal.getsignal(signum) is not signal.SIG_IGN
+    }
+    temp_dir: str | None = None
+    returncode = 0
     try:
-        result = subprocess.run([binary, *leading_args, *args], env=env)
+        temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port, copied, sorted(set(kept.values())))
+        env[env_var] = temp_dir
+        if not received:
+            # As subprocess.run does: Ctrl-C reaches the agent too, and a KeyboardInterrupt here kills it.
+            with subprocess.Popen([binary, *leading_args, *args], env=env) as agent:
+                if received:
+                    agent.send_signal(received[0])  # it came while the agent started
+                try:
+                    returncode = agent.wait()
+                except BaseException:
+                    agent.kill()
+                    raise
     finally:
         proxy.publish_turn()
         proxy.stop()
         try:
-            for state, relative in kept.items():
-                written = Path(temp_dir) / relative
-                # A file still linked was written through the link; a real one is new, or renamed over the link.
-                if state.kind != "file" or written.is_symlink() or not written.is_file():
-                    continue
-                destination = Path(compose_dir) / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                file_descriptor, staging = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}-")
-                os.close(file_descriptor)
-                shutil.copy2(written, staging)  # with its mode: dsh refuses credentials readable beyond their owner
-                os.replace(staging, destination)
+            if temp_dir is not None:
+                keep_client_files(kept, Path(temp_dir), Path(compose_dir))
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
 
     # The one session this run wrote, by its file: the newest row would pick a session another run keeps open.
     written_session_ids = [
@@ -974,7 +1297,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             f"reef-{adapter}: resume this session with: reef-{adapter} --resume {written_session_ids[0]}",
             file=sys.stderr,
         )
-    sys.exit(result.returncode)
+    sys.exit(128 + received[0] if received else returncode)
 
 
 def _reportable(turn: Mapping[str, Any]) -> bool:
@@ -1634,7 +1957,13 @@ def page(scenario: str, adapter: str, compose_dir: str, step: int, *, open_page:
 
 
 def _reef_url_of(adapter: str, compose_dir: str) -> str:
-    """Reef's base URL from the installed tree, or an exit naming what is missing."""
+    """Reef's base URL: the one the install recorded, else from the installed tree, or an exit naming what is missing.
+
+    The record comes first: a session can change the model binding of a tree
+    in its project, and ``update`` must not run a script from that address."""
+    recorded = recorded_service_url(compose_dir)
+    if recorded is not None:
+        return recorded
     try:
         reef_url = _extract_reef_url(adapter, Path(compose_dir))
     except WrapperError as exc:
@@ -1742,7 +2071,7 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
         session_root
         and session_service
         and session_scenario
-        and Path(session_root).resolve() == Path(compose_dir).resolve().parent
+        and Path(session_root).resolve() == Path(compose_dir).parent.resolve()
     ):
         upstream = _strip_v1(session_service.rstrip("/"))
         scenario = session_scenario
@@ -2020,8 +2349,11 @@ def binary_install_prefix(adapter: str) -> str | None:
 def _run_install_script(script: bytes, install_root: Path, token: str | None, prefix: str | None = None) -> int:
     """Run a fetched install script with ``bash`` for ``install_root``; its exit status, 127 when bash cannot run.
 
-    ``REEF_TOKEN`` rides in the script's environment, so the binding it
-    writes keeps the token the wrapper reaches reef with; ``prefix``, the
+    The script reaches bash on its standard input, as ``curl ... | bash``
+    runs it, and never sits in a file: bash reads a script file while it
+    runs, and a copy in TMPDIR is one a sandboxed command could rewrite
+    first. ``REEF_TOKEN`` rides in the script's environment, so the binding
+    it writes keeps the token the wrapper reaches reef with; ``prefix``, the
     script's second argument, keeps the binary where the first install put
     it."""
     env = os.environ.copy()
@@ -2031,17 +2363,12 @@ def _run_install_script(script: bytes, install_root: Path, token: str | None, pr
     env["REEF_PYTHON"] = sys.executable
     # Older services generate scripts that still resolve python3 on PATH.
     env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
-    with tempfile.NamedTemporaryFile(prefix="reef-harness-install-", suffix=".sh", delete=False) as handle:
-        handle.write(script)
-        path = Path(handle.name)
     try:
         arguments = [str(install_root)] if prefix is None else [str(install_root), prefix]
-        return subprocess.run(["bash", str(path), *arguments], env=env).returncode
+        return subprocess.run(["bash", "-s", "--", *arguments], input=script, env=env).returncode
     except OSError as exc:
         print(f"reef-harness: cannot run bash: {exc}", file=sys.stderr)
         return 127
-    finally:
-        path.unlink(missing_ok=True)
 
 
 def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None = None) -> int:
@@ -2051,7 +2378,18 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     the scenario header and runs with ``bash`` and the install root as its
     destination; 1 when the fetch or the script fails. While the release
     requires an item that is not met the items are printed and nothing is
-    fetched: 3, the script would refuse anyway, this says why first."""
+    fetched: 3, the script would refuse anyway, this says why first. 3 too,
+    fetching nothing, when the recorded install root now leads through a link."""
+    install_root = Path(compose_dir).parent
+    if read_install_record(compose_dir) is not None and install_root.resolve() != install_root:
+        # The install names the resolved root, so a link on the way to it is new: an install through it would write
+        # the tree, and prune it, wherever the link points.
+        print(
+            f"reef-{adapter} update: {install_root} now leads through a link to {install_root.resolve()}, which the "
+            "install did not make: remove the link and run the install command again",
+            file=sys.stderr,
+        )
+        return 3
     state = _load_setup(scenario, adapter, compose_dir, release, "update")
     if state is None:
         return 1
@@ -2084,9 +2422,7 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     except OSError as exc:
         print(f"reef-{adapter} update: reef unreachable at {state.upstream}: {exc}", file=sys.stderr)
         return 1
-    status = _run_install_script(
-        script, Path(compose_dir).resolve().parent, state.token, binary_install_prefix(adapter)
-    )
+    status = _run_install_script(script, install_root.resolve(), state.token, binary_install_prefix(adapter))
     if status != 0:
         print(f"reef-{adapter} update: the install script exited {status}", file=sys.stderr)
         return 1
@@ -2120,7 +2456,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     except Exception as exc:  # pragma: no cover - the wrapper itself imports both
         rows.append((False, "interpreter", f"{sys.executable} does not import reef: {exc}"))
     try:
-        upstream = _extract_reef_url(adapter, Path(compose_dir))
+        upstream = recorded_service_url(compose_dir) or _extract_reef_url(adapter, Path(compose_dir))
     except WrapperError as exc:
         upstream = None
         rows.append((False, "service", f"binding unreadable: {exc}"))

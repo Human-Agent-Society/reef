@@ -584,44 +584,111 @@ the install works before any step has run:
    curl -fsS -H "x-reef-scenario: harness-evolve-demo" \
      'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
 
+   reef-pi doctor
    reef-pi -p "fix the failing test in auth.py"
    reef-pi report --score 0 --feedback "missed the empty-token case"
 
-With a token on the service, the exported ``REEF_TOKEN`` also reaches the
-script, which writes it into the installed harness's model binding.
+The script installs into ``~/reef-harness/<scenario>``, here
+``~/reef-harness/harness-evolve-demo``; ``bash -s -- <dir>`` names another
+install root. Keep any install root outside the project the agent works in.
+An agent can write files in its project, also from a sandbox such as
+Codex's ``workspace-write``, so with the install root there a session can
+change the files the next session runs, for example rewrite the agent's
+config so that the next session runs without approvals. For ``reef-codex``
+and ``reef-dsh``, also keep it out of ``/tmp`` and ``$TMPDIR``: the Codex and
+dsh sandboxes let a command write there too, so an install root there is as
+open to a session as one in the project. The default is outside all of
+these, unless the agent's project is your home directory itself.
 
-The script installs the pinned agent, writes the tree, writes the agent's
-model binding pointed at the address the script came from, which behind a
-gateway is the gateway's (Reef reads ``x-forwarded-host`` and
-``x-forwarded-proto`` when a proxy sets them); the served tree itself carries
-no endpoint or credential, and the binding takes its token from
-``REEF_TOKEN`` in your shell when the script runs. It also puts a
-``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH; the wrapper runs
-through the interpreter that imported reef when the script ran (``REEF_PYTHON``
-when set, otherwise ``python3`` on PATH). Wrapper updates pass their own
-interpreter as ``REEF_PYTHON``. The wrapper reads the
-token back from the binding, so the shell that runs it later needs neither
-on its own. The wrapper keeps
-the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor`` prints one line per thing the install needs
-(the interpreter and its imports, the service and its token, the binary,
-the tools on PATH, the installed release against the served head) and exits
-0 when they all hold; it also lists every release that waits for your
-review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
-(``-h``, ``help``) prints the wrapper's own subcommands (``report``,
-``evolve``, ``wait``, ``page``, ``doctor``, ``setup``, ``update``; anything
-else runs pi) before pi's help. Reef pins Claude Code's version, so
-``reef-claude`` runs Claude Code with ``DISABLE_UPDATES=1`` unless your
-shell sets it:
-``reef-claude upgrade`` and ``reef-claude install`` reach Claude Code's own
-update and install commands, which print that updates are disabled, and
-``reef-claude update`` is Reef's own command, which installs the served
-release. Reef refuses a harness tree whose ``settings.json`` sets
-``DISABLE_UPDATES``, but a ``.claude/settings.json`` of your own in the
-project folder can still turn those commands back on: Claude Code applies
-that file's ``env`` over the environment, and it reads ``DISABLE_UPDATES``
-as on only for ``1``, ``true``, ``yes`` or ``on``. Pinning,
-rollback, and the raw manifest routes are in `HTTP API
-<../reference/http-api.rst#harness-artifacts>`__.
+The script installs the pinned agent, writes the tree and its model binding,
+and writes a ``reef-<adapter>`` wrapper (here ``reef-pi``) outside the tree,
+in ``~/.reef/installs``, with ``~/.local/bin/reef-pi`` linked to it. With
+a token on the service, the exported ``REEF_TOKEN`` also reaches the script,
+which writes it into the binding. Later sessions read the token from that
+binding, and the wrapper keeps each run's receipts for ``report``.
+
+The binding points to the address that served the script. Behind a gateway,
+Reef uses ``x-forwarded-host`` and ``x-forwarded-proto`` when the proxy sets
+them. The published tree itself contains no endpoint or credential.
+
+The wrapper uses the interpreter that imported Reef during installation:
+``REEF_PYTHON`` when set, otherwise ``python3`` on PATH. Wrapper updates pass
+their own interpreter as ``REEF_PYTHON``. Install from a Python environment
+outside the project the agent works in: a session can write a virtual
+environment in its project, and code there runs as you when ``reef-pi``
+starts, before its check.
+
+``reef-pi doctor`` checks the interpreter and imports, service authentication,
+agent binary, tools on PATH, and installed release against the served head.
+It exits 0 when all checks pass and lists releases awaiting review, using the
+same descriptions as ``reef-pi evolve --wait``.
+
+``reef-pi --help`` (also ``-h`` or ``help``) lists wrapper subcommands before
+pi's help: ``report``, ``evolve``, ``wait``, ``page``, ``doctor``, ``setup``,
+and ``update``. Other arguments run pi. For pinning, rollback, and raw manifest
+routes, see `HTTP API <../reference/http-api.rst#harness-artifacts>`__.
+
+Reef pins Claude Code's version, so ``reef-claude`` runs Claude Code with
+``DISABLE_UPDATES=1`` unless your shell sets it. ``reef-claude upgrade`` and
+``reef-claude install`` reach Claude Code's own update and install commands,
+which print that updates are disabled, and ``reef-claude update`` is Reef's
+own command, which installs the served release. Reef refuses a harness tree
+whose ``settings.json`` sets ``DISABLE_UPDATES``, but a ``.claude/settings.json``
+of your own in the project folder can still turn those commands back on:
+Claude Code applies that file's ``env`` over the environment, and it reads
+``DISABLE_UPDATES`` as on only for ``1``, ``true``, ``yes`` or ``on``.
+
+Recover a changed installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Before starting an agent, the wrapper checks the installed release's files
+against its install record. If a checked file changed, the wrapper names it,
+prints ``cannot start agent``, and exits with status 3. Restore the files with:
+
+.. code:: bash
+
+   reef-pi update
+   reef-pi doctor
+
+Then start ``reef-pi`` again. If ``update`` names a link outside the install
+root or a non-regular file at a destination, remove that named entry before
+retrying. The installer refuses to write through it. Session state is not
+checked. pi's ``settings.json``, which the model binding writes, is checked,
+except the preferences pi saves itself (the model, the theme and the other
+``/settings`` choices but Default project trust, which decides whose code
+loads). ``reef-pi install``, ``reef-pi remove`` and ``reef-pi config``, and
+that one ``/settings`` choice, change keys the check covers, so the next start
+names them, for example ``pi-agent/settings.json (keys: packages)``, until
+``reef-pi update``, which rewrites ``settings.json`` as the install wrote it
+and so also resets the preferences pi saved there.
+
+The check stops a session that can write only its project, ``/tmp`` and
+``$TMPDIR``, as commands inside the Codex and dsh sandboxes can. A session
+that can write your home directory can also change the record in
+``~/.reef/installs`` and the wrapper, and then the check passes: pi, opencode
+and Hermes run commands with no sandbox, and Claude Code, and Codex outside
+its sandbox, run the commands you approve.
+
+Upgrade an older installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An install made before Reef recorded file checksums, or one whose record was
+removed, prints ``<install root> has no install record`` at each session
+start. Run ``reef-pi update`` once to write the record and enable the check.
+The update also moves the wrapper out of the tree, beside the record, and
+removes the ``reef-pi`` in the install root: run ``reef-pi`` from your PATH,
+or ``~/.local/bin/reef-pi``, which links to the latest install's wrapper. For
+another install of the same adapter, run the ``wrapper:`` path its install
+printed.
+
+Keep the install root, and the Python environment the wrapper runs, outside
+the project and, for Codex and dsh, outside ``/tmp`` and ``$TMPDIR``.
+See `Installed session files
+<../developer-guide/harness-adapters.rst#installed-session-files>`__ for the
+check's scope, state handling, and cleanup behavior.
+
+Ask for a harness change
+~~~~~~~~~~~~~~~~~~~~~~~
 
 You can also ask for a harness change in plain words. The tutorial's
 ``deployment.yaml`` runs in ``data.training_mode: hybrid``, so an ask needs
@@ -783,8 +850,10 @@ setup`` shows the prompt and asks you for the value (without echo when the
 name contains TOKEN, KEY, SECRET or PASSWORD; ``--yes`` asks nothing) and
 stores it there: ``NAME=VALUE`` lines, readable by you alone (mode 0600),
 written by ``setup`` only, never in the tree and never sent anywhere. Every
-``reef-pi`` session gets each stored variable in its environment unless
-your shell already sets it (the shell wins), so an evolved extension reads
+``reef-pi`` session gets each stored variable an ``env`` item of the
+installed release names (every stored variable on an install with no
+record in ``~/.reef/installs``) in its environment unless your shell
+already sets it (the shell wins), so an evolved extension reads
 ``process.env.NAME`` and keeps no file of its own. Three more forms take
 one item at a time, for scripts and for the session's extensions:
 ``reef-pi setup --json`` prints the release to set up and its items as one
@@ -886,7 +955,7 @@ the head), and name it to the promote route yourself. Both
 calls name the scenario your install used: the ``x-reef-scenario`` header
 you gave the install command or, without one, the generated name the script
 baked into ``reef-pi`` as ``REEF_HARNESS_SCENARIO``;
-``grep REEF_HARNESS_SCENARIO ./reef-harness/reef-pi`` prints it. The
+``grep REEF_HARNESS_SCENARIO ~/.local/bin/reef-pi`` prints it. The
 deployment listens on port 8901.
 
 .. code:: bash

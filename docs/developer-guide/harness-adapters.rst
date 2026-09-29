@@ -136,6 +136,98 @@ tree and configured executor before Reef writes episode files. It raises
 ``self_isolating`` nesting restriction. Execution, timeout, cleanup, and
 trajectory handling still use the shared episode code.
 
+opencode
+~~~~~~~~
+
+The ``opencode`` adapter runs ``opencode run --format json --auto "<task>"``
+headless. It renders configuration to ``opencode/opencode.json``, skills to
+``opencode/skill/<name>/SKILL.md``, and commands to
+``opencode/command/<name>.md``.
+
+Write a skill or command
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+For a skill named ``notes``, use a body such as:
+
+.. code:: text
+
+   ---
+   name: notes
+   description: Summarize the changes made during a task.
+   ---
+   List the changed files and the checks that ran.
+
+If a skill has no frontmatter, Reef supplies its directory name and first
+line as quoted ``name`` and ``description`` strings. If you provide your own
+frontmatter, include both fields.
+
+A command named ``review`` can select an existing agent:
+
+.. code:: text
+
+   ---
+   name: review
+   description: Review the current changes.
+   agent: plan
+   subtask: false
+   ---
+   Review the changes and explain any correctness problems.
+
+When present, frontmatter must be a YAML mapping between opening and closing
+``---`` lines, without a byte order mark, YAML tags, or an alternate format
+such as JSON. Quote strings containing a colon followed by a space, or
+numeric-looking text such as ``"1e5"``. Use ``true`` or ``false`` for
+booleans; ``yes`` is a string.
+Reef rejects unsupported frontmatter forms and fields with the wrong types
+during rendering.
+
+Command fields have these constraints:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Field
+     - Type and constraint
+   * - ``name``
+     - Optional; must match the command's file name. The name replaces any
+       existing command with that name, including ``/reefine``.
+   * - ``description``, ``variant``
+     - Strings when present.
+   * - ``agent``
+     - A string naming an enabled tree agent or a built-in agent: ``build``,
+       ``plan``, ``general``, ``explore``, ``title``, ``summary``, or ``compaction``.
+   * - ``subtask``
+     - A boolean when present.
+   * - ``model``
+     - Not allowed; Reef's model binding selects the model.
+
+Tree agents are configured under ``agent`` (or the older ``mode``). Their
+``disable`` and ``hidden`` fields are booleans, and ``mode`` is ``subagent``,
+``primary``, or ``all``. An agent may not set a different ``name``.
+``default_agent`` must name an enabled, non-hidden agent that is not a subagent.
+Without ``default_agent``, keep at least one agent meeting those conditions.
+Reef rejects invalid configurations before opencode can fail to start or load
+a command.
+
+Configuration and model binding
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The defaults keep autoupdate and sharing off, allow every permission, and set
+``enabled_providers`` to ``["reef"]``. Rendering rejects changes to those
+update, sharing, and provider-list settings.
+
+The deployment's model binding selects the provider and model. The tree must
+not contain inline credentials, set ``provider``, ``model``,
+``disabled_providers``, or ``small_model``, or choose a model in an agent or
+command. Reef rejects these overrides.
+
+Web search
+^^^^^^^^^^
+
+Interactive ``reef-opencode`` sessions offer the Exa ``websearch`` tool
+without requiring a search API key. Evaluation episodes do not enable this
+tool.
+
 DeepSeek Harness
 ~~~~~~~~~~~~~~~~
 
@@ -773,16 +865,152 @@ Descriptor fields
 - ``writable_paths`` lists state directories that a hosted sandbox makes
   writable. Rendered inputs within them stay read-only.
 - ``client_state`` lists ``{path, kind}`` entries for sessions and settings
-  that a ``reef-<adapter>`` wrapper keeps under the relocated composition.
-  The wrapper uses a temporary copy of links, then removes it. ``directory``
-  and ``sqlite`` entries are created and linked before the run; ``file``
-  entries are copied back with their mode if the binary created the file
-  or replaced its link. Other state created only in the temporary copy is
-  lost.
+  that the wrapper preserves between runs. Use ``directory`` or ``sqlite``
+  for state linked into a session, and ``file`` for files copied back if the
+  agent creates them or replaces their link. Include files the binary rewrites,
+  such as pi's ``settings.json``. A ``file`` entry that the install also
+  writes, a JSON object such as pi's ``settings.json``, lists
+  ``preference_keys``: the top-level keys the binary saves itself and that
+  load no code. The install records the value of every other key. See
+  `Installed session files`_ for the installation checks and copying rules.
 - ``cleanup_whitelist`` lists agent-written paths allowed after boot or a
   run, rather than reported as drift.
 - ``quirks`` names an optional module for adapter-specific render checks
   and boot mutations.
+
+Installed session files
+~~~~~~~~~~~~~~~~~~~~~~~
+
+The wrapper checks and copies installed files before starting a session.
+For installation and recovery commands, see `Install the published tree
+<../user-guide/evolve-your-harness.rst#install-the-published-tree>`__.
+
+Temporary session copies
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Each session runs the agent on a temporary copy of the tree whose model binding points at the
+wrapper's capture proxy and holds the token. The wrapper makes that copy in
+``$XDG_CACHE_HOME/reef-harness/sessions`` (``~/.cache/reef-harness/sessions``
+by default on Linux and macOS; on Windows the wrapper runs under WSL, where
+the same path applies), readable by you alone, and never in
+``$TMPDIR`` or ``/tmp``: a command in the Codex or dsh sandbox can write
+there, and Codex reads its config and rules from that copy again when you
+start a new thread with ``/new``. When the terminal closes (SIGHUP) or the
+wrapper gets SIGTERM, it passes the signal to the agent, waits for the
+agent to exit, removes the temp copy, keeps the receipts, and exits with
+128 plus the signal number. ``reef-pi update`` passes the install script to
+``bash`` on its standard input, as ``curl ... | bash`` does, so no copy of
+the script sits in ``$TMPDIR`` while it runs.
+
+Install records and validation
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The script also records what it wrote in ``~/.reef/installs/<sha256 of the
+install root>.json``, outside the install root: the sha256 of every file, of
+the release file without the check offs ``setup`` adds, the value of every
+key of pi's ``settings.json`` outside its preference keys, and the address
+the script came from. A ``reef-pi`` session starts only while those files
+are as the install wrote them. A file counts as changed also when a link
+reaches it: a link at the file or at a directory above it, or a second hard
+link to it; so does anything at its path that is not a regular file, such as
+a FIFO. When one differs, ``reef-pi`` prints ``cannot start agent; these
+files in <install root> changed since the install wrote them:``, the file
+names (a link is named after its file, for example ``pi-agent/models.json (a
+link)``, a FIFO as ``pi-agent/models.json (not a regular file)``, a changed
+key of pi's settings as ``pi-agent/settings.json (keys: extensions)``, and a
+settings file that no longer holds a JSON object as ``pi-agent/settings.json
+(not a JSON object)``) and ``run reef-pi update to restore them``, and exits
+3 without starting the agent; ``reef-pi update`` writes them again.
+
+The wrapper runs this check, so the install writes it beside the record, as
+``~/.reef/installs/<sha256 of the install root>/reef-pi``, links
+``~/.local/bin/reef-pi`` to it, and removes a ``reef-pi`` an earlier install
+wrote into the tree. The wrapper names the resolved install root. When that
+root later leads through a link, at the root or at a directory above it, a
+start prints ``cannot start agent; <install root> now leads through a link
+to <target>, which the install did not make``, ``reef-pi update`` refuses
+the same way, and both exit 3: remove the link and run the install command
+again.
+
+The record and the wrapper hold only while a session cannot write
+``~/.reef/installs`` or ``~/.local/bin``. A command inside the Codex or dsh
+sandbox can write only its project, ``/tmp`` and ``$TMPDIR``, so they are
+out of its reach. A pi, opencode or Hermes session runs commands with no
+sandbox, and Claude Code, and Codex outside its sandbox, run the commands
+and edits you approve: such a session can change or remove the record and
+the wrapper along with the tree, and the check does not stop it. The Python
+the wrapper runs (``REEF_PYTHON``, or the ``python3`` the install found) and
+the ``reef`` package in it run before the check, and the check does not read
+the agent under ``~/.local/share/reef-harness``, so keep them outside the
+project too.
+
+``~/.local/bin/reef-pi`` links to the wrapper of the latest install. Each
+install prints its own wrapper's path as ``wrapper:``; run that path to
+start another install of the same adapter.
+
+Links and non-regular files
+^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The installer handles links before writing:
+
+- A link to a file inside the install root is replaced with a regular copy of
+  its target, preserving setup check-offs when the linked file is the release
+  file. A link to a directory is removed and that directory is written again.
+- A link outside the install root is refused. The installer names the link
+  and target and writes nothing until you remove it.
+- A non-regular file at a destination is also refused and named. Remove it
+  before retrying; the installer writes nothing while it remains.
+- When removing files absent from a new release, the installer leaves paths
+  under linked directories untouched and prints
+  ``did not remove <path>: <directory> is a link``.
+
+``setup`` and ``update`` also refuse to write the release file through a link.
+
+Mutable client state
+^^^^^^^^^^^^^^^^^^^^
+
+The sessions and settings the adapter keeps (``client_state`` in its
+descriptor) are the agent's own to write and are not checked, except pi's
+``settings.json`` when the install wrote it (the model binding does). pi
+saves its preferences there, the model, the theme and the ``/settings``
+choices except Default project trust, and those keys may change. Every other
+key must keep the value the install wrote: the ones ``pi install``, ``pi
+remove`` and ``pi config`` write (``packages``, ``extensions``, ``skills``,
+``prompts``, ``themes``), ``defaultProjectTrust``, which the Default project
+trust choice writes and which decides whose code loads, and the rest, such
+as ``shellCommandPrefix``. After such a change the next ``reef-pi`` start is
+refused until ``reef-pi update``, which rewrites ``settings.json`` as the
+install wrote it and so also resets the preferences pi saved there.
+
+A link at a recorded ``settings.json`` counts as changed, as at any recorded
+file. A link at another client state path would send the agent's writes
+wherever it points, so before each session the wrapper removes such a link,
+prints ``<path> in <install root> was a link to <target>; removed the link,
+and the session keeps this state in the tree``, and the agent starts that
+state again in the tree; what the link pointed at is left as it was.
+
+Session inputs and older installations
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+A session gets the files the install wrote and that client state, so a
+file added to the tree later is not used, and it gets only the env file
+values the release's ``env`` items name. With a record, its PATH starts
+with the agent binary's directory and the wrapper's, never the install
+root, so a program added there does not run either. ``update``, ``setup``, ``doctor``,
+``evolve`` and ``page`` run from your shell reach Reef at the recorded
+address, not at the one in the model binding. An install made before Reef
+kept this record has none, and neither has one whose record was removed:
+its sessions start without the check, and each such start prints ``<install root> has no install record``
+and that ``reef-pi update`` records the files, until the update writes the
+record.
+
+For a recorded install, the temporary tree contains copies of installed
+files with their modes, plus links to individual ``client_state`` paths.
+Copied files allow Codex to load skills: it skips a linked ``SKILL.md``.
+Overwriting a copied input affects only the session copy. ``directory`` and
+``sqlite`` state is created and linked before launch; ``file`` state is copied
+back with its mode if the agent creates it or replaces its link. Other state
+created only in the temporary tree is discarded when the session ends.
 
 Connect a new agent
 ~~~~~~~~~~~~~~~~~~~
@@ -833,8 +1061,8 @@ that the variable is set in the current shell.
 If a required item has not passed setup, an interactive session with a
 ``reef-pi`` wrapper asks ``Set up release <id8> now?`` and runs the setup
 loop below before offering the update. It finds the wrapper through
-``REEF_HARNESS_WRAPPER`` (exported by ``run_agent``), or beside the release
-file. Without a wrapper or UI, it prints the unmet items and
+``REEF_HARNESS_WRAPPER`` (exported by ``run_agent``), or, for a tree run
+without ``reef-pi``, in ``~/.reef/installs``. Without a wrapper or UI, it prints the unmet items and
 ``Run reef-pi setup, then start reef-pi again.``. Items still unmet after
 setup are reported, and the update offer waits until the next session.
 
@@ -994,7 +1222,8 @@ to install. The separate automatic update notice remains available at
 session start.
 
 The install uses the ``reef-pi`` wrapper from ``REEF_HARNESS_WRAPPER``
-(exported by ``run_agent``) or beside the release file. If neither exists,
+(exported by ``run_agent``) or, for a tree run without ``reef-pi``, the one
+in ``~/.reef/installs``. If neither exists,
 pi reports ``reef: no reef-pi wrapper found; install it with reef-pi
 update, then reef-pi setup``. The wrapper runs
 ``reef-pi update --release <id>``, then setup, and reports

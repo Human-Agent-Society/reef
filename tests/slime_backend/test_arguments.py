@@ -32,6 +32,7 @@ def slime_args(**overrides):
         "custom_megatron_init_path": "custom.initialize",
         "custom_model_provider_path": "custom.model_provider",
         "loss_family": None,
+        "score_centering": False,
     }
     values.update(overrides)
     return SlimeArguments(**values)
