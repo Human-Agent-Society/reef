@@ -1,0 +1,142 @@
+# OPD on mathematical reasoning
+
+This example targets roadmap [#502](https://github.com/Human-Agent-Society/reef/issues/502):
+full-parameter on-policy distillation from `Qwen/Qwen3.5-9B` into an
+OpenThoughts3-SFT initialization of `Qwen/Qwen3.5-9B-Base`. It runs on local GPU
+workers through Reef, Slime/Megatron and SGLang. No Tinker credentials or API
+are used. Experiment tracking is in [#682](https://github.com/Human-Agent-Society/reef/issues/682).
+
+## Protocol and acceptance
+
+The model pair follows cookbook commit `dfe4d77e8e8c`. The original 2025 blog
+used Qwen3-8B and reported AIME'24 moving from approximately 60% to 70%.
+Results with the 9B pair must identify that difference.
+
+- Student base: `Qwen/Qwen3.5-9B-Base`, revision `68c46c4b3498877f3ef123c856ecfde50c39f404`.
+- Frozen teacher: `Qwen/Qwen3.5-9B`, revision `c202236235762e1c871ad0ccb60c8ee5ba337b9a`.
+- Initialization if no matching public full-parameter checkpoint is available:
+  384,000 OpenThoughts3 examples, one pass, batch 128, 3,000 steps, 16,384-token
+  sequences, full language-model SFT at initial learning rate 1e-4 with linear
+  decay. The unused vision encoder is frozen; no adapters are used. The
+  Transformers/FSDP initializer replaces the hosted reference trainer.
+- OPD: DeepMath prompts in dataset order, truncated to 1,024 prompt tokens as
+  in the reference; 512 prompts times four responses, one optimizer update
+  per batch, 200 steps, learning rate 5e-5, temperature 1, response limit 16,384.
+  The teacher sees the exact student sequence and remains frozen. No answer
+  labels, correctness rewards or teacher-only context are used for training.
+- Evaluation: the 30 AIME'24 questions, 16 samples per question at the fixed
+  seeds 0 through 15, temperature 1, top-p 1, top-k disabled, 64,000 output-token
+  budget, the same boxed-answer instruction and scorer for all checkpoints.
+  Evaluate at initialization, every 20 steps, and step 200. Evaluation receipts
+  are never reported for training. This repeated-sampling protocol must be
+  reported separately from a one-sample benchmark score.
+- Acceptance is predeclared: the final scheduled OPD checkpoint should improve
+  mean AIME'24 accuracy over the frozen SFT initialization by approximately
+  ten percentage points; the operational target here is at least 0.10 absolute.
+  Report the full curve and uncertainty, including a failed target. Do not
+  select the best test-set checkpoint and call it the final result.
+
+A running service, a smoke update or a falling KL loss does not meet that
+acceptance criterion. No AIME improvement has yet been established by this
+example. Preserve each run's raw predictions, receipts, releases and metrics.
+
+## Environment
+
+Use the repository's supported Slime GPU image and development environment
+(`docker/README.md`). The example uses four GPUs: a TP4 actor and four TP1
+rollout engines colocated on those devices. The teacher pass temporarily
+loads the frozen weights into the actor and then restores the student. The
+full training and evaluation lengths require substantially more memory and
+time than a short startup check.
+
+Mount model/data/output storage at `/work`. Provide at least enough disk for
+the base, teacher, SFT checkpoint and two optimizer checkpoints. The example
+limits OPD checkpoint storage to 200 GB and requires 2% of the filesystem to
+remain free; set an appropriate reserve for your own filesystem. State and
+ports must belong to this experiment, not another running Reef deployment.
+
+From the repository root, with its environment activated:
+
+```bash
+hf download Qwen/Qwen3.5-9B-Base --revision 68c46c4b3498877f3ef123c856ecfde50c39f404 --local-dir /work/models/Qwen3.5-9B-Base
+hf download Qwen/Qwen3.5-9B --revision c202236235762e1c871ad0ccb60c8ee5ba337b9a --local-dir /work/models/Qwen3.5-9B
+python recipes/opd/examples/math/prepare.py --output /work/data --tokenizer /work/models/Qwen3.5-9B
+```
+
+The preparation script pins all three datasets and writes file checksums.
+It refuses to overwrite existing inputs. The SFT shuffle buffer follows the
+reference's 384,000-example buffer; preparation takes significant host memory.
+The scripts require the packages in this example's `pyproject.toml` plus the
+GPU training environment. They are a direct `reef_client` campaign and do not
+require Harbor or reef-eval.
+
+## SFT initialization
+
+Prefer a published compatible SFT checkpoint with documented data and
+training settings. If one is unavailable, prepare and train the initialization:
+
+```bash
+python recipes/opd/examples/math/sft.py --tokenize-only --data /work/data/sft.jsonl --tokenized /work/sft-data --output /work/sft
+TORCH_DISTRIBUTED_DEBUG=DETAIL python -m torch.distributed.run --standalone --nproc-per-node=4 recipes/opd/examples/math/sft.py --data /work/data/sft.jsonl --tokenized /work/sft-data --output /work/sft
+```
+
+The initializer masks the observed prompt, preserves reasoning tokens, and
+does not append a false EOS when a response is truncated. It saves optimizer
+checkpoints for explicit `--resume /work/sft/checkpoint-N` and exports the
+final Hugging Face checkpoint to `/work/sft/final`. The exported tokenizer
+comes from the pinned teacher, whose vocabulary is shared by the student.
+
+## OPD and evaluation
+
+Start the service with a fresh run directory and a private service token:
+
+```bash
+export OPD_MODEL_PATH=/work/sft/final
+export OPD_RUN_DIR=/work/opd
+mkdir -p "$OPD_RUN_DIR"
+export REEF_TOKEN="$(openssl rand -hex 24)"
+reef serve -c recipes/opd/examples/math/serve.yaml
+```
+
+In another terminal with the same `REEF_TOKEN`, after `/healthz` is ready:
+
+```bash
+python recipes/opd/examples/math/run.py --config recipes/opd/examples/math/serve.yaml --train-data /work/data/deepmath.jsonl --eval-data /work/data/aime24.jsonl --output /work/opd/results
+```
+
+The driver collects a complete batch before submitting any training reports,
+checks that all responses came from one release, then waits for exactly one
+committed update. Its batch must match both recipe and trainer configuration.
+It refuses an existing output directory or scenario rather than silently
+restarting an interrupted campaign. Preserve a failed run and use a fresh
+scenario/run directory until resume support is added.
+
+Use `--steps 0` on an independently launched frozen SFT or teacher deployment
+for a control evaluation. Keep the evaluation data, seeds, token budget,
+prompt and scorer identical. Do not report control receipts for training.
+For a smoke run, copy the YAML and reduce **both** batch sizes together with
+`--prompts-per-step`, `--samples-per-prompt` and token budgets. Label those
+results as integration checks.
+
+## Output
+
+`config.json` records the driver settings; `train-*.jsonl` and `eval-*.jsonl`
+record responses, receipts, sampled release IDs, seeds, finish reasons and
+usage. `metrics.jsonl` records evaluation accuracy and truncations per step.
+`releases-*.json` records publication history. Keep the service logs and exact
+resolved stack configuration beside these files. Include the actual SFT
+checkpoint identifier and software image digest in an experiment report.
+
+After the final scheduled evaluation, generate the curve and acceptance record:
+
+```bash
+python recipes/opd/examples/math/analyze.py /work/opd/results
+```
+
+The analysis requires the same question/seed pairs at every checkpoint. Its
+95% bootstrap interval resamples whole questions, retaining repeated samples
+and baseline/final pairing. `acceptance.json` reports whether the final point
+estimate reaches the predeclared target; it does not equate that threshold
+with statistical significance. `learning-curve.png` includes every evaluated
+checkpoint. The scorer accepts the final boxed integer (including a simple
+`\boxed{\text{42}}` form); symbolic equivalents are not silently converted.

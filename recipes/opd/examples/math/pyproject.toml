@@ -1,0 +1,5 @@
+[project]
+name = "reef-opd-math-example"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = ["reef-client", "datasets>=3,<5", "transformers==5.12.1", "matplotlib>=3.8", "PyYAML>=6"]

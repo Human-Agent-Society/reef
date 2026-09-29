@@ -240,7 +240,8 @@ class DistillAlgorithm(SlimeAlgorithm):
 
     def parse_specific_options(self, arguments: Sequence[str]) -> tuple[DistillSettings, list[str]]:
         prefix = f"--{self.loss_family}-"
-        defaults = self.settings_type()
+        # Read class defaults before validating the user-supplied teacher checkpoint.
+        defaults = self.settings_type
         parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
         parser.add_argument(
             f"{prefix}teacher",

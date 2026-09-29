@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Hashable, Mapping, Sequence
-from typing import Any
+from typing import Any, cast
 
 from reef.core.reports import TeacherContextReport
 from reef.train.processors.common import flatten_content, recorded_request, recorded_response
@@ -144,13 +144,17 @@ class DistillProcessor(ReportedFeedbackProcessor):
         template_options: dict[str, Any] = {}
         if enable_thinking is not None:
             template_options["enable_thinking"] = enable_thinking
-        prompt_ids = self._tokenizer.apply_chat_template(
-            list(messages),
-            tools=list(tools) if tools else None,
-            tokenize=True,
-            add_generation_prompt=True,
-            return_dict=False,
-            **template_options,
+        # tokenize=True and return_dict=False return the flat token list.
+        prompt_ids = cast(
+            list[int],
+            self._tokenizer.apply_chat_template(
+                list(messages),
+                tools=list(tools) if tools else None,
+                tokenize=True,
+                add_generation_prompt=True,
+                return_dict=False,
+                **template_options,
+            ),
         )
         if max_prompt_tokens > 0:
             prompt_ids = prompt_ids[:max_prompt_tokens]

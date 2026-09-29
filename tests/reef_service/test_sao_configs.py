@@ -151,6 +151,9 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
+        "--vocab-size",
+        "--norm-epsilon",
+        "--untie-embeddings-and-output-weights",
         "--pipeline-model-parallel-size",
         "--position-embedding-type",
         "--qk-layernorm",
@@ -175,6 +178,8 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # example's ``run.sh`` normally supplies these before invoking ``reef serve``;
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
+    "OPD_MODEL_PATH": "/root/models/Qwen3.5-9B-SFT",
+    "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
     "REEF_TOKEN": "config-test-token",
     "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
     "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
@@ -394,6 +399,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
         "recipes/sdpo/examples/sciknoweval/serve.yaml",
+        "recipes/opd/examples/math/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -420,6 +426,7 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/sao/examples/ceobench/serve.yaml",
         "recipes/sdft/examples/skill_stream/serve.yaml",
         "recipes/sdpo/examples/sciknoweval/serve.yaml",
+        "recipes/opd/examples/math/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

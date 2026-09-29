@@ -421,3 +421,22 @@ def test_cookbook_objectives_signal_their_recipes_loss_family() -> None:
         assert resolve_loss_family(objective.loss_family).loss_family == spec.loss_family
         checked.add(recipe_type.__name__)
     assert checked == {"OpenClawRLRecipe", "SAORecipe", "TTTDRecipe"}
+
+
+def test_opd_recipe_uses_configured_runtime_and_checkpoint_schedule() -> None:
+    from recipes.opd import OPDRecipe
+
+    runtime = StubTrainingRuntime()
+    recipe = build_recipe(
+        "recipes.opd.recipe:OPDRecipe",
+        {},
+        config={
+            "data": {"batch_size": 4, "tokenizer_path": "/models/qwen35"},
+            "artifact": {"checkpoint_every_n_versions": 20},
+        },
+        **runtime_bindings(runtime),
+    )
+    assert isinstance(recipe, OPDRecipe)
+    assert recipe.training_runtime is runtime
+    assert recipe.checkpoint_strategy == EveryNVersions(20)
+    assert recipe.processor_config()["batch_size"] == 4
