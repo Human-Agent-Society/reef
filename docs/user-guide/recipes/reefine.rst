@@ -415,10 +415,13 @@ Terminus
 --------
 
 ``--recipe.config.evolution.adapter terminus`` runs the profile on
-Terminal-Bench's Terminus 2. Prepare a working Docker installation on the
-service host and a model endpoint with its API key. On macOS, Docker must
-share ``~/.reef/episodes`` with the host. Other platforms use the temp
-directory; set ``TMPDIR`` for the service if Docker's VM does not share it.
+Terminal-Bench's Terminus 2. Prepare a model endpoint with its API key, and
+Docker or E2B for the task container. With Docker, the default, prepare a
+working Docker installation on the service host. On macOS, Docker must share
+``~/.reef/episodes`` with the host. Other platforms use the temp directory;
+set ``TMPDIR`` for the service if Docker's VM does not share it. To run the
+task containers on E2B instead, see `Docker or E2B
+<../../developer-guide/harness-adapters.rst#docker-or-e2b>`__.
 
 Terminus runs one Harbor task at a time through ``reef-terminus --task``.
 Submit evolution requests over HTTP and inspect their result pages. The
@@ -467,12 +470,12 @@ on the page before using the new tree.
 Docker context and published files
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-The episode uses the Docker your shell uses: it keeps the service's
-``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (default
+With local Docker, the episode uses the Docker your shell uses: it keeps the
+service's ``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (default
 ``~/.docker``, where colima and Docker Desktop set the current context). On
 macOS its files live under ``~/.reef/episodes``, because colima does not
 share ``$TMPDIR`` with its VM; on Linux, WSL and Windows they stay in the
-temp directory.
+temp directory. An episode on E2B gets none of these.
 ``GET /reef/harness`` serves the published tree; `Harness adapters
 <../../developer-guide/harness-adapters.rst>`__ shows the config that runs
 it through Reef yourself, including the ``x-reef-scenario`` header.

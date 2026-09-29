@@ -134,9 +134,10 @@ Run a published tree
 Before running a declarative Terminus tree locally, prepare:
 
 - A running Reef service and the scenario whose published tree you want to use.
-- A Harbor task directory and a working Docker installation.
-- A trial directory shared with Docker. With colima on macOS, use a path under
-  your home directory; ``$TMPDIR`` is not shared by default.
+- A Harbor task directory, and either a working Docker installation or an
+  E2B API key.
+- For Docker, a trial directory shared with Docker. With colima on macOS, use
+  a path under your home directory; ``$TMPDIR`` is not shared by default.
 - A local tree root containing the ``files`` returned by ``GET /reef/harness``
   for the scenario, saved under their relative paths.
 
@@ -170,6 +171,9 @@ Set the paths to your saved tree and task, then run one task:
      REEF_TERMINUS_TRIALS_DIR="$TRIALS_DIR" \
      reef-terminus --task "$TASK_DIR"
 
+To run the task on E2B instead of local Docker, add
+``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY=<key>`` to the command.
+
 The JSON trial record under ``$TREE_ROOT/terminus/sessions`` contains the
 verifier rewards and ATIF trajectory. The bundled Reefine health task succeeds
 with reward 1. If a local Docker trial has neither reward nor verifier output,
@@ -191,18 +195,32 @@ keeps the service's ``DOCKER_HOST``, ``DOCKER_CONTEXT``, and
 reads its current context (colima, Docker Desktop) and the compose plugin
 from that directory.
 
-Python extensions
-^^^^^^^^^^^^^^^^^
+Docker or E2B
+^^^^^^^^^^^^^
 
-Extensions require ``evolution.executor: sandbox`` to isolate the Python
-runner. Harbor runs the terminal task remotely. Enable network access with
-``sandbox.egress_hosts``; this setting currently does not enforce a hostname
-firewall. The runtime needs Linux, bubblewrap, Python 3.12+, and
-``harbor[e2b]``. The interpreter and local task directories must be visible
-inside the sandbox, for example under ``/opt``.
+Evaluation episodes run the Harbor task in local Docker unless the
+deployment runs them on E2B. For E2B, use the sandbox executor and pass the
+switch and the key into it:
 
-Declarative trees can use the local executor and Docker. Reef rejects Docker
-inside bubblewrap and extensions in an unisolated runner before launch.
+.. code:: yaml
+
+   evolution:
+     executor: sandbox
+     sandbox:
+       egress_hosts: [api.e2b.dev]
+       env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
+
+Start the service with ``REEF_TERMINUS_ENVIRONMENT=e2b`` and ``E2B_API_KEY``
+set. The runtime needs Linux, bubblewrap, Python 3.12+, and ``harbor[e2b]``.
+The interpreter and local task directories must be visible inside the
+sandbox, for example under ``/opt``. ``egress_hosts`` currently does not
+enforce a hostname firewall. The episode root under ``~/.reef/episodes`` and
+the ``DOCKER_*`` variables above apply only to local Docker; an episode on
+E2B gets neither.
+
+A Python extension (``code_extension``) runs only this way. Reef rejects
+Docker inside bubblewrap and an extension in an unisolated runner before
+launch.
 
 The Terminus quirk supplies ``validate_execution`` as an
 ``ExecutionValidator``. Its ``__call__(files, executor)`` checks the rendered
