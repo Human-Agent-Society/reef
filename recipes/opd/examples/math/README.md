@@ -5,6 +5,7 @@ full-parameter on-policy distillation from `Qwen/Qwen3.5-9B` into an
 OpenThoughts3-SFT initialization of `Qwen/Qwen3.5-9B-Base`. It runs on local GPU
 workers through Reef, Slime/Megatron and SGLang. No Tinker credentials or API
 are used. Experiment tracking is in [#682](https://github.com/Human-Agent-Society/reef/issues/682).
+See [VALIDATION.md](VALIDATION.md) for completed checks and pending acceptance.
 
 ## Protocol and acceptance
 
@@ -51,9 +52,26 @@ time than a short startup check.
 
 Mount model/data/output storage at `/work`. Provide at least enough disk for
 the base, teacher, SFT checkpoint and two optimizer checkpoints. The example
-limits OPD checkpoint storage to 200 GB and requires 2% of the filesystem to
-remain free; set an appropriate reserve for your own filesystem. State and
+limits OPD checkpoint storage to 600 GB and reserves 100 GB of free space.
+The measured B200 optimizer/HF checkpoint pair occupied about 188 GiB;
+the cap must fit the protected current checkpoint plus the next reservation,
+not just one checkpoint. An FP32 SFT export also increases the initial
+reservation estimate. Set an appropriate cap and reserve for your filesystem. State and
 ports must belong to this experiment, not another running Reef deployment.
+
+The B200 integration check used base image digest
+`slimerl/slime@sha256:8851cdff296ce6e569fed9b427aab05a72b55e803ccf73ecb6697c261621fd02`,
+with the repository's reviewed Slime and SGLang pins, torch 2.11.0+cu129,
+Transformers 5.12.1, tokenizers 0.22.2 and Megatron Bridge 0.4.2. The SFT
+initializer also needs `flash-linear-attention==0.4.2`, `fla-core==0.4.2`
+and `causal-conv1d==1.7.0` built against the selected CUDA/PyTorch environment.
+It refuses to train if Transformers would use its slow Gated DeltaNet fallback.
+Install these only in the GPU environment, preserving its existing torch:
+
+```bash
+uv pip install --no-deps flash-linear-attention==0.4.2 fla-core==0.4.2
+uv pip install --no-deps --no-build-isolation causal-conv1d==1.7.0
+```
 
 From the repository root, with its environment activated:
 
@@ -80,7 +98,8 @@ python recipes/opd/examples/math/sft.py --tokenize-only --data /work/data/sft.js
 TORCH_DISTRIBUTED_DEBUG=DETAIL python -m torch.distributed.run --standalone --nproc-per-node=4 recipes/opd/examples/math/sft.py --data /work/data/sft.jsonl --tokenized /work/sft-data --output /work/sft
 ```
 
-The initializer masks the observed prompt, preserves reasoning tokens, and
+The initializer keeps the latest optimizer checkpoint (the previous one may
+coexist while the next is being written). It masks the observed prompt, preserves reasoning tokens, and
 does not append a false EOS when a response is truncated. It saves optimizer
 checkpoints for explicit `--resume /work/sft/checkpoint-N` and exports the
 final Hugging Face checkpoint to `/work/sft/final`. The exported tokenizer

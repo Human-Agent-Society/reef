@@ -15,6 +15,7 @@ inference:
   options:
     router-port: "23082"
     context-length: "65536"
+    dtype: bfloat16
     mem-fraction-static: "0.6"
     disable-cuda-graph: true
   handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
@@ -43,15 +44,15 @@ training:
   config:
     checkpoint_dir: ${OPD_RUN_DIR}/checkpoints
     checkpoint_retention:
-      max_storage: 200GB
+      max_storage: 600GB
       max_storage_fraction: 0.80
-      min_free_space_fraction: 0.02
+      min_free_space: 100GB
       policy: latest
     global_batch_size: 2048
   options:
     reef-checkpoint-max-storage: "${training.config.checkpoint_retention.max_storage}"
     reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
-    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-min-free-space: "${training.config.checkpoint_retention.min_free_space}"
     reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
     megatron-to-hf-mode: bridge
     hf-checkpoint: "${inference.model-path}"

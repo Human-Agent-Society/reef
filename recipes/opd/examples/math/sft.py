@@ -56,10 +56,14 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=3000)
     parser.add_argument("--global-batch-size", type=int, default=128)
     parser.add_argument("--max-length", type=int, default=16384)
-    parser.add_argument("--save-steps", type=int, default=100)
+    parser.add_argument(
+        "--save-steps", type=int, default=100, help="Optimizer checkpoint interval; 0 saves only the final model"
+    )
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--resume", type=str)
     args = parser.parse_args()
+    if min(args.steps, args.global_batch_size, args.max_length, args.workers) <= 0 or args.save_steps < 0:
+        parser.error("Steps, batch size, length and workers must be positive; save-steps must be nonnegative")
     if args.tokenize_only:
         data = load_dataset("json", data_files=str(args.data), split="train")
         data = data.map(
@@ -77,14 +81,34 @@ def main() -> None:
     data = load_from_disk(str(args.tokenized))
     if len(data) < args.steps * args.global_batch_size:
         raise ValueError("The SFT schedule needs more examples; do not silently repeat a small subset")
+    from transformers.models.qwen3_5.modeling_qwen3_5 import is_fast_path_available
+
+    if not is_fast_path_available:
+        raise RuntimeError("Qwen3.5 SFT requires flash-linear-attention and causal-conv1d; refusing the slow fallback")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
     # FP32 master parameters and optimizer state; FSDP runs the forward in bf16.
     model = AutoModelForImageTextToText.from_pretrained(
         args.model, dtype=torch.float32, attn_implementation="flash_attention_2"
     )
     model.config.use_cache = False
+    model.config.get_text_config().use_cache = False
     for parameter in model.model.visual.parameters():
         parameter.requires_grad_(False)
+    parameter_counts = {
+        "total_parameters": sum(parameter.numel() for parameter in model.parameters()),
+        "trainable_parameters": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
+    }
+    if int(os.environ.get("RANK", "0")) == 0:
+        print(
+            json.dumps(
+                {
+                    "sft_initialization": parameter_counts,
+                    "steps": args.steps,
+                    "global_batch_size": args.global_batch_size,
+                }
+            ),
+            flush=True,
+        )
     arguments = TrainingArguments(
         output_dir=str(args.output),
         max_steps=args.steps,
@@ -103,9 +127,9 @@ def main() -> None:
         gradient_checkpointing_kwargs={"use_reentrant": False},
         fsdp="full_shard auto_wrap",
         fsdp_config={"transformer_layer_cls_to_wrap": ["Qwen3_5DecoderLayer"], "use_orig_params": True},
-        save_strategy="steps",
+        save_strategy="steps" if args.save_steps else "no",
         save_steps=args.save_steps,
-        save_total_limit=2,
+        save_total_limit=1,
         logging_steps=1,
         report_to="none",
         seed=0,
@@ -122,14 +146,25 @@ def main() -> None:
     )
     trainer.train(resume_from_checkpoint=args.resume)
     trainer.save_model(str(args.output / "final"))
+    # Keep every rank alive until the final FSDP gathers have completed.
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
     if trainer.is_world_process_zero():
         tokenizer.save_pretrained(str(args.output / "final"))
         (args.output / "protocol.json").write_text(
             json.dumps(
-                {key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()}, indent=2
+                {
+                    **{key: str(value) if isinstance(value, Path) else value for key, value in vars(args).items()},
+                    **parameter_counts,
+                },
+                indent=2,
             )
             + "\n"
         )
+
+    if torch.distributed.is_initialized():
+        torch.distributed.barrier()
+        torch.distributed.destroy_process_group()
 
 
 if __name__ == "__main__":
