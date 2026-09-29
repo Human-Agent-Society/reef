@@ -1,8 +1,11 @@
 # SAO functional-smoke config for recipes/sao/examples/imo_answerbench/run.sh.
 #
-# SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) trains one
-# rollout at a time with no comparison group: batch_size 1 means the dispatcher
-# runs a full train step the moment a rollout's score arrives. The value model
+# SAO (Single-Rollout Asynchronous Optimization, arXiv:2607.07508) samples one
+# rollout per prompt with no comparison group, and trains on batch_size of them
+# per optimizer step (the paper: 128, the recipe default). This smoke config
+# sets batch_size 1 so the dispatcher runs a full train step the moment a
+# rollout's score arrives; that is a different estimator from the paper's and
+# is only here so the loop is visible end to end on two GPUs. The value model
 # computes advantages in-backend via skip-observation GAE, so reef ships no
 # advantages and the family turns Slime's advantage pass on itself. The critic
 # actor colocates on the actor GPUs (fractional placement), so the GPU budget
@@ -36,7 +39,7 @@ inference:
 recipe:
   implementation: recipes.sao.recipe:SAORecipe
   config:
-    batch-size: 1                      # MUST equal training.config.global_batch_size
+    batch-size: 1                      # smoke only; the paper and the recipe default are 128. MUST equal training.config.global_batch_size
     max-staleness: 18
     checkpoint-every-n-versions: 1
 training:

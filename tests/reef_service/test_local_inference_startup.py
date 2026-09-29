@@ -262,3 +262,37 @@ def test_backend_definition_controls_launch_without_backend_specific_code(monkey
     ]
     assert service["ready"][-1] == service["endpoint"] + "/readyz"
     assert config["reef"]["upstream_url"] == service["endpoint"]
+
+
+def test_vllm_backend_launches_the_openai_server_with_native_options():
+    from reef.service.deploy.inference import prepare_inference
+    from reef.service.deploy.service_config import ServiceConfig
+
+    config = {"reef": {"model_path": "org/model"}}
+    settings = ServiceConfig(
+        recipe="recipe",
+        model_path="org/model",
+        inference_backend="vllm",
+        tensor_parallel_size=2,
+        inference_options={"logprobs-mode": "processed_logprobs"},
+    )
+    service = prepare_inference(config, settings)
+    assert service["name"] == "vllm"
+    port = service["endpoint"].rsplit(":", 1)[1]
+    assert service["command"][1:] == [
+        "-m",
+        "vllm.entrypoints.openai.api_server",
+        "--model",
+        "${reef.model_path}",
+        "--served-model-name",
+        "org/model",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        port,
+        "--tensor-parallel-size",
+        "2",
+        "--logprobs-mode=processed_logprobs",
+    ]
+    assert service["ready"][-1] == service["endpoint"] + "/health"
+    assert config["reef"]["inference_backend"] == "vllm"

@@ -16,6 +16,10 @@ service's ``ready`` probe must pass before the next one starts; when they are
 all up, Reef blocks, and a watchdog tears the stack down if any process exits
 unexpectedly.
 
+Once the stack is running, Ctrl-C requests graceful shutdown. Pressing it
+again during shutdown skips the remaining 30-second grace period and proceeds
+to forced cleanup of the managed service processes.
+
 .. config::
 
    -c, --config | optional config file. No file is loaded unless explicitly selected.
@@ -152,13 +156,44 @@ a token, set ``REEF_TOKEN`` in the connector's environment; use
 ``--reef-token-env VARIABLE`` to select a different environment variable.
 Do not put tokens in URLs or command-line arguments.
 
-The platform receives scenario names, serving release identifiers, training
-modes, selected numeric evaluation results, the Reef URL the connector checks
-and, with ``--serve``, whether Reef is starting, running or exited. It can create a scenario,
-request training, change training mode, promote or roll back a release.
-Local provider credentials, artifact files, and recorded prompts are not
-uploaded. Instructions you submit through the dashboard are stored on the
-platform as commands. Inference continues to use your runtime URL directly.
+Data sent to the platform
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The connector sends summaries of the connected runtime:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Summary
+     - Included information
+   * - Runtime and scenario
+     - Reef URL, scenario name, harness adapter, serving release, training mode,
+       selected numeric evaluation results, and service state with ``--serve``.
+   * - Release step
+     - Result (``selected``, ``rejected``, ``skipped``, or ``failed``), selection
+       outcome, policy, evaluator, and pass/fail counts.
+   * - Step inputs and changes
+     - Request ID and requirement names/kinds, agent proposal ID, recheck reason
+       (``drift`` or ``cadence``), and each mutation's operation, entry ID, and kind.
+   * - Harness request
+     - ID, state, and filing time, including requests filed on the local machine.
+
+Local provider credentials, artifact files, entry contents, local request text,
+and recorded prompts are not uploaded. Instructions submitted through the
+console are stored on the platform as commands. Inference continues to use
+your runtime URL directly.
+
+Remote operations and limits
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+The console can create a scenario, request training, change training mode,
+promote or roll back a release, and delete a scenario as described below.
+
+The release list contains the newest 100 steps. If their summaries exceed the
+192 KiB result limit, it returns fewer steps and marks the result truncated.
+The harness request list contains the newest 100 requests. Update Reef and
+restart an older connector to enable request listing and adapter names; older
+connectors reject the ``requests`` command and send no adapter.
 
 Lifecycle and local state
 ~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -178,11 +213,19 @@ The directory is mode 0700 and credential files are mode 0600 on POSIX systems.
 ``--state-dir PATH`` selects an explicit directory. Preserve it to keep the
 same identity; do not share or copy it between running machines.
 
+Connected runtime cards in the console support deletion after confirmation.
+The connector sends ``DELETE /reef/scenarios/{scenario}`` to Reef, which
+removes that scenario and archives its own saved state. Other scenarios and
+the connection remain available. Update and restart older connectors before
+using this action; they reject the new ``delete_scenario`` command.
+
 The connector reconnects after network failures. It does not install an OS
 startup service; use ``--foreground`` with your process supervisor for restart
-after a machine reboot. It reports heartbeats every three seconds and scenario
-summaries about every fifteen seconds, or every five seconds while Reef does
-not answer. When Reef does not answer, the summary names the address it
+after a machine reboot. It polls every three seconds while idle or running a
+slow operation. Completed commands are reported immediately, so queued commands
+do not each wait for another heartbeat. For thirty seconds after activity, it
+checks for follow-up commands every second. It reports scenario summaries about
+every fifteen seconds, or every five seconds while Reef does not answer. When Reef does not answer, the summary names the address it
 checked and the reason: nothing listening, a rejected service token, a
 timeout, or a service that is not Reef. The console marks it offline after
 45 seconds without a heartbeat and retains its last scenario summary.
@@ -192,3 +235,13 @@ and is not replayed automatically. Check Reef before submitting it again.
 Completed results are saved locally until the platform acknowledges them;
 cloud command history is retained for 30 days. Closing a browser or revoking a
 connection cannot undo an operation already dispatched to Reef.
+
+Request lookup protocol
+~~~~~~~~~~~~~~~~~~~~~~~
+
+For the console's ``requests`` command, the connector reads training
+instructions from ``GET /reef/scenarios/{scenario}/records?request_type=train``
+and obtains each state from
+``GET /reef/harness/requests/{record_id}/progress``. Reef reports the adapter
+for each harness scenario even while it loads or after preload fails; a
+recipe that installs no harness tree reports none.

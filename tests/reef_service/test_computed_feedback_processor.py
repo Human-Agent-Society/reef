@@ -110,15 +110,15 @@ def test_track_complete_judge_batch_acknowledge() -> None:
     batch = processor.build_batch()
     assert source_record_id(batch.items[0]) == "r1"
     processor.acknowledge(batch.batch_id)
-    decision = processor.retention_decision()
-    assert "r1" in decision.releasable_agent_record_ids
-    assert "r2" in decision.protected_agent_record_ids  # still tracked
+    decision = processor.releasable_record_ids()
+    assert "r1" in decision
+    assert "r2" not in decision  # still tracked
 
 
 def test_untracked_records_are_terminal_on_sight() -> None:
     processor, worker = _engine()
     processor.ingest(_record("noise"))
-    assert "noise" in processor.retention_decision().releasable_agent_record_ids
+    assert "noise" in processor.releasable_record_ids()
     assert not worker.jobs
 
 
@@ -131,7 +131,7 @@ def test_failed_and_declined_judgments_retire_the_record() -> None:
     worker.push(Failed("a"))
     worker.push(_Judgment("b", good=False))
     assert not processor.ready()
-    releasable = processor.retention_decision().releasable_agent_record_ids
+    releasable = processor.releasable_record_ids()
     assert {"a", "b"} <= set(releasable)
 
 
@@ -143,7 +143,7 @@ def test_refused_submission_retires_immediately() -> None:
     processor, _ = _engine(worker=_Refusing())
     processor.ingest(_record("r1", track=True))
     processor.ingest(_record("r2", completes="r1"))
-    assert "r1" in processor.retention_decision().releasable_agent_record_ids
+    assert "r1" in processor.releasable_record_ids()
 
 
 def test_stale_runtime_load_ids_drop_by_record_arrival() -> None:
@@ -156,15 +156,15 @@ def test_stale_runtime_load_ids_drop_by_record_arrival() -> None:
     worker.push(_Judgment("new"))
     worker.push(_Judgment("old"))
     assert not processor.ready()  # the stale candidate was dropped
-    assert "old" in processor.retention_decision().releasable_agent_record_ids
-    assert "new" in processor.retention_decision().protected_agent_record_ids
+    assert "old" in processor.releasable_record_ids()
+    assert "new" not in processor.releasable_record_ids()
 
 
 def test_correlate_only_mode_without_a_worker() -> None:
     processor = _ToyProcessor(ProcessorContext("s", {"batch_size": 1}), worker=None)
     processor.ingest(_record("r1", track=True))
     processor.ingest(_record("r2", completes="r1"))
-    assert "r1" in processor.retention_decision().releasable_agent_record_ids
+    assert "r1" in processor.releasable_record_ids()
     processor.close()
 
 

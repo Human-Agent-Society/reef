@@ -45,10 +45,11 @@ from pathlib import Path
 from reef_client import ReefClient, ReefClientError
 
 from harness import evolution
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY
 
 SERVICE_URL = "http://127.0.0.1:8900"  # the Reef run.sh started
 SCENARIO = "harness-evolve-demo"  # this workload's isolated lane
-TOKEN = "reef-local"  # matches serve.yaml
+TOKEN = os.environ.get("REEF_TOKEN") or None  # serve.yaml reads the same variable; unset means no authentication
 MODEL = "qwen3-8b"  # matches serve.yaml's upstream_model
 PULL_TIMEOUT_S = 900.0
 # run.sh polls the head every 5 s, but a poll that started during the evolve step waits behind the step's
@@ -95,26 +96,15 @@ def main():
         return
     print(f"{failures} failing report(s) batched; each triggers one gated evolve step (episodes take minutes)")
 
-    # pull: GET /reef/harness 404s until a winning step publishes its tree.
-    manifest = None
+    # The seed tree is served from the start, so the manifest alone never says whether a step
+    # published: wait for the step verdicts in the catalog, then read the head a win left behind.
     deadline = time.monotonic() + PULL_TIMEOUT_S
-    while manifest is None and time.monotonic() < deadline:
-        try:
-            manifest = client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
-        except ReefClientError as exc:
-            if exc.status != 404:  # 404 only means nothing has published yet
-                raise
-            if error := client.get("/reef/status").get("error"):
-                raise SystemExit(f"evolve step failed: {error}; check work/reef.log") from exc
-            time.sleep(2.0)
-        except (TimeoutError, OSError):
-            # The evolve step runs inside the service, so a long gate (a graph that loops on verify,
-            # a slow local model) leaves a poll unanswered; keep polling until the deadline.
-            time.sleep(2.0)
-    if manifest is None:
+    steps = _wait_for_steps(client, before, failures, deadline)
+    if not any((row.get("metrics") or {}).get("published") for row in steps):
         print(f"no skill mutation won a gate within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh for another attempt")
         return
 
+    manifest = client.get("/reef/harness", extra_headers={"x-reef-scenario": SCENARIO})
     print(f"published: artifact {manifest['release_id']} (parent {manifest['parent_release_id']})")
     print("gate metrics (the evolve step that published this artifact):")
     print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
@@ -147,8 +137,9 @@ def _steps_before(client):
 
 def _wait_for_steps(client, before, expected, deadline):
     """Every batched report runs one step; wait for the ones this run batched, so each verdict is on the record
-    before run.sh stops the service, and print each verdict as the catalog lists it."""
+    before run.sh stops the service, and print each verdict as the catalog lists it. Returns this run's rows."""
     shown = before
+    steps = []
     while time.monotonic() < deadline:
         try:
             steps = _training_rows(client)
@@ -170,11 +161,12 @@ def _wait_for_steps(client, before, expected, deadline):
             print(f"step {metrics.get('steps', '?')}: {verdict} (release {row['release_id'][:12]})")
         shown = max(shown, len(steps))
         if shown - before >= expected:
-            return
+            return steps[before:]
         time.sleep(2.0)
     print(
         f"{expected - (shown - before)} step(s) still pending at the deadline; their verdicts land in the commit log"
     )
+    return steps[before:]
 
 
 # -- the native variant: the serve form ----------------------------------------------------------------------
@@ -211,7 +203,7 @@ def pull():
         "files": sorted(manifest["files"]),
     }
     (TREE_DIR / RELEASE_FILE).write_text(json.dumps(release_info, indent=2) + "\n", encoding="utf-8")
-    binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN, "model": MODEL}
+    binding = {"api": "openai", "base_url": SERVICE_URL, "api_key": TOKEN or NO_TOKEN_API_KEY, "model": MODEL}
     (TREE_DIR / "native" / "models.json").write_text(
         json.dumps(binding, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
@@ -228,7 +220,6 @@ def _wrapper_env():
         "REEF_HARNESS_SCENARIO": SCENARIO,
         "REEF_HARNESS_ADAPTER": "native",
         "REEF_HARNESS_ENV_VAR": "REEF_NATIVE_DIR",
-        "REEF_TOKEN": TOKEN,
     }
 
 

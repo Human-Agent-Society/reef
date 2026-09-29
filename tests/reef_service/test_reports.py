@@ -194,14 +194,14 @@ def test_report_type_is_not_recipe_configuration() -> None:
 # ------------------------------------------------------------ ingress (mandatory)
 
 
-def _dispatcher(recipe: Recipe, name: str) -> Dispatcher:
+def _dispatcher(recipe: Recipe, name: str, *, record_dir: Path | None = None) -> Dispatcher:
     root = Path(tempfile.mkdtemp(prefix="reef-artifacts-"))
     initial = root / "initial"
     initial.mkdir()
     return Dispatcher(
         recipe,
         InMemoryRepositoryBackend.factory(initial, root=root / "repository"),
-        scenario_storage=SQLiteScenarioStorage(),
+        scenario_storage=SQLiteScenarioStorage(record_dir),
     )
 
 
@@ -352,11 +352,11 @@ def test_missing_reference_rejection_does_not_queue_or_reserve_the_report_id() -
         dispatcher.close()
 
 
-def test_report_retry_after_source_purge_remains_idempotent_and_conflicts_fail() -> None:
+def test_report_retry_after_capacity_eviction_remains_idempotent_and_conflicts_fail(tmp_path) -> None:
     from dataclasses import replace
-    from reef.storage.records import RecordConflict
+    from reef.storage.records import RecordConflict, RecordRetention
 
-    dispatcher = _dispatcher(Recipe(), "recipe")
+    dispatcher = _dispatcher(Recipe(), "recipe", record_dir=tmp_path)
     try:
         dispatcher.accept_record(
             AgentRecord.create(
@@ -369,8 +369,7 @@ def test_report_retry_after_source_purge_remains_idempotent_and_conflicts_fail()
         record = _report_record("feedback", {"references": ["source"], "score": 1.0})
         dispatcher.accept_record(record)
         scenario = dispatcher.get_or_create_scenario("workload")
-        scenario.records.compact("workload", frozenset({"source", "feedback"}))
-        scenario.records.purge_compacted("workload", before=1e20)
+        dispatcher.prune_record_archives(RecordRetention(max_bytes=1))
         assert dispatcher.accept_record(record).agent_record_id == "feedback"
         with pytest.raises(RecordConflict):
             dispatcher.accept_record(replace(record, payload={**record.payload, "score": 0.0}))

@@ -1,0 +1,161 @@
+# The skill stream's stack, for run.py (recipes/sdft/examples/skill_stream).
+#
+# One stage: Qwen2.5-7B-Instruct, or the previous stage's export, fully
+# fine-tuned with the settings of the reference implementation's Figure 3
+# runs (idanshen/Self-Distillation, issue 9): learning rate 1e-5 with a
+# cosine schedule over the stage's steps and 10 warmup steps, 32 prompts per
+# step for two epochs, one on-policy sample per prompt in a 2048-token
+# window, the truncated importance-sampling cap of 2, three skipped leading
+# tokens, the teacher copy moving 2% toward the policy per step, no weight
+# decay, clipping at 1. The KL is the forward one, the reference's default
+# and what the paper's results used (that issue's run switched to reverse).
+#
+# run.py sets SDFT_MODEL_PATH (the stage's starting weights) and
+# SDFT_LR_DECAY_ITERS (its step count) per stage; docker-compose.yaml hands
+# them to the container. GPU budget: four GPUs, the actor (tensor parallel
+# 4) colocated with four rollout engines. The teacher pass is a forward of
+# the actor with the teacher copy swapped in from the host. Paths are the
+# container's.
+
+schema-version: 2
+reef:
+  ready-timeout: 3600
+  host: 0.0.0.0
+  port: 28902
+  run-dir: /var/lib/reef/run             # the stage's own logs and runtime config, beside its state
+  token: ${REEF_TOKEN}                 # run.sh mints one per run directory
+inference:
+  model-path: ${SDFT_MODEL_PATH}
+  timeout-s: 1800
+  # Four single-GPU engines colocated with the four actor ranks
+  # (training.colocate): the actor offloads to the host while the engines
+  # serve, the engines release their memory while the actor trains.
+  num-gpus: "4"
+  tensor-parallel-size: "1"
+  options:
+    router-port: "23002"
+    context-length: "8192"
+    mem-fraction-static: "0.6"
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
+    # The reference samples through vLLM at temperature 1 with no nucleus,
+    # top-k or repetition penalty; the requests set temperature and the
+    # window, these fill in the rest (instead of the model's generation_config).
+    sampling_defaults:
+      top_p: 1.0
+      top_k: -1
+      repetition_penalty: 1.0
+      max_new_tokens: 2048
+recipe:
+  implementation: recipes.sdft.recipe:SDFTRecipe
+  config:
+    batch-size: 32                     # MUST equal training.config.global_batch_size and the stage's SDFT_PROMPTS_PER_STEP
+    max-staleness: 0                   # on-policy: the stage waits for each step's release before sampling again
+    tokenizer-path: /root/models/Qwen2.5-7B-Instruct  # every stage's export shares the base tokenizer; recipe.config takes no ${} references
+    max-teacher-tokens: 8192           # the trainer's seq-length; a longer teacher sequence is skipped and counted
+    checkpoint-every-n-versions: 1000  # the bridge's per-step HF export seeds the next stage; no durable artifact within a stage
+training:
+  backend: slime
+  colocate: true
+  ready-timeout: 900
+  ray-namespace: reef
+  ray-actor-name: reef-train-bridge
+  timeout-s: 3600
+  config:
+    checkpoint_dir: /var/lib/reef/checkpoints
+    checkpoint_retention:
+      # A step saves the weights twice (Megatron, the HF export), about 30 GB;
+      # the cap keeps the last few, not the stage's whole history.
+      max_storage: 200GB
+      max_storage_fraction: 0.80
+      min_free_space_fraction: 0.10
+      policy: latest
+    global_batch_size: 32
+  options:
+    reef-checkpoint-max-storage: "${training.config.checkpoint_retention.max_storage}"
+    reef-checkpoint-max-storage-fraction: "${training.config.checkpoint_retention.max_storage_fraction}"
+    reef-checkpoint-min-free-space-fraction: "${training.config.checkpoint_retention.min_free_space_fraction}"
+    reef-checkpoint-policy: "${training.config.checkpoint_retention.policy}"
+    megatron-to-hf-mode: "bridge"
+    hf-checkpoint: "${inference.model-path}"
+    load: "${training.config.checkpoint_dir}/megatron"
+    save: "${training.config.checkpoint_dir}/megatron"
+    save-interval: "1000"
+    # The next stage starts from the HF export alone, so the optimizer state
+    # is never saved: a step's checkpoint is the weights, not the Adam moments.
+    no-save-optim: true
+    save-hf: "${training.config.checkpoint_dir}/hf/{rollout_id}"
+    num-rollout: "100000000"
+    rollout-batch-size: "${training.config.global_batch_size}"
+    global-batch-size: "${training.config.global_batch_size}"
+    micro-batch-size: "1"
+    actor-num-nodes: "1"
+    actor-num-gpus-per-node: "4"
+    num-gpus-per-node: "4"
+    tensor-model-parallel-size: "4"
+    pipeline-model-parallel-size: "1"
+    seq-length: "8192"
+    rollout-max-response-len: "2048"
+    rollout-max-context-len: "8192"
+    # Qwen2.5 architecture flags beyond the sizes Reef reads from the HF config.
+    padded-vocab-size: "152064"
+    position-embedding-type: "rope"
+    swiglu: true
+    disable-bias-linear: true
+    add-qkv-bias: true
+    normalization: "RMSNorm"
+    attention-dropout: "0.0"
+    hidden-dropout: "0.0"
+    attention-softmax-in-fp32: true
+    accumulate-allreduce-grads-in-fp32: true
+    attention-backend: "flash"
+    sequence-parallel: true
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: "16384"
+    log-probs-chunk-size: "1024"
+    ckpt-fully-parallel-save: true
+    # The reference's Figure 3 optimizer: TRL's AdamW (no weight decay) at
+    # 1e-5, cosine decay over the stage's steps after 10 warmup steps, clip 1.
+    optimizer: "adam"
+    lr: "1e-5"
+    lr-decay-style: "cosine"
+    lr-warmup-iters: "10"
+    lr-decay-iters: "${SDFT_LR_DECAY_ITERS}"
+    weight-decay: "0.0"
+    clip-grad: "1.0"
+    # The sdft loss family: the backend's distillation loss over the
+    # self-teacher's whole distributions; Slime's own advantage and
+    # old-log-prob pass stays off.
+    loss-type: "custom_loss"
+    use-rollout-logprobs: true
+    disable-compute-advantages-and-returns: true
+    sdft-teacher: "self"
+    sdft-divergence: "forward"
+    sdft-importance-sampling-cap: "2.0"
+    sdft-skip-response-tokens: "3"
+    # The teacher is a frozen copy of the stage's initial weights. A teacher
+    # that follows the policy (the reference's ref_model_mixup_alpha, 0.02 in
+    # these runs) drifts with it: in both runs that used it Tool Use collapsed
+    # after step 170 (66% to 23% by step 252) while the loss stayed small and
+    # the responses grew longer.
+    sdft-teacher-update-rate: "0"
+    n-samples-per-prompt: "1"
+    rollout-temperature: "1.0"
+storage:
+  artifact-repository: /var/lib/reef/artifacts.git
+  artifact-work-dir: /var/lib/reef/artifact-work
+  artifact-cache-dir: /var/lib/reef/artifact-cache
+  agent-record-dir: /var/lib/reef/agent-record
+
+execution:
+  training: ray
+  rollout: ray
+
+observability:
+  wandb:
+    enabled: false
+    project: reef
+    tags: []
+    mode: online
+    directory: /var/lib/reef/wandb
+    upload_checkpoints: false

@@ -12,6 +12,10 @@ dependencies = [
     "reef-eval[harbor]",
 ]
 
+[project.optional-dependencies]
+# Host-side scripts around stream.py: export_problems.py, evaluate.py, plot_*.py.
+stream = ["aiohttp", "datasets", "matplotlib"]
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["harness*"]

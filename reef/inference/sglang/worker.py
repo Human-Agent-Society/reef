@@ -278,14 +278,22 @@ class _SGLangInferenceEngines(InferenceEngines):
         return not self._worker.config.external_engines
 
     def pause(self) -> Any:
+        """Stop generation for a publication, leaving no reusable cache entry.
+
+        A ``retract`` pause releases every in-flight request's KV, which is
+        what lets the shared prefix cache be cleared: an entry the previous
+        weights built must not be matchable by a request running under the
+        next ones. A colocated engine drops the cache with its KV allocation
+        anyway; clearing it here extends the same guarantee to a disjoint
+        engine that shares prefixes. A failed flush raises, and the
+        publication then retires the engines.
+        """
         mode = self._worker.config.pause_mode
-        return ray.get(
-            [
-                engine.pause_generation.remote(mode)
-                for engine in self._worker.updatable_rollout_engines
-                if engine is not None
-            ]
-        )
+        engines = [engine for engine in self._worker.updatable_rollout_engines if engine is not None]
+        result = ray.get([engine.pause_generation.remote(mode) for engine in engines])
+        if mode == "retract":
+            ray.get([engine.flush_cache.remote() for engine in engines])
+        return result
 
     def resume(self) -> Any:
         return ray.get([engine.continue_generation.remote() for engine in self._worker.updatable_rollout_engines])

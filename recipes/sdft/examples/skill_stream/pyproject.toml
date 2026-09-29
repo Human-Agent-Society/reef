@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-sdft-skill-stream-harness"
+version = "0.1.0"
+description = "The skill stream's stage runner as a Harbor agent, served and trained by Reef"
+requires-python = ">=3.12"
+dependencies = [
+    "reef-client",
+    "reef-eval[harbor]",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

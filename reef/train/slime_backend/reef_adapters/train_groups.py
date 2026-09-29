@@ -160,9 +160,12 @@ class SlimeTrainGroup:
             "set_adaptive_kl_beta", args=(float(beta),), timeout=TRAIN_RPC_TIMEOUT_S
         )
 
-    def save_model(self, rollout_id, force_sync=False):
+    def save_model(self, rollout_id, force_sync=False, *, scenario_step):
         result = self.executor.collective_rpc(
-            "save_model", args=(rollout_id,), kwargs={"force_sync": force_sync}, timeout=TRAIN_RPC_TIMEOUT_S
+            "save_model",
+            args=(rollout_id,),
+            kwargs={"force_sync": force_sync, "scenario_step": scenario_step},
+            timeout=TRAIN_RPC_TIMEOUT_S,
         )
         if self._release_train_enabled():
             self.args.load = self.args.save

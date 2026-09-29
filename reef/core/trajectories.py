@@ -71,7 +71,7 @@ def make_trajectory(
     steps: list[dict[str, Any]] = []
     history: list[Mapping[str, Any]] = []
     for record in records:
-        request, responses = _exchange_messages(record.payload)
+        request, responses = exchange_messages(record.payload)
         shared = 0
         for previous, current in zip(history, request, strict=False):
             if previous != current:
@@ -116,7 +116,7 @@ def make_trajectory(
     )
 
 
-def _exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+def exchange_messages(payload: Mapping[str, Any]) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
     response = payload.get("response", {})
     response = response if isinstance(response, Mapping) else {"content": response}
     training = response.get("training", {})

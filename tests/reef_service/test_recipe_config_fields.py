@@ -145,6 +145,15 @@ def test_service_config_rejects_settings_no_config_field_consumes() -> None:
 
 
 @pytest.mark.unit
+def test_data_section_reads_either_spelling_and_refuses_both() -> None:
+    """A deployment file writes group-size where the field is group_size; naming a field twice is a mistake."""
+    resolved = resolve_config_field_values(ConfiguredRecipe, {"batch-size": 2, "temperature": 0.5}, {})
+    assert resolved["batch_size"] == 2 and resolved["temperature"] == 0.5
+    with pytest.raises(RecipeConfigError, match="names the field 'batch_size' twice"):
+        resolve_config_field_values(ConfiguredRecipe, {"batch-size": 2, "batch_size": 3}, {})
+
+
+@pytest.mark.unit
 def test_data_section_rejects_keys_no_config_field_consumes() -> None:
     with pytest.raises(
         RecipeConfigError, match=r"does not consume config key.*'group_size'.*known ConfiguredRecipe config fields"

@@ -105,7 +105,11 @@ class ProposalInbox:
         self._move(proposal_id, REFUSED_DIR, {"refused": reason})
 
     def settle(self, proposal_id: str, selection_result: Mapping[str, Any]) -> None:
-        """A claimed proposal the evaluation settled: into ``settled/`` with the result."""
+        """A claimed proposal the evaluation settled: into ``settled/`` with the result.
+
+        Settled again, after the candidate was evaluated once more against a
+        newer release, the file carries the latest decision.
+        """
         self._move(proposal_id, SETTLED_DIR, {"result": dict(selection_result)})
 
     def _move(self, proposal_id: str, subdir: str, extra: Mapping[str, Any]) -> None:
@@ -115,8 +119,12 @@ class ProposalInbox:
         try:
             data = json.loads(source.read_text(encoding="utf-8"))
         except FileNotFoundError:
-            # An operator moved or removed the claimed file by hand; the result still gets filed, not lost.
-            data = {"proposal_id": proposal_id}
+            # Filed before (a second settlement), or an operator moved the claimed file by hand:
+            # the earlier filing keeps the proposal's body, and the result still gets filed, not lost.
+            try:
+                data = json.loads(target.read_text(encoding="utf-8"))
+            except (FileNotFoundError, json.JSONDecodeError):
+                data = {"proposal_id": proposal_id}
         _write(target, {**data, **extra})
         source.unlink(missing_ok=True)
 

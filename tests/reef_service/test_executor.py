@@ -481,3 +481,46 @@ def test_rpc_rejects_invalid_rank(executor_cls, rank):
             executor.rpc(rank, "compute", args=(0,))
     finally:
         executor.shutdown()
+
+
+@pytest.mark.parametrize("node_id", [1, ""])
+def test_executor_config_rejects_malformed_node_id(node_id):
+    with pytest.raises(TypeError, match="node_id"):
+        ExecutorConfig(node_id=node_id)
+
+
+def test_local_rejects_node_placement():
+    with pytest.raises(ValueError, match="cluster node"):
+        Executor.create(ExecutorConfig(backend="uni", workers=(WorkerSpec(Worker),), node_id="node-1"))
+
+
+def test_ray_places_every_worker_on_the_requested_node(fake_ray, monkeypatch):
+    import sys
+    from types import ModuleType
+
+    class NodeAffinity:
+        def __init__(self, *, node_id, soft):
+            self.node_id = node_id
+            self.soft = soft
+
+        def __eq__(self, other):
+            return isinstance(other, NodeAffinity) and (self.node_id, self.soft) == (other.node_id, other.soft)
+
+    strategies = ModuleType("ray.util.scheduling_strategies")
+    strategies.NodeAffinitySchedulingStrategy = NodeAffinity  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "ray.util.scheduling_strategies", strategies)
+    executor = Executor.create(
+        ExecutorConfig(backend="ray", workers=(WorkerSpec(Worker, (0,)), WorkerSpec(Worker, (1,))), node_id="node-1")
+    )
+    placement = NodeAffinity(node_id="node-1", soft=False)
+    assert [options["scheduling_strategy"] for options in fake_ray.options] == [placement, placement]
+    executor.shutdown()
+    # A worker's own strategy would silently override the placement; refuse the pair.
+    with pytest.raises(ValueError, match="scheduling_strategy"):
+        Executor.create(
+            ExecutorConfig(
+                backend="ray",
+                workers=(WorkerSpec(Worker, (0,), options={"scheduling_strategy": placement}),),
+                node_id="node-1",
+            )
+        )

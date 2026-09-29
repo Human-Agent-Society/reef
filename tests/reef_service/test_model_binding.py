@@ -5,7 +5,12 @@ from __future__ import annotations
 
 import io
 import json
+from dataclasses import replace
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+from threading import Thread
 from typing import Any
+from urllib.request import Request
 
 import pytest
 
@@ -173,10 +178,10 @@ def test_complete_reports_the_tokens_the_endpoint_counted_in_every_dialect(monke
 
 
 def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import _BudgetedBinding
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     record: list[dict[str, Any]] = []
-    budgeted = _BudgetedBinding(ModelBinding("http://up", "m"), [0], 0, record)
+    budgeted = _BudgetedBinding(ModelBinding("http://up", "m"), _StepCalls(0, record))
     _capture(
         monkeypatch,
         {
@@ -191,7 +196,7 @@ def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch)
 
 
 def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, _BudgetedBinding
+    from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, _BudgetedBinding, _StepCalls
 
     response = {
         "id": "response-1",
@@ -208,7 +213,7 @@ def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -
     }
     record: list[dict[str, Any]] = []
     inner = ModelBinding("http://up", "m")
-    budgeted = _BudgetedBinding(inner, [0], 0, record)
+    budgeted = _BudgetedBinding(inner, _StepCalls(0, record))
     _capture(monkeypatch, response)
     assert budgeted.chat([]) == "the answer"
     assert record[0]["reply"] == "the answer"
@@ -305,7 +310,7 @@ def test_responses_stream_keeps_reasoning_output_items(monkeypatch) -> None:
 
 
 def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import _BudgetedBinding
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     class CustomChat(ModelBinding):
         def chat(self, messages, **params):
@@ -316,7 +321,7 @@ def test_record_does_not_reuse_a_previous_response_when_custom_chat_returns_text
     inner.complete({"messages": []})
     assert inner.last_response() is not None
     record: list[dict[str, Any]] = []
-    assert _BudgetedBinding(inner, [0], 0, record).chat([]) == "custom text"
+    assert _BudgetedBinding(inner, _StepCalls(0, record)).chat([]) == "custom text"
     assert "response" not in record[0]
 
 
@@ -334,7 +339,7 @@ def test_failed_request_clears_the_previous_response(monkeypatch) -> None:
 
 def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(monkeypatch) -> None:
     from reef.harness.episodes.model_binding import ModelBindingError
-    from reef.train.cordis_backend.backend import _BudgetedBinding
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     record: list[dict[str, Any]] = []
     response = {
@@ -348,7 +353,7 @@ def test_proposer_error_retains_reasoning_when_provider_returns_no_final_text(mo
     }
     _capture(monkeypatch, response)
     with pytest.raises(ModelBindingError, match="non-text"):
-        _BudgetedBinding(ModelBinding("http://up", "m"), [0], 0, record).chat([])
+        _BudgetedBinding(ModelBinding("http://up", "m"), _StepCalls(0, record)).chat([])
     assert "error" in record[0] and "reply" not in record[0]
     assert record[0]["response"] == response
     assert record[0]["usage"] == {"input_tokens": 3, "output_tokens": 20}
@@ -419,7 +424,7 @@ def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> Non
     )
 
 
-def test_recipe_reads_client_models_into_the_harness_surface(tmp_path) -> None:
+def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> None:
     module = tmp_path / "demo_client_models.py"
     module.write_text(
         "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
@@ -440,6 +445,19 @@ def test_recipe_reads_client_models_into_the_harness_surface(tmp_path) -> None:
         runtime = InferenceProxyRuntime(model_path="small", base_url="http://up")
         built = CordisRecipe.from_environment({}, config=config, runtime=runtime)
         assert built.build_surface("s").harness.client_models == ("big/one", "big/two")
+        codex_config = {
+            **config,
+            "evolution": {
+                **config["evolution"],
+                "adapter": "codex",
+                "model_metadata": {
+                    "small": {"context_window": 640_000, "reasoning": True},
+                },
+            },
+        }
+        codex = CordisRecipe.from_environment({}, config=codex_config, runtime=runtime)
+        assert codex.model_binding().metadata.context_window == 640_000
+        assert codex.build_surface("s").harness.model_metadata["small"] == codex.model_binding().metadata
         bad = {**config, "evolution": {**config["evolution"], "client_models": "big/one"}}
         with pytest.raises(RecipeConfigError, match=r"evolution\.client_models"):
             CordisRecipe.from_environment({}, config=bad, runtime=runtime)
@@ -562,3 +580,148 @@ def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     finally:
         sys.path.remove(str(tmp_path))
         sys.modules.pop("demo_models", None)
+
+
+def _models_node(binding: ModelBinding) -> dict:
+    """The ``models`` config node a pi tree gets from ``binding``."""
+    return next(node for _, node in binding.compose_nodes(get_adapter("pi")) if node["target"] == "models")
+
+
+@pytest.mark.unit
+def test_a_pi_tree_carries_the_bindings_reply_budget_as_a_number() -> None:
+    """pi falls back to 16384 tokens for a model its config does not size, which a reasoning model spends on its
+    reasoning alone; Reef writes the binding's budget instead, and JSON needs it to stay a number."""
+    binding = ModelBinding(base_url="http://127.0.0.1:8901", model="anthropic/claude-sonnet-5", api_key="tok")
+    models = _models_node(binding)
+    assert models["data"]["providers"]["reef"]["models"][0] == {
+        "id": "anthropic/claude-sonnet-5",
+        "maxTokens": 32000,
+    }
+    assert binding.max_output_tokens == 32000
+
+    smaller = _models_node(replace(binding, max_output_tokens=8000))
+    assert smaller["data"]["providers"]["reef"]["models"][0]["maxTokens"] == 8000
+
+    for bad in (0, -1, True):
+        with pytest.raises(ValueError, match="max_output_tokens"):
+            replace(binding, max_output_tokens=bad)
+
+
+@pytest.mark.parametrize("parameters, reasoning", [(["reasoning"], True), ([], False)])
+def test_provider_metadata_is_selected_by_exact_model_and_cached(
+    monkeypatch: pytest.MonkeyPatch, parameters: list[str], reasoning: bool
+) -> None:
+    from reef.core.model_metadata import ModelMetadata
+    from reef.harness.episodes.model_binding import provider_model_metadata
+
+    provider_model_metadata.cache_clear()
+    reply = {
+        "data": [
+            {"id": "other", "context_length": 100, "supported_parameters": []},
+            {"id": "served", "context_length": 640_000, "supported_parameters": parameters},
+        ]
+    }
+    calls = []
+
+    def fetch(request: Request, timeout: float) -> io.BytesIO:
+        calls.append((request.full_url, request.get_header("Authorization"), timeout))
+        return _Response(json.dumps(reply).encode())
+
+    monkeypatch.setattr("urllib.request.urlopen", fetch)
+    binding = ModelBinding("http://up", "served", api_key="test-key", api="responses").with_metadata()
+    assert binding.metadata == ModelMetadata(640_000, reasoning)
+    assert ModelBinding("http://up", "served", api_key="test-key").with_metadata().metadata == binding.metadata
+    assert calls == [("http://up/v1/models", "Bearer test-key", 5.0)]
+    # Routing through Reef must preserve the provider's resolved metadata.
+    assert replace(binding, base_url="http://reef/evaluation", api_key="reef-key").metadata == binding.metadata
+    provider_model_metadata.cache_clear()
+
+
+def test_metadata_missing_or_unavailable_keeps_fallback_and_explicit_config_wins(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from reef.core.model_metadata import ModelMetadata
+    from reef.harness.episodes.model_binding import provider_model_metadata
+
+    provider_model_metadata.cache_clear()
+
+    def missing(request: Request, timeout: float) -> io.BytesIO:
+        return _Response(b'{"data": [{"id": "served"}]}')
+
+    monkeypatch.setattr("urllib.request.urlopen", missing)
+    binding = ModelBinding("http://up", "served", api="responses")
+    assert binding.with_metadata().metadata is None
+    provider_model_metadata.cache_clear()
+
+    def unavailable(request: Request, timeout: float) -> io.BytesIO:
+        raise OSError("offline")
+
+    monkeypatch.setattr("urllib.request.urlopen", unavailable)
+    assert binding.with_metadata().metadata is None
+    assert binding.with_metadata(ModelMetadata(32_000, False)).metadata == ModelMetadata(32_000, False)
+    configured = ModelBinding.from_config(
+        {
+            "url": "http://up",
+            "model": "served",
+            "metadata": {
+                "context_window": 32_000,
+                "reasoning": False,
+            },
+        },
+        {},
+    )
+    assert configured.with_metadata().metadata == ModelMetadata(32_000, False)
+
+
+def test_truncated_metadata_response_keeps_fallback_and_allows_retry(caplog: pytest.LogCaptureFixture) -> None:
+    from reef.core.model_metadata import ModelMetadata
+    from reef.harness.episodes.model_binding import provider_model_metadata
+
+    complete_body = json.dumps(
+        {"data": [{"id": "served", "context_length": 640_000, "supported_parameters": []}]}
+    ).encode()
+    bodies = iter((complete_body[:10], complete_body))
+    paths: list[str] = []
+
+    class MetadataHandler(BaseHTTPRequestHandler):
+        def log_message(self, format: str, *args: object) -> None:
+            pass
+
+        def do_GET(self) -> None:
+            paths.append(self.path)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(complete_body)))
+            self.end_headers()
+            self.wfile.write(next(bodies))
+            self.close_connection = True
+
+    provider_model_metadata.cache_clear()
+    server = ThreadingHTTPServer(("127.0.0.1", 0), MetadataHandler)
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        binding = ModelBinding(f"http://127.0.0.1:{server.server_port}", "served", api="responses")
+        fallback = binding.with_metadata()
+        assert fallback == binding
+        assert "Could not read metadata for model 'served'" in caplog.text
+        descriptor = get_adapter("codex")
+        files = render_composition(fallback.compose_nodes(descriptor), descriptor)
+        assert "codex/models.json" not in files
+        assert "model_catalog_json" not in files["codex/config.toml"]
+        assert binding.with_metadata().metadata == ModelMetadata(640_000, False)
+        assert paths == ["/v1/models", "/v1/models"]
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+        provider_model_metadata.cache_clear()
+
+
+def test_budgeted_binding_keeps_model_metadata() -> None:
+    from reef.core.model_metadata import ModelMetadata
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
+
+    binding = ModelBinding("http://up", "served", api="responses", metadata=ModelMetadata(640_000, True))
+    budgeted = _BudgetedBinding(binding, _StepCalls(0, []))
+    assert budgeted.compose_nodes(get_adapter("codex")) == binding.compose_nodes(get_adapter("codex"))

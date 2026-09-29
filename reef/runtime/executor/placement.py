@@ -84,11 +84,14 @@ class ModelGpuLayout:
 class ModelGpuReservation:
     """One deployment's placement group, sliced for its training and inference components."""
 
-    def __init__(self, bundles: GpuBundles, layout: ModelGpuLayout) -> None:
+    def __init__(self, bundles: GpuBundles, layout: ModelGpuLayout, *, training_node_id: str | None = None) -> None:
         if len(bundles.bundle_indices) != layout.total:
             raise ValueError("reserved bundles do not match the model GPU layout")
         self._bundles = bundles
         self.layout = layout
+        #: Ray node of the first training bundle, where the trainer's rank 0
+        #: runs and writes its checkpoints; None for a hosted trainer.
+        self.training_node_id = training_node_id
         self._released = False
 
     @property
@@ -124,12 +127,25 @@ def reserve_model_gpus(
     group = placement_group([{"GPU": 1, "CPU": 1} for _ in range(layout.total)], strategy="PACK")
     _wait_until_placed(ray, group, layout.total, wait_log_interval_s)
     identities = _bundle_identities(ray, group, layout.total)
-    order = sorted(range(layout.total), key=lambda index: _bundle_sort_key(*identities[index]))
+    order = sorted(
+        range(layout.total),
+        key=lambda index: _bundle_sort_key(identities[index].node_address, identities[index].gpu_id),
+    )
     for position, index in enumerate(order):
-        node, gpu = identities[index]
-        logger.info("bundle %4d: placement bundle %4d, node %s, gpu %s", position, index, node, gpu)
-    bundles = GpuBundles(group, order, [identities[index][1] for index in order])
-    return ModelGpuReservation(bundles, layout)
+        identity = identities[index]
+        logger.info(
+            "bundle %4d: placement bundle %4d, node %s, gpu %s",
+            position,
+            index,
+            identity.node_address,
+            identity.gpu_id,
+        )
+    bundles = GpuBundles(group, order, [identities[index].gpu_id for index in order])
+    # The trainer's rank 0 takes the first training bundle. Components that
+    # must see its node-local files, such as the coordinator verifying the
+    # checkpoints it writes, are placed on that node.
+    training_node_id = identities[order[0]].node_id if layout.training_gpus > 0 else None
+    return ModelGpuReservation(bundles, layout, training_node_id=training_node_id)
 
 
 def _wait_until_placed(ray: Any, group: Any, count: int, log_interval_s: float) -> None:
@@ -145,16 +161,26 @@ def _wait_until_placed(ray: Any, group: Any, count: int, log_interval_s: float) 
         )
 
 
+class BundleIdentity(NamedTuple):
+    """Where one placement bundle landed: the node's address and Ray id, and the device."""
+
+    node_address: str
+    gpu_id: int
+    node_id: str
+
+
 class _BundleProbe:
     """Runs inside each bundle to report which node and device it received."""
 
-    def identity(self) -> tuple[str, int]:
+    def identity(self) -> BundleIdentity:
         import ray
 
-        return ray.util.get_node_ip_address(), int(ray.get_gpu_ids()[0])
+        return BundleIdentity(
+            ray.util.get_node_ip_address(), int(ray.get_gpu_ids()[0]), ray.get_runtime_context().get_node_id()
+        )
 
 
-def _bundle_identities(ray: Any, group: Any, count: int) -> list[tuple[str, int]]:
+def _bundle_identities(ray: Any, group: Any, count: int) -> list[BundleIdentity]:
     from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
     probe = ray.remote(num_gpus=1)(_BundleProbe)

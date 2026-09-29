@@ -9,7 +9,15 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 
 
 def load_deployment(path):
-    return resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]
+    # Guidance's launcher supplies these paths before resolving its deployment.
+    with patch.dict(
+        os.environ,
+        {
+            "GUIDANCE_MODEL_PATH": os.environ.get("GUIDANCE_MODEL_PATH") or "/tmp/reef-test-model",
+            "GUIDANCE_STATE_DIR": os.environ.get("GUIDANCE_STATE_DIR") or "/tmp/reef-test-guidance",
+        },
+    ):
+        return resolve_deployment_config(load_config(path, interpolate_env=False), None, path)[0]
 
 
 def deployment_layout(config):
@@ -19,6 +27,8 @@ def deployment_layout(config):
         {
             "REEF_UPSTREAM_URL": os.environ.get("REEF_UPSTREAM_URL") or "http://127.0.0.1:8000",
             "REEF_UPSTREAM_MODEL": os.environ.get("REEF_UPSTREAM_MODEL") or "test-model",
+            "GUIDANCE_MODEL_PATH": os.environ.get("GUIDANCE_MODEL_PATH") or "/tmp/reef-test-model",
+            "GUIDANCE_STATE_DIR": os.environ.get("GUIDANCE_STATE_DIR") or "/tmp/reef-test-guidance",
         },
     ):
         return resolve_deployment_config(config, None, Path(__file__).resolve().parents[2] / "<example>")[0]

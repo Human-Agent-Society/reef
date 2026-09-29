@@ -285,7 +285,6 @@ def test_commit_record_without_failure_manifest_still_drives_a_step(tmp_path: Pa
             "record_progress": {
                 "high_water_sequence": 1,
                 "high_water_offset": 1,
-                "compacted_ids": [],
                 "consumed_ids": [],
             },
             "recorded_at": 1700000000.0,

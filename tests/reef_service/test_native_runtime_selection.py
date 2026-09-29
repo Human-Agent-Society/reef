@@ -7,6 +7,8 @@ import pytest
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.sglang.chat import SGLangInferenceHandler
 from reef.inference.sglang.runtime import SGLangInferenceRuntime
+from reef.inference.vllm.chat import VLLMInferenceHandler
+from reef.inference.vllm.runtime import VLLMInferenceRuntime
 from reef.runtime.deployment import RuntimeConfigError, RuntimeFactory, RuntimeRegistry
 from reef.service.assembly import _connect_training_runtime
 from reef.service.deploy.service_config import ServiceConfig
@@ -87,6 +89,34 @@ def test_sglang_runtime_selects_its_native_request_handler(monkeypatch):
     assert isinstance(runtime, SGLangInferenceRuntime)
     assert runtime.inference_handler is handler
     assert requests == [("http://router", "selected-model", 42, {"trust_remote_code": True})]
+    assert not runtime.inference_admission_status["open"]
+    runtime.shutdown()
+    assert coordinator.shutdown_events == []
+
+
+def test_vllm_runtime_selects_its_native_request_handler(monkeypatch):
+    coordinator = Coordinator()
+    requests = []
+    handler = InferenceProxyRuntime(base_url="http://router").inference_handler
+
+    def from_config(cls, upstream_url, *, model_path, timeout_s, **config):
+        requests.append((upstream_url, model_path, timeout_s, config))
+        return handler
+
+    monkeypatch.setattr(VLLMInferenceHandler, "from_config", classmethod(from_config))
+    runtime = RuntimeRegistry().build(
+        {
+            "type": "vllm",
+            "control": coordinator,
+            "inference_timeout_s": 42,
+            "inference_handler_config": {"tool_call_parser": "hermes"},
+        },
+        model_path="selected-model",
+        environ={},
+    )
+    assert isinstance(runtime, VLLMInferenceRuntime)
+    assert runtime.inference_handler is handler
+    assert requests == [("http://router", "selected-model", 42, {"tool_call_parser": "hermes"})]
     assert not runtime.inference_admission_status["open"]
     runtime.shutdown()
     assert coordinator.shutdown_events == []

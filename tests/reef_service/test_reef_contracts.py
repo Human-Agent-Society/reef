@@ -24,7 +24,7 @@ from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import InferenceRetryPolicy, RequestService, create_app
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.surface import Surface, create_weight_surface
+from reef.surface import Surface, create_harness_surface, create_weight_surface
 from reef.train import TrainStepResult
 from reef.train.types import TrainingBatch
 
@@ -1218,7 +1218,7 @@ def test_any_accepted_token_authenticates_and_rotation_keeps_scenarios_reachable
 
 @pytest.mark.unit
 def test_tag_headers_ride_the_inference_record_and_nothing_else() -> None:
-    """``x-reef-tag-*`` reaches a processor; the service never reads a value."""
+    """``x-reef-tag-*`` reaches a processor; the service reads no value but ``release`` (see the record test)."""
     from reef.service.request_service import _with_tags
     from reef.service.wire import parse_request_headers
 
@@ -1250,6 +1250,66 @@ def test_tags_ride_the_streaming_record_too() -> None:
     parsed = parse_request_headers({"x-reef-scenario": "math", "x-reef-tag-session": "hw-3"}, RequestType.INFERENCE)
     streamed = _with_tags({"messages": [], "stream": True}, parsed)
     assert streamed["metadata"]["tags"] == {"session": "hw-3"}
+
+
+class HarnessRecipe(Recipe):
+    """A recipe whose clients pull a file tree: the served exchange is the same on every release."""
+
+    def build_surface(self, scenario: str) -> Surface:
+        return create_harness_surface()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "recipe", [HarnessRecipe(), WeightRecipe(checkpoint_strategy=EveryNVersions(3))], ids=["harness", "weights"]
+)
+def test_a_record_names_the_release_the_client_runs_only_where_the_client_pulls_it(tmp_path, recipe) -> None:
+    """A session still on an older release records against it, from its x-reef-tag-release; a tag the catalog does not
+    have, and every call on a scenario that serves weights, records against the served release."""
+
+    async def run() -> tuple[list[str], list[str]]:
+        async def backend(artifact: Artifact, path: str, payload: dict) -> dict:
+            live = isinstance(artifact.ref, LiveWeightArtifactRef)
+            return {"meta_info": {"runtime_load_id": artifact.ref.runtime_load_id}} if live else {"ok": True}
+
+        initial = tmp_path / "initial"
+        initial.mkdir()
+        (initial / "AGENTS.md").write_text("first")
+        dispatcher = Dispatcher(
+            recipe,
+            InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+            local_artifact_dir=tmp_path / "local",
+            scenario_storage=SQLiteScenarioStorage(tmp_path / "agent-record"),
+        )
+        releases = [dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id]
+        for version in (1, 2):
+            if isinstance(recipe, WeightRecipe):
+                result = TrainStepResult(state=None, runtime_load_id=f"sglang-v{version}")
+            else:
+                candidate = tmp_path / f"candidate-{version}"
+                candidate.mkdir()
+                (candidate / "AGENTS.md").write_text(f"v{version}")
+                result = TrainStepResult(state=None, artifact=Artifact.local(candidate))
+            dispatcher._commit_result("chat", result)
+            releases.append(dispatcher.get_or_create_scenario("chat").current_artifact_ref().release_id)
+        assert len(set(releases)) == 3
+        client = TestClient(TestServer(create_app(dispatcher, inference_handler=ContractInferenceHandler(backend))))
+        await client.start_server()
+        try:
+            for tag in (releases[1], releases[0], "no-such-release", None):
+                headers = {"x-reef-scenario": "chat", **({"x-reef-tag-release": tag} if tag else {})}
+                response = await client.post("/v1/chat/completions", headers=headers, json={"messages": []})
+                assert response.status == 200
+            rows = (await (await client.get("/reef/scenarios/chat/records")).json())["records"]
+        finally:
+            await client.close()
+        return releases, [row["artifact_ref"]["release_id"] for row in rows]
+
+    import asyncio
+
+    (first, middle, served), recorded = asyncio.run(run())
+    pulled = isinstance(recipe, HarnessRecipe)
+    assert recorded == [middle if pulled else served, first if pulled else served, served, served]
 
 
 @pytest.mark.parametrize("close_dispatcher", [False, True])

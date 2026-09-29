@@ -169,9 +169,10 @@ jobs:
       # huggingface_hub is a declared core dependency (pyproject.toml); the
       # rest are test-only: NumPy for the Erdos TTTD example, httpx for the
       # OPD teacher-client tests, ray for the slime bridge suites, and openai
-      # for the CEO-Bench harness tests; keeping them here avoids expanding
+      # for the CEO-Bench harness tests, the OpenTelemetry SDK for the
+      # record tracing exporter; keeping them here avoids expanding
       # Reef's minimal service dependencies.
-      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4"
+      - run: uv pip install --system --python python pytest pytest-cov "coverage==$COVERAGE_VERSION" pytest-xdist==3.8.0 aiohttp "alembic>=1.13,<2" pyyaml huggingface_hub "sqlalchemy>=2.0,<3" tomli-w numpy ray httpx openai "psutil>=5.9" "psycopg[binary]>=3.1,<4" "opentelemetry-sdk>=1.25" "opentelemetry-exporter-otlp-proto-http>=1.25"
       # Install the pinned training runtime without its GPU dependencies: the
       # tests need it importable, not its GPU stack, and the
       # full requirements pull CUDA torch and the nvidia wheels, which

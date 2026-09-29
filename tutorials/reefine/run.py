@@ -2,7 +2,7 @@
 
 One demo (``./run.sh bugfix`` or ``./run.sh research``):
 
-    ask     - ``reef-pi harness "<request>"``: the wrapper posts the request
+    ask     - ``reef-pi evolve "<request>"``: the wrapper posts the request
               to ``POST /reef/train`` as a training instruction, and the
               deployment, in ``training_mode: manual``, runs one evolve step
               for it at once
@@ -45,6 +45,8 @@ from pathlib import Path
 
 from reef_client import ReefClient, ReefClientError
 
+from reef.harness.client.wrapper import wrapper_directory
+
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
 SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it into reef-pi
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
@@ -56,7 +58,8 @@ POLL_S = 5.0
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
 WORK = HERE / "work"
-# The install script writes the tree, reef-pi wrapper, and release metadata here.
+# The install script writes the tree and release metadata here, and the reef-pi wrapper outside it, in
+# ~/.reef/installs.
 INSTALL_ROOT = WORK / "harness"
 CAPTURES = WORK / "captures"  # the wrapper's spool, beside the run so a show session's receipts can be read back
 DEMOS = HERE / "demos"
@@ -253,10 +256,10 @@ def _wrapper_env():
 
 
 def reef_pi(args, cwd=None):
-    """One call of the installed wrapper, its lines echoed indented; the completed process."""
-    done = subprocess.run(
-        [str(INSTALL_ROOT / "reef-pi"), *args], cwd=cwd, env=_wrapper_env(), capture_output=True, text=True
-    )
+    """One call of the wrapper this install wrote, its lines echoed indented; the completed process. It is this
+    install's own, beside its record in ~/.reef/installs; ~/.local/bin/reef-pi links to the latest install."""
+    wrapper = wrapper_directory(INSTALL_ROOT.resolve()) / "reef-pi"
+    done = subprocess.run([str(wrapper), *args], cwd=cwd, env=_wrapper_env(), capture_output=True, text=True)
     for line in (done.stdout + done.stderr).splitlines():
         print("  " + line, flush=True)
     return done
@@ -303,8 +306,8 @@ def ask(text):
     a fresh one), and the deployment's manual mode runs one step for it. A
     refusal (admission's screens, a mode that takes no instructions) is a
     stop, with the wrapper's line saying why."""
-    say(f"ask: reef-pi harness {text!r}")
-    done = reef_pi(["harness", text])
+    say(f"ask: reef-pi evolve {text!r}")
+    done = reef_pi(["evolve", text])
     match = re.search(r"training request (\S+) accepted", done.stdout)
     if match is None:
         raise SystemExit("the request was not accepted; the wrapper's lines above say why")
@@ -414,7 +417,7 @@ def _take_show_spool(started_ns, run_dir):
     """The spool entry the show session wrote at exit, moved into the run directory; its turns.
 
     The wrapper spools every session's receipts for ``report`` to claim, and
-    ``harness`` records the oldest spooled session as the session the request
+    ``evolve`` records the oldest spooled session as the session the request
     came from; the show session is shown, never reported, so its entry leaves the spool
     for the run directory, where it is the record this driver reads."""
     if not CAPTURES.is_dir():
@@ -553,7 +556,7 @@ def demo(mode):
     else:
         say(f"the head did not move: release {installed_before} stays installed")
         installed = installed_before
-    # From the harness call to the end of the install, or to the result when nothing new installed.
+    # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)
     shown = show(mode, run_dir)
     result.update(

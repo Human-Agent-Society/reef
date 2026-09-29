@@ -77,6 +77,12 @@ class PreparedStep:
         return cls("drop", state, metrics or {})
 
 
+#: What a backend's result becomes when another component's commit replaced the release it was prepared
+#: against: merged onto the release served now, evaluated again against it, or refused and prepared again.
+StaleResultPolicy = Literal["merge", "reevaluate", "refuse"]
+STALE_RESULT_POLICIES: tuple[StaleResultPolicy, ...] = ("merge", "reevaluate", "refuse")
+
+
 @dataclass(frozen=True)
 class StepExecution:
     """One backend attempt returned to the dispatcher."""
@@ -85,6 +91,8 @@ class StepExecution:
     result: TrainStepResult | None = None
     storage: Mapping[str, Any] | None = None
     metrics: Mapping[str, Any] = field(default_factory=dict)
+    #: The prepared step a committed result came from, kept so a stale result can be evaluated again.
+    prepared: PreparedStep | None = None
 
     def __post_init__(self) -> None:
         if self.outcome == "commit" and self.result is None:
@@ -129,6 +137,33 @@ class CandidateBackend(CandidateEvaluator, ABC):
     def dispatched(self) -> bool:
         """Whether the dispatcher must run this backend outside scenario locks."""
         return False
+
+    @property
+    def colocated(self) -> bool:
+        """Whether a dispatched job holds the served engine, so no other component can evaluate meanwhile."""
+        return False
+
+    @property
+    def harness_node_paths(self) -> Mapping[str, str] | None:
+        """Root-relative render paths of the harness node kinds; ``None`` for a backend that evolves no harness."""
+        return None
+
+    @property
+    def harness_adapter(self) -> str | None:
+        """The name of the harness adapter the backend evolves; ``None`` for a backend that evolves no harness."""
+        return None
+
+    @property
+    def stale_result_policy(self) -> StaleResultPolicy:
+        """What a result prepared against a release another trainer has since replaced becomes.
+
+        One of :data:`STALE_RESULT_POLICIES`. The default refuses it: the
+        batch is kept and prepared again. A backend whose evaluation compares
+        candidate and current under the same conditions may answer ``merge``
+        or ``reevaluate`` instead. A dispatched backend is merged whatever it
+        answers, since its result is published before it reaches the commit.
+        """
+        return "refuse"
 
     def recover_pending_step(
         self,
@@ -194,6 +229,15 @@ class CandidateBackend(CandidateEvaluator, ABC):
         stays the one every plugin can rely on.
         """
 
+    def prepare_reevaluation(self, prepared: PreparedStep) -> PreparedStep:
+        """The kept step, ready to be evaluated again after its result was refused as stale.
+
+        The default hands it back unchanged. A backend that keeps a record
+        per attempt claims a fresh one here, so the second evaluation lands
+        beside the first instead of failing on it.
+        """
+        return prepared
+
     @abstractmethod
     def settle_step(
         self,
@@ -206,4 +250,4 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """Restore backend-local state after evaluation or settlement fails."""
 
 
-__all__ = ["CandidateBackend", "PreparedStep", "StepExecution"]
+__all__ = ["STALE_RESULT_POLICIES", "CandidateBackend", "PreparedStep", "StaleResultPolicy", "StepExecution"]

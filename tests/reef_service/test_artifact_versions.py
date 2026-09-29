@@ -42,7 +42,7 @@ class RollbackRuntime(StubTrainingRuntime):
         del batch, objective
         return PreparedTrainingStep(
             action="train",
-            payload={"rollout_id": scenario_step},
+            payload={"scenario_step": scenario_step},
             next_algorithm_state={"steps": int(algorithm_state.get("steps", 0)) + 1},
             metrics={},
         )
@@ -50,10 +50,10 @@ class RollbackRuntime(StubTrainingRuntime):
     def train_candidate(self, payload):
         self.trained += 1
         version = f"w{self.trained}"
-        checkpoint = self.checkpoint_dir / str(payload["rollout_id"])
+        checkpoint = self.checkpoint_dir / str(payload["scenario_step"])
         checkpoint.mkdir(parents=True)
         (checkpoint / "model.txt").write_text(version)
-        job_id = f"job-{payload['rollout_id']}"
+        job_id = f"job-{payload['scenario_step']}"
         self.candidate_versions[job_id] = version
         return ModelCandidate(
             candidate_id=job_id,
@@ -68,6 +68,10 @@ class RollbackRuntime(StubTrainingRuntime):
     def reject_candidate(self, candidate, decision):
         del decision
         self.candidate_versions.pop(candidate.candidate_id, None)
+
+    @property
+    def supports_checkpoint_restore(self):
+        return True
 
     def restore_checkpoint(self, artifact):
         assert not self.inference.inference_admission_status["open"]
@@ -249,6 +253,11 @@ def test_rollback_starts_a_new_experiment_run_segment(tmp_path) -> None:
 
     value.rollback("math", target_version)
     train(value, 4)
+    # The step is visible before the tracker hears about the commit; wait for the event rather than race it.
+    for _ in range(1000):
+        if len(tracker.events) == 3:
+            break
+        time.sleep(0.001)
 
     assert [(event.context.run_segment, event.context.run_step) for event in tracker.events] == [
         (0, 0),

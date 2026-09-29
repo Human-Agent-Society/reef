@@ -10,7 +10,8 @@ The map, one subpackage per job:
     shared by serving and training (``mutations``).
 ``adapters/``
     one directory per agent, the mapping only: a ``descriptor.yaml`` (schema in
-    ``descriptor``) plus quirks. pi, opencode, claude, codex, dsh, hermes, and
+    ``descriptor``) plus quirks, and the ``harness_facts.yaml`` a text proposer
+    reads about the harness's own surface (``harness_facts``). pi, opencode, claude, codex, dsh, hermes, and
     the two programs Reef ships, native and terminus.
 ``episodes/``
     one headless run and its reading: launch on a rendered root, locally or
@@ -23,6 +24,9 @@ The map, one subpackage per job:
 ``client/``
     what runs on a user's machine: the wrapper the install script bakes
     around a pulled harness.
+``step_result``
+    what a settled step means for the person who asked, and the next action
+    it offers: the words the wrapper prints and the harness pages render.
 
 This package depends on core values and runtime contracts, never on training,
 recipes, scenario coordination, or the HTTP service.

@@ -139,7 +139,7 @@ def test_the_designers_reports_and_the_hint_arms_are_released_not_trained() -> N
         report("rep-designer-refused", "rec-designer-refused", "harbor-00000-000", 0.0, arm=None, role="designer")
     )
     assert not p.ready()
-    released = p.retention_decision().releasable_agent_record_ids
+    released = p.releasable_record_ids()
     assert {"rep-designer", "rec-designer", "rep-designer-refused", "rec-designer-refused"} <= released
     assert {"rec-harbor-00000-000-0", "rec-harbor-00000-000-1"} <= released, "the hint arm's calls are released too"
     played(p, "harbor-00000-000", 2, 1.0)

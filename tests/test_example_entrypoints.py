@@ -5,11 +5,15 @@ from __future__ import annotations
 import asyncio
 import importlib
 import importlib.util
+import io
+import json
 import runpy
 import sys
 import tomllib
+import urllib.request
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
+from unittest.mock import patch
 
 import pytest
 
@@ -27,6 +31,7 @@ REEF_EVAL_EXAMPLE_DIRS = (
     *EXAMPLE_DIRS.values(),
     ROOT / "recipes" / "skillclaw",
     ROOT / "recipes" / "openclawrl" / "examples" / "openclawrl",
+    ROOT / "recipes" / "sdpo" / "examples" / "sciknoweval",
 )
 
 
@@ -78,6 +83,7 @@ def _load_harness(monkeypatch, example: str):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("has_cached_harness", [False, True], ids=["fresh", "cached-harness"])
 @pytest.mark.parametrize(
     ("example", "recipe", "task_name", "expected_tasks", "expected_tags", "expected_lab", "expected_model"),
     [
@@ -101,6 +107,18 @@ def _load_harness(monkeypatch, example: str):
             "work/polyomino_packing/lab",
             "Qwen/Qwen3-8B",
         ),
+        *[
+            (
+                "guidance_ttt",
+                "tttd",
+                task,
+                (f"harbor/{task}",),
+                (None,),
+                f"work/{task}/lab",
+                "Qwen/Qwen3-8B",
+            )
+            for task in ("lasso_path", "ahc058", "trimul")
+        ],
         (
             "tttd",
             "tttd",
@@ -140,6 +158,7 @@ def test_reef_eval_entrypoint_dispatches_the_documented_workload(
     expected_tags,
     expected_lab,
     expected_model,
+    has_cached_harness: bool,
 ) -> None:
     calls = []
 
@@ -167,10 +186,37 @@ def test_reef_eval_entrypoint_dispatches_the_documented_workload(
     }.items():
         monkeypatch.setenv(key, value)
 
-    if task_name is not None:
+    if example == "guidance_ttt":
+        for name in ("GUIDANCE_CONFIG", "GUIDANCE_STATE_DIR", "GUIDANCE_MODEL"):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv("GUIDANCE_TASK", task_name or "polyomino_packing")
+    elif task_name is not None:
         monkeypatch.setenv("TTTD_TASK", task_name)
 
-    runpy.run_path(str(EXAMPLE_DIRS[example] / "run.py"))
+    if example == "sao":
+        # The entrypoint waits for training after each mocked rollout; keep that
+        # query local too, regardless of what is listening on the example port.
+        def _training_releases(request, timeout):
+            assert request.full_url.endswith("/reef/scenarios/sao-smoke/releases")
+            return io.BytesIO(json.dumps({"releases": [{"operation": "training"}] * (len(calls) * 6)}).encode())
+
+        monkeypatch.setattr(urllib.request, "urlopen", _training_releases)
+
+    cached_config = ModuleType("harness.config")
+    if has_cached_harness:
+        monkeypatch.setitem(sys.modules, "harness", ModuleType("harness"))
+        monkeypatch.setitem(sys.modules, "harness.config", cached_config)
+
+    # Match a fresh script process while restoring other examples' modules
+    # after this run. Adding the script directory alone leaves cached imports.
+    monkeypatch.syspath_prepend(str(EXAMPLE_DIRS[example]))
+    with patch.dict(sys.modules):
+        for name in tuple(sys.modules):
+            if name == "harness" or name.startswith("harness."):
+                sys.modules.pop(name)
+        runpy.run_path(str(EXAMPLE_DIRS[example] / "run.py"), run_name="__main__")
+    if has_cached_harness:
+        assert sys.modules["harness.config"] is cached_config
 
     example_root = EXAMPLE_DIRS[example]
     assert [str(task.relative_to(example_root)) for _, task, _, _ in calls] == list(expected_tasks)

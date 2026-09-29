@@ -81,6 +81,10 @@ class StubTrainingRuntime(TrainingRuntime):
     def current_runtime_load_id(self):
         return self.inference.current_runtime_load_id()
 
+    @property
+    def supports_checkpoint_restore(self):
+        return True
+
     def restore_checkpoint(self, artifact):
         return None
 

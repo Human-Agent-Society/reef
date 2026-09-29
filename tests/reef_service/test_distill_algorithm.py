@@ -2,7 +2,7 @@
 
 Torch/ray free: a toy family subclasses the base under its own prefix, the
 way ``recipes/<name>/slime/`` does, and the tests exercise the flags, the
-settings stamped on ``args``, the six-column wire row and the payload
+settings stamped on ``args``, the seven-column wire row and the payload
 checks. The kernels are pinned in ``test_distill_parity.py``.
 """
 
@@ -59,8 +59,8 @@ def _sample() -> TrajectoryItem:
     return sample.with_training(teacher_tokens=TEACHER_TOKENS)
 
 
-def _payload(teacher_tokens: list[Any], **overrides: Any) -> dict[str, Any]:
-    row = ["i1", STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, teacher_tokens]
+def _payload(teacher_tokens: list[Any], sample_weight: Any = 1.0, **overrides: Any) -> dict[str, Any]:
+    row = ["i1", STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, teacher_tokens, sample_weight]
     return {"samples": [row], "rollout_ids": [0], "loss": "toydistill", **overrides}
 
 
@@ -133,6 +133,9 @@ def test_flags_carry_the_family_prefix_and_land_on_args_under_distill_names(toy_
         ("importance_sampling_cap", float("nan")),
         ("skip_response_tokens", -1),
         ("jsd_beta", 1.0),
+        ("top_k_source", "oracle"),
+        ("top_k_distribution", "flat"),
+        ("importance_sampling_level", "batch"),
     ],
 )
 def test_settings_reject_invalid_values(name: str, value: Any) -> None:
@@ -150,15 +153,41 @@ def test_a_separate_teacher_needs_its_checkpoint() -> None:
 @pytest.mark.unit
 def test_backend_validation_pins_the_loss_type_rollout_logprobs_and_one_step_per_rollout(toy_family) -> None:
     accepted = {"loss_type": "custom_loss", "use_rollout_logprobs": True, "num_steps_per_rollout": 1}
-    toy_family.validate_backend_args(SimpleNamespace(**accepted))
-    toy_family.validate_backend_args(SimpleNamespace(**{**accepted, "num_steps_per_rollout": None}))  # Slime's default
+
+    def _args(**changes: Any) -> SimpleNamespace:
+        # The driver stamps the family's settings on args before it validates them.
+        args = SimpleNamespace(**{**accepted, **changes})
+        toy_family.apply_driver_options(args, None)
+        return args
+
+    toy_family.validate_backend_args(_args())
+    toy_family.validate_backend_args(_args(num_steps_per_rollout=None))  # Slime's default
 
     with pytest.raises(RuntimeError, match="loss-type custom_loss"):
-        toy_family.validate_backend_args(SimpleNamespace(**{**accepted, "loss_type": "policy_loss"}))
+        toy_family.validate_backend_args(_args(loss_type="policy_loss"))
     with pytest.raises(RuntimeError, match="use-rollout-logprobs"):
-        toy_family.validate_backend_args(SimpleNamespace(**{**accepted, "use_rollout_logprobs": False}))
+        toy_family.validate_backend_args(_args(use_rollout_logprobs=False))
     with pytest.raises(RuntimeError, match="num-steps-per-rollout"):
-        toy_family.validate_backend_args(SimpleNamespace(**{**accepted, "num_steps_per_rollout": 2}))
+        toy_family.validate_backend_args(_args(num_steps_per_rollout=2))
+
+
+@pytest.mark.unit
+def test_selecting_the_support_with_the_student_needs_zero_dropout(toy_family) -> None:
+    args = SimpleNamespace(
+        loss_type="custom_loss",
+        use_rollout_logprobs=True,
+        num_steps_per_rollout=1,
+        attention_dropout=0.0,
+        hidden_dropout=0.0,
+    )
+    toy_family.apply_driver_options(args, ToySettings(top_k_source="student"))
+    toy_family.validate_backend_args(args)
+    with pytest.raises(RuntimeError, match="dropout"):
+        toy_family.validate_backend_args(SimpleNamespace(**{**vars(args), "attention_dropout": 0.1}))
+    # The exact representation keeps the teacher's whole distribution: nothing is selected.
+    exact = SimpleNamespace(**{**vars(args), "attention_dropout": 0.1})
+    toy_family.apply_driver_options(exact, ToySettings(top_k=0, top_k_source="student"))
+    toy_family.validate_backend_args(exact)
 
 
 @pytest.mark.unit
@@ -167,16 +196,31 @@ def test_the_wire_row_is_the_policy_row_plus_the_teacher_sequence(toy_family) ->
 
     row = toy_family.shape_sample_row(sample)
 
-    assert row == [source_record_id(sample), STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, TEACHER_TOKENS]
+    expected = [source_record_id(sample), STUDENT_TOKENS, STUDENT_LOSS_MASK, STUDENT_LOG_PROBS, 0.0, TEACHER_TOKENS]
+    # A sample without a weight of its own carries 1; a recipe's weight rides along.
+    assert row == [*expected, 1.0]
+    assert toy_family.shape_sample_row(sample.with_training(distill_sample_weight=0))[6] == 0.0
     data = to_slime_rollout_data(_payload(TEACHER_TOKENS))
     assert data["loss"] == "toydistill"
     assert data["tokens"] == [STUDENT_TOKENS]
     assert data["response_lengths"] == [3]
     assert data["rollout_log_probs"] == [STUDENT_LOG_PROBS]
     assert data["teacher_tokens"] == [TEACHER_TOKENS]
-    assert toy_family.rollout_data_keys == ("teacher_tokens",)
-    assert set(toy_family.external_batch_keys) >= {"rollout_log_probs", "distill_teacher_log_probs"}
+    assert data["distill_sample_weights"] == [1.0]
+    assert toy_family.rollout_data_keys == ("teacher_tokens", "distill_sample_weights")
+    assert set(toy_family.external_batch_keys) >= {
+        "rollout_log_probs",
+        "distill_sample_weights",
+        "distill_teacher_log_probs",
+    }
     assert set(toy_family.rollout_log_skip_keys) >= {"teacher_tokens", "distill_teacher_topk_ids"}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("sample_weight", [-1.0, "1", None, float("nan"), True])
+def test_the_payload_rejects_an_invalid_sample_weight(toy_family, sample_weight: Any) -> None:
+    with pytest.raises(ValueError, match="sample_weight"):
+        to_slime_rollout_data(_payload(TEACHER_TOKENS, sample_weight=sample_weight))
 
 
 @pytest.mark.unit

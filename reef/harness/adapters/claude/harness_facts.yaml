@@ -1,0 +1,23 @@
+# What reef's reefine proposer is told about Claude Code: see reef.harness.adapters.harness_facts.
+title: Claude Code
+command: >-
+  A person types an agent_command as /<id> in the session. Its text is a Claude Code command file: YAML
+  frontmatter with description (and allowed-tools, a list such as [WebSearch], which pre-approves those tools for
+  the command's own turn), then the prompt, where $ARGUMENTS stands for what the person typed after /<id>. Claude
+  Code replaces every $ARGUMENTS in the file with that text, so write it once (The person typed: $ARGUMENTS) and
+  describe the branches by what it holds.
+tools: >-
+  Agent, AskUserQuestion, Bash, CronCreate, CronDelete, CronList, DesignSync, Edit, EnterPlanMode, EnterWorktree,
+  ExitPlanMode, ExitWorktree, ListAgents, NotebookEdit, Read, ReportFindings, ScheduleWakeup, SendMessage, Skill,
+  TaskOutput, TaskStop, Workflow, Write, WebFetch (reads one URL) and WebSearch (searches the web; no key needed)
+conversation_mode:
+  name: Claude Code
+  skill: >-
+    Claude Code puts a typed skill's SKILL.md into the message, after the line 'Base directory for this skill:'
+  escape: >-
+    Claude Code runs a line that starts with ! in the person's shell
+config_keys: [permissions]
+config_example: >-
+  {"target": "primary", "data": {"permissions": {"allow": ["WebSearch"]}}} lets WebSearch run without asking the
+  person each time. Every session of the release runs under it, so the allow list may name only WebSearch,
+  WebFetch or WebFetch(domain:<host>), and no other permissions key
