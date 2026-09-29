@@ -12,7 +12,6 @@ from reef_service._trajectories import policy_trajectory
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.slime_arguments import add_reef_slime_arguments, configure_reef_loss_args
 from reef.train.slime_backend.score_centering import (
     ROLLOUT_KEYS,
     TOPK_INDICES_KEY,
@@ -75,6 +74,10 @@ def test_settings_reject_invalid_values(field: str, value: object) -> None:
 
 @pytest.mark.unit
 def test_flags_are_off_by_default_and_travel_onto_args() -> None:
+    # slime_arguments imports the Megatron LoRA adapter, which needs torch.
+    pytest.importorskip("torch")
+    from reef.train.slime_backend.reef_adapters.slime_arguments import add_reef_slime_arguments
+
     parser = add_reef_slime_arguments(argparse.ArgumentParser())
     assert settings_from_args(parser.parse_args([])) is None
     args = parser.parse_args(["--score-centering", "--score-centering-top-k", "32"])
@@ -83,6 +86,9 @@ def test_flags_are_off_by_default_and_travel_onto_args() -> None:
 
 @pytest.mark.unit
 def test_driver_adds_the_rollout_keys_for_a_family_that_declares_its_weight() -> None:
+    pytest.importorskip("torch")
+    from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
+
     args = sao_args()
     configure_reef_loss_args(args)
     # SAO's own wire keys stay; the term's join them.
@@ -113,6 +119,9 @@ def test_driver_adds_the_rollout_keys_for_a_family_that_declares_its_weight() ->
     ],
 )
 def test_driver_refuses_what_the_term_cannot_correct(overrides: dict, message: str) -> None:
+    pytest.importorskip("torch")
+    from reef.train.slime_backend.reef_adapters.slime_arguments import configure_reef_loss_args
+
     with pytest.raises(RuntimeError, match=message):
         configure_reef_loss_args(sao_args(**overrides))
 
