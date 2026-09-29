@@ -66,8 +66,27 @@ slices (embedding, output and first/last decoder MLP) were finite and differed
 from the uninterrupted step-2 checkpoint by at most 6.364e-6. This is a sampled
 numerical comparison, not a claim of bitwise or whole-model equality.
 
-The complete 3,000-step, batch-128 SFT run has been started separately from
-these short checks. No full-run SFT or AIME result is available yet.
+The complete 3,000-step, batch-128 SFT run is running separately from these
+short checks. Its first scheduled checkpoint, `checkpoint-100`, passed the
+following validation at 2026-09-29 10:56 UTC, after training continued to
+step 101:
+
+- The HF export and FSDP recovery model have matching tensor names and shapes,
+  covering 9,409,813,744 parameters.
+- The optimizer contains 427 parameter states covering all 8,953,803,264
+  trainable text parameters. Parameter groups, moment shapes and optimizer
+  step counters agree; the trainer and scheduler also report step 100.
+- All four ranks' RNG files load with Python, NumPy, CPU and CUDA state.
+- Four selected 8x8 slices from the embedding, output and first/last decoder
+  MLP weights are finite and exactly equal between the HF and FSDP files.
+  Sampled optimizer moments are also finite.
+
+The checkpoint occupies approximately 137 GiB. The check covers structure,
+shapes, counters and sampled numerical values; it is not a full checksum,
+an actual restore of checkpoint 100, or an evaluation result. The earlier
+checkpoint-1 restore test remains the recovery check. No full-run SFT or
+AIME result is available yet. The detailed report is retained on B200 as
+`/raid/x9zou/reef-opd-state/checkpoint-100-validation.json`.
 
 ## Campaign driver recovery
 
