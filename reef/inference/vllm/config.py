@@ -55,6 +55,8 @@ class VLLMConfig:
     options: dict[str, Any] = field(default_factory=dict)
     #: The endpoint that balances across engines; required when more than one engine serves.
     router_url: str | None = None
+    #: Where each engine's port probe starts on its host; stacks sharing a host need distinct bases.
+    engine_port_base: int = 15000
     env_vars: dict[str, str] = field(default_factory=dict)
     offload: bool = False
     shared_gpus: int = 0
@@ -80,6 +82,8 @@ class VLLMConfig:
             raise ValueError("a vLLM engine must fit on one node")
         if self.request_timeout <= 0 or self.startup_timeout <= 0:
             raise ValueError("vLLM timeouts must be positive")
+        if not 1 <= self.engine_port_base <= 65500:
+            raise ValueError("engine_port_base must be a port between 1 and 65500")
         if self.engine_count > 1 and not self.router_url:
             raise ValueError(
                 "serving more than one vLLM engine requires router_url, the endpoint balancing across them"

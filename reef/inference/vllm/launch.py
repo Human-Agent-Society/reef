@@ -57,8 +57,9 @@ class VLLMEngineGroup:
     def start_engines(self, cursors: dict[str, int]) -> list[Any]:
         """Launch an actor for every empty slot; return the pending ``init`` calls.
 
-        ``cursors`` tracks the next free port per host so engines on one node
-        never race for the same port.
+        ``cursors`` tracks the next free port per host so engines of this
+        deployment never race for the same port; probing starts at the
+        configured ``engine_port_base``, which stacks sharing a host must set apart.
         """
         created = [index for index, engine in enumerate(self.all_engines) if engine is None]
         for index in created:
@@ -68,7 +69,9 @@ class VLLMEngineGroup:
         for index in created:
             actor = self.all_engines[index]
             host, _ = ray.get(actor.node_address_and_port.remote())
-            _, port = ray.get(actor.node_address_and_port.remote(start_port=cursors.get(host, 15000)))
+            _, port = ray.get(
+                actor.node_address_and_port.remote(start_port=cursors.get(host, self.config.engine_port_base))
+            )
             cursors[host] = port + 1
             pending.append(actor.init.remote(host, port))
         return pending

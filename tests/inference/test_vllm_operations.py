@@ -198,3 +198,28 @@ def test_worker_pauses_in_the_configured_mode_and_recovers_only_dead_engines(mon
     engines.recover()
     assert events[-1] == "recover"  # nothing dead: no second recovery
     assert engines.owned is True
+
+
+def test_engine_group_probes_ports_from_the_configured_base_per_host(monkeypatch):
+    from reef.inference.vllm import launch as launch_module
+
+    probes, inits = [], []
+
+    class Actor:
+        def __init__(self, host):
+            self.host = host
+            self.node_address_and_port = SimpleNamespace(remote=self._probe)
+            self.init = SimpleNamespace(remote=lambda host, port: inits.append((host, port)))
+
+        def _probe(self, start_port=15000):
+            probes.append(start_port)
+            return (self.host, start_port)
+
+    hosts = iter(["node-a", "node-a", "node-b"])
+    monkeypatch.setattr(launch_module.ray, "get", lambda value: value)
+    monkeypatch.setattr(launch_module.VLLMEngineGroup, "_launch_actor", lambda self, index: Actor(next(hosts)))
+    config = VLLMConfig("model", 3, 1, 3, router_url="http://router", engine_port_base=20000)
+    group = launch_module.VLLMEngineGroup(config, placement=None)
+    group.start_engines({})
+    assert inits == [("node-a", 20000), ("node-a", 20001), ("node-b", 20000)]
+    assert group.num_new_engines == 3

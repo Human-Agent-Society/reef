@@ -70,6 +70,8 @@ def test_config_derives_reef_serving_options():
         (base_values(options={"enable_prefix_caching": "yes"}, pause_mode="retract"), "must be a boolean"),
         (base_values(options={"kv_transfer_config": {"kv_role": "kv_both"}}), "naming kv_connector"),
         (base_values(request_timeout=0), "timeouts must be positive"),
+        (base_values(engine_port_base=0), "engine_port_base"),
+        (base_values(engine_port_base=65501), "engine_port_base"),
     ],
 )
 def test_config_rejects_settings_reef_cannot_serve(values, message):
