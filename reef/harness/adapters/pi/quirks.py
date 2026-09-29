@@ -20,6 +20,14 @@ pass only beside it, and ``reef`` only with the keys the binding writes.
 Another provider (its own ``baseUrl``, or pi's built in one with a new
 endpoint), ``enabledModels`` and ``httpProxy``, which sends every call
 through another host, are the tree choosing where calls go, and are refused.
+
+pi 0.84.2 rewrites a few old settings keys when it loads ``settings.json`` and
+writes the new form back on its next save: ``queueMode`` becomes
+``steeringMode``, a boolean ``websockets`` becomes ``transport``, and a
+``skills`` object becomes the array of its ``customDirectories`` (its
+``enableSkillCommands`` moves to the top level). The render writes the new
+form itself, so the file an install writes is the one pi keeps, and the check
+of the keys pi may not change never refuses pi's own rewrite.
 """
 
 from __future__ import annotations
@@ -73,10 +81,32 @@ def check_model_route(settings: dict[str, Any], models: dict[str, Any]) -> None:
             raise RenderError(f"pi composition must not set {key}: {refusal}")
 
 
+def migrated_settings(settings: dict[str, object]) -> dict[str, object]:
+    """``settings`` with the old keys pi 0.84.2 rewrites on load in their new form, as its migrateSettings does."""
+    if "queueMode" in settings and "steeringMode" not in settings:
+        settings["steeringMode"] = settings.pop("queueMode")
+    if "transport" not in settings and isinstance(settings.get("websockets"), bool):
+        settings["transport"] = "websocket" if settings.pop("websockets") else "sse"
+    skills = settings.get("skills")
+    if isinstance(skills, dict):
+        if "enableSkillCommands" in skills and "enableSkillCommands" not in settings:
+            settings["enableSkillCommands"] = skills["enableSkillCommands"]
+        directories = skills.get("customDirectories")
+        if isinstance(directories, list) and directories:
+            settings["skills"] = directories
+        else:
+            settings.pop("skills")
+    return settings
+
+
 def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    """Keep every model call on the binding, and give every skill the frontmatter pi requires when its text has none."""
+    """Keep every model call on the binding, give every skill the frontmatter pi requires when its text has none, and
+    write pi's settings in the form pi keeps."""
     check_model_route(json.loads(files[SETTINGS_PATH]), json.loads(files[MODELS_PATH]))
     for path, text in list(files.items()):
         if path.startswith(_SKILLS) and path.endswith("/SKILL.md"):
             files[path] = _with_frontmatter(path, text)
+    settings = json.loads(files[SETTINGS_PATH])
+    if isinstance(settings, dict):
+        files[SETTINGS_PATH] = json.dumps(migrated_settings(settings), indent=2, sort_keys=True) + "\n"
     return files

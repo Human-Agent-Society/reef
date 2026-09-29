@@ -4,12 +4,8 @@ import pytest
 
 torch = pytest.importorskip("torch")
 
-from reef.train.slime_backend.distill.objective import (
-    gather_log_probs_at_ids,
-    native_topk_ids,
-    restricted_divergence,
-    token_importance_weights,
-)
+from reef.train.slime_backend.distill.objective import restricted_divergence, token_importance_weights
+from reef.train.slime_backend.vocab_parallel import gather_log_probs_at_ids, native_topk_ids
 
 
 @pytest.mark.unit

@@ -49,6 +49,6 @@ while ! curl -sf http://127.0.0.1:8901/healthz > /dev/null; do
     sleep 1
 done
 
-# The served tree, the reef-pi wrapper and the release metadata file land under work/harness.
+# The served tree and the release metadata file land under work/harness, the reef-pi wrapper in ~/.reef/installs.
 python3 run.py install
 python3 run.py "$MODE" "$@"
