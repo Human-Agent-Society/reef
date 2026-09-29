@@ -288,7 +288,6 @@ class OpenClawRLProcessor(ComputedFeedbackProcessor):
         states are being judged.
         """
         record = {
-            "batch": self.batch_number,
             "batch_id": batch_id,
             "scenario": self.scenario,
             "samples": len(samples),

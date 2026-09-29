@@ -478,11 +478,11 @@ def test_the_prm_record_file_reports_the_judged_population(tmp_path) -> None:
     processor.ingest(_turn("t2", _successor(Q1, "that works")))
     worker.push(TurnJudgment("t1", score=1.0, teacher_cands=ANCHOR))
     assert processor.ready()
-    processor.build_batch()
+    batch = processor.build_batch()
 
     line = json.loads(record.read_text().splitlines()[0])
-    assert line["batch"] == 1
-    assert line["batch_id"] == "s:batch:1"
+    assert "batch" not in line
+    assert line["batch_id"] == batch.batch_id == "s:batch:1"
     assert line["samples"] == 1
     assert line["rewards"] == {"+1": 1}
 
