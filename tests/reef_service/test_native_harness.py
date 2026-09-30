@@ -887,8 +887,8 @@ def test_native_graph_admission_names_the_rule_a_bad_graph_breaks() -> None:
             ),
             "not reachable",
         ),
-        (_graph(max_steps=0), "'max_steps' must be an integer from 1 to 32"),
-        (_graph(max_steps=33), "'max_steps' must be an integer from 1 to 32"),
+        (_graph(max_steps=0), "'max_steps' must be an integer from 1 to 1024"),
+        (_graph(max_steps=1025), "'max_steps' must be an integer from 1 to 1024"),
         (_graph(start="nowhere"), "'start' must name a stage"),
         (
             _graph(
@@ -938,6 +938,11 @@ def test_native_graph_admission_names_the_rule_a_bad_graph_breaks() -> None:
     )
     with pytest.raises(ValueError, match="cycle without a model stage"):
         NODE_KINDS["native_graph"](None, cycle)
+
+
+def test_a_long_task_graph_and_agent_step_budget_pass_admission() -> None:
+    NODE_KINDS["native_graph"](None, _graph(max_steps=1024))
+    NODE_KINDS["native_agent"](None, {**CHECKER[1], "max_steps": 40})
 
 
 def test_native_graph_renders_sorted_json_and_checks_its_allow_list() -> None:
@@ -1170,7 +1175,10 @@ def test_branch_and_compact_admission_names_the_rule_a_bad_stage_breaks() -> Non
         ({**route, "cases": []}, "'cases' must be a list of 1 to 8"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": 2}]}, "objects with when, value and outcome"),
         ({**route, "cases": [{"when": "moon_phase", "value": 2, "outcome": "x"}]}, "'when' must be one of"),
-        ({**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]}, "integer from 0 to 32"),
+        (
+            {**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]},
+            "integer from 0 to 1024",
+        ),
         ({**route, "cases": [{"when": "last_text_matches", "value": "(", "outcome": "x"}]}, "regular expression"),
         # A proposer's pattern is bounded where it runs (bounded_search); admission keeps the length rule only.
         ({**route, "cases": [{"when": "last_text_matches", "value": "a" * 201, "outcome": "x"}]}, "at most 200"),
@@ -1623,7 +1631,7 @@ def test_native_agent_admission_and_render_checks_name_what_is_missing() -> None
         ({**CHECKER[1], "tools": ["a", "a"]}, "'tools' must be a list of distinct names"),
         ({**CHECKER[1], "then": ["checker"]}, "cannot hand its text to itself"),
         ({**CHECKER[1], "then": [f"a{i}" for i in range(9)]}, "'then' takes at most 8"),
-        ({**CHECKER[1], "max_steps": 0}, "'max_steps' must be an integer from 1 to 32"),
+        ({**CHECKER[1], "max_steps": 0}, "'max_steps' must be an integer from 1 to 1024"),
         ({**CHECKER[1], "max_tool_calls": "3"}, "'max_tool_calls' must be an integer from 1 to 256"),
     ]
     for config, rule in bad:

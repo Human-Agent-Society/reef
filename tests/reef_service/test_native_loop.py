@@ -335,7 +335,7 @@ def test_from_root_boots_the_loop_from_the_entries_list_and_from_the_files(tmp_p
         NativeHost.from_root(root)
     (root / "loops" / "other.py").unlink()
     # A hand edited file cannot run unchecked: the constants and the code meet admission again.
-    (root / "loops" / "main.py").write_text(f"{LOOP_CODE}\nNAME = 'main'\nMAX_STEPS = 99\n", encoding="utf-8")
+    (root / "loops" / "main.py").write_text(f"{LOOP_CODE}\nNAME = 'main'\nMAX_STEPS = 1025\n", encoding="utf-8")
     with pytest.raises(LoadError, match=r"loop main\.py cannot run: .*'max_steps' must be an integer"):
         NativeHost.from_root(root)
     (root / "loops" / "main.py").write_text("x = 1\n", encoding="utf-8")
@@ -360,7 +360,7 @@ def test_the_file_form_admits_the_text_before_the_import_runs_the_module(tmp_pat
             load_loop(loops)
         assert not marker.exists()  # the top level never ran
     # The header the render wrote is read the same way: a budget past the bound is refused before the import.
-    (loops / "main.py").write_text(f"{ran}{LOOP_CODE}\nNAME = 'main'\nMAX_STEPS = 99\n", encoding="utf-8")
+    (loops / "main.py").write_text(f"{ran}{LOOP_CODE}\nNAME = 'main'\nMAX_STEPS = 1025\n", encoding="utf-8")
     with pytest.raises(LoadError, match=r"loop main\.py cannot run: .*max_steps"):
         load_loop(loops)
     assert not marker.exists()

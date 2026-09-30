@@ -771,7 +771,7 @@ its own graph replaces that flow; hooks still handle their events.
 
 Admission rejects unknown kinds or keys, outcomes without exactly one edge,
 stages unreachable from ``start``, stages without a path to an end, and
-cycles without a model stage. The step budget (``max_steps``, 1 to 32) thus
+cycles without a model stage. The step budget (``max_steps``, 1 to 1024) thus
 bounds each run. Rendering rejects a ``tools`` allow list that names a tool
 missing from the tree.
 
@@ -889,7 +889,7 @@ compiles, contains no credential, and leaves ``run_turn`` bound to a plain
 top-level ``def`` with a parameter. The last module-scope binding wins,
 including bindings inside ``if``, ``for``, ``with``, ``try``, or ``match``;
 those other bindings are refused. ``max_steps`` is the model-step budget,
-from 1 to 32 (default 12). The tree is flat: entries with ``group`` are
+from 1 to 1024 (default 12). The tree is flat: entries with ``group`` are
 refused at admission, boot, and mount.
 
 ``ctx`` exposes the following calls into the run:

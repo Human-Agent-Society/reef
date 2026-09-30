@@ -79,7 +79,7 @@ NATIVE_VERIFY_CHECKS = ("last_line_integer", "last_line_matches", "nonempty")
 NATIVE_BRANCH_PREDICATES = ("steps_used_at_least", "tool_errors_at_least", "last_text_matches")
 NATIVE_END_REASONS = ("completed", "gave_up")
 #: Size caps on one graph, so admission and the interpreter's guard stay cheap.
-NATIVE_GRAPH_MAX_STEPS = 32
+NATIVE_GRAPH_MAX_STEPS = 1024
 NATIVE_GRAPH_MAX_STAGES = 16
 NATIVE_GRAPH_MAX_EDGES = 64
 NATIVE_GRAPH_MAX_CASES = 8
