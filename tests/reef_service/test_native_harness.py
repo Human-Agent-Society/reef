@@ -945,6 +945,46 @@ def test_a_long_task_graph_and_agent_step_budget_pass_admission() -> None:
     NODE_KINDS["native_agent"](None, {**CHECKER[1], "max_steps": 40})
 
 
+def test_a_team_stage_takes_agents_and_a_workspace_and_a_sequential_stage_takes_neither() -> None:
+    def crew(**keys):
+        """The seed graph with a subagent stage made of ``keys`` on the model's answer."""
+        to_act, _, to_think = SEED_GRAPH["edges"]
+        outcomes = ("completed", "gave_up", "budget", "ask")
+        return _graph(
+            stages={**SEED_GRAPH["stages"], "crew": {"kind": "subagent", **keys}},
+            edges=[
+                to_act,
+                to_think,
+                {"from": "think", "when": "text", "to": "crew"},
+                *({"from": "crew", "when": outcome, "to": "done"} for outcome in outcomes),
+            ],
+        )
+
+    for keys in (
+        {"agent": "checker"},
+        {"mode": "sequential", "agent": "checker"},
+        {"mode": "parallel", "agents": ["worker", "critic"]},
+        {"mode": "parallel", "agents": ["worker"], "workspace": "shared"},
+    ):
+        NODE_KINDS["native_graph"](None, crew(**keys))
+    bad = [
+        ({"mode": "wide", "agents": ["worker"]}, "'mode' must be one of sequential, parallel"),
+        ({"mode": "parallel", "agents": [f"w{i}" for i in range(9)]}, "'agents' must be a list of 1 to 8 agent names"),
+        ({"mode": "parallel", "agents": []}, "'agents' must be a list of 1 to 8 agent names"),
+        ({"mode": "parallel", "agents": ["../x"]}, "'agents' must be a list of 1 to 8 agent names"),
+        ({"mode": "parallel", "agents": ["worker", "worker"]}, "'agents' must be distinct with mode parallel"),
+        ({"mode": "parallel", "agents": ["a..b"]}, "'agents' cannot name a..b: a member's name is part of a git"),
+        ({"mode": "parallel", "agent": "worker"}, "with mode parallel names its agents in 'agents', not 'agent'"),
+        ({"agent": "checker", "agents": ["worker"]}, "stage 'crew' takes agents only with mode parallel"),
+        ({"agent": "checker", "workspace": "own"}, "stage 'crew' takes workspace only with mode parallel"),
+        ({"mode": "parallel", "agents": ["worker"], "workspace": "mine"}, "'workspace' must be one of own, shared"),
+        ({"mode": "parallel", "agents": ["worker"], "then": ["x"]}, r"stage 'crew' \(subagent\) does not take then"),
+    ]
+    for keys, message in bad:
+        with pytest.raises(ValueError, match=message):
+            NODE_KINDS["native_graph"](None, crew(**keys))
+
+
 def test_native_graph_renders_sorted_json_and_checks_its_allow_list() -> None:
     descriptor = get_adapter("native")
     files = render_composition([("native_graph", VERIFY_GRAPH), TOOL], descriptor)

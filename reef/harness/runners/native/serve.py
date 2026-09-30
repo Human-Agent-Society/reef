@@ -6,9 +6,11 @@ for turns and control requests. A session holds one ``Run`` across turns. A
 new head Reef serves reaches the process through the release poll or the
 ``x-reef-release-id`` header of an inference answer and is mounted between
 two steps of the open turn, or at once when no turn is open; a mount that
-leaves an entry FAILED is rolled back whole. Every mount, unmount and failed
-mount is an event in the open turn's session, else in ``sessions/serve.jsonl``.
-``reef-native -p`` stays the episode form: one process, one turn.
+leaves an entry FAILED is rolled back whole, and a graph with a team stage
+does not mount, since only the episode form runs one. Every mount, unmount
+and failed mount is an event in the open turn's session, else in
+``sessions/serve.jsonl``. ``reef-native -p`` stays the episode form: one
+process, one turn.
 """
 
 from __future__ import annotations
@@ -53,7 +55,7 @@ from reef.harness.runners.native.release_client import (
 )
 from reef.harness.runners.native.selftools import RESERVED_NAMES, ServeState, self_tools
 from reef.harness.tree.mutations import Mutation, admit_mutations
-from reef.harness.tree.nodes import flat_entry_refusal
+from reef.harness.tree.nodes import NATIVE_TEAM_MODES, flat_entry_refusal
 
 SERVE_LOG = "serve.jsonl"
 SOCKET_NAME = "serve.sock"
@@ -176,6 +178,27 @@ def _not_flat(entries: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]
         refusal = flat_entry_refusal(entry)
         if refusal is not None:
             failures.append((str(entry.get("id")), str(entry.get("name")), refusal))
+    return failures
+
+
+def team_stage_refusals(entries: Sequence[Mapping[str, Any]]) -> list[tuple[str, str, str]]:
+    """Every enabled graph entry with a team stage: (id, kind, error). A mount lands on the one host every session of
+    this process runs on, between the steps of any run, and team members need hosts of their own."""
+    failures = []
+    for entry in entries:
+        config = entry.get("config")
+        if entry.get("name") != "native_graph" or entry.get("disabled") or not isinstance(config, Mapping):
+            continue
+        stages = config.get("stages")
+        for stage_name, stage in stages.items() if isinstance(stages, Mapping) else ():
+            mode = stage.get("mode") if isinstance(stage, Mapping) else None
+            if mode in NATIVE_TEAM_MODES:
+                error = (
+                    f"stage {stage_name!r} uses mode {mode}, which the serve form does not run; team stages run in "
+                    "episodes only"
+                )
+                failures.append((str(entry.get("id")), "native_graph", error))
+                break
     return failures
 
 
@@ -637,7 +660,7 @@ class Server(ServeState, ReleaseUpdateListener):
     ) -> dict[str, Any] | None:
         """``root.update(entries)`` checked entry by entry; None on success, else the first failure after the rollback."""
         previous = self.served_entries()
-        failures = [*_not_flat(entries), *self._reserved(entries)]
+        failures = [*_not_flat(entries), *self._reserved(entries), *team_stage_refusals(entries)]
         if not failures:
             if self._degraded:
                 # A FAILED entry whose options did not change never retries on its own (only update() does), so a

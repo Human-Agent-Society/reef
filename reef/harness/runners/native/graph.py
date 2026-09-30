@@ -26,7 +26,7 @@ from typing import Any, NoReturn
 
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.runners.native.enforce import Tool
-from reef.harness.runners.native.inbox import TeamMember
+from reef.harness.runners.native.inbox import Assignment, TeamMember
 from reef.harness.runners.native.seed import SEED_GRAPH
 from reef.harness.tree.nodes import _NAME, NATIVE_END_REASONS, validate_native_graph
 
@@ -220,7 +220,9 @@ class Run:
 
     The tools, hooks, agents and prompt are read from the host at each use;
     ``allow`` narrows the tools to the names an agent may see. ``builtin_tools``
-    (a team member's message tools) come after that filter, so no list hides them."""
+    (a team member's message tools, a lead's ``team_assign``) come after that
+    filter, so no list hides them; ``assignments`` are the workers the run
+    queued for its next parallel stage."""
 
     def __init__(
         self,
@@ -254,6 +256,7 @@ class Run:
         self.max_tool_calls = max_tool_calls
         self.team_member = team_member
         self.builtin_tools: dict[str, Tool] = {}
+        self.assignments: list[Assignment] = []
         self.max_steps = 0
         self.tool_calls = 0
         self.tool_errors = 0
@@ -542,7 +545,12 @@ class Run:
         self.end_turn({"kind": reason}, reason)
 
     def subagent(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
-        """Hand the last assistant text (or the task) to an agent, then down its ``then`` pipeline; its text comes back."""
+        """Hand the last assistant text (or the task) to an agent, then down its ``then`` pipeline; its text comes
+        back. A team stage (a mode other than ``sequential``) runs its members at once instead."""
+        if stage.get("mode", "sequential") != "sequential":
+            from reef.harness.runners.native.team import run_team_stage  # late: team.py imports this module
+
+            return run_team_stage(self, stage, name)
         first = str(stage["agent"])
         text = _last_assistant_text(self.messages) or self.prompt
         outcome = "completed"
@@ -585,6 +593,9 @@ class Run:
             agent_prompt=str(agent.get("prompt", "")),
             max_tool_calls=agent.get("max_tool_calls"),
         )
+        from reef.harness.runners.native.team import attach_team_tools  # late: team.py imports this module
+
+        attach_team_tools(child, graph)
         tools = child.tools
         session.write(
             "session",

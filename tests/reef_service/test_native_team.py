@@ -2,8 +2,8 @@
 
 One token budget per episode, spent by every agent turn and set only by the caller; a stop flag every run reads
 before its next step; and the members of a team stage, each on its own thread, host, session file and step budget.
-Until a graph can name a team stage, the stage runs through ``TeamStageRun`` on a root turn put together as
-``run_loop`` puts it together."""
+The core tests run ``TeamStageRun`` on a root turn put together as ``run_loop`` puts it together; the mode tests run
+a graph that names the stage."""
 
 from __future__ import annotations
 
@@ -13,6 +13,7 @@ import re
 import threading
 import time
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 
 import pytest
 from reef_service.test_harness_recipe import MODEL, batch, make_binary
@@ -34,15 +35,28 @@ from reef.harness.episodes.run import EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import reader_for
 from reef.harness.runners.native import TEAM_DIR, Session, ToolModule, ToolRunner, _Loop, run_loop
 from reef.harness.runners.native.control import EpisodeControl, EpisodeStop, TeamBudget, episode_token_limit
-from reef.harness.runners.native.enforce import InProcessEnforcer
+from reef.harness.runners.native.enforce import InProcessEnforcer, ToolFailed
 from reef.harness.runners.native.graph import Run, _tokens, run_graph
 from reef.harness.runners.native.host import NativeHost
-from reef.harness.runners.native.inbox import TEAM_MAX_SENDS_PER_MEMBER, TEAM_MESSAGE_MAX_CHARS, Inbox, TeamMember
+from reef.harness.runners.native.inbox import (
+    TEAM_MAX_SENDS_PER_MEMBER,
+    TEAM_MESSAGE_MAX_CHARS,
+    Assignment,
+    Inbox,
+    TeamMember,
+)
 from reef.harness.runners.native.seed import SEED_TOOLS
-from reef.harness.runners.native.team import MemberStart, TeamStageRun, TeamWaitRunner, team_outcome
+from reef.harness.runners.native.team import (
+    MemberStart,
+    TeamAssignRunner,
+    TeamStageRun,
+    TeamWaitRunner,
+    run_team_stage,
+    team_outcome,
+)
 from reef.harness.runners.native.workspaces import CommandOutcome, HostCommandRunner, TeamWorkspaces
 from reef.harness.tree.nodes import NODE_KINDS
-from reef.harness.tree.render import render_composition
+from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.backend import (
     EpisodeEvaluationWorker,
@@ -233,9 +247,9 @@ def member_of(body: dict) -> str:
 
 
 class MemberModel(_FakeModel):
-    """Answers each member by its instance name; with ``gather``, that many members meet at a barrier on their first
-    call, so no reply goes out until all of them are in flight at once. At the barrier it sets ``stop`` when given
-    and lists ``mounts_path`` when given."""
+    """Answers each member by its instance name; with ``gather``, that many members (the root is none of them) meet
+    at a barrier on their first call, so no reply goes out until all of them are in flight at once. At the barrier it
+    sets ``stop`` when given and lists ``mounts_path`` when given."""
 
     def __init__(self, gather: int = 0, stop: EpisodeStop | None = None, mounts_path: Path | None = None) -> None:
         super().__init__()
@@ -257,7 +271,7 @@ class MemberModel(_FakeModel):
         with self.lock:
             is_first = instance not in self.met
             self.met.add(instance)
-        if is_first and self.barrier is not None:
+        if is_first and self.barrier is not None and instance != "root":
             try:
                 self.barrier.wait()
             except threading.BrokenBarrierError:
@@ -977,3 +991,196 @@ def test_a_side_whose_episodes_sent_messages_reports_them_per_agent(tmp_path: Pa
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     metrics = b.evaluate(prepared.candidate, sides=("candidate",)).metrics
     assert metrics["candidate_messages"] == {"peer.1": {"sent": 1, "received": 0, "undelivered": 0}}
+
+
+# -- mode parallel: a lead assigns workers with team_assign --------------------------------------------------------
+
+WORKER = ("native_agent", {"name": "worker", "prompt": "You are a worker. Do the task you are given in one line."})
+
+
+def crew_graph(name: str = "main", **crew) -> dict:
+    """The delegating graph with its subagent stage ``delegate`` made of ``crew``: think, act while the model calls
+    tools, the stage on its answer, then one more model step."""
+    graph = _delegating_graph()
+    return {**graph, "name": name, "stages": {**graph["stages"], "delegate": {"kind": "subagent", **crew}}}
+
+
+class LeadModel(MemberModel):
+    """A run that holds ``team_assign`` makes ``assignments`` in its first step, answers after the tool results, and
+    then answers with the message it read; any other root answers with what it read; a worker, with its task."""
+
+    def __init__(self, assignments: list[dict], gather: int = 0) -> None:
+        super().__init__(gather)
+        self.assignments = assignments
+
+    def reply(self, instance: str, body: dict) -> dict:
+        messages = body["messages"]
+        if instance != "root":
+            return _reply(content=f"{instance} did: {messages[1]['content']}")
+        if "team_assign" not in [tool["function"]["name"] for tool in body.get("tools") or ()]:
+            return _reply(content=f"root read: {messages[-1]['content']}")
+        if not any(message["role"] == "tool" for message in messages):
+            calls = [_call("team_assign", arguments, f"a{index}") for index, arguments in enumerate(self.assignments)]
+            return _reply(tool_calls=calls)
+        if messages[-1]["role"] == "user":
+            return _reply(content=f"lead read: {messages[-1]['content']}")
+        return _reply(content="assigned")
+
+
+def root_typed(sessions: Path, type_: str) -> list[dict]:
+    return [e["data"] for e in events(sessions / "session.jsonl") if e["type"] == type_]
+
+
+def test_a_lead_assigns_two_workers_that_run_at_once_and_its_next_step_reads_both_results(tmp_path: Path) -> None:
+    assignments = [
+        {"agent": "worker", "task": "count the primes below 50", "rules": "Answer with the count alone."},
+        {"agent": "worker", "task": "count the primes below 100"},
+    ]
+    model = LeadModel(assignments, gather=2)
+    crew = crew_graph(mode="parallel", agents=["worker"], workspace="shared")
+    try:
+        code, sessions = run_turn(tmp_path, model, [*_seed_nodes(SEED_TOOLS), WORKER, ("native_graph", crew)])
+    finally:
+        stop(model)
+    # Both workers' first calls were in flight together.
+    assert code == 0 and not model.is_barrier_broken
+    seed_tools = [tool["config"]["name"] for tool in SEED_TOOLS]
+    assert events(sessions / "session.jsonl")[0]["data"]["tools"] == sorted([*seed_tools, "team_assign"])
+    (declaration,) = [t for t in model.requests[0]["tools"] if t["function"]["name"] == "team_assign"]
+    assert declaration["function"]["parameters"]["properties"]["agent"]["enum"] == ["worker"]
+    assert [r["content"] for r in root_typed(sessions, "tool/result")] == ["assigned worker.1", "assigned worker.2"]
+    files = member_files(sessions)
+    assert {instance: (found[0]["data"]["role"], found[0]["data"]["task"]) for instance, found in files.items()} == {
+        "worker.1": ("worker", "count the primes below 50"),
+        "worker.2": ("worker", "count the primes below 100"),
+    }
+    # A worker talks to its team but assigns no one; the rules reach the worker they were given to alone.
+    assert files["worker.1"][0]["data"]["tools"] == sorted([*seed_tools, "team_send", "team_wait"])
+    systems = {member_of(r): r["messages"][0]["content"] for r in model.requests if member_of(r) != "root"}
+    assert "Answer with the count alone." in systems["worker.1"] and "Answer with" not in systems["worker.2"]
+    kinds = [e["type"] for e in events(sessions / "session.jsonl")]
+    assert kinds.index("team/start") < kinds.index("team/end") < kinds.index("user/message")
+    (said,) = root_typed(sessions, "user/message")
+    assert said["source"] == {"kind": "team", "stage": "delegate", "mode": "parallel", "outcome": "completed"}
+    assert said["content"] == (
+        "worker.1 (worker) ended with completed: worker.1 did: count the primes below 50\n\n"
+        "worker.2 (worker) ended with completed: worker.2 did: count the primes below 100"
+    )
+    # The lead's next step reads the stage's one message, and its answer ends the turn.
+    assert model.requests[-1]["messages"][-1] == {"role": "user", "content": said["content"]}
+    exits = [e for e in root_typed(sessions, "stage/exit") if e["stage"] == "delegate"]
+    assert exits == [
+        {
+            "step": 2,
+            "stage": "delegate",
+            "outcome": "completed",
+            "to": "answer",
+            "mode": "parallel",
+            "agents": ["worker.1", "worker.2"],
+            "outcomes": {"worker.1": "completed", "worker.2": "completed"},
+            "steps": 2,
+        }
+    ]
+    assert root_typed(sessions, "turn/end")[-1]["reason"] == {"kind": "completed"}
+
+
+def test_an_agent_no_parallel_stage_runs_is_a_tool_error_and_a_stage_with_no_work_completes(tmp_path: Path) -> None:
+    model = LeadModel([{"agent": "critic", "task": "check it"}])
+    crew = crew_graph(mode="parallel", agents=["worker"])
+    try:
+        code, sessions = run_turn(tmp_path, model, [*_seed_nodes(SEED_TOOLS), WORKER, CRITIC, ("native_graph", crew)])
+    finally:
+        stop(model)
+    (result,) = root_typed(sessions, "tool/result")
+    assert result["error"]["code"] == "TOOL_FAILED"
+    assert result["content"] == "Error: no parallel stage runs 'critic'; agent must be one of worker"
+    (said,) = root_typed(sessions, "user/message")
+    assert (said["content"], said["source"]["outcome"]) == ("no work was assigned to worker", "completed")
+    (stage_exit,) = [e for e in root_typed(sessions, "stage/exit") if e["stage"] == "delegate"]
+    assert (stage_exit["outcome"], stage_exit["to"], stage_exit["agents"]) == ("completed", "answer", [])
+    assert code == 0 and not (sessions / "agents").exists() and not root_typed(sessions, "team/start")
+
+
+def test_team_assign_holds_eight_workers_and_a_stage_takes_only_the_agents_it_runs(tmp_path: Path) -> None:
+    runner = TeamAssignRunner(SimpleNamespace(assignments=[]), ["worker"])
+    for index in range(1, 9):
+        assert runner({"agent": "worker", "task": f"part {index}"}, "") == f"assigned worker.{index}"
+    with pytest.raises(ToolFailed, match="8 workers already wait for a parallel stage"):
+        runner({"agent": "worker", "task": "part 9"}, "")
+    model = MemberModel()
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        turn.run.assignments = [
+            Assignment("peer", "a", ""),
+            Assignment("critic", "b", ""),
+            Assignment("peer", "c", ""),
+        ]
+        stage = {"kind": "subagent", "mode": "parallel", "agents": ["peer"], "workspace": "shared"}
+        outcome, detail = run_team_stage(turn.run, stage, "crew")
+        turn.finish()
+    finally:
+        stop(model)
+    assert (outcome, detail["agents"]) == ("completed", ["peer.1", "peer.2"])
+    assert turn.run.assignments == [Assignment("critic", "b", "")]
+
+
+def test_an_agent_whose_graph_holds_a_parallel_stage_gets_team_assign_and_leads_its_own_workers(
+    tmp_path: Path,
+) -> None:
+    model = LeadModel([{"agent": "worker", "task": "count the primes below 50"}])
+    lead = ("native_agent", {"name": "lead", "prompt": "You are the lead. Split the work.", "graph": "leading"})
+    graph = _delegating_graph()
+    main = {**graph, "stages": {**graph["stages"], "delegate": {"kind": "subagent", "agent": "lead"}}}
+    leading = crew_graph("leading", mode="parallel", agents=["worker"])
+    nodes = [*_seed_nodes(SEED_TOOLS), WORKER, lead, ("native_graph", main), ("native_graph", leading)]
+    try:
+        code, sessions = run_turn(tmp_path, model, nodes)
+    finally:
+        stop(model)
+    headers = {found[0]["data"]["agent"]: found[0]["data"] for found in member_files(sessions).values()}
+    assert "team_assign" in headers["lead"]["tools"]
+    assert "team_assign" not in events(sessions / "session.jsonl")[0]["data"]["tools"]
+    assert (headers["worker.1"]["parent"], headers["worker.1"]["task"]) == ("lead", "count the primes below 50")
+    # The workspace defaults to own: the worker had a worktree, and it changed no file.
+    assert headers["worker.1"]["workspace"] == "own"
+    (stage_exit,) = [
+        e["data"] for e in member_files(sessions)["lead"] if e["type"] == "stage/exit" and "mode" in e["data"]
+    ]
+    assert stage_exit["merges"] == {"worker.1": "empty"}
+    handed = root_typed(sessions, "user/message")[0]
+    assert handed["source"]["agent"] == "lead"
+    assert handed["content"] == (
+        "lead read: worker.1 (worker) ended with completed: worker.1 did: count the primes below 50\n\n"
+        "worker.1: changed no file"
+    )
+    assert code == 0 and root_typed(sessions, "turn/end")[-1]["reason"] == {"kind": "completed"}
+
+
+def test_render_refuses_unknown_members_a_cycle_through_them_nested_team_stages_and_a_member_with_then() -> None:
+    descriptor = get_adapter("native")
+    seed = _seed_nodes(SEED_TOOLS)
+    crew = ("native_graph", crew_graph(mode="parallel", agents=["worker"]))
+    files = render_composition([*seed, WORKER, crew], descriptor)
+    assert json.loads(files["native/graphs/main.json"])["stages"]["delegate"]["agents"] == ["worker"]
+    with pytest.raises(RenderError, match="stage 'delegate' names agents the tree lacks: critic, worker"):
+        render_composition(
+            [*seed, ("native_graph", crew_graph(mode="parallel", agents=["worker", "critic"]))], descriptor
+        )
+    looped = ("native_agent", {**WORKER[1], "graph": "side"})
+    side = ("native_graph", crew_graph("side", mode="parallel", agents=["worker"]))
+    with pytest.raises(RenderError, match="'worker' is called in a cycle"):
+        render_composition([*seed, looped, crew, side], descriptor)
+    below = ("native_graph", crew_graph("side", mode="parallel", agents=["critic"]))
+    nested = "native_agent 'worker' runs inside a team stage, and its graph 'side' holds team stage 'delegate'"
+    with pytest.raises(RenderError, match=f"{nested}; team stages do not nest"):
+        render_composition([*seed, looped, CRITIC, crew, below], descriptor)
+    # A team stage anywhere below a member is refused too: here the member calls a lead that runs one.
+    calls_lead = ("native_graph", crew_graph("side", agent="lead"))
+    lead = ("native_agent", {"name": "lead", "prompt": "You lead.", "graph": "leading"})
+    leading = ("native_graph", crew_graph("leading", mode="parallel", agents=["critic"]))
+    with pytest.raises(RenderError, match="native_agent 'lead' runs inside a team stage"):
+        render_composition([*seed, looped, CRITIC, lead, crew, calls_lead, leading], descriptor)
+    with pytest.raises(RenderError, match="native_agent 'worker' is a team member and cannot carry then"):
+        render_composition([*seed, ("native_agent", {**WORKER[1], "then": ["critic"]}), CRITIC, crew], descriptor)
+    with pytest.raises(RenderError, match="does not render native_graph"):
+        render_composition([crew], get_adapter("pi"))

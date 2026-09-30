@@ -19,7 +19,7 @@ from typing import Any
 
 from reef.core.errors import ReefError
 from reef.harness.adapters.descriptor import AdapterDescriptor
-from reef.harness.tree.nodes import NATIVE_LOOP_DEFAULT_MAX_STEPS
+from reef.harness.tree.nodes import NATIVE_LOOP_DEFAULT_MAX_STEPS, NATIVE_TEAM_MODES
 
 
 class RenderError(ReefError):
@@ -41,19 +41,26 @@ def _names_of(nodes: Sequence[tuple[str, Any]], kind: str) -> set[str]:
 def _check_native_references(
     nodes: Sequence[tuple[str, Any]], graphs: Sequence[Mapping[str, Any]], agents: Sequence[Mapping[str, Any]]
 ) -> None:
-    """Names a graph or an agent uses exist in the same tree, and agents never call each other in a cycle.
+    """Names a graph or an agent uses exist in the same tree, agents never call each other in a cycle, and team
+    stages do not nest.
 
     The checks need every node, so they land here rather than in admission.
     ``main`` is always a graph: the loop runs the seed when the tree carries
     none. The reference graph is an agent's ``then`` list plus the agents its
     graph's subagent stages name; a cycle would run without end, so every
-    delegation is a finite tree."""
+    delegation is a finite tree. A member of a team stage runs on its own step
+    budget and workspace, which a ``then`` pipeline or a team stage below it
+    would have to share, so a member carries no ``then`` and nothing it calls
+    runs a team stage."""
     tool_names = _names_of(nodes, "native_tool")
     skill_names = _names_of(nodes, "skill")
     # main is always a graph (the loop runs the seed when the tree carries none) and seed is the built in loop.
     graph_names = {str(graph.get("name")) for graph in graphs} | {"main", "seed"}
     agent_names = {str(agent.get("name")) for agent in agents}
     subagents: dict[str, list[str]] = {}
+    # Each graph's first team stage, and every agent a team stage runs.
+    team_stages: dict[str, str] = {}
+    members: set[str] = set()
     for graph in graphs:
         called: list[str] = []
         for stage_name, stage in (graph.get("stages") or {}).items():
@@ -64,23 +71,38 @@ def _check_native_references(
                 raise RenderError(
                     f"native_graph stage {stage_name!r} allows tools the tree lacks: {', '.join(missing)}"
                 )
-            if stage.get("kind") == "subagent":
-                if stage.get("agent") not in agent_names:
+            if stage.get("kind") != "subagent":
+                continue
+            if stage.get("mode") in NATIVE_TEAM_MODES:
+                named = [str(agent) for agent in stage.get("agents") or ()]
+                missing = sorted(set(named) - agent_names)
+                if missing:
                     raise RenderError(
-                        f"native_graph stage {stage_name!r} calls an agent the tree lacks: {stage.get('agent')}"
+                        f"native_graph stage {stage_name!r} names agents the tree lacks: {', '.join(missing)}"
                     )
+                called.extend(named)
+                members.update(named)
+                team_stages.setdefault(str(graph.get("name")), str(stage_name))
+            elif stage.get("agent") not in agent_names:
+                raise RenderError(
+                    f"native_graph stage {stage_name!r} calls an agent the tree lacks: {stage.get('agent')}"
+                )
+            else:
                 called.append(str(stage["agent"]))
         subagents[str(graph.get("name"))] = called
     calls: dict[str, list[str]] = {"": subagents.get("main", [])}
+    graph_of: dict[str, str] = {}
     for agent in agents:
         name = str(agent.get("name"))
         for key, names in (("tools", tool_names), ("skills", skill_names), ("then", agent_names)):
             missing = sorted(set(agent.get(key) or ()) - names)
             if missing:
                 raise RenderError(f"native_agent {name!r} names {key} the tree lacks: {', '.join(missing)}")
-        graph_name = str(agent.get("graph", "seed"))
+        graph_name = graph_of[name] = str(agent.get("graph", "seed"))
         if graph_name not in graph_names:
             raise RenderError(f"native_agent {name!r} runs a graph the tree lacks: {graph_name}")
+        if name in members and agent.get("then"):
+            raise RenderError(f"native_agent {name!r} is a team member and cannot carry then")
         calls[name] = [*(agent.get("then") or ()), *subagents.get(graph_name, [])]
     state: dict[str, int] = {}
 
@@ -96,6 +118,20 @@ def _check_native_references(
     for name in calls:
         if state.get(name) is None:
             visit(name)
+    below = sorted(members)
+    seen: set[str] = set()
+    while below:
+        name = below.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        graph_name = graph_of[name]
+        if graph_name in team_stages:
+            raise RenderError(
+                f"native_agent {name!r} runs inside a team stage, and its graph {graph_name!r} holds team stage "
+                f"{team_stages[graph_name]!r}; team stages do not nest"
+            )
+        below.extend(calls[name])
 
 
 def render_native_module(kind: str, options: Mapping[str, Any]) -> str:

@@ -1,10 +1,11 @@
 """Team stages of the native loop: the members of one stage run at once, each on its own thread, host and budget.
 
-A member is one agent turn in its own session file, as a sequential subagent is, but it reads its own
-``NativeHost`` (its own mount directory, so hook module state is per member) and runs on its agent's step budget,
-not on the caller's remaining steps. The caller waits for every member and then reads one message that names each
-member's outcome and text. The episode's token budget and stop flag are shared: once either is set, every member
-ends its turn at its next step.
+A ``subagent`` stage with ``mode: parallel`` starts the workers its caller queued with the built-in ``team_assign``
+tool, each named ``<agent>.<k>`` and told the task it was assigned. A member is one agent turn in its own session
+file, as a sequential subagent is, but it reads its own ``NativeHost`` (its own mount directory, so hook module
+state is per member) and runs on its agent's step budget, not on the caller's remaining steps. The caller waits for
+every member and then reads one message that names each member's outcome and text. The episode's token budget and
+stop flag are shared: once either is set, every member ends its turn at its next step.
 
 With ``workspace: own`` each member works in a git worktree of its own (``reef.harness.runners.native.workspaces``),
 and its branch is merged into the caller's workdir when the stage ends; with ``shared`` every member works in the
@@ -22,17 +23,18 @@ import copy
 import os
 import shutil
 import threading
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from reef.harness.runners.native import LoadError, Session, ToolModule, ToolRunner
 from reef.harness.runners.native.enforce import ToolFailed
-from reef.harness.runners.native.graph import GraphError, Run, _Stop, _walk, narrow_allow
+from reef.harness.runners.native.graph import Graph, GraphError, Run, _Stop, _walk, narrow_allow
 from reef.harness.runners.native.host import NativeHost
-from reef.harness.runners.native.inbox import Inbox, TeamMember
+from reef.harness.runners.native.inbox import Assignment, Inbox, TeamMember
 from reef.harness.runners.native.workspaces import MergeResult, TeamWorkspaceError
+from reef.harness.tree.nodes import NATIVE_TEAM_MAX_AGENTS
 
 #: Characters of one member's final text that the caller's message carries.
 TEAM_RESULT_CHARS = 4000
@@ -59,6 +61,11 @@ TEAM_WAIT_DESCRIPTION = (
     "other member has ended. The message itself arrives at your next step."
 )
 TEAM_WAIT_PARAMETERS = {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]}
+TEAM_ASSIGN_DESCRIPTION = (
+    "Assign a task to a new worker that runs one of these agents: {agents}. task is what the worker is told; rules "
+    "(optional) are added to its agent's prompt for it alone. The workers start together at the next parallel "
+    "stage that runs their agent, each on its own step budget, and their results come back to you as one message."
+)
 
 
 class TeamSendRunner(ToolRunner):
@@ -108,6 +115,26 @@ class TeamWaitRunner(ToolRunner):
         if member.inbox.is_alone(member.instance):
             return "every other member has ended; no message will come"
         return f"no message after {seconds} s"
+
+
+class TeamAssignRunner(ToolRunner):
+    """``team_assign(agent, task, rules)``: queue one worker on the run for the next parallel stage that runs its
+    agent; the answer names the worker as that stage will."""
+
+    def __init__(self, run: Run, agents: Sequence[str]) -> None:
+        self.run = run
+        self.agents = tuple(agents)
+
+    def __call__(self, args: dict[str, Any], workdir: str, /) -> str:
+        agent, queued = str(args["agent"]), self.run.assignments
+        if agent not in self.agents:
+            raise ToolFailed(f"no parallel stage runs {agent!r}; agent must be one of {', '.join(self.agents)}")
+        if len(queued) >= NATIVE_TEAM_MAX_AGENTS:
+            raise ToolFailed(
+                f"{NATIVE_TEAM_MAX_AGENTS} workers already wait for a parallel stage, the most one run may hold"
+            )
+        queued.append(Assignment(agent, str(args["task"]), str(args.get("rules") or "")))
+        return f"assigned {agent}.{sum(1 for assignment in queued if assignment.agent == agent)}"
 
 
 @dataclass(frozen=True)
@@ -384,3 +411,50 @@ class TeamStageRun:
                 host.dispose()
             # A boot that failed may leave its mount directory behind; a member's never outlives its turn.
             shutil.rmtree(mount_path, ignore_errors=True)
+
+
+def attach_team_tools(run: Run, graph: Graph) -> None:
+    """Give ``run`` the ``team_assign`` tool when its graph holds a parallel stage, over the agents such stages run."""
+    agents = list(
+        dict.fromkeys(
+            str(agent)
+            for stage in graph.stages.values()
+            if stage["kind"] == "subagent" and stage.get("mode") == "parallel"
+            for agent in stage["agents"]
+        )
+    )
+    if not agents:
+        return
+    parameters = {
+        "type": "object",
+        "properties": {
+            "agent": {"type": "string", "enum": agents},
+            "task": {"type": "string"},
+            "rules": {"type": "string"},
+        },
+        "required": ["agent", "task"],
+    }
+    description = TEAM_ASSIGN_DESCRIPTION.format(agents=", ".join(agents))
+    run.builtin_tools["team_assign"] = ToolModule(
+        "team_assign", description, parameters, TeamAssignRunner(run, agents), builtin_tool=True
+    )
+
+
+def run_team_stage(caller: Run, stage: Mapping[str, Any], stage_name: str) -> tuple[str, dict[str, object]]:
+    """One parallel stage of the caller's graph: the workers it queued for the agents the stage runs start together.
+
+    With none queued the stage ends ``completed`` and starts nobody; the assignments for other agents stay queued."""
+    mode, agents = str(stage["mode"]), [str(agent) for agent in stage["agents"]]
+    taken = [assignment for assignment in caller.assignments if assignment.agent in agents]
+    caller.assignments = [assignment for assignment in caller.assignments if assignment.agent not in agents]
+    if not taken:
+        source = {"kind": "team", "stage": stage_name, "mode": mode, "outcome": "completed"}
+        caller.say(f"no work was assigned to {', '.join(agents)}", source)
+        return "completed", {"mode": mode, "agents": [], "outcomes": {}, "steps": 0}
+    counts: dict[str, int] = {}
+    members = []
+    for assignment in taken:
+        counts[assignment.agent] = counts.get(assignment.agent, 0) + 1
+        instance = f"{assignment.agent}.{counts[assignment.agent]}"
+        members.append(MemberStart(instance, assignment.agent, assignment.task, assignment.rules))
+    return TeamStageRun(caller, stage_name, mode, str(stage.get("workspace", "own")), members).run()

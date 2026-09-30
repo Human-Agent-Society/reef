@@ -75,9 +75,18 @@ NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "message": (("text",), ("done",)),
     "branch": (("cases",), ("else",)),
     "compact": (("fire_ratio", "keep_ratio"), ("done",)),
-    "subagent": (("agent",), ("completed", "gave_up", "budget", "ask")),
+    "subagent": (("agent", "mode", "agents", "workspace"), ("completed", "gave_up", "budget", "ask")),
     "end": (("reason",), ()),
 }
+#: How a subagent stage runs its agents: one after another (``agent`` and its ``then``), or the ``agents`` of a
+#: team stage at once, each on its own thread and budget (``parallel``: the workers the caller assigned with
+#: ``team_assign``).
+NATIVE_TEAM_MODES = ("parallel",)
+NATIVE_SUBAGENT_MODES = ("sequential", *NATIVE_TEAM_MODES)
+#: Where a team stage's members work: a git worktree each, merged back when the stage ends, or the caller's workdir.
+NATIVE_TEAM_WORKSPACES = ("own", "shared")
+#: The members one team stage lists, and the assignments one run may hold for its parallel stages.
+NATIVE_TEAM_MAX_AGENTS = 8
 #: What one native_agent node may carry beside its name.
 NATIVE_AGENT_KEYS = ("prompt", "graph", "tools", "skills", "max_steps", "max_tool_calls", "then")
 NATIVE_AGENT_MAX_TOOL_CALLS = 256
@@ -388,9 +397,7 @@ def _graph_stage(name: str, stage: Any) -> str:
     elif kind == "compact":
         _compact_ratios(name, stage)
     elif kind == "subagent":
-        agent = stage.get("agent")
-        if not isinstance(agent, str) or not _NAME.fullmatch(agent):
-            raise ValueError(f"native_graph stage {name!r} 'agent' must name an agent")
+        check_subagent_stage(name, stage)
     elif kind == "end" and stage.get("reason", "completed") not in NATIVE_END_REASONS:
         raise ValueError(f"native_graph stage {name!r} 'reason' must be one of {', '.join(NATIVE_END_REASONS)}")
     return kind
@@ -407,6 +414,47 @@ def _admit_pattern(value: Any, where: str) -> None:
         re.compile(value)
     except re.error as exc:
         raise ValueError(f"{where} must be a regular expression: {exc}") from exc
+
+
+def check_subagent_stage(name: str, stage: Mapping[str, Any]) -> None:
+    """A subagent stage's mode and the keys it takes: ``agent`` for one agent after another, else ``agents`` to run
+    at once and the ``workspace`` they share or split."""
+    mode = stage.get("mode", "sequential")
+    if mode not in NATIVE_SUBAGENT_MODES:
+        raise ValueError(f"native_graph stage {name!r} 'mode' must be one of {', '.join(NATIVE_SUBAGENT_MODES)}")
+    if mode == "sequential":
+        extra = sorted({"agents", "workspace"} & set(stage))
+        if extra:
+            raise ValueError(
+                f"native_graph stage {name!r} takes {' and '.join(extra)} only with mode "
+                f"{' or '.join(NATIVE_TEAM_MODES)}"
+            )
+        agent = stage.get("agent")
+        if not isinstance(agent, str) or not _NAME.fullmatch(agent):
+            raise ValueError(f"native_graph stage {name!r} 'agent' must name an agent")
+        return
+    if "agent" in stage:
+        raise ValueError(f"native_graph stage {name!r} with mode {mode} names its agents in 'agents', not 'agent'")
+    agents = stage.get("agents")
+    if (
+        not isinstance(agents, Sequence)
+        or isinstance(agents, str)
+        or not 1 <= len(agents) <= NATIVE_TEAM_MAX_AGENTS
+        or any(not isinstance(agent, str) or not _NAME.fullmatch(agent) for agent in agents)
+    ):
+        raise ValueError(
+            f"native_graph stage {name!r} 'agents' must be a list of 1 to {NATIVE_TEAM_MAX_AGENTS} agent names"
+        )
+    if mode == "parallel" and len(set(agents)) < len(agents):
+        raise ValueError(f"native_graph stage {name!r} 'agents' must be distinct with mode parallel")
+    dotted = sorted({agent for agent in agents if ".." in agent})
+    if dotted:
+        raise ValueError(
+            f"native_graph stage {name!r} 'agents' cannot name {', '.join(dotted)}: a member's name is part of a "
+            "git branch name, which cannot hold '..'"
+        )
+    if stage.get("workspace", "own") not in NATIVE_TEAM_WORKSPACES:
+        raise ValueError(f"native_graph stage {name!r} 'workspace' must be one of {', '.join(NATIVE_TEAM_WORKSPACES)}")
 
 
 def _branch_cases(name: str, cases: Any) -> None:

@@ -705,7 +705,15 @@ def run_loop(
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None, "loop": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
-        tools, hooks, module = host.tools, host.hooks, host.loop
+        module = host.loop
+        loop = _Loop(session, root, session_dir, header, enforcer=enforcer, control=control, workspaces=workspaces)
+        run = graphs.Run(loop, prompt, binding, host, workdir)
+        if module is None:
+            from reef.harness.runners.native.team import attach_team_tools  # late: team.py imports this module
+
+            # Built before the header, so the header lists team_assign when the graph holds a parallel stage.
+            attach_team_tools(run, graph)
+        tools, hooks = run.tools, host.hooks
         session.write(
             "session",
             {
@@ -722,8 +730,6 @@ def run_loop(
             },
         )
         session.write("turn/start", {"turn": 1})
-        loop = _Loop(session, root, session_dir, header, enforcer=enforcer, control=control, workspaces=workspaces)
-        run = graphs.Run(loop, prompt, binding, host, workdir)
         try:
             if module is not None:
                 return graphs.run_loop_module(run, module)

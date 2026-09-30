@@ -1,7 +1,8 @@
 """The mailboxes of one team stage run: a queue per member, and the messages sent to the agent that started the team.
 
 A message is queued when it is sent and read at the receiver's next step; a member that has ended receives nothing
-more, and a message to it is reported undelivered. The inbox lasts one stage run.
+more, and a message to it is reported undelivered. The inbox lasts one stage run. The workers a run assigns for
+its parallel stages wait on that run as ``Assignment`` values.
 """
 
 from __future__ import annotations
@@ -125,3 +126,12 @@ class TeamMember:
     instance: str
     role: str
     inbox: Inbox
+
+
+@dataclass(frozen=True)
+class Assignment:
+    """One worker a run queued with ``team_assign``: the agent it runs, its task, and rules for it alone."""
+
+    agent: str
+    task: str
+    rules: str
