@@ -221,7 +221,7 @@ training, adapter publication, and inference against a new live release.
 Both drivers exited zero. OPD loss was 0.275383 and gradient norm 0.485756;
 reported trainable base parameters were zero. All 80 published adapter tensors
 matched receiver checksums. This verifies integration only, not AIME gains.
-The 4096-example SFT and 30-update efficacy experiment remain pending.
+The 4096-example SFT and 30-update efficacy experiment completed; see the result below.
 
 For this change, 135 focused OPD, LoRA-import, teacher, and publication-recovery
 tests passed. Repository-wide pre-commit and mypy (337 source files) passed;
@@ -236,3 +236,14 @@ configuration tests and all 128 harness recipe/step-record tests passed.
 Focused pre-commit also passed. The entire suite has not been rerun after
 these corrections; the initial full run and focused reruns are reported
 separately. No remaining failure from that full run is unresolved.
+
+## Completed small LoRA experiment
+
+The [paired AIME result](results/2026-09-30-lora-small/README.md) is negative:
+360/480 (75.0%) after SFT versus 338/480 (70.4167%) after 30 OPD updates,
+a change of -4.5833 percentage points. The question-cluster bootstrap 95%
+interval is [-13.3333, +3.3333] pp; it includes zero. No improvement is
+established and the +3 pp target was not met. This does not satisfy the
+original full-parameter +10 pp roadmap criterion. Both pipeline and campaign
+exited zero; physical GPUs 2–5 were released. Compact paired scores reproduce
+the saved analysis, and rescoring all 960 final answers matched recorded scores.

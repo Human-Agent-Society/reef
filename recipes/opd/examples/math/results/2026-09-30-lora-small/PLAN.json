@@ -1,0 +1,51 @@
+{
+  "protocol": "small LoRA efficacy; not full roadmap reproduction",
+  "student": "Qwen3.5-9B-Base",
+  "teacher": "Qwen3.5-9B frozen",
+  "lora_rank": 32,
+  "lora_alpha": 32,
+  "targets": [
+    "MLP down_proj",
+    "full-attention o_proj"
+  ],
+  "sft_examples": 4096,
+  "sft_steps": 128,
+  "sft_global_batch": 32,
+  "sft_lr": 0.0001,
+  "sft_max_length": 8192,
+  "opd_prompts": 1920,
+  "opd_steps": 30,
+  "opd_prompts_per_step": 64,
+  "opd_responses_per_prompt": 4,
+  "opd_response_limit": 4096,
+  "opd_lr": 5e-05,
+  "evaluation_steps": [
+    0,
+    30
+  ],
+  "aime_questions": 30,
+  "eval_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15
+  ],
+  "eval_max_new_tokens": 32768,
+  "target_absolute_gain": 0.03,
+  "report_any_positive_gain_separately": true,
+  "old_full_parameter_run": "stopped; do not resume",
+  "sft_selection": "seed-0 shuffled pinned shards and math rows, deduplicated, truncated to8192; user changed selection to speed up preparation",
+  "sft_complete_responses_required": false
+}

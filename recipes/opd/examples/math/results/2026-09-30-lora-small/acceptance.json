@@ -1,0 +1,27 @@
+{
+  "final_step": 30,
+  "eval_every": 30,
+  "questions": 30,
+  "samples_per_question": 16,
+  "target_absolute_improvement": 0.03,
+  "absolute_improvement": -0.04583333333333333,
+  "target_met": false,
+  "observed_positive_improvement": false,
+  "paired_question_bootstrap_95_interval": [
+    -0.13333333333333333,
+    0.03333333333333333
+  ],
+  "uncertainty_note": "Question-cluster bootstrap, 10,000 resamples, seed 0; the point-estimate target is separate from statistical significance.",
+  "curve": [
+    {
+      "step": 0,
+      "release_id": "01a9538b0a408a4c59ed5c359b44dd9732271b86",
+      "accuracy": 0.75
+    },
+    {
+      "step": 30,
+      "release_id": "live:19f2abb1f70948aca1856ced36d377b1:ff31c8e6786b46408666f0d45e49c80a:30:30",
+      "accuracy": 0.7041666666666667
+    }
+  ]
+}

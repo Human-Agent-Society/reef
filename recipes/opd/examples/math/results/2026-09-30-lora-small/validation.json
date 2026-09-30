@@ -1,0 +1,20 @@
+{
+  "eval-0000.jsonl": {
+    "raw_sha256": "13a7b0345811a86c313c730efacd5223775944f14f5ef62ecab472467de3f175",
+    "correct": 360,
+    "samples": 480,
+    "rescoring_matches": true,
+    "release_ids": [
+      "01a9538b0a408a4c59ed5c359b44dd9732271b86"
+    ]
+  },
+  "eval-0030.jsonl": {
+    "raw_sha256": "0a3fb0bd1733e7d8499875d46c2f32340c53f449221e8bd7016e4dc3b336b4b1",
+    "correct": 338,
+    "samples": 480,
+    "rescoring_matches": true,
+    "release_ids": [
+      "live:19f2abb1f70948aca1856ced36d377b1:ff31c8e6786b46408666f0d45e49c80a:30:30"
+    ]
+  }
+}
