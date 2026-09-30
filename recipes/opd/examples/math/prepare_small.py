@@ -1,4 +1,4 @@
-"""Select complete short math demonstrations and disjoint prompt-only OPD inputs."""
+"""Select reproducible math demonstrations and disjoint prompt-only OPD inputs."""
 
 import argparse
 import hashlib
@@ -39,13 +39,18 @@ def main() -> None:
     parser.add_argument("--opd-prompts", type=int, default=1920)
     parser.add_argument("--max-length", type=int, default=8192)
     parser.add_argument("--workers", type=int, default=8)
+    parser.add_argument(
+        "--random-truncate",
+        action="store_true",
+        help="Shuffle math rows within seeded shards and truncate instead of rejecting long responses",
+    )
     args = parser.parse_args()
     if min(args.examples, args.opd_prompts, args.max_length, args.workers) <= 0:
         parser.error("Counts and length must be positive")
     args.output.mkdir(parents=True, exist_ok=False)
     evaluation = [json.loads(line) for line in (args.source / "aime24.jsonl").read_text().splitlines()]
     excluded = {normalize_question(row["prompt"]) for row in evaluation}
-    transform = TokenizePair(args.tokenizer, 10**9)
+    transform = TokenizePair(args.tokenizer, args.max_length if args.random_truncate else 10**9)
     shards = sorted(
         name
         for name in list_repo_files(SFT_DATASET[0], repo_type="dataset", revision=SFT_DATASET[1])
@@ -76,6 +81,12 @@ def main() -> None:
                 candidates.append({"messages": messages, "question": question})
         if not candidates:
             continue
+        if args.random_truncate:
+            random.Random(0).shuffle(candidates)
+            unique = {}
+            for row in candidates:
+                unique.setdefault(row["question"], row)
+            candidates = list(unique.values())[: args.examples - len(selected)]
         print(json.dumps({"shard": shard, "math_candidates": len(candidates)}), flush=True)
         tokenized = Dataset.from_list(candidates).map(
             transform,
@@ -121,7 +132,13 @@ def main() -> None:
     Dataset.from_list(encoded).save_to_disk(str(args.output / "tokenized"))
     manifest = {
         "sft_dataset": SFT_DATASET,
-        "selection": "seed-0 shuffled pinned shards; first eligible math rows, then seed-0 shuffle",
+        "selection": (
+            "seed-0 shuffled pinned shards; shuffled rows within each shard"
+            if args.random_truncate
+            else "seed-0 shuffled pinned shards; first eligible math rows, then seed-0 shuffle"
+        ),
+        "truncate_long_responses": args.random_truncate,
+        "sampling_scope": "seeded shard subset, not a uniform sample of the entire dataset",
         "domain": "math",
         "sft_examples": len(selected),
         "opd_prompts": len(train),

@@ -9,9 +9,11 @@ roadmap acceptance remains separate; this LoRA experiment does not establish
 the original approximately ten-point, full-parameter reproduction target.
 
 - Keep the pinned Qwen3.5-9B-Base student and frozen Qwen3.5-9B teacher below.
-- Select 4096 complete OpenThoughts3 math demonstrations with at most 8192
-  tokens, including the prompt and answer. Use deterministic shuffled shards,
-  exclude normalized whole-question AIME overlap, and deduplicate questions.
+- Randomly select 4096 OpenThoughts3 math demonstrations using seed-0 shuffled
+  shards and seed-0 shuffled rows within each shard. This samples a shard subset,
+  not uniformly across the whole dataset. Truncate to 8192 tokens including
+  the prompt; long reasoning/answers may be incomplete. Do not invent EOS.
+  Exclude normalized whole-question AIME overlap, and deduplicate questions.
   This is not a paraphrase contamination audit. Preserve the selection manifest.
 - Train one epoch: 128 updates, global batch 32, initial learning rate 1e-4
   with linear decay. Freeze the base; use LoRA rank/alpha 32, dropout zero,
@@ -27,10 +29,10 @@ the original approximately ten-point, full-parameter reproduction target.
   The earlier 64K teacher score is not a matched control for this 32K protocol.
 
 `prepare_small.py` consumes the pinned source files from `prepare.py` and writes
-`manifest.json`, the selected JSONL files, and an untruncated tokenized dataset:
+`manifest.json`, the selected JSONL files, and a length-limited tokenized dataset:
 
 ```bash
-python recipes/opd/examples/math/prepare_small.py --source /work/data --output /work/lora-small/data
+python recipes/opd/examples/math/prepare_small.py --random-truncate --source /work/data --output /work/lora-small/data
 torchrun --standalone --nproc-per-node=4 recipes/opd/examples/math/sft.py \
   --data /work/lora-small/data/sft.jsonl --tokenized /work/lora-small/data/tokenized \
   --output /work/lora-small/sft --steps 128 --global-batch-size 32 \
