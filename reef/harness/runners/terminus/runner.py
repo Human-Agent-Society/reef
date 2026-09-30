@@ -1,8 +1,9 @@
 """Run one Terminal-Bench task for one episode, on behalf of ``run_episode``.
 
-This is the only module that imports the evaluation stack, and nothing on the
-render path imports it, so the adapter registry stays cheap and a deployment
-without the ``terminus`` extra can still load the descriptor.
+This module and ``reef.harness.runners.harbor_trial`` import the evaluation
+stack, and nothing on the render path imports either, so the adapter registry
+stays cheap and a deployment without the ``terminus`` extra can still load the
+descriptor.
 
 Reef stays the outer loop. An episode launches ``reef-terminus --task <task>``;
 this module runs that one task through reef-eval, the same primitive every
@@ -20,19 +21,17 @@ directory the reader walks to files Reef wrote.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import json
 import os
 import sys
-import urllib.parse
-from collections.abc import Collection
 from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
 from reef.harness.episodes.executor import ISOLATION_ENV
 from reef.harness.episodes.trajectory import primary_reward
+from reef.harness.runners.harbor_trial import HarborTrialError, mount_error, own_trial, run_trial
 from reef.harness.runners.terminus.tree import (
     ENVIRONMENT_ENV,
     TerminusTreeError,
@@ -138,18 +137,6 @@ def atif_steps(trial_dir: Path) -> list[dict[str, Any]]:
     return steps
 
 
-def own_trial(trials_dir: Path, names_before_run: Collection[str], uri: str | None) -> Path | None:
-    """The trial directory this run wrote: the one the Lab row's ``file://`` URI names (Harbor's trial URI), else
-    the one directory that appeared under ``trials_dir`` during the run. ``None`` when neither says, so a reused trials
-    directory never lends this run an earlier trial's steps."""
-    if isinstance(uri, str) and uri.startswith("file://"):
-        path = Path(urllib.parse.unquote(urllib.parse.urlparse(uri).path))
-        if path.is_dir():
-            return path
-    appeared = [path for path in trials_dir.iterdir() if path.is_dir() and path.name not in names_before_run]
-    return appeared[0] if len(appeared) == 1 else None
-
-
 def trial_record(task: str, rewards: Any, trial_dir: Path | None, error: str = "") -> dict[str, Any]:
     """One trial as the ``terminus-atif-json`` reader expects it, its steps read from ``trial_dir`` alone.
 
@@ -168,22 +155,6 @@ def trial_record(task: str, rewards: Any, trial_dir: Path | None, error: str = "
     }
 
 
-def mount_error(error: str, trials_dir: Path) -> str:
-    """Name the mount problem when the task container's writes never reached the trial directory.
-
-    Harbor bind-mounts each trial's ``verifier`` directory into the Docker task container, and the verifier's
-    output lands in ``test-stdout.txt`` there before any reward. No reward and no such file on this host means
-    Docker wrote into a directory its VM does not share with the host, not that the verifier failed.
-    """
-    if not error.startswith("No reward file found") or any(trials_dir.rglob("verifier/test-stdout.txt")):
-        return error
-    return (
-        f"{error}. Docker wrote nothing into {trials_dir}, which it bind-mounted into the task container: the "
-        "Docker VM does not share that path with this host. Share it with the VM, or use a path it shares "
-        "(colima and Docker Desktop share the home directory by default)"
-    )
-
-
 def write_trial(record: dict[str, Any], sessions: Path) -> Path:
     """Write the trial where the adapter's trajectory reader will find it."""
     sessions.mkdir(parents=True, exist_ok=True)
@@ -198,17 +169,6 @@ def run(task: str) -> int:
     Non-zero when the verifier produced no reward: the episode then reports a
     failed run rather than a scoreless success.
     """
-    # Lazy: reef-eval pulls Harbor's dependency tree, which the render path
-    # and its tests must never need. Harbor requires Python 3.12, above Reef's
-    # own floor, so the extra carries that marker and can be absent on a
-    # supported interpreter; say so rather than raising a bare ImportError.
-    try:
-        from reef_eval import Lab
-    except ImportError as exc:
-        raise TerminusTreeError(
-            "the terminus runner needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
-        ) from exc
-
     trial_slug(task)  # refuse a task that cannot name its own trial file
     root = _required_env(TREE_DIR_ENV)
     tree = load_tree(root)
@@ -219,18 +179,34 @@ def run(task: str) -> int:
     if environment not in ("docker", "e2b"):
         raise TerminusTreeError(f"unsupported terminus environment {environment!r}; use docker or e2b")
 
-    names_before_run = {path.name for path in trials.iterdir()}
-    row = asyncio.run(
-        Lab(trials).run(
+    agent = agent_spec(root, tree)
+    try:
+        result = run_trial(
             task,
-            agent_spec(root, tree),
+            agent,
+            trials_path=trials,
+            environment=environment,
+            runner_name="terminus",
             extra_instruction_paths=instruction_paths(root, tree),
-            environment={"type": environment},
         )
-    )
-    error = str((row.tags or {}).get("error") or "")
-    if environment == "docker":
-        error = mount_error(error, trials)
-    record = trial_record(task, row.rewards, own_trial(trials, names_before_run, row.uri), error)
+    except HarborTrialError as exc:
+        raise TerminusTreeError(str(exc)) from exc
+    record = trial_record(task, result.rewards, result.trial_path, result.error)
     write_trial(record, sessions)
     return 1 if record["failed"] else 0
+
+
+__all__ = [
+    "AGENT_NAME",
+    "SESSION_DIR_ENV",
+    "TREE_DIR_ENV",
+    "TRIALS_DIR_ENV",
+    "agent_spec",
+    "atif_steps",
+    "mount_error",
+    "own_trial",
+    "run",
+    "trial_record",
+    "trial_slug",
+    "write_trial",
+]
