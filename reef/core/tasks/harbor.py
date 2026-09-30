@@ -11,11 +11,13 @@ and every example under ``recipes/`` ships::
       solution/            optional reference files
 
 ``task.toml`` carries a ``[metadata.reef]`` table with the task's digest and
-the agent record ids it was made from. The digest covers every file, so a
-replay that writes the same task again is a no-op and a directory edited by
-hand, or given an extra entry of any kind, is refused. A task is staged under
+the agent record ids it was made from, and when set, the digests of its
+parents and ``is_imported``. The digest covers every file, so a replay that
+writes the same task again is a no-op and a directory edited by hand, or
+given an extra entry of any kind, is refused. A task is staged under
 ``<root>/.staging/`` and renamed into place; that directory stays, and nothing
-under it is a task.
+under it is a task. :func:`import_harbor_task` stamps a Harbor task reef did
+not write; its ``task.toml`` may carry every key Harbor 0.20.0 reads.
 """
 
 from __future__ import annotations
@@ -61,7 +63,62 @@ KNOWN_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     ),
 }
 TOP_LEVEL_KEYS = ("version", "metadata", *KNOWN_CONFIG_KEYS)
+#: The task.toml tables and keys Harbor 0.20.0 reads (``harbor.models.task.config.TaskConfig``), for an imported task.
+HARBOR_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
+    "task": ("name", "description", "authors", "keywords"),
+    "verifier": (
+        "timeout_sec",
+        "env",
+        "user",
+        "network_mode",
+        "allowed_hosts",
+        "environment_mode",
+        "environment",
+        "collect",
+    ),
+    "agent": ("timeout_sec", "user", "network_mode", "allowed_hosts"),
+    "environment": (
+        "build_timeout_sec",
+        "docker_image",
+        "os",
+        *SIZE_KEYS,
+        "gpu_types",
+        "tpu",
+        "mcp_servers",
+        "env",
+        "skills_dir",
+        "healthcheck",
+        "workdir",
+        "allow_internet",
+        "network_mode",
+        "allowed_hosts",
+    ),
+    "solution": ("env",),
+}
+HARBOR_TOP_LEVEL_KEYS = ("source", "artifacts", "multi_step_reward_strategy", "steps")
+IMPORTED_TOP_LEVEL_KEYS = ("version", "metadata", *HARBOR_CONFIG_KEYS, *HARBOR_TOP_LEVEL_KEYS)
+#: Values whose shape Harbor's own model checks; reef keeps them when both TOML and JSON can hold them.
+STRUCTURED_KEYS = (
+    "authors",
+    "keywords",
+    "gpu_types",
+    "tpu",
+    "mcp_servers",
+    "healthcheck",
+    "collect",
+    "artifacts",
+    "steps",
+)
+KEY_CHOICES: dict[str, tuple[str, ...]] = {
+    "network_mode": NETWORK_MODES,
+    "environment_mode": ("shared", "separate"),
+    "os": ("linux", "windows"),
+    "multi_step_reward_strategy": ("mean", "final"),
+}
 REEF_TABLE_KEYS = ("digest", "source_agent_record_ids")
+#: The [metadata.reef] keys written only when set, so the digest and the task.toml of a task without them hold.
+OPTIONAL_REEF_TABLE_KEYS = ("parents", "is_imported")
+DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 TREE_DIRECTORIES = ("tests", "environment", "solution")
 ROOT_FILES = ("task.toml", "instruction.md")
 MAX_NAME_COMPONENT_BYTES = 255
@@ -88,6 +145,12 @@ class HarborTask:
     metadata: Mapping[str, object] = field(default_factory=dict)
     solution: Mapping[str, str] = field(default_factory=dict)
     source_agent_record_ids: tuple[str, ...] = ()
+    #: Digests of the tasks a Designer prompt showed, or of the benchmark item this task came from.
+    parents: tuple[str, ...] = ()
+    #: Copied by :func:`import_harbor_task`: its task.toml may carry every key Harbor 0.20.0 reads.
+    is_imported: bool = False
+    #: Harbor's top level task.toml keys outside any table; an imported task's only.
+    top_level_config: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not TASK_NAME_PATTERN.fullmatch(self.name) or ".." in self.name:
@@ -101,9 +164,14 @@ class HarborTask:
             raise HarborTaskError("tests/test.sh must be non-empty text: it is the verifier Harbor runs")
         object.__setattr__(self, "environment", checked_files("environment", self.environment))
         object.__setattr__(self, "solution", checked_files("solution", self.solution))
-        object.__setattr__(self, "config", checked_config(self.config))
+        if not isinstance(self.is_imported, bool):
+            raise HarborTaskError("is_imported must be a boolean")
+        object.__setattr__(self, "config", checked_config(self.config, is_imported=self.is_imported))
         if "Dockerfile" not in self.environment and "docker_image" not in self.config.get("environment", {}):
             raise HarborTaskError("environment needs a Dockerfile or config environment.docker_image")
+        object.__setattr__(
+            self, "top_level_config", checked_top_level_config(self.top_level_config, is_imported=self.is_imported)
+        )
         object.__setattr__(self, "metadata", checked_metadata(self.metadata))
         record_ids = self.source_agent_record_ids
         if (
@@ -112,6 +180,13 @@ class HarborTask:
             or len(set(record_ids)) != len(record_ids)
         ):
             raise HarborTaskError("source_agent_record_ids must be a tuple of distinct non-empty strings")
+        parents = self.parents
+        if (
+            not isinstance(parents, tuple)
+            or any(not isinstance(parent, str) or not DIGEST_PATTERN.fullmatch(parent) for parent in parents)
+            or len(set(parents)) != len(parents)
+        ):
+            raise HarborTaskError("parents must be a tuple of distinct task digests (64 lowercase hex digits)")
         # One encode of everything the writer will put on disk: a lone surrogate anywhere fails here, not mid write.
         try:
             self.task_toml().encode("utf-8")
@@ -121,21 +196,25 @@ class HarborTask:
 
     @property
     def digest(self) -> str:
-        """sha256 over the task's content and its source record ids, the same for the same task however it was built."""
-        canonical = json.dumps(
-            {
-                "name": self.name,
-                "instruction": self.instruction,
-                "tests": dict(self.tests),
-                "environment": dict(self.environment),
-                "solution": dict(self.solution),
-                "config": {table: dict(values) for table, values in self.config.items()},
-                "metadata": dict(self.metadata),
-                "source_agent_record_ids": list(self.source_agent_record_ids),
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        )
+        """sha256 over the task's content, source record ids and stamp; the same however the task was built."""
+        content: dict[str, object] = {
+            "name": self.name,
+            "instruction": self.instruction,
+            "tests": dict(self.tests),
+            "environment": dict(self.environment),
+            "solution": dict(self.solution),
+            "config": {table: dict(values) for table, values in self.config.items()},
+            "metadata": dict(self.metadata),
+            "source_agent_record_ids": list(self.source_agent_record_ids),
+        }
+        # Only when set, so the digest of a task written before these fields existed holds.
+        if self.parents:
+            content["parents"] = list(self.parents)
+        if self.is_imported:
+            content["is_imported"] = True
+        if self.top_level_config:
+            content["top_level_config"] = dict(self.top_level_config)
+        canonical = json.dumps(content, sort_keys=True, separators=(",", ":"))
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     @property
@@ -148,13 +227,18 @@ class HarborTask:
         return files
 
     def task_toml(self) -> str:
-        """The task.toml text: the version, the tables in Harbor's order, reef's digest and source ids under metadata."""
-        document: dict[str, object] = {"version": TASK_CONFIG_VERSION}
-        document["metadata"] = {
-            **self.metadata,
-            "reef": {"digest": self.digest, "source_agent_record_ids": list(self.source_agent_record_ids)},
+        """The task.toml text: the version, any top level keys, the tables in Harbor's order and reef's stamp."""
+        reef_table: dict[str, object] = {
+            "digest": self.digest,
+            "source_agent_record_ids": list(self.source_agent_record_ids),
         }
-        for table in KNOWN_CONFIG_KEYS:
+        if self.parents:
+            reef_table["parents"] = list(self.parents)
+        if self.is_imported:
+            reef_table["is_imported"] = True
+        document: dict[str, object] = {"version": TASK_CONFIG_VERSION, **self.top_level_config}
+        document["metadata"] = {**self.metadata, "reef": reef_table}
+        for table in HARBOR_CONFIG_KEYS:
             if table in self.config:
                 document[table] = dict(self.config[table])
         return tomli_w.dumps(document)
@@ -194,9 +278,6 @@ def read_harbor_task(path: Path) -> HarborTask:
     path = Path(path)
     if not path.is_dir():
         raise HarborTaskError(f"{path} is not a task directory")
-    # The parent resolved physically, the last component kept as written: a symlink alias keeps its own name,
-    # "." gains one, and a path ending in ".." names the directory it lands in.
-    name = Path(os.path.normpath(os.path.join(os.path.realpath(path.parent), path.name))).name
     files, directories = read_all_entries(path)
     if "task.toml" not in files:
         raise HarborTaskError(f"{path / 'task.toml'} is missing")
@@ -204,20 +285,110 @@ def read_harbor_task(path: Path) -> HarborTask:
         document = tomllib.loads(files["task.toml"])
     except tomllib.TOMLDecodeError as exc:
         raise HarborTaskError(f"{path / 'task.toml'} is not valid TOML: {exc}") from exc
-    if document.get("version") != TASK_CONFIG_VERSION:
-        raise HarborTaskError(f"{path / 'task.toml'} must declare version = {TASK_CONFIG_VERSION!r}")
-    unknown_tables = sorted(key for key in document if key not in TOP_LEVEL_KEYS)
-    if unknown_tables:
-        raise HarborTaskError(f"{path / 'task.toml'} carries tables reef did not write: {', '.join(unknown_tables)}")
     metadata = document.get("metadata")
     if not isinstance(metadata, dict) or not isinstance(metadata.get("reef"), dict):
-        raise HarborTaskError(f"{path / 'task.toml'} carries no [metadata.reef] table; reef did not write it")
+        raise HarborTaskError(
+            f"{path / 'task.toml'} carries no [metadata.reef] table; reef did not write it; "
+            "import it with reef.core.tasks.import_harbor_task"
+        )
     reef_table = metadata["reef"]
+    is_imported = reef_table.get("is_imported") is True
+    if document.get("version") != TASK_CONFIG_VERSION:
+        raise HarborTaskError(f"{path / 'task.toml'} must declare version = {TASK_CONFIG_VERSION!r}")
+    unknown_tables = sorted(
+        key for key in document if key not in (IMPORTED_TOP_LEVEL_KEYS if is_imported else TOP_LEVEL_KEYS)
+    )
+    if unknown_tables:
+        raise HarborTaskError(f"{path / 'task.toml'} carries tables reef did not write: {', '.join(unknown_tables)}")
     record_ids = reef_table.get("source_agent_record_ids")
-    if sorted(reef_table) != sorted(REEF_TABLE_KEYS) or not isinstance(record_ids, list):
-        raise HarborTaskError(f"{path / 'task.toml'} metadata.reef must hold exactly {' and '.join(REEF_TABLE_KEYS)}")
+    parents = reef_table.get("parents", [])
+    if (
+        not set(REEF_TABLE_KEYS) <= set(reef_table) <= {*REEF_TABLE_KEYS, *OPTIONAL_REEF_TABLE_KEYS}
+        or not isinstance(record_ids, list)
+        or not isinstance(parents, list)
+        or ("is_imported" in reef_table and not is_imported)
+    ):
+        raise HarborTaskError(
+            f"{path / 'task.toml'} metadata.reef must hold exactly {' and '.join(REEF_TABLE_KEYS)}, "
+            "and may hold a list of parents and is_imported = true"
+        )
     if any(not isinstance(record_id, str) for record_id in record_ids):
         raise HarborTaskError(f"{path / 'task.toml'} metadata.reef.source_agent_record_ids must hold strings")
+    trees = task_trees(path, files, directories)
+    task = HarborTask(
+        name=task_directory_name(path),
+        instruction=files["instruction.md"],
+        tests=trees["tests"],
+        environment=trees["environment"],
+        config={table: document[table] for table in HARBOR_CONFIG_KEYS if table in document},
+        metadata={key: value for key, value in metadata.items() if key != "reef"},
+        solution=trees["solution"],
+        source_agent_record_ids=tuple(record_ids),
+        parents=tuple(parents),
+        is_imported=is_imported,
+        top_level_config={key: document[key] for key in HARBOR_TOP_LEVEL_KEYS if key in document},
+    )
+    if reef_table["digest"] != task.digest:
+        raise HarborTaskError(
+            f"{path} does not match its digest: it was edited, renamed or read through another name after it was written"
+        )
+    return task
+
+
+def import_harbor_task(source_path: Path, root: Path, *, parents: tuple[str, ...] = ()) -> Path:
+    """Copy the Harbor task at ``source_path`` under ``root`` as a reef task: every file kept, a digest stamped.
+
+    Every task.toml key Harbor 0.20.0 reads is kept, except the schema version: the copy declares reef's. Only text
+    files are copied, and only ``tests/test.sh`` is made executable. The copy reads back with :func:`read_harbor_task`
+    and is refused there once edited.
+    """
+    source_path = Path(source_path)
+    if not source_path.is_dir():
+        raise HarborTaskError(f"{source_path} is not a task directory")
+    files, directories = read_all_entries(source_path)
+    if "task.toml" not in files:
+        raise HarborTaskError(f"{source_path / 'task.toml'} is missing")
+    try:
+        document = tomllib.loads(files["task.toml"])
+    except tomllib.TOMLDecodeError as exc:
+        raise HarborTaskError(f"{source_path / 'task.toml'} is not valid TOML: {exc}") from exc
+    metadata = document.get("metadata", {})
+    if not isinstance(metadata, dict):
+        raise HarborTaskError(f"{source_path / 'task.toml'} [metadata] must be a table")
+    if "reef" in metadata:
+        raise HarborTaskError(
+            f"{source_path / 'task.toml'} carries a [metadata.reef] table: it is already a reef task"
+        )
+    unknown_keys = sorted(key for key in document if key not in (*IMPORTED_TOP_LEVEL_KEYS, "schema_version"))
+    if unknown_keys:
+        raise HarborTaskError(
+            f"{source_path / 'task.toml'} carries keys Harbor 0.20.0 does not read: {', '.join(unknown_keys)}"
+        )
+    trees = task_trees(source_path, files, directories)
+    task = HarborTask(
+        name=task_directory_name(source_path),
+        instruction=files["instruction.md"],
+        tests=trees["tests"],
+        environment=trees["environment"],
+        config={table: document[table] for table in HARBOR_CONFIG_KEYS if table in document},
+        metadata=metadata,
+        solution=trees["solution"],
+        parents=parents,
+        is_imported=True,
+        top_level_config={key: document[key] for key in HARBOR_TOP_LEVEL_KEYS if key in document},
+    )
+    return write_harbor_task(task, root)
+
+
+def task_directory_name(path: Path) -> str:
+    """The name of the task directory at ``path``, however the path spells it."""
+    # The parent resolved physically, the last component kept as written: a symlink alias keeps its own name,
+    # "." gains one, and a path ending in ".." names the directory it lands in.
+    return Path(os.path.normpath(os.path.join(os.path.realpath(path.parent), path.name))).name
+
+
+def task_trees(path: Path, files: Mapping[str, str], directories: set[str]) -> dict[str, dict[str, str]]:
+    """The files of each tree directory of the task at ``path``; any other entry but the root files is refused."""
     trees: dict[str, dict[str, str]] = {directory: {} for directory in TREE_DIRECTORIES}
     foreign: list[str] = []
     for relative, text in files.items():
@@ -238,21 +409,7 @@ def read_harbor_task(path: Path) -> HarborTask:
     for directory in ("tests", "environment"):
         if directory not in directories:
             raise HarborTaskError(f"{path / directory} is missing")
-    task = HarborTask(
-        name=name,
-        instruction=files["instruction.md"],
-        tests=trees["tests"],
-        environment=trees["environment"],
-        config={table: document[table] for table in KNOWN_CONFIG_KEYS if table in document},
-        metadata={key: value for key, value in metadata.items() if key != "reef"},
-        solution=trees["solution"],
-        source_agent_record_ids=tuple(record_ids),
-    )
-    if reef_table["digest"] != task.digest:
-        raise HarborTaskError(
-            f"{path} does not match its digest: it was edited, renamed or read through another name after it was written"
-        )
-    return task
+    return trees
 
 
 def read_all_entries(root: Path) -> tuple[dict[str, str], set[str]]:
@@ -351,24 +508,46 @@ def folded(name: str) -> str:
     return unicodedata.normalize("NFC", name).casefold()
 
 
-def checked_config(config: object) -> dict[str, dict[str, object]]:
-    """The task.toml tables reef writes, checked against the keys Harbor reads."""
+def checked_config(config: object, *, is_imported: bool = False) -> dict[str, dict[str, object]]:
+    """The task.toml tables, checked against the keys Harbor reads: reef's set, or Harbor 0.20.0's for an import."""
     if not isinstance(config, Mapping):
         raise HarborTaskError("config must map task.toml table names to their keys")
+    known_keys = HARBOR_CONFIG_KEYS if is_imported else KNOWN_CONFIG_KEYS
     checked: dict[str, dict[str, object]] = {}
     for table, values in config.items():
-        if table not in KNOWN_CONFIG_KEYS:
-            raise HarborTaskError(f"config table {table!r} is not one reef writes ({', '.join(KNOWN_CONFIG_KEYS)})")
-        if not isinstance(values, Mapping):
-            raise HarborTaskError(f"config.{table} must be a table")
-        checked[table] = {}
-        for key, value in values.items():
-            if key not in KNOWN_CONFIG_KEYS[table]:
-                raise HarborTaskError(f"config.{table}.{key} is not a key Harbor reads")
-            checked[table][key] = checked_config_value(f"config.{table}.{key}", key, value)
-    environment = checked.get("environment", {})
-    if environment.get("allowed_hosts") and environment.get("network_mode") != "allowlist":
-        raise HarborTaskError("config.environment.allowed_hosts needs network_mode = 'allowlist'")
+        if table not in known_keys:
+            raise HarborTaskError(f"config table {table!r} is not one reef writes ({', '.join(known_keys)})")
+        checked[table] = checked_table(f"config.{table}", known_keys[table], values)
+    return checked
+
+
+def checked_table(key_path: str, keys: tuple[str, ...], values: object) -> dict[str, object]:
+    """One task.toml table that holds only ``keys``, each value in the form Harbor's own model would accept."""
+    if not isinstance(values, Mapping):
+        raise HarborTaskError(f"{key_path} must be a table")
+    checked: dict[str, object] = {}
+    for key, value in values.items():
+        if key not in keys:
+            raise HarborTaskError(f"{key_path}.{key} is not a key Harbor reads")
+        checked[key] = checked_config_value(f"{key_path}.{key}", key, value)
+    if checked.get("allowed_hosts") and checked.get("network_mode") != "allowlist":
+        raise HarborTaskError(f"{key_path}.allowed_hosts needs network_mode = 'allowlist'")
+    return checked
+
+
+def checked_top_level_config(top_level_config: object, *, is_imported: bool) -> dict[str, object]:
+    """Harbor's top level task.toml keys outside any table, which only an imported task carries."""
+    if not isinstance(top_level_config, Mapping):
+        raise HarborTaskError("top_level_config must map top level task.toml keys to their values")
+    if top_level_config and not is_imported:
+        raise HarborTaskError("top_level_config belongs to an imported task only; reef writes no top level keys")
+    checked: dict[str, object] = {}
+    for key, value in top_level_config.items():
+        if key not in HARBOR_TOP_LEVEL_KEYS:
+            raise HarborTaskError(
+                f"top level key {key!r} is not one Harbor reads ({', '.join(HARBOR_TOP_LEVEL_KEYS)})"
+            )
+        checked[key] = checked_config_value(key, key, value)
     return checked
 
 
@@ -386,9 +565,25 @@ def checked_config_value(key_path: str, key: str, value: object) -> object:
         if isinstance(value, bool) or not isinstance(value, int) or value < 0:
             raise HarborTaskError(f"{key_path} must be a non-negative integer")
         return value
-    if key == "network_mode":
-        if value not in NETWORK_MODES:
-            raise HarborTaskError(f"{key_path} must be one of {', '.join(NETWORK_MODES)}")
+    if key in KEY_CHOICES:
+        if value not in KEY_CHOICES[key]:
+            raise HarborTaskError(f"{key_path} must be one of {', '.join(KEY_CHOICES[key])}")
+        return value
+    if key == "allow_internet":
+        if not isinstance(value, bool):
+            raise HarborTaskError(f"{key_path} must be a boolean")
+        return value
+    if key == "environment":
+        # The verifier's own container, as Harbor reads it: the same keys as the task's [environment].
+        return checked_table(key_path, HARBOR_CONFIG_KEYS["environment"], value)
+    if key in STRUCTURED_KEYS:
+        try:
+            tomli_w.dumps({key: value})
+            json.dumps(value, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise HarborTaskError(
+                f"{key_path} must hold strings, numbers, booleans, lists and tables only: {exc}"
+            ) from exc
         return value
     if key == "allowed_hosts":
         if not isinstance(value, list):

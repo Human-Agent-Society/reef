@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import datetime
+import hashlib
+import json
 import os
 import tomllib
 from pathlib import Path
@@ -14,6 +16,7 @@ from reef.core.tasks import (
     HarborTask,
     HarborTaskConflict,
     HarborTaskError,
+    import_harbor_task,
     read_harbor_task,
     write_harbor_task,
 )
@@ -671,3 +674,223 @@ def test_a_renamed_task_directory_is_refused_with_the_reason(tmp_path: Path) -> 
     moved = root.rename(tmp_path / "sum-392")
     with pytest.raises(HarborTaskError, match="edited, renamed or read through another name"):
         read_harbor_task(moved)
+
+
+# ----------------------------------------------------------------------------------------------- imported tasks
+
+#: Harbor's ProgramBench task template (harbor-framework/harbor#2295) filled in for one item.
+PROGRAMBENCH_TASK_TOML = """schema_version = "1.3"
+source = "ProgramBench"
+artifacts = [
+  "/logs/verifier/reward.json",
+  "/logs/verifier/reward.txt",
+  { source = "/workspace", exclude = ["executable"] },
+]
+
+[task]
+name = "programbench/jq-1"
+description = "ProgramBench cleanroom reconstruction task for jqlang/jq"
+authors = [{ name = "Ada Example" }, { name = "Grace Example" }]
+keywords = ["programbench", "cleanroom", "c"]
+
+[metadata]
+source = "ProgramBench"
+instance_id = "jqlang__jq.1"
+test_count = 12
+
+[agent]
+timeout_sec = 14400
+network_mode = "allowlist"
+allowed_hosts = ["api.anthropic.com", "api.openai.com"]
+
+[verifier]
+timeout_sec = 3600
+user = "root"
+environment_mode = "separate"
+
+[verifier.env]
+PROGRAMBENCH_SCRIPT_PTY = "1"
+
+[verifier.environment]
+build_timeout_sec = 1800
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+workdir = "/workspace"
+
+[environment]
+docker_image = "programbench/jqlang__jq.1:task_cleanroom_v6"
+network_mode = "allowlist"
+allowed_hosts = ["api.anthropic.com", "api.openai.com"]
+build_timeout_sec = 1800
+cpus = 2
+memory_mb = 4096
+storage_mb = 10240
+gpus = 0
+workdir = "/workspace"
+"""
+
+
+def programbench_task(root: Path, task_toml: str = PROGRAMBENCH_TASK_TOML) -> Path:
+    source_path = root / "jq-1"
+    files = {
+        "task.toml": task_toml,
+        "instruction.md": "Rebuild /workspace/executable from its behavior alone.\n",
+        "environment/Dockerfile": "FROM programbench/jqlang__jq.1:task_cleanroom_v6\n",
+        "tests/test.sh": "#!/bin/bash\npython3 /tests/programbench_evaluator.py\n",
+        "tests/Dockerfile": "FROM programbench/jqlang__jq.1:task_cleanroom_v6\nRUN rm -rf /workspace\n",
+        "tests/programbench_evaluator.py": "print('evaluated')\n",
+        "solution/solve.sh": "#!/bin/bash\ncp /reference/executable /workspace/executable\n",
+    }
+    for relative, text in files.items():
+        (source_path / relative).parent.mkdir(parents=True, exist_ok=True)
+        (source_path / relative).write_text(text)
+    return source_path
+
+
+def test_a_programbench_task_imports_with_every_file_and_every_key_harbor_reads(tmp_path: Path) -> None:
+    source_path = programbench_task(tmp_path / "harbor")
+    path = import_harbor_task(source_path, tmp_path / "tasks", parents=(task().digest,))
+    assert path == tmp_path / "tasks" / "jq-1"
+    assert files_of(path) == files_of(source_path)
+    for relative in files_of(source_path):
+        if relative != "task.toml":
+            assert (path / relative).read_text() == (source_path / relative).read_text()
+    imported = read_harbor_task(path)
+    assert imported.is_imported and imported.parents == (task().digest,) and imported.source_agent_record_ids == ()
+    original = tomllib.loads((source_path / "task.toml").read_text())
+    copied = tomllib.loads((path / "task.toml").read_text())
+    assert original.pop("schema_version") == "1.3" and copied.pop("version") == TASK_CONFIG_VERSION
+    assert copied["metadata"].pop("reef") == {
+        "digest": imported.digest,
+        "source_agent_record_ids": [],
+        "parents": [task().digest],
+        "is_imported": True,
+    }
+    assert copied == original
+    assert import_harbor_task(source_path, tmp_path / "tasks", parents=(task().digest,)) == path
+
+
+def test_harbor_itself_loads_an_imported_task_with_its_separate_verifier(tmp_path: Path) -> None:
+    config_module = pytest.importorskip("harbor.models.task.config")
+    path = import_harbor_task(programbench_task(tmp_path / "harbor"), tmp_path / "tasks")
+    config = config_module.TaskConfig.model_validate_toml((path / "task.toml").read_text())
+    assert config.verifier.environment_mode.value == "separate"
+    assert config.verifier.environment.workdir == "/workspace"
+    assert config.verifier.env == {"PROGRAMBENCH_SCRIPT_PTY": "1"}
+    assert config.agent.network_mode.value == "allowlist"
+    assert config.agent.allowed_hosts == ["api.anthropic.com", "api.openai.com"]
+    assert config.source == "ProgramBench" and config.task.name == "programbench/jq-1"
+    assert config.artifacts[-1].source == "/workspace" and config.artifacts[-1].exclude == ["executable"]
+    assert config.metadata["reef"]["digest"] == read_harbor_task(path).digest
+
+
+@pytest.mark.parametrize(
+    ("relative", "old", "new"),
+    [
+        ("tests/programbench_evaluator.py", "evaluated", "passed"),
+        ("task.toml", 'environment_mode = "separate"', 'environment_mode = "shared"'),
+        ("task.toml", '{ source = "/workspace", exclude = [', '{ source = "/workspace", exclude = [ "keep",'),
+    ],
+)
+def test_an_edited_import_is_refused(tmp_path: Path, relative: str, old: str, new: str) -> None:
+    path = import_harbor_task(programbench_task(tmp_path / "harbor"), tmp_path / "tasks")
+    text = (path / relative).read_text()
+    assert old in text
+    (path / relative).write_text(text.replace(old, new))
+    with pytest.raises(HarborTaskError, match="does not match its digest"):
+        read_harbor_task(path)
+
+
+def test_a_harbor_task_reef_did_not_write_is_refused_naming_the_importer(tmp_path: Path) -> None:
+    with pytest.raises(HarborTaskError, match=r"no \[metadata\.reef\] table.*import_harbor_task"):
+        read_harbor_task(programbench_task(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "message"),
+    [
+        (
+            'schema_version = "1.3"\n',
+            'schema_version = "1.3"\ndifficulty = 3\n',
+            "Harbor 0.20.0 does not read: difficulty",
+        ),
+        ("[agent]\n", '[agent]\nmodel = "m"\n', r"config\.agent\.model is not a key Harbor reads"),
+        (
+            "[verifier.environment]\n",
+            '[verifier.environment]\nshell = "sh"\n',
+            r"verifier\.environment\.shell is not a key",
+        ),
+        ('environment_mode = "separate"', 'environment_mode = "apart"', "must be one of shared, separate"),
+        ('schema_version = "1.3"\n', 'multi_step_reward_strategy = "max"\n', "must be one of mean, final"),
+        ('source = "ProgramBench"\nartifacts', 'source = ""\nartifacts', "source must be a non-empty string"),
+        ("[metadata]\n", '[metadata.reef]\ndigest = "x"\n\n[metadata]\n', "already a reef task"),
+    ],
+)
+def test_an_import_harbor_would_not_read_is_refused(tmp_path: Path, old: str, new: str, message: str) -> None:
+    assert old in PROGRAMBENCH_TASK_TOML
+    source_path = programbench_task(tmp_path / "harbor", PROGRAMBENCH_TASK_TOML.replace(old, new, 1))
+    with pytest.raises(HarborTaskError, match=message):
+        import_harbor_task(source_path, tmp_path / "tasks")
+    assert not (tmp_path / "tasks" / "jq-1").exists()
+
+
+def test_parents_round_trip_and_a_task_without_them_keeps_the_digest_it_had(tmp_path: Path) -> None:
+    parent = task()
+    child = task(name="sum-392", parents=(parent.digest,))
+    root = write_harbor_task(child, tmp_path)
+    assert tomllib.loads((root / "task.toml").read_text())["metadata"]["reef"]["parents"] == [parent.digest]
+    assert read_harbor_task(root) == child and child.digest != task(name="sum-392").digest
+    assert "parents" not in tomllib.loads(write_harbor_task(parent, tmp_path).joinpath("task.toml").read_text())
+    before = {
+        "name": parent.name,
+        "instruction": parent.instruction,
+        "tests": dict(parent.tests),
+        "environment": dict(parent.environment),
+        "solution": dict(parent.solution),
+        "config": {table: dict(values) for table, values in parent.config.items()},
+        "metadata": dict(parent.metadata),
+        "source_agent_record_ids": list(parent.source_agent_record_ids),
+    }
+    canonical = json.dumps(before, sort_keys=True, separators=(",", ":"))
+    assert parent.digest == hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+@pytest.mark.parametrize(
+    ("line", "message"),
+    [
+        ("is_imported = true", "does not match its digest"),
+        ("is_imported = false", "must hold exactly"),
+        ('parents = "x"', "must hold exactly"),
+        ("parents = []\nsigned = true", "must hold exactly"),
+    ],
+)
+def test_a_stamp_edited_into_a_reef_task_is_refused(tmp_path: Path, line: str, message: str) -> None:
+    root = write_harbor_task(task(), tmp_path)
+    text = (root / "task.toml").read_text().replace("[metadata.reef]\n", f"[metadata.reef]\n{line}\n")
+    (root / "task.toml").write_text(text)
+    with pytest.raises(HarborTaskError, match=message):
+        read_harbor_task(root)
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"parents": ("abc",)}, "parents must be a tuple of distinct task digests"),
+        ({"parents": ("A" * 64,)}, "parents must be a tuple of distinct task digests"),
+        ({"parents": ["a" * 64]}, "parents must be a tuple of distinct task digests"),
+        ({"parents": ("a" * 64, "a" * 64)}, "parents must be a tuple of distinct task digests"),
+        ({"is_imported": "yes"}, "is_imported must be a boolean"),
+        ({"top_level_config": {"source": "x"}}, "imported task only"),
+        ({"is_imported": True, "top_level_config": {"steps_dir": "x"}}, "not one Harbor reads"),
+        ({"config": {"verifier": {"environment_mode": "separate"}}}, "not a key Harbor reads"),
+        ({"is_imported": True, "config": {"verifier": {"environment": {"os": "mac"}}}}, "one of linux, windows"),
+        ({"is_imported": True, "config": {"environment": {"allow_internet": "yes"}}}, "must be a boolean"),
+        ({"is_imported": True, "config": {"agent": {"allowed_hosts": ["pypi.org"]}}}, "needs network_mode"),
+        ({"is_imported": True, "config": {"task": {"keywords": [datetime.date(2026, 1, 1)]}}}, "strings, numbers"),
+    ],
+)
+def test_the_stamp_and_the_harbor_keys_are_checked_at_construction(overrides: dict[str, object], message: str) -> None:
+    with pytest.raises(HarborTaskError, match=message):
+        task(**overrides)

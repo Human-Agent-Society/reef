@@ -7,8 +7,11 @@ from pathlib import Path
 import pytest
 
 from reef.core.tasks import (
+    HarborTask,
     TaskSplit,
     TaskSplitError,
+    assign_splits,
+    hashed_split,
     manifest_task_paths,
     read_split_manifest,
     split_by_source,
@@ -285,3 +288,169 @@ def test_a_split_that_is_not_train_or_eval_is_refused(tmp_path: Path) -> None:
 def test_a_side_name_that_is_not_a_task_directory_name_is_refused(name: str) -> None:
     with pytest.raises(TaskSplitError, match="task names"):
         TaskSplit((), (name,), 0, 1)
+
+
+# ----------------------------------------------------------------------------------------------- assigned splits
+
+
+def harbor_task(name: str, records: tuple[str, ...] = (), parents: tuple[str, ...] = ()) -> HarborTask:
+    return HarborTask(
+        name=name,
+        instruction=f"task {name}",
+        tests={"test.sh": "#!/bin/sh\necho 1 > /logs/verifier/reward.txt\n"},
+        environment={"Dockerfile": "FROM python:3.12-slim\n"},
+        source_agent_record_ids=records,
+        parents=parents,
+    )
+
+
+SOURCE_TASKS = [harbor_task(name, tuple(records)) for name, records in SOURCES.items()]
+
+
+def test_a_ninth_task_moves_none_of_the_eight_where_the_fraction_split_moves_some() -> None:
+    moved_by_fraction = 0
+    for seed in range(20):
+        ninth = harbor_task("t9", ("r9",))
+        eight = assign_splits(SOURCE_TASKS, seed=seed, eval_fraction=0.25)
+        nine = assign_splits([*SOURCE_TASKS, ninth], seed=seed, eval_fraction=0.25)
+        seven = assign_splits(SOURCE_TASKS[:-1], seed=seed, eval_fraction=0.25)
+        assert all(nine.split_of(name) == eight.split_of(name) for name in SOURCES), seed
+        assert all(seven.split_of(name) == eight.split_of(name) for name in list(SOURCES)[:-1]), seed
+        before = split_by_source(SOURCES, eval_fraction=0.25, seed=seed)
+        after = split_by_source({**SOURCES, "t9": ["r9"]}, eval_fraction=0.25, seed=seed)
+        moved_by_fraction += any(before.split_of(name) != after.split_of(name) for name in SOURCES)
+    assert moved_by_fraction > 0
+
+
+def test_assigned_tasks_sharing_a_record_land_in_one_split_and_the_rest_go_by_their_hash() -> None:
+    for seed in range(20):
+        split = assign_splits(SOURCE_TASKS, seed=seed, eval_fraction=0.5, test_fraction=0.2)
+        for pair in (("t1", "t2"), ("t4", "t5")):
+            assert split.split_of(pair[0]) == split.split_of(pair[1]), (seed, pair)
+        for name in ("t3", "t6", "t7", "t8"):
+            assert split.split_of(name) == hashed_split(seed, name, eval_fraction=0.5, test_fraction=0.2)
+    assert assign_splits(SOURCE_TASKS, seed=0, eval_fraction=0, test_fraction=1).test == tuple(sorted(SOURCES))
+    assert assign_splits(SOURCE_TASKS, seed=0, eval_fraction=1).eval == tuple(sorted(SOURCES))
+
+
+def test_a_new_task_takes_the_split_its_records_and_eval_parents_impose(tmp_path: Path) -> None:
+    write_split_manifest(tmp_path / "split.json", split_by_source(SOURCES, eval_fraction=0.5, seed=11))
+    pinned = read_split_manifest(tmp_path / "split.json")
+    assert pinned.test == () and pinned.test_fraction == 0.0
+    assert pinned.split_of("t1") == "eval" and pinned.split_of("t3") == "train"
+    by_name = {task.name: task for task in SOURCE_TASKS}
+    placed = {}
+    for arrival in (
+        harbor_task("n1", ("r2", "n1")),
+        harbor_task("n2", ("r2", "r3")),
+        harbor_task("n3", ("n3",), parents=(by_name["t1"].digest,)),
+        harbor_task("n4", ("n4",), parents=(by_name["t3"].digest,)),
+    ):
+        split = assign_splits([*SOURCE_TASKS, arrival], seed=11, eval_fraction=0.5, pinned=pinned)
+        assert all(split.split_of(name) == pinned.split_of(name) for name in SOURCES)
+        placed[arrival.name] = split.split_of(arrival.name)
+    # By its hash alone n1 and n3 would train and n4 would be evaluated.
+    hashed = {name: hashed_split(11, name, eval_fraction=0.5, test_fraction=0.0) for name in placed}
+    assert hashed == {"n1": "train", "n2": "eval", "n3": "train", "n4": "eval"}
+    assert placed == {"n1": "eval", "n2": None, "n3": "eval", "n4": "eval"}
+
+
+def test_a_test_parent_imposes_test_and_parents_that_cross_between_new_groups_leave_them_out() -> None:
+    pinned = TaskSplit((), (), 0, 0.5, ("t3",), 0.1)
+    child = harbor_task("child", ("c",), parents=(SOURCE_TASKS[2].digest,))
+    split = assign_splits([*SOURCE_TASKS, child], seed=0, eval_fraction=0.5, pinned=pinned)
+    assert split.split_of("child") == "test" and split.split_of("t3") == "test"
+    # a waits for b's group and d for c's group, and each is in the other's: no order places them.
+    b, c = harbor_task("b", ("rb",)), harbor_task("c", ("ra",))
+    a, d = harbor_task("a", ("ra",), parents=(b.digest,)), harbor_task("d", ("rb",), parents=(c.digest,))
+    crossed = assign_splits([a, b, c, d], seed=0, eval_fraction=0.5)
+    assert crossed.train == crossed.eval == crossed.test == ()
+    assert assign_splits([a, c], seed=0, eval_fraction=0.5).split_of("a") in ("train", "eval")
+
+
+def test_a_pinned_name_that_is_not_among_the_tasks_is_not_listed() -> None:
+    split = assign_splits(SOURCE_TASKS[:1], seed=0, eval_fraction=0.5, pinned=TaskSplit((), ("t1", "gone"), 0, 0.5))
+    assert split.eval == ("t1",) and split.train == ()
+
+
+@pytest.mark.parametrize(
+    ("tasks", "arguments", "message"),
+    [
+        ([harbor_task("t1"), harbor_task("t1")], {}, "share the name 't1'"),
+        (["t1"], {}, "HarborTask values"),
+        (SOURCE_TASKS, {"seed": "0"}, "seed must be an integer"),
+        (SOURCE_TASKS, {"eval_fraction": 1.5}, "eval_fraction must be a number between 0 and 1"),
+        (SOURCE_TASKS, {"test_fraction": -0.1}, "test_fraction must be a number between 0 and 1"),
+        (SOURCE_TASKS, {"eval_fraction": 0.7, "test_fraction": 0.4}, "add up to at most 1"),
+        (SOURCE_TASKS, {"pinned": ("t1",)}, "pinned must be a TaskSplit"),
+    ],
+)
+def test_a_bad_assignment_is_refused(tasks: list[object], arguments: dict[str, object], message: str) -> None:
+    with pytest.raises(TaskSplitError, match=message):
+        assign_splits(tasks, **{"seed": 0, "eval_fraction": 0.5, **arguments})  # type: ignore[arg-type]
+
+
+def test_a_split_keeps_the_test_split_apart_and_names_the_split_of_a_task() -> None:
+    split = TaskSplit(("a",), ("b",), 0, 0.3, ("c",), 0.7)
+    assert [split.split_of(name) for name in ("a", "b", "c", "d")] == ["train", "eval", "test", None]
+    with pytest.raises(TaskSplitError, match="both the test split and another split"):
+        TaskSplit(("a",), (), 0, 0.5, ("a",), 0.1)
+    with pytest.raises(TaskSplitError, match="add up to at most 1"):
+        TaskSplit((), (), 0, 0.6, (), 0.5)
+
+
+# ----------------------------------------------------------------------------------------------- manifest version 2
+
+
+def test_a_manifest_with_a_test_split_is_version_2_and_round_trips(tmp_path: Path) -> None:
+    root = tmp_path / "tasks"
+    written_tasks(root, ("t1", "t2", "t3"))
+    split = TaskSplit(("t1",), ("t2",), 5, 0.25, ("t3",), 0.25)
+    write_split_manifest(tmp_path / "split.json", split)
+    assert read_split_manifest(tmp_path / "split.json") == split
+    assert '"version": 2' in (tmp_path / "split.json").read_text()
+    assert manifest_task_paths(tmp_path / "split.json", root, "test") == (root / "t3",)
+    assert manifest_task_paths(tmp_path / "split.json", root, "eval") == (root / "t2",)
+    write_split_manifest(tmp_path / "split.json", TaskSplit(("t1",), (), 5, 0.25, (), 0.5))
+    assert manifest_task_paths(tmp_path / "split.json", root, "test") == ()
+
+
+def test_a_manifest_without_a_test_split_is_written_as_version_1_exactly(tmp_path: Path) -> None:
+    write_split_manifest(tmp_path / "split.json", TaskSplit(("t1",), ("t2",), 5, 0.25))
+    assert (tmp_path / "split.json").read_text() == (
+        '{\n  "eval": [\n    "t2"\n  ],\n  "eval_fraction": 0.25,\n  "seed": 5,\n  "train": [\n    "t1"\n  ],\n'
+        '  "version": 1\n}\n'
+    )
+    assert read_split_manifest(tmp_path / "split.json").test == ()
+    with pytest.raises(TaskSplitError, match="it holds no test split"):
+        manifest_task_paths(tmp_path / "split.json", tmp_path, "test")
+
+
+@pytest.mark.parametrize(
+    ("text", "message"),
+    [
+        ('{"version": 2, "seed": 0, "eval_fraction": 0.5, "train": [], "eval": []}', "lacks test_fraction, test"),
+        ('{"version": 3, "seed": 0, "eval_fraction": 0.5, "train": [], "eval": []}', "not a version 1 or 2"),
+        (
+            '{"version": 1, "seed": 0, "eval_fraction": 0.5, "train": [], "eval": [], "test": []}',
+            "did not write: test",
+        ),
+        (
+            '{"version": 2, "seed": 0, "eval_fraction": 0.5, "test_fraction": "0", "train": [], "eval": [], "test": []}',
+            "test_fraction must be a number",
+        ),
+        (
+            '{"version": 2, "seed": 0, "eval_fraction": 0.5, "test_fraction": 0, "train": [], "eval": [], "test": "a"}',
+            "test must be a list",
+        ),
+        (
+            '{"version": 2, "seed": 0, "eval_fraction": 0.5, "test_fraction": 0.1, "train": ["a"], "eval": [],'
+            ' "test": ["a"]}',
+            "both the test split",
+        ),
+    ],
+)
+def test_a_bad_version_2_manifest_is_refused(tmp_path: Path, text: str, message: str) -> None:
+    (tmp_path / "split.json").write_text(text)
+    with pytest.raises(TaskSplitError, match=message):
+        read_split_manifest(tmp_path / "split.json")

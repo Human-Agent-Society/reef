@@ -51,8 +51,8 @@ def checked_tables(document: Mapping[str, object], key: str, *, label: str) -> d
 
 
 def task_document(task: HarborTask) -> dict[str, object]:
-    """A task as JSON: every field of :class:`HarborTask`, the digest beside them."""
-    return {
+    """A task as JSON: every field of :class:`HarborTask`, the digest beside them; the stamp's fields only when set."""
+    document: dict[str, object] = {
         "name": task.name,
         "instruction": task.instruction,
         "tests": dict(task.tests),
@@ -63,6 +63,13 @@ def task_document(task: HarborTask) -> dict[str, object]:
         "source_agent_record_ids": list(task.source_agent_record_ids),
         "digest": task.digest,
     }
+    if task.parents:
+        document["parents"] = list(task.parents)
+    if task.is_imported:
+        document["is_imported"] = True
+    if task.top_level_config:
+        document["top_level_config"] = dict(task.top_level_config)
+    return document
 
 
 def task_from_document(document: object) -> HarborTask:
@@ -74,6 +81,15 @@ def task_from_document(document: object) -> HarborTask:
     sources = fields.get("source_agent_record_ids", [])
     if not isinstance(sources, list) or any(not isinstance(item, str) for item in sources):
         raise WireError("a task's source_agent_record_ids must be a list of strings")
+    parents = fields.get("parents", [])
+    if not isinstance(parents, list) or any(not isinstance(item, str) for item in parents):
+        raise WireError("a task's parents must be a list of strings")
+    is_imported = fields.get("is_imported", False)
+    if not isinstance(is_imported, bool):
+        raise WireError("a task's is_imported must be a boolean")
+    top_level_config = fields.get("top_level_config", {})
+    if not isinstance(top_level_config, Mapping):
+        raise WireError("a task's top_level_config must be an object")
     try:
         return HarborTask(
             name=checked_string(fields, "name", label="a task"),
@@ -84,6 +100,9 @@ def task_from_document(document: object) -> HarborTask:
             config=checked_tables(fields, "config", label="a task"),
             metadata={str(key): value for key, value in metadata.items()},
             source_agent_record_ids=tuple(sources),
+            parents=tuple(parents),
+            is_imported=is_imported,
+            top_level_config={str(key): value for key, value in top_level_config.items()},
         )
     except HarborTaskError as exc:
         raise WireError(f"not a Harbor task: {exc}") from exc
