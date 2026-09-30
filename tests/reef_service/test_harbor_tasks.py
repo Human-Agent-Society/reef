@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import tomllib
+import warnings
 from pathlib import Path
 
 import pytest
@@ -801,6 +802,53 @@ def test_an_edited_import_is_refused(tmp_path: Path, relative: str, old: str, ne
     (path / relative).write_text(text.replace(old, new))
     with pytest.raises(HarborTaskError, match="does not match its digest"):
         read_harbor_task(path)
+
+
+TERMINAL_BENCH_TASK_TOML = """version = "1.0"
+
+[task]
+name = "terminal-bench/sampler"
+description = ""
+
+[metadata]
+difficulty = "medium"
+
+[agent]
+timeout_sec = 900.0
+
+[environment]
+docker_image = "alexgshaw/adaptive-rejection-sampler:20251031"
+cpus = 1
+memory = "2G"
+storage = "10G"
+"""
+
+
+def test_a_terminal_bench_task_with_the_older_size_keys_imports_as_harbor_reads_it(tmp_path: Path) -> None:
+    source_path = programbench_task(tmp_path / "harbor", TERMINAL_BENCH_TASK_TOML)
+    path = import_harbor_task(source_path, tmp_path / "tasks")
+    copied = tomllib.loads((path / "task.toml").read_text())
+    assert copied["environment"]["memory"] == "2G" and copied["environment"]["storage"] == "10G"
+    assert copied["task"]["description"] == ""
+    config_module = pytest.importorskip("harbor.models.task.config")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", DeprecationWarning)
+        config = config_module.TaskConfig.model_validate_toml((path / "task.toml").read_text())
+    assert (config.environment.memory_mb, config.environment.storage_mb) == (2048, 10240)
+
+
+@pytest.mark.parametrize("size", ['"2 gigs"', '"G"', '"nanG"', "2048", '"-1G"'])
+def test_an_older_size_harbor_cannot_read_is_refused(tmp_path: Path, size: str) -> None:
+    source_path = programbench_task(tmp_path / "harbor", TERMINAL_BENCH_TASK_TOML.replace('"2G"', size))
+    with pytest.raises(HarborTaskError, match=r"environment\.memory must be a size Harbor reads"):
+        import_harbor_task(source_path, tmp_path / "tasks")
+
+
+def test_an_entry_outside_harbors_layout_is_refused_by_the_import(tmp_path: Path) -> None:
+    source_path = programbench_task(tmp_path / "harbor")
+    (source_path / "LICENSE").write_text("MIT\n")
+    with pytest.raises(HarborTaskError, match="holds entries reef did not write: LICENSE"):
+        import_harbor_task(source_path, tmp_path / "tasks")
 
 
 def test_a_harbor_task_reef_did_not_write_is_refused_naming_the_importer(tmp_path: Path) -> None:

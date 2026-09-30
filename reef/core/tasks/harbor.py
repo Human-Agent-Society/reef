@@ -48,6 +48,8 @@ STAGING_DIRECTORY = ".staging"
 TASK_NAME_PATTERN = re.compile(r"^[a-z0-9][a-z0-9._-]{0,99}$")
 HOST_LABEL_PATTERN = re.compile(r"^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$")
 SIZE_KEYS = ("cpus", "memory_mb", "storage_mb", "gpus")
+#: Older size keys Harbor 0.20.0 still reads, as text such as "2G", into ``memory_mb`` and ``storage_mb``.
+LEGACY_SIZE_KEYS = ("memory", "storage")
 #: The task.toml tables reef writes and, per table, the keys Harbor 0.23 reads (``harbor.models.task.config``).
 KNOWN_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
     "verifier": ("timeout_sec", "env", "user"),
@@ -82,6 +84,7 @@ HARBOR_CONFIG_KEYS: dict[str, tuple[str, ...]] = {
         "docker_image",
         "os",
         *SIZE_KEYS,
+        *LEGACY_SIZE_KEYS,
         "gpu_types",
         "tpu",
         "mcp_servers",
@@ -336,11 +339,13 @@ def read_harbor_task(path: Path) -> HarborTask:
 
 
 def import_harbor_task(source_path: Path, root: Path, *, parents: tuple[str, ...] = ()) -> Path:
-    """Copy the Harbor task at ``source_path`` under ``root`` as a reef task: every file kept, a digest stamped.
+    """Copy the Harbor task at ``source_path`` under ``root`` as a reef task, its digest stamped.
 
-    Every task.toml key Harbor 0.20.0 reads is kept, except the schema version: the copy declares reef's. Only text
-    files are copied, and only ``tests/test.sh`` is made executable. The copy reads back with :func:`read_harbor_task`
-    and is refused there once edited.
+    Every task.toml key Harbor 0.20.0 reads is kept, except the schema version: the copy declares reef's. The files
+    are those of Harbor's layout (task.toml, instruction.md and the tests, environment and solution directories); any
+    other entry, such as a LICENSE beside task.toml, and any file that is not UTF-8 text is refused. Only
+    ``tests/test.sh`` is made executable. The copy reads back with :func:`read_harbor_task` and is refused there once
+    edited.
     """
     source_path = Path(source_path)
     if not source_path.is_dir():
@@ -569,9 +574,22 @@ def checked_config_value(key_path: str, key: str, value: object) -> object:
         if value not in KEY_CHOICES[key]:
             raise HarborTaskError(f"{key_path} must be one of {', '.join(KEY_CHOICES[key])}")
         return value
+    if key in LEGACY_SIZE_KEYS:
+        size = value.strip().upper() if isinstance(value, str) else ""
+        try:
+            number = float(size[:-1]) if size[-1:] in ("G", "M", "K") else math.nan
+        except ValueError:
+            number = math.nan
+        if not math.isfinite(number) or number < 0:
+            raise HarborTaskError(f"{key_path} must be a size Harbor reads, such as '2G', '512M' or '64K'")
+        return value
     if key == "allow_internet":
         if not isinstance(value, bool):
             raise HarborTaskError(f"{key_path} must be a boolean")
+        return value
+    if key == "description":
+        if not isinstance(value, str):
+            raise HarborTaskError(f"{key_path} must be text")
         return value
     if key == "environment":
         # The verifier's own container, as Harbor reads it: the same keys as the task's [environment].

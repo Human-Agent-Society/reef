@@ -3,7 +3,8 @@
 Two tasks made from a shared agent record go to the same split, so nothing
 the train split saw reappears, reworded, in an evaluation. :func:`assign_splits`
 places a task by the tasks it shares records with, its parents and a keyed hash
-of its name, so its split is known before play and stays as tasks come and go;
+of its name, so a task that shares no record has its split known before play,
+and a manifest that lists a task keeps it there as tasks come and go;
 :func:`split_by_source` splits a closed set once. The result is written as a
 manifest the evaluation reads; only reports read the test split.
 """
@@ -158,14 +159,18 @@ def assign_splits(
     test_fraction: float = 0.0,
     pinned: TaskSplit | None = None,
 ) -> TaskSplit:
-    """Place each task so its split is known before play and stays as tasks come and go.
+    """Place each task by its pin, the tasks it shares source records with and its parents, else by a keyed hash.
 
     A task ``pinned`` lists keeps its split. The other tasks of a group that
     shares source records take the splits of the group's pinned tasks and of
     every eval or test parent, a task among ``tasks`` whose digest a member
     lists in ``parents``: one split, they take it; more than one, they are
     left out of every split; none, :func:`hashed_split` of the group's first
-    name decides. A pinned name that is not among ``tasks`` is not listed.
+    name decides. A group with a parent no task among ``tasks`` has is left
+    out too, since that parent may be an eval or test task. So a task that
+    shares no source record goes where its own name hashes, known before play,
+    while a task not yet pinned can move when a task sharing its records
+    arrives. A pinned name that is not among ``tasks`` is not listed.
     """
     parameters = TaskSplit((), (), seed, eval_fraction, (), test_fraction)  # checks the seed and the fractions
     if pinned is not None and not isinstance(pinned, TaskSplit):
@@ -191,7 +196,10 @@ def assign_splits(
         if all(name in placed for name in group):
             continue
         parent_digests = {parent for name in group for parent in tasks_by_name[name].parents}
-        parent_names = {name_by_digest[digest] for digest in parent_digests if digest in name_by_digest}
+        if not parent_digests <= name_by_digest.keys():
+            placed.update({name: None for name in group if name not in placed})
+            continue
+        parent_names = {name_by_digest[digest] for digest in parent_digests}
         pending.append((group, parent_names - set(group)))
     # A group waits for its parents' groups. When none can go, parents cross between groups made together: no
     # order places them, so their new tasks are left out.

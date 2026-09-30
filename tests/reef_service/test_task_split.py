@@ -365,7 +365,18 @@ def test_a_test_parent_imposes_test_and_parents_that_cross_between_new_groups_le
     a, d = harbor_task("a", ("ra",), parents=(b.digest,)), harbor_task("d", ("rb",), parents=(c.digest,))
     crossed = assign_splits([a, b, c, d], seed=0, eval_fraction=0.5)
     assert crossed.train == crossed.eval == crossed.test == ()
-    assert assign_splits([a, c], seed=0, eval_fraction=0.5).split_of("a") in ("train", "eval")
+
+
+def test_a_parent_the_split_cannot_see_leaves_its_group_out() -> None:
+    """A parent outside the tasks, such as an eval task of another tasks root, may be held out: no hash decides."""
+    outside = harbor_task("benchmark-item", ("item",))
+    child, sibling = harbor_task("child", ("ra",), parents=(outside.digest,)), harbor_task("sibling", ("ra",))
+    split = assign_splits([child, sibling, harbor_task("alone", ("rb",))], seed=0, eval_fraction=0.5)
+    assert (split.split_of("child"), split.split_of("sibling")) == (None, None)
+    assert split.split_of("alone") == hashed_split(0, "alone", eval_fraction=0.5, test_fraction=0.0)
+    # Seen, the parent imposes its split as usual.
+    seen = assign_splits([outside, child, sibling], seed=0, eval_fraction=1)
+    assert seen.eval == ("benchmark-item", "child", "sibling")
 
 
 def test_a_pinned_name_that_is_not_among_the_tasks_is_not_listed() -> None:
