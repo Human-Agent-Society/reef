@@ -212,7 +212,7 @@ differs from the trainer's ``p`` (a quantized engine, stale weights), a
 policy gradient drifts toward ``q``; score centering subtracts that drift.
 It is off unless ``--score-centering`` is set, and only a family that
 declares the weight its loss puts on the sampled token's score accepts it.
-SAO declares one.
+SAO and the distillation base's sampled reverse-KL mode support it.
 
 A family declares its weight with ``policy_gradient_weight``. Its loss must
 have the form ``-A_t * sg[f(p_t / q_t)] * log p_t``, with ``q`` the rollout
@@ -228,7 +228,7 @@ engine's probability:
 (``f = 1``, plain off-policy REINFORCE), ``truncated`` (``min(r, upper)``) or
 ``masked`` (``r`` strictly inside ``(lower, upper)``, else 0). The default,
 ``None``, refuses score centering: a clipped surrogate against a recomputed
-old policy or a distillation loss has no such weight. For unclipped
+old policy or a full-distribution KL loss has no such weight. For unclipped
 importance sampling (``f = r``) the term below is identically zero, since
 that estimator has no drift.
 
@@ -247,7 +247,8 @@ approximated as ``rho * p``, and ``sg`` stops the gradient. The term uses the
 loss's own advantages and is reduced with the same per-sample mean, so the
 loss's weighted score ends up centered under the sampler, tail included. It
 is zero when ``q = p``. It is added inside Slime's policy loss for a stock or
-pg-primitive family, and around the family's custom loss otherwise.
+pg-primitive family. The distillation base adds it inside its own loss, using
+the teacher signal and that loss's masks; other custom losses use a wrapper.
 
 To enable it, record the sampler's top-K and set the flags in
 ``training.options``:
@@ -264,6 +265,41 @@ To enable it, record the sampler's top-K and set the flags in
        score-centering-top-k: 128
 
 Each step then reports the ``score_centering_*`` metrics listed below.
+
+For sampled on-policy distillation (OPD), select ``reverse`` divergence,
+a positive teacher ``top-k``, and ``renormalized`` top-K distribution on a
+family using ``DistillAlgorithm``. In this mode the reverse KL is estimated
+at the sampled token. Its advantage is the detached
+``log teacher(y) - log student(y)``. The correction uses that advantage
+before importance weighting, and preserves sample weights, loss masks and
+``skip-response-tokens``. No external advantages are needed.
+
+For example, add these options to an SDFT configuration along with the
+sampler capture and score-centering options above:
+
+.. code:: yaml
+
+   training:
+     options:
+       sdft-divergence: reverse
+       sdft-top-k: 128
+       sdft-top-k-distribution: renormalized
+       sdft-importance-sampling-level: token
+       sdft-importance-sampling-cap: 2.0
+
+Use the ``sdpo-`` prefix for SDPO. These settings change the recipe's
+default divergence. Centering accepts token-level truncated importance
+sampling, or no importance weighting (``importance-sampling-cap: 0``).
+It refuses sequence-level importance weights, full-vocabulary KL,
+top-K-plus-tail divergences, forward KL and JSD. OpenClaw-RL's separate
+top-K OPD surrogate is not supported.
+
+The sampler's ``capture_topk`` and ``score-centering-top-k`` describe the
+correction's head; the family's ``top-k`` describes the teacher pass.
+They need not match. Teacher top-K log-probs cannot replace the sampler's
+recorded head. Centering approximates the score correction with the tail
+model above; it does not correct the distribution of sampled prefixes or
+make the off-policy update an exact on-policy KL gradient.
 
 +-----------------------------------+---------+-------------------------------------+
 | Flag                              | Default | Meaning                             |
@@ -317,4 +353,6 @@ The step reports aggregate metrics only, as sums of per-sample means:
 fraction of positions where a tail fell below the floor); ``loss`` includes
 the term. ``tests/reef_service/test_score_centering_parity.py`` checks the
 term, added to each weight's loss and to SAO's own loss, against a
-full-vocabulary reference.
+full-vocabulary reference. ``tests/reef_service/test_distill_score_centering.py``
+checks the sampled OPD loss against that gradient, including skipped tokens,
+masked positions and sample weights.

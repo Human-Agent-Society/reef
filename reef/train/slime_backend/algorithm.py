@@ -305,7 +305,7 @@ class SlimeAlgorithm(ABC):
         probability, returns its ``f`` so ``--score-centering`` can add the
         matching correction term to that loss. Default ``None``: the loss has
         another form (a clipped surrogate against a recomputed old policy, a
-        distillation), and score centering is refused.
+        full-distribution divergence), and score centering is refused.
         """
         return None
 

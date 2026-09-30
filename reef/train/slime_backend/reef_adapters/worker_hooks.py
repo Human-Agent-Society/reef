@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, resolve_args_loss_family, resolve_objective_paths
+from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError
 
 #: ``--custom-loss-function-path`` of a custom-loss family with score centering on;
@@ -336,6 +337,10 @@ def _install_score_centering(args) -> None:
     if not args.score_centering or args.loss_type == "value_loss":
         return
     if args.loss_type == "custom_loss":
+        # Distillation computes its teacher advantage and effective masks inside
+        # its loss, where it also adds the correction exactly once.
+        if isinstance(resolve_args_loss_family(args), DistillAlgorithm):
+            return
         if args.custom_loss_function_path != SCORE_CENTERED_CUSTOM_LOSS_PATH:
             args.reef_score_centering_base_loss_path = args.custom_loss_function_path
             args.custom_loss_function_path = SCORE_CENTERED_CUSTOM_LOSS_PATH
