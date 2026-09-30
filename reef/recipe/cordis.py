@@ -226,8 +226,9 @@ class CordisRecipe(Recipe):
     reruns both sides of a pair an infrastructure fault hit up to
     ``infra_reruns`` times (default 0), counts a pair still faulted as a
     candidate loss, and selects when at least ``min_valid_pairs`` (default 1)
-    pairs are valid and an exact sign test and a bootstrap interval over tasks
-    clear ``min_effect`` (default 0) at ``confidence_level`` (default 0.95);
+    pairs are valid, an exact sign test over tasks passes at
+    ``confidence_level`` (default 0.95) and the bootstrap lower bound of the
+    mean task gain is above ``min_effect`` (default 0);
     ``always``;
     or a dotted reference to a ``CandidatePluginFactory`` subclass or instance),
     optional ``step_record_dir`` (a directory under which every scenario's

@@ -2,14 +2,16 @@
 
 An evaluation runs the candidate and the current tree as pairs on the same
 task and repeat. Each episode has a label: ``valid`` (it scored),
-``execution_error`` (it could not run), ``invalid`` (it ran and its scorer
-found no score) or ``not_run`` (it was skipped). An episode without a score
-is the harness's fault or the infrastructure's. A pair with an
-infrastructure fault is void and counts as a candidate loss, so a fault a
-candidate forged cannot win its pair; a harness fault takes the lowest score
-of the evaluation. The repeats of a task are averaged, and the candidate is
-selected only when an exact sign test and a bootstrap interval over tasks
-both clear ``min_effect`` at ``confidence_level``.
+``execution_error`` (it could not run) or ``invalid`` (it ran and its scorer
+found no score); a task that is not run has no episode, and the step counts
+it as ``not_run_tasks``. An episode without a score is the harness's fault or
+the infrastructure's. A harness fault ranks below every real score of the
+evaluation. A pair with an infrastructure fault is void and takes the worst
+difference, a candidate loss, so a fault a candidate forged cannot win its
+pair. The repeats of a task are averaged, and the candidate is selected only
+when an exact sign test over the tasks rejects no gain at
+``confidence_level`` and the one sided bootstrap lower bound of the mean
+task difference at that level is above ``min_effect``.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ from typing import Literal
 
 from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
 
-EpisodeLabel = Literal["valid", "execution_error", "invalid", "not_run"]
+EpisodeLabel = Literal["valid", "execution_error", "invalid"]
 EpisodeFault = Literal["harness", "infrastructure"]
 PairedSelectionResult = Literal["selected", "invalid_evaluation", "insufficient_confidence"]
 
@@ -64,7 +66,7 @@ class PairedConfidenceSettings:
 
 @dataclass(frozen=True)
 class PairedComparison:
-    """The paired test of one evaluation; ``wins``, ``losses`` and ``ties`` count tasks against ``min_effect``."""
+    """The paired test of one evaluation; ``wins``, ``losses`` and ``ties`` count tasks above, below and at 0."""
 
     valid_pairs: int
     void_pairs: int
@@ -74,7 +76,7 @@ class PairedComparison:
     losses: int
     ties: int
     sign_test_p_value: float
-    #: The bootstrap interval of the mean task difference; ``None`` with no task.
+    #: The one sided bootstrap bounds of the mean task difference at the confidence level; ``None`` with no task.
     interval: tuple[float, float] | None
 
     @property
@@ -116,7 +118,7 @@ def side_scores_and_faults(
     return tuple(scores), tuple(faults)
 
 
-def compare_pairs(metrics: Mapping[str, object], *, min_effect: float, confidence_level: float) -> PairedComparison:
+def compare_pairs(metrics: Mapping[str, object], *, confidence_level: float) -> PairedComparison:
     """The paired test of an evaluation's score and fault vectors, ordered by task, then repeat."""
     candidate_scores, candidate_faults = side_scores_and_faults(metrics, "candidate")
     current_scores, current_faults = side_scores_and_faults(metrics, "current")
@@ -131,6 +133,8 @@ def compare_pairs(metrics: Mapping[str, object], *, min_effect: float, confidenc
         )
     scored = [score for score in (*candidate_scores, *current_scores) if score is not None]
     lowest, highest = (min(scored), max(scored)) if scored else (0.0, 0.0)
+    # A harness fault ranks below every real score: one score range lower, or one unit when every score is equal.
+    fault_value = lowest - (highest - lowest if highest > lowest else 1.0)
     differences: list[float] = []
     valid_pairs = void_pairs = 0
     for candidate_score, current_score, candidate_fault, current_fault in zip(
@@ -139,17 +143,17 @@ def compare_pairs(metrics: Mapping[str, object], *, min_effect: float, confidenc
         if "infrastructure" in (candidate_fault, current_fault):
             # The worst difference the evaluation allows: a void pair is a candidate loss.
             void_pairs += 1
-            differences.append(lowest - highest)
+            differences.append(fault_value - highest)
             continue
         valid_pairs += 1
-        candidate_value = lowest if candidate_score is None else candidate_score
-        current_value = lowest if current_score is None else current_score
+        candidate_value = fault_value if candidate_score is None else candidate_score
+        current_value = fault_value if current_score is None else current_score
         differences.append(candidate_value - current_value)
     task_differences = tuple(
         math.fsum(differences[start : start + repeats]) / repeats for start in range(0, pair_count, repeats)
     )
-    wins = sum(1 for difference in task_differences if difference - min_effect > 0)
-    losses = sum(1 for difference in task_differences if difference - min_effect < 0)
+    wins = sum(1 for difference in task_differences if difference > 0)
+    losses = sum(1 for difference in task_differences if difference < 0)
     untied = wins + losses
     # Exact one sided sign test: the chance of at least this many wins among the untied tasks under no effect.
     p_value = 1.0 if untied == 0 else sum(math.comb(untied, k) for k in range(wins, untied + 1)) / 2**untied
@@ -160,6 +164,7 @@ def compare_pairs(metrics: Mapping[str, object], *, min_effect: float, confidenc
         means = sorted(
             math.fsum(generator.choices(task_differences, k=task_count)) / task_count for _ in range(BOOTSTRAP_DRAWS)
         )
+        # The (1 - level) and level quantiles: each a one sided bound at the level, the test being one sided.
         lower_index = math.floor((1 - confidence_level) * BOOTSTRAP_DRAWS + 1e-9)
         interval = (means[lower_index], means[BOOTSTRAP_DRAWS - 1 - lower_index])
     return PairedComparison(
@@ -175,7 +180,7 @@ def compare_pairs(metrics: Mapping[str, object], *, min_effect: float, confidenc
 
 
 class PairedConfidenceMixin(CandidateEvaluationPlugin):
-    """Give a plugin a ``decide()`` that selects when the paired test over tasks clears ``min_effect``.
+    """Give a plugin a ``decide()`` that selects when the sign test and the bootstrap lower bound clear.
 
     The evaluation must carry both sides' score and fault vectors; ``evaluate`` stays abstract.
     """
@@ -188,9 +193,7 @@ class PairedConfidenceMixin(CandidateEvaluationPlugin):
 
     def decide(self, candidate: UpdateCandidate, evaluation: EvaluationResult) -> SelectionDecision:
         settings = self.settings
-        comparison = compare_pairs(
-            evaluation.metrics, min_effect=settings.min_effect, confidence_level=settings.confidence_level
-        )
+        comparison = compare_pairs(evaluation.metrics, confidence_level=settings.confidence_level)
         valid, void, p_value = comparison.valid_pairs, comparison.void_pairs, comparison.sign_test_p_value
         mean = comparison.mean_difference
         lower, upper = (None, None) if comparison.interval is None else comparison.interval

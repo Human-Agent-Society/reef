@@ -113,9 +113,9 @@ candidate and selects it when every task reaches ``evolution.floor_score``
 (default ``1.0``). An episode that could not run misses the floor. The
 current release does not run under ``floor``, so ``current_scores`` is empty.
 ``paired_confidence`` reruns a pairing an infrastructure fault hit, up to
-``evolution.infra_reruns`` times, and selects when an exact sign test and a
-bootstrap interval over tasks both clear ``evolution.min_effect`` at
-``evolution.confidence_level``; see `Evolve your harness
+``evolution.infra_reruns`` times, and selects when an exact sign test over
+tasks passes at ``evolution.confidence_level`` and the bootstrap lower bound
+of the mean task gain is above ``evolution.min_effect``; see `Evolve your harness
 <../user-guide/evolve-your-harness.rst#evaluating-the-result>`__.
 ``always`` selects every applied mutation.
 

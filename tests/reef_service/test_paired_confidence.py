@@ -1,5 +1,6 @@
 """The paired confidence selection (#698, #356): faults decide their pairs, repeats average within a task, and a
-candidate is selected only when an exact sign test and a bootstrap interval over tasks both clear ``min_effect``."""
+candidate is selected only when an exact sign test over tasks passes and the bootstrap lower bound clears
+``min_effect``."""
 
 from __future__ import annotations
 
@@ -107,10 +108,23 @@ def test_a_real_gain_is_selected_and_the_decision_records_its_test() -> None:
     assert decision.reason.startswith("candidate gained 0.6667 per task (interval ")
     assert decision.reason.endswith(" over 30 valid pairs (0 void), sign test p 9.537e-07")
     json.loads(json.dumps(decision.to_dict(), allow_nan=False))
-    # The same gain below min_effect is not enough.
+    # A gain below min_effect is not enough: every task is a win, and the lower bound stays under it.
     below = decide(evaluation((0.6,) * 30, (0.5,) * 30), min_effect=0.2)
     assert not below.selected and below.metrics["selection_result"] == "insufficient_confidence"
-    assert (below.metrics["wins"], below.metrics["losses"]) == (0, 30)
+    assert (below.metrics["wins"], below.metrics["losses"]) == (30, 0)
+    assert below.metrics["interval_lower"] == pytest.approx(0.1)
+
+
+def test_min_effect_bounds_the_mean_gain_and_leaves_ties_out_of_the_sign_test() -> None:
+    """Eight wins and twelve ties on 0/1 rewards: a mean gain of 0.4 clears a min_effect of 0.05."""
+    decision = decide(evaluation((1.0,) * 8 + (0.0,) * 12, (0.0,) * 20), min_effect=0.05)
+    assert decision.selected and decision.metrics["selection_result"] == "selected"
+    assert (decision.metrics["wins"], decision.metrics["losses"], decision.metrics["ties"]) == (8, 0, 12)
+    assert decision.metrics["sign_test_p_value"] == 1 / 256
+    assert decision.metrics["interval_lower"] > 0.05
+    # The same wins do not clear a min_effect above the lower bound.
+    strict = decide(evaluation((1.0,) * 8 + (0.0,) * 12, (0.0,) * 20), min_effect=0.4)
+    assert not strict.selected and strict.metrics["sign_test_p_value"] == 1 / 256
 
 
 def test_void_pairs_count_as_candidate_losses() -> None:
@@ -121,22 +135,28 @@ def test_void_pairs_count_as_candidate_losses() -> None:
     assert (voided.metrics["wins"], voided.metrics["losses"]) == (8, 2)
     assert voided.metrics["sign_test_p_value"] == 56 / 1024
     # The fault is on either side: the candidate's own fault voids its pair too.
-    comparison = compare_pairs(
-        evaluation((1.0, "infrastructure"), (0.0, 0.5)).metrics, min_effect=0.0, confidence_level=0.95
-    )
-    assert comparison.task_differences == (1.0, -1.0) and comparison.void_pairs == 1
+    comparison = compare_pairs(evaluation((1.0, "infrastructure"), (0.0, 0.5)).metrics, confidence_level=0.95)
+    # The worst difference: the fault value, one score range below the lowest score, minus the highest.
+    assert comparison.task_differences == (1.0, -2.0) and comparison.void_pairs == 1
     # Dropping the void pairs would have selected.
     dropped = decide(evaluation((1.0,) * 8, (0.0,) * 8))
     assert dropped.selected and dropped.metrics["sign_test_p_value"] == 1 / 256
 
 
-def test_a_harness_fault_takes_the_lowest_score_of_the_evaluation() -> None:
+def test_a_harness_fault_ranks_below_every_real_score_of_the_evaluation() -> None:
+    # The scores run from 0.25 to 0.75, so a harness fault scores one range below the lowest: -0.25.
     comparison = compare_pairs(
-        evaluation(("harness", 0.25, "harness"), (0.5, 0.75, "harness")).metrics, min_effect=0.0, confidence_level=0.95
+        evaluation(("harness", 0.25, "harness"), (0.5, 0.75, "harness")).metrics, confidence_level=0.95
     )
     assert comparison.valid_pairs == 3 and comparison.void_pairs == 0
-    assert comparison.task_differences == (-0.25, -0.5, 0.0)
+    assert comparison.task_differences == (-0.75, -0.5, 0.0)
     assert (comparison.wins, comparison.losses, comparison.ties) == (0, 2, 1)
+    # A candidate that fixes a current tree which crashed on every task wins every task, even when every real
+    # score is the same.
+    fixed = decide(evaluation((1.0,) * 8, ("harness",) * 8))
+    assert fixed.selected and (fixed.metrics["wins"], fixed.metrics["ties"]) == (8, 0)
+    crashed = decide(evaluation(("harness",) * 8, (1.0,) * 8))
+    assert not crashed.selected and crashed.metrics["losses"] == 8
 
 
 def test_an_evaluation_without_enough_valid_pairs_is_invalid() -> None:
@@ -151,7 +171,6 @@ def test_an_evaluation_without_enough_valid_pairs_is_invalid() -> None:
 def test_repeats_average_within_a_task_before_the_test() -> None:
     comparison = compare_pairs(
         evaluation((1.0, 0.0, 1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0, 0.0, 0.0, 1.0), repeats=3).metrics,
-        min_effect=0.0,
         confidence_level=0.95,
     )
     assert comparison.valid_pairs == 6
@@ -175,16 +194,16 @@ def test_an_evaluation_the_rule_cannot_read_is_an_error() -> None:
     plain = evaluation((1.0, 0.0), (0.0, 0.0))
     without_faults = {key: value for key, value in plain.metrics.items() if key != "candidate_faults"}
     with pytest.raises(ValueError, match="needs 'candidate_faults'"):
-        compare_pairs(without_faults, min_effect=0.0, confidence_level=0.95)
+        compare_pairs(without_faults, confidence_level=0.95)
     one_sided = {**plain.metrics, "current_scores": (), "current_faults": ()}
     with pytest.raises(ValueError, match="needs both sides evaluated on the same pairs"):
-        compare_pairs(one_sided, min_effect=0.0, confidence_level=0.95)
+        compare_pairs(one_sided, confidence_level=0.95)
     for candidate_scores, candidate_faults in (((None, 0.0), (None, None)), ((1.0, 0.0), ("harness", None))):
         broken = {**plain.metrics, "candidate_scores": candidate_scores, "candidate_faults": candidate_faults}
         with pytest.raises(ValueError, match="needs a finite score or a fault"):
-            compare_pairs(broken, min_effect=0.0, confidence_level=0.95)
+            compare_pairs(broken, confidence_level=0.95)
     with pytest.raises(ValueError, match="a multiple of episode_repeats 3"):
-        compare_pairs({**plain.metrics, "episode_repeats": 3}, min_effect=0.0, confidence_level=0.95)
+        compare_pairs({**plain.metrics, "episode_repeats": 3}, confidence_level=0.95)
 
 
 @pytest.mark.parametrize(

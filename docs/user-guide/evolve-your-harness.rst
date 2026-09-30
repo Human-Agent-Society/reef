@@ -350,9 +350,11 @@ Two settings shape the evaluation result:
 ``evolution.selection: paired_confidence`` selects a candidate only when its
 gain is larger than chance explains. It averages the pairings of each task
 (``episode_repeats`` of them) into one difference, candidate minus current,
-and selects when an exact one sided sign test over the tasks and a bootstrap
-interval over the tasks both clear ``min_effect`` at ``confidence_level``. At
-a confidence level of 0.95, a candidate needs at least five tasks to pass.
+and selects when two checks pass: an exact one sided sign test over the
+tasks that differ gives a p value of at most one minus ``confidence_level``,
+and the bootstrap lower bound of the mean difference at that level is above
+``min_effect``. At a confidence level of 0.95, a candidate needs at least
+five task wins to pass.
 Four ``evolution`` keys configure it; every other selection refuses them:
 
 - ``min_valid_pairs`` (1): with fewer valid pairings, the step is rejected as
@@ -363,8 +365,9 @@ Four ``evolution`` keys configure it; every other selection refuses them:
   hit runs again, on both sides, before it becomes void (see `Edge cases`_).
 
 The decision records ``valid_pairs`` and ``void_pairs``,
-``sign_test_p_value``, ``interval_lower`` and ``interval_upper``, and the
-``wins``, ``losses`` and ``ties`` counted per task. On Harbor tasks, set
+``sign_test_p_value``, ``interval_lower`` and ``interval_upper`` (the one
+sided bootstrap bounds at ``confidence_level``), and the ``wins``, ``losses``
+and ``ties`` counted per task. On Harbor tasks, set
 ``evolution.evaluate`` to
 ``reef.train.cordis_backend.strategies:required_verifier_reward``, so that a
 verifier that wrote no reward gives an invalid episode, not a score of 0.
@@ -527,7 +530,7 @@ publishes accidentally.
   the step is a tie.
 - Under ``paired_confidence``, an episode that failed through the harness (a
   timeout, an unreadable trajectory, residue, a native turn that ended on an
-  error) takes the lowest score of the evaluation. One that failed through the
+  error) ranks below every real score of the evaluation. One that failed through the
   infrastructure (the binary or the sandbox could not start, a Harbor trial
   that never ran, a scorer that raised ``ScoreUnavailable``) runs both sides
   again, up to ``infra_reruns`` times. A pairing still faulted after that is
