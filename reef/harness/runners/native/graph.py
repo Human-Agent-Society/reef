@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.runners.native.enforce import Tool
+from reef.harness.runners.native.inbox import TeamMember
 from reef.harness.runners.native.seed import SEED_GRAPH
 from reef.harness.tree.nodes import _NAME, NATIVE_END_REASONS, validate_native_graph
 
@@ -217,7 +219,8 @@ class Run:
     """One turn's state, shared by every stage handler: the messages, the step counter, the log.
 
     The tools, hooks, agents and prompt are read from the host at each use;
-    ``allow`` narrows the tools to the names an agent may see."""
+    ``allow`` narrows the tools to the names an agent may see. ``builtin_tools``
+    (a team member's message tools) come after that filter, so no list hides them."""
 
     def __init__(
         self,
@@ -235,6 +238,7 @@ class Run:
         skills: Sequence[str] | None = None,
         agent_prompt: str | None = None,
         max_tool_calls: int | None = None,
+        team_member: TeamMember | None = None,
     ) -> None:
         self.loop = loop
         self.prompt = prompt
@@ -248,6 +252,8 @@ class Run:
         self.skills = None if skills is None else tuple(skills)
         self.agent_prompt = agent_prompt
         self.max_tool_calls = max_tool_calls
+        self.team_member = team_member
+        self.builtin_tools: dict[str, Tool] = {}
         self.max_steps = 0
         self.tool_calls = 0
         self.tool_errors = 0
@@ -267,7 +273,8 @@ class Run:
     @property
     def tools(self) -> Mapping[str, Any]:
         tools = self.host.tools
-        return tools if self.allow is None else {name: tool for name, tool in tools.items() if name in self.allow}
+        allowed = tools if self.allow is None else {name: tool for name, tool in tools.items() if name in self.allow}
+        return {**allowed, **self.builtin_tools}
 
     @property
     def hooks(self) -> Mapping[str, list]:
@@ -316,6 +323,12 @@ class Run:
             self.end_turn({"kind": "max-steps", "steps": graph.max_steps}, "budget")
         self.step += 1
         step = self.step
+        member = self.team_member
+        if member is not None:
+            # A team message arrives at the receiver's next step, before its hooks and its call see the messages.
+            for message in member.inbox.take(member.instance):
+                source = {"kind": "message", "from": message.sender, "message_id": message.message_id}
+                self.say(f"Message from {message.sender}: {message.text}", source)
         # What the host holds now is what this step runs on; the hooks see the same messages the model will.
         self.system = self.host.system_prompt(skills=self.skills, prompt=self.agent_prompt)
         self.messages[0] = {"role": "system", "content": self.system}
@@ -368,7 +381,9 @@ class Run:
     def tools_stage(self, graph: Graph, stage: Mapping[str, Any]) -> str:
         loop = self.loop
         allow = stage.get("allow")
-        tools = self.tools if not allow else {name: tool for name, tool in self.tools.items() if name in allow}
+        tools = self.tools
+        if allow:
+            tools = {name: tool for name, tool in tools.items() if name in allow or name in self.builtin_tools}
         step = self.step
         contexts: list[str] = []
         for call in list(self.last.get("tool_calls") or []):

@@ -11,9 +11,11 @@ import json
 import os
 import re
 import threading
+import time
 from pathlib import Path, PurePosixPath
 
 import pytest
+from reef_service.test_harness_recipe import MODEL, batch, make_binary
 from reef_service.test_native_harness import (
     CHECKER,
     _call,
@@ -28,18 +30,29 @@ from reef_service.test_native_harness import (
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.executor import EPISODE_TOKENS_ENV
 from reef.harness.episodes.model_binding import ModelBinding
-from reef.harness.episodes.run import run_episode
+from reef.harness.episodes.run import EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import reader_for
 from reef.harness.runners.native import TEAM_DIR, Session, ToolModule, ToolRunner, _Loop, run_loop
 from reef.harness.runners.native.control import EpisodeControl, EpisodeStop, TeamBudget, episode_token_limit
 from reef.harness.runners.native.enforce import InProcessEnforcer
 from reef.harness.runners.native.graph import Run, _tokens, run_graph
 from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.inbox import TEAM_MAX_SENDS_PER_MEMBER, TEAM_MESSAGE_MAX_CHARS, Inbox, TeamMember
 from reef.harness.runners.native.seed import SEED_TOOLS
-from reef.harness.runners.native.team import MemberStart, TeamStageRun, team_outcome
+from reef.harness.runners.native.team import MemberStart, TeamStageRun, TeamWaitRunner, team_outcome
 from reef.harness.runners.native.workspaces import CommandOutcome, HostCommandRunner, TeamWorkspaces
+from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import render_composition
-from reef.train.cordis_backend.backend import _agent_work, _stage_path, tree_files
+from reef.train.cordis_backend import CordisBackend, Mutation
+from reef.train.cordis_backend.backend import (
+    EpisodeEvaluationWorker,
+    _agent_work,
+    _stage_path,
+    sum_message_counts,
+    team_message_counts,
+    tree_files,
+)
+from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 
 USAGE = {"prompt_tokens": 200, "completion_tokens": 100}
 READ = _reply(tool_calls=[_call("read_file", {"path": "missing.txt"}, "c1")])
@@ -370,7 +383,8 @@ def test_members_run_at_once_each_in_its_own_session_file_and_the_caller_reads_e
     critic_system = next(r for r in model.requests if member_of(r) == "critic.1")["messages"][0]["content"]
     assert critic_system.endswith(
         "Be strict.\n\nYou are critic.1, one critic in a team of peer.1, critic.1. "
-        "root started the team and reads your final answer."
+        "root started the team and reads your final answer. team_send sends a message to a member, a role, all, "
+        "or root; it arrives at the receiver's next step. team_wait waits for one."
     )
     peer_system = next(r for r in model.requests if member_of(r) == "peer.1")["messages"][0]["content"]
     assert "Be strict." not in peer_system
@@ -573,7 +587,7 @@ def test_members_in_their_own_worktrees_merge_into_the_workdir_and_leave_no_git_
         outcome, detail = turn.stage(peers(2), workspace="own")
         team_path = turn.work / TEAM_DIR
         worktrees = sorted(path.name for path in team_path.iterdir())
-        status = git_status(turn)
+        status, is_git_in_workdir = git_status(turn), (turn.work / ".git").exists()
         turn.finish()
     finally:
         stop(model)
@@ -590,7 +604,7 @@ def test_members_in_their_own_worktrees_merge_into_the_workdir_and_leave_no_git_
     (said,) = root_events(turn, "user/message")
     assert said["content"].endswith("peer.1: merged\n\npeer.2: merged")
     # The main worktree never gets a .git, and closing removes Reef's git directory with every worktree.
-    assert not (turn.work / ".git").exists() and not team_path.exists()
+    assert not is_git_in_workdir and not (turn.work / ".git").exists() and not team_path.exists()
 
 
 def test_a_conflict_is_named_and_leaves_the_workdir_clean_with_the_members_changes_kept(tmp_path: Path) -> None:
@@ -690,3 +704,276 @@ def test_the_host_command_runner_reports_a_missing_command_and_a_timeout_as_outc
     assert slow.return_code == 124 and "did not finish in 0.2 s" in slow.stderr
     done = runner.run(["sh", "-c", "echo hi; exit 3"], cwd=str(tmp_path), timeout_seconds=5)
     assert done == CommandOutcome(3, "hi\n", "")
+
+
+# -- team_send and team_wait -------------------------------------------------------------------------------------
+
+
+def message_events(found: list[dict]) -> list[dict]:
+    return [e for e in found if e["type"] == "user/message" and e["data"]["source"]["kind"] == "message"]
+
+
+class ChattingModel(MemberModel):
+    """Each member runs its plan of (tool, arguments) calls, one per step, then answers; a listener waits after its
+    plan until a message has reached it, and answers then."""
+
+    def __init__(self, plans: dict[str, list[tuple[str, dict]]], listeners: tuple[str, ...] = ()) -> None:
+        super().__init__()
+        self.plans = plans
+        self.listeners = listeners
+
+    def reply(self, instance: str, body: dict) -> dict:
+        heard = [m["content"] for m in body["messages"] if m["role"] == "user" and m["content"].startswith("Message")]
+        done = sum(1 for message in body["messages"] if message.get("role") == "tool")
+        plan = self.plans.get(instance, [])
+        if done < len(plan):
+            name, arguments = plan[done]
+            return _reply(tool_calls=[_call(name, arguments, f"t{done}")])
+        if instance in self.listeners and not heard:
+            return _reply(tool_calls=[_call("team_wait", {"seconds": 30}, f"t{done}")])
+        return _reply(content=f"{instance} heard: {heard[-1]}" if heard else f"{instance} is done")
+
+
+def test_one_message_each_way_is_a_send_in_one_file_and_a_message_at_the_next_step_in_the_other(
+    tmp_path: Path,
+) -> None:
+    plans = {
+        "peer.1": [("team_send", {"to": "peer.2", "text": "hello from one"})],
+        "peer.2": [("team_send", {"to": "peer.1", "text": "hello from two"})],
+    }
+    model = ChattingModel(plans, listeners=("peer.1", "peer.2"))
+    listed = ("native_agent", {**PEER[1], "tools": ["read_file"]})
+    try:
+        turn = TeamTurn(tmp_path, model, [*_seed_nodes(SEED_TOOLS), listed])
+        outcome, _ = turn.stage(peers(2))
+        trajectory = turn.finish()
+    finally:
+        stop(model)
+    assert outcome == "completed"
+    files = member_files(turn.sessions)
+    for sender, receiver in (("peer.1", "peer.2"), ("peer.2", "peer.1")):
+        # The agent's tools list does not hide the team tools.
+        assert files[sender][0]["data"]["tools"] == ["read_file", "team_send", "team_wait"]
+        (sent,) = [e["data"] for e in files[sender] if e["type"] == "team/send"]
+        assert (sent["to"], sent["delivered"], sent["undelivered"]) == (receiver, [receiver], [])
+        (heard,) = message_events(files[receiver])
+        assert heard["data"]["source"] == {"kind": "message", "from": sender, "message_id": f"{sender}-1"}
+        assert heard["data"]["content"] == f"Message from {sender}: {sent['text']}"
+        # Delivered at the top of a step: the next event is that step's start.
+        following = files[receiver][files[receiver].index(heard) + 1]
+        assert following["type"] == "step/start" and following["data"]["step"] == heard["data"]["step"]
+    assert team_message_counts(trajectory) == {
+        "peer.1": {"sent": 1, "received": 1, "undelivered": 0},
+        "peer.2": {"sent": 1, "received": 1, "undelivered": 0},
+    }
+    # The message events move no per agent counter.
+    plain = [e for e in trajectory if not e["type"].startswith("team/") and e not in message_events(trajectory)]
+    assert _agent_work(plain) == _agent_work(trajectory)
+
+
+def test_a_broadcast_reaches_every_other_open_member_and_not_the_sender(tmp_path: Path) -> None:
+    plans = {"peer.1": [("team_send", {"to": "all", "text": "split: I take the parser"})]}
+    model = ChattingModel(plans, listeners=("peer.2", "peer.3"))
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        outcome, _ = turn.stage(peers(3))
+        turn.finish()
+    finally:
+        stop(model)
+    files = member_files(turn.sessions)
+    (sent,) = [e["data"] for e in files["peer.1"] if e["type"] == "team/send"]
+    assert sent["delivered"] == ["peer.2", "peer.3"] and outcome == "completed"
+    assert not message_events(files["peer.1"])
+    assert [len(message_events(files[instance])) for instance in ("peer.2", "peer.3")] == [1, 1]
+
+
+def test_a_message_to_a_member_that_has_ended_is_reported_undelivered(tmp_path: Path) -> None:
+    # peer.1 answers at once; peer.2 waits until it is alone, then writes to peer.1.
+    plans = {"peer.2": [("team_wait", {"seconds": 30}), ("team_send", {"to": "peer.1", "text": "are you there?"})]}
+    model = ChattingModel(plans)
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        turn.stage(peers(2))
+        trajectory = turn.finish()
+    finally:
+        stop(model)
+    files = member_files(turn.sessions)
+    results = [e["data"]["content"] for e in files["peer.2"] if e["type"] == "tool/result"]
+    assert results == ["every other member has ended; no message will come", "peer.1 has ended; not delivered"]
+    (sent,) = [e["data"] for e in files["peer.2"] if e["type"] == "team/send"]
+    assert (sent["delivered"], sent["undelivered"]) == ([], ["peer.1"])
+    assert team_message_counts(trajectory) == {"peer.2": {"sent": 1, "received": 0, "undelivered": 1}}
+
+
+class LateNoteModel(MemberModel):
+    """peer.1 writes to the caller and then to peer.2 while peer.2's only call is held open, so peer.2 ends with
+    the note unread."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.is_sent = threading.Event()
+
+    def reply(self, instance: str, body: dict) -> dict:
+        done = sum(1 for message in body["messages"] if message.get("role") == "tool")
+        if instance == "peer.2":
+            self.is_sent.wait(10)
+            return _reply(content="peer.2 is done")
+        if done == 0:
+            return _reply(tool_calls=[_call("team_send", {"to": "root", "text": "the parser is done"}, "t0")])
+        if done == 1:
+            return _reply(tool_calls=[_call("team_send", {"to": "peer", "text": "late note"}, "t1")])
+        self.is_sent.set()
+        return _reply(content="peer.1 is done")
+
+
+def test_a_message_to_the_caller_joins_the_stage_result_and_an_unread_one_is_named(tmp_path: Path) -> None:
+    model = LateNoteModel()
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        turn.stage(peers(2))
+        turn.finish()
+    finally:
+        stop(model)
+    (said,) = root_events(turn, "user/message")
+    assert said["content"].endswith(
+        "peer.2 (peer) ended with completed: peer.2 is done\n\nMessage from peer.1: the parser is done"
+    )
+    files = member_files(turn.sessions)
+    sent = [e["data"] for e in files["peer.1"] if e["type"] == "team/send"]
+    assert [(e["to"], e["delivered"]) for e in sent] == [("root", ["root"]), ("peer", ["peer.2"])]
+    assert files["peer.2"][-1]["type"] == "team/unread"
+    assert files["peer.2"][-1]["data"] == {"messages": [{"message_id": "peer.1-2", "from": "peer.1"}]}
+
+
+def test_message_text_is_redacted_in_both_files_and_an_overlong_message_is_a_tool_error(tmp_path: Path) -> None:
+    secret = "sk-" + "a" * 24
+    model = ChattingModel(
+        {
+            "peer.1": [
+                ("team_send", {"to": "peer.2", "text": "x" * (TEAM_MESSAGE_MAX_CHARS + 1)}),
+                ("team_send", {"to": "peer.2", "text": f"the key is {secret}"}),
+            ]
+        },
+        listeners=("peer.2",),
+    )
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        turn.stage(peers(2))
+        turn.finish()
+    finally:
+        stop(model)
+    files = member_files(turn.sessions)
+    first, second = [e["data"] for e in files["peer.1"] if e["type"] == "tool/result"]
+    assert (
+        first["error"]["code"] == "TOOL_FAILED" and f"at most {TEAM_MESSAGE_MAX_CHARS} characters" in first["content"]
+    )
+    assert second["content"] == "sent to peer.2"
+    (sent,) = [e["data"] for e in files["peer.1"] if e["type"] == "team/send"]
+    (heard,) = message_events(files["peer.2"])
+    assert sent["text"] == "the key is [redacted credential]"
+    assert heard["data"]["content"] == "Message from peer.1: the key is [redacted credential]"
+    assert secret not in (turn.sessions / "agents").joinpath("003-peer.2.jsonl").read_text()
+
+
+def test_the_inbox_caps_sends_and_resolves_members_roles_all_and_the_caller() -> None:
+    inbox = Inbox({"peer.1": "peer", "peer.2": "peer", "critic.1": "critic"}, "lead", EpisodeStop())
+    assert inbox.recipients("peer.1", "peer") == ["peer.2"]
+    assert inbox.recipients("peer.1", "all") == ["peer.2", "critic.1"]
+    assert inbox.recipients("peer.1", "lead") == ["lead"] and inbox.recipients("critic.1", "peer.2") == ["peer.2"]
+    with pytest.raises(ValueError, match=re.escape("no member, role or caller is named 'nobody'; members: peer.1,")):
+        inbox.recipients("peer.1", "nobody")
+    with pytest.raises(ValueError, match="cannot send a message to itself"):
+        inbox.recipients("peer.1", "peer.1")
+    for _ in range(TEAM_MAX_SENDS_PER_MEMBER):
+        inbox.send("peer.1", "peer.2", "hi")
+    with pytest.raises(ValueError, match=f"at most {TEAM_MAX_SENDS_PER_MEMBER} messages"):
+        inbox.send("peer.1", "peer.2", "one too many")
+    assert len(inbox.take("peer.2")) == TEAM_MAX_SENDS_PER_MEMBER and inbox.take("peer.2") == []
+
+
+def test_team_wait_returns_on_a_message_the_stop_flag_or_when_it_is_alone_and_never_past_its_cap() -> None:
+    def timed(inbox: Inbox, act) -> tuple[int, float]:
+        threading.Timer(0.2, act).start()
+        started = time.monotonic()
+        return inbox.wait("peer.1", 30), time.monotonic() - started
+
+    members = {"peer.1": "peer", "peer.2": "peer"}
+    inbox = Inbox(members, "root", EpisodeStop())
+    waiting, seconds = timed(inbox, lambda: inbox.send("peer.2", "peer.1", "here"))
+    assert waiting == 1 and seconds < 5
+    stop_flag = EpisodeStop()
+    inbox = Inbox(members, "root", stop_flag)
+    waiting, seconds = timed(inbox, lambda: stop_flag.set("cancelled"))
+    assert waiting == 0 and seconds < 5  # the flag is read at least once a second
+    inbox = Inbox(members, "root", EpisodeStop())
+    waiting, seconds = timed(inbox, lambda: inbox.close("peer.2"))
+    assert waiting == 0 and seconds < 5
+    assert Inbox(members, "root", EpisodeStop()).wait("peer.1", 0.1) == 0
+
+    class RecordingInbox(Inbox):
+        def wait(self, member: str, timeout_seconds: float) -> int:
+            self.asked = timeout_seconds
+            return 0
+
+    recording = RecordingInbox(members, "root", EpisodeStop())
+    runner = TeamWaitRunner(TeamMember("peer.1", "peer", recording))
+    assert runner({"seconds": 10**6}, "") == "no message after 300 s" and recording.asked == 300
+    runner({"seconds": 0}, "")
+    assert recording.asked == 1
+
+
+def test_team_tool_names_are_reserved_for_built_in_tools() -> None:
+    for name in ("team_assign", "team_send", "team_wait"):
+        config = {"name": name, "description": "x", "code": "def run(args, workdir):\n    return ''\n"}
+        with pytest.raises(ValueError, match="reserved for built-in tools"):
+            NODE_KINDS["native_tool"](None, config)
+
+
+def test_message_counts_are_per_agent_and_add_up_over_episodes() -> None:
+    trajectory = [
+        {"type": "session", "data": {"agent": "peer.1"}},
+        {"type": "team/send", "data": {"delivered": [], "undelivered": ["peer.2"]}},
+        {"type": "session", "data": {"agent": "peer.2"}},
+        {"type": "user/message", "data": {"source": {"kind": "message", "from": "peer.1"}}},
+        {"type": "user/message", "data": {"source": {"kind": "team"}}},
+        {"type": "session", "data": {"agent": "root"}},
+    ]
+    counts = team_message_counts(trajectory)
+    assert counts == {
+        "peer.1": {"sent": 1, "received": 0, "undelivered": 1},
+        "peer.2": {"sent": 0, "received": 1, "undelivered": 0},
+    }
+    assert sum_message_counts([counts, counts, {}])["peer.1"] == {"sent": 2, "received": 0, "undelivered": 2}
+    worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("native"),
+        scorer=resolve_episode_scorer(lambda task, result: 1.0),
+        binary=None,
+        timeout=10,
+        executor=__import__("reef.harness.episodes.executor", fromlist=["LocalExecutor"]).LocalExecutor(),
+        forbid_residue=False,
+    )
+    scored = worker._score_result(EpisodeResult(0, "", "", tuple(trajectory), ()), "task")
+    assert scored.messages == counts
+
+
+def test_a_side_whose_episodes_sent_messages_reports_them_per_agent(tmp_path: Path, monkeypatch) -> None:
+    import reef.train.cordis_backend.backend as reef_cordis_backend
+
+    trajectory = (
+        {"type": "session", "data": {"agent": "peer.1"}},
+        {"type": "team/send", "data": {"delivered": ["peer.2"], "undelivered": []}},
+    )
+    monkeypatch.setattr(
+        reef_cordis_backend, "run_episode", lambda *args, **kwargs: EpisodeResult(0, "", "", trajectory, ())
+    )
+    b = CordisBackend(
+        descriptor=get_adapter("pi"),
+        propose=resolve_proposer(lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "x"}})),
+        score_episode=resolve_episode_scorer(lambda task, result: 1.0),
+        tasks=("task one",),
+        models=MODEL,
+        binary=str(make_binary(tmp_path)),
+    )
+    prepared = b.prepare_step(batch(), b.initial_state(), 0)
+    metrics = b.evaluate(prepared.candidate, sides=("candidate",)).metrics
+    assert metrics["candidate_messages"] == {"peer.1": {"sent": 1, "received": 0, "undelivered": 0}}

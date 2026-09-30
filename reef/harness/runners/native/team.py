@@ -9,6 +9,10 @@ ends its turn at its next step.
 With ``workspace: own`` each member works in a git worktree of its own (``reef.harness.runners.native.workspaces``),
 and its branch is merged into the caller's workdir when the stage ends; with ``shared`` every member works in the
 caller's workdir and nothing is merged.
+
+Members talk through two built-in tools, ``team_send`` and ``team_wait``, over the stage run's inbox
+(``reef.harness.runners.native.inbox``): a message is a ``team/send`` event in the sender's file and a
+``user/message`` at the receiver's next step, and a message to the caller joins the stage's result.
 """
 
 from __future__ import annotations
@@ -21,18 +25,89 @@ import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-from reef.harness.runners.native import LoadError, Session
+from reef.harness.runners.native import LoadError, Session, ToolModule, ToolRunner
+from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import GraphError, Run, _Stop, _walk, narrow_allow
 from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.inbox import Inbox, TeamMember
 from reef.harness.runners.native.workspaces import MergeResult, TeamWorkspaceError
 
 #: Characters of one member's final text that the caller's message carries.
 TEAM_RESULT_CHARS = 4000
 #: What each member's system prompt ends with, so a member knows who else is in its stage run.
 TEAM_MEMBER_NOTE = (
-    "You are {instance}, one {role} in a team of {roster}. {caller} started the team and reads your final answer."
+    "You are {instance}, one {role} in a team of {roster}. {caller} started the team and reads your final answer. "
+    "team_send sends a message to a member, a role, all, or {caller}; it arrives at the receiver's next step. "
+    "team_wait waits for one."
 )
+#: The longest one ``team_wait`` call waits.
+TEAM_WAIT_MAX_SECONDS = 300
+TEAM_SEND_DESCRIPTION = (
+    "Send a message to your team: to a member (peer.2), a role (every other member that runs it), all (every other "
+    "member), or the agent that started the team. It arrives at the receiver's next step; a member that has ended "
+    "does not get it."
+)
+TEAM_SEND_PARAMETERS = {
+    "type": "object",
+    "properties": {"to": {"type": "string"}, "text": {"type": "string"}},
+    "required": ["to", "text"],
+}
+TEAM_WAIT_DESCRIPTION = (
+    f"Wait up to seconds (1 to {TEAM_WAIT_MAX_SECONDS}) for a message; it returns early when one arrives or every "
+    "other member has ended. The message itself arrives at your next step."
+)
+TEAM_WAIT_PARAMETERS = {"type": "object", "properties": {"seconds": {"type": "integer"}}, "required": ["seconds"]}
+
+
+class TeamSendRunner(ToolRunner):
+    """``team_send(to, text)``: queue the message, then name it in the sender's file before the tool result."""
+
+    def __init__(self, run: Run, member: TeamMember) -> None:
+        self.run = run
+        self.member = member
+
+    def __call__(self, args: dict[str, Any], workdir: str, /) -> str:
+        member, to = self.member, str(args["to"])
+        try:
+            message, delivered, undelivered = member.inbox.send(member.instance, to, str(args["text"]))
+        except ValueError as exc:
+            raise ToolFailed(str(exc)) from exc
+        self.run.session.write(
+            "team/send",
+            {
+                "step": self.run.step,
+                "message_id": message.message_id,
+                "to": to,
+                "delivered": delivered,
+                "undelivered": undelivered,
+                "text": message.text,
+            },
+        )
+        parts = [f"sent to {', '.join(delivered)}"] if delivered else []
+        if undelivered:
+            parts.append(f"{', '.join(undelivered)} {'has' if len(undelivered) == 1 else 'have'} ended; not delivered")
+        return "; ".join(parts) or f"no other member runs {to}; not delivered"
+
+
+class TeamWaitRunner(ToolRunner):
+    """``team_wait(seconds)``: block until a message waits, every other member has ended, or the time passes."""
+
+    def __init__(self, member: TeamMember) -> None:
+        self.member = member
+
+    def __call__(self, args: dict[str, Any], workdir: str, /) -> str:
+        member = self.member
+        seconds = min(max(int(args["seconds"]), 1), TEAM_WAIT_MAX_SECONDS)
+        waiting = member.inbox.wait(member.instance, seconds)
+        if waiting:
+            return f"{waiting} message{'s' if waiting > 1 else ''} waiting; delivered at your next step"
+        if member.inbox.stop.is_set:
+            return "the episode is stopping; no message came"
+        if member.inbox.is_alone(member.instance):
+            return "every other member has ended; no message will come"
+        return f"no message after {seconds} s"
 
 
 @dataclass(frozen=True)
@@ -81,6 +156,9 @@ class TeamStageRun:
         self.mode = mode
         self.workspace = workspace
         self.members = tuple(members)
+        self.inbox = Inbox(
+            {start.instance: start.role for start in self.members}, caller.agent, caller.loop.control.stop
+        )
 
     def run(self) -> tuple[str, dict[str, object]]:
         """The stage's outcome and its ``stage/exit`` detail; the caller's own step counter does not move."""
@@ -158,6 +236,7 @@ class TeamStageRun:
             else:
                 lines.append(f"{merge.agent}: {'merged' if merge.result == 'merged' else 'changed no file'}")
         lines.extend(failures)
+        lines.extend(f"Message from {message.sender}: {message.text}" for message in self.inbox.caller_messages())
         caller.say(
             "\n\n".join(lines), {"kind": "team", "stage": self.stage_name, "mode": self.mode, "outcome": outcome}
         )
@@ -243,7 +322,8 @@ class TeamStageRun:
                 loop._abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]}, turn=turn)
                 return MemberResult(start.instance, start.role, "gave_up", "", 0, str(workdir))
             graph.max_steps = int(agent.get("max_steps") or graph.max_steps)
-            roster = ", ".join(member.instance for member in self.members)
+            member = TeamMember(start.instance, start.role, self.inbox)
+            roster = ", ".join(other.instance for other in self.members)
             note = TEAM_MEMBER_NOTE.format(
                 instance=start.instance, role=start.role, roster=roster, caller=caller.agent
             )
@@ -261,7 +341,17 @@ class TeamStageRun:
                 skills=agent.get("skills"),
                 agent_prompt="\n\n".join(part for part in (str(agent.get("prompt", "")), start.rules, note) if part),
                 max_tool_calls=agent.get("max_tool_calls"),
+                team_member=member,
             )
+            send = TeamSendRunner(child, member)
+            child.builtin_tools = {
+                "team_send": ToolModule(
+                    "team_send", TEAM_SEND_DESCRIPTION, TEAM_SEND_PARAMETERS, send, builtin_tool=True
+                ),
+                "team_wait": ToolModule(
+                    "team_wait", TEAM_WAIT_DESCRIPTION, TEAM_WAIT_PARAMETERS, TeamWaitRunner(member), builtin_tool=True
+                ),
+            }
             tools = child.tools
             session.write(
                 "session",
@@ -283,6 +373,12 @@ class TeamStageRun:
                 outcome, text = "gave_up", ""
             return MemberResult(start.instance, start.role, outcome, text, child.step, str(workdir))
         finally:
+            # Closed first: a member waiting for a message stops waiting once every other member has ended.
+            unread = self.inbox.close(start.instance)
+            if unread:
+                session.write(
+                    "team/unread", {"messages": [{"message_id": m.message_id, "from": m.sender} for m in unread]}
+                )
             session.close()
             if host is not None:
                 host.dispose()

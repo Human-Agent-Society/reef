@@ -54,8 +54,16 @@ NATIVE_LOOP_DEFAULT_MAX_STEPS = 12
 NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
-#: Names reserved for built-in tools (``reef.harness.runners.native.selftools``); no tree entry may take one.
-NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
+#: Names reserved for built-in tools (the serve form's ``reef.harness.runners.native.selftools`` and the team tools of
+#: ``reef.harness.runners.native.team``); no tree entry may take one.
+NATIVE_RESERVED_TOOL_NAMES = (
+    "harness_inspect",
+    "harness_propose",
+    "harness_try",
+    "team_assign",
+    "team_send",
+    "team_wait",
+)
 #: Entry ids of reef's own shipped entries (the update notice, the harness requests extension and its skill): a seed or a
 #: recovered state carries them, and no mutation creates, updates or removes one.
 RESERVED_ENTRY_IDS = frozenset({"reef-version-check", "reef-requests", "reef-pi-extension-api"})

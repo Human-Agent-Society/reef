@@ -18,7 +18,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
@@ -160,18 +160,29 @@ class EpisodeEvaluationWorker:
         """The score and the observations of an episode that ran."""
         residue = len(result.residue)
         agents = _agent_work(result.trajectory)
+        messages = team_message_counts(result.trajectory)
         path = _stage_path(result.trajectory)
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
+                None,
+                FailureObservation(task=task, stage="residue", cause=cause),
+                residue,
+                agents,
+                path,
+                messages=messages,
             )
         trial_error = _failed_trial_error(result.trajectory)
         if trial_error:
             # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
             # start): no answer was given, so it ranks below every real score instead of tying a zero.
             return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="trial", cause=trial_error), residue, agents, path
+                None,
+                FailureObservation(task=task, stage="trial", cause=trial_error),
+                residue,
+                agents,
+                path,
+                messages=messages,
             )
         if path.get("error") is not None:
             # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
@@ -183,7 +194,9 @@ class EpisodeEvaluationWorker:
                 cause = f"agent {path['errored_agent']}: {cause}"
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
-            return _ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
+            return _ScoredEpisode(
+                None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path, messages=messages
+            )
         score = float(
             self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
         )
@@ -194,11 +207,19 @@ class EpisodeEvaluationWorker:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return _ScoredEpisode(
-                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path, reply
+                score,
+                FailureObservation(task=task, stage="exit", cause=cause),
+                residue,
+                agents,
+                path,
+                reply,
+                messages=messages,
             )
         # An empty trajectory is no failure: a grader that reads files scored the run as it stands. The summary
         # still says no transcript was read, so a low score a text grader gave is not blamed on the request.
-        return _ScoredEpisode(score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory))
+        return _ScoredEpisode(
+            score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory), messages=messages
+        )
 
 
 def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
@@ -1313,6 +1334,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
             # Per agent sums over the side's episodes, so a result says which agent did the work.
             metrics[f"{side}_agents"] = _sum_agents(run.agents for run in runs[side])
+            # Team messages per agent, only when the side's episodes sent any, so an ordinary result keeps its shape.
+            messages = sum_message_counts(run.messages for run in runs[side])
+            if messages:
+                metrics[f"{side}_messages"] = messages
             # Per episode, in pairing order: the root's stage path and how its turn ended.
             metrics[f"{side}_paths"] = tuple(run.path for run in runs[side])
         if "candidate" in sides:
@@ -1745,6 +1770,8 @@ class _ScoredEpisode:
     transcript_read: bool = True
     #: Remote workers return the kept trajectory; the driver owns its durable path.
     record_archive: bytes | None = field(default=None, repr=False)
+    #: Team messages per agent (``MESSAGE_COUNTERS``); empty when the episode sent none.
+    messages: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 #: How many candidate episodes a step's evaluation summarizes, and how much of each text it keeps: a summary for
@@ -1848,6 +1875,42 @@ def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, 
         elif type_ == "tool/result" and data.get("is_error"):
             work[agent]["tool_errors"] += 1
     return work
+
+
+#: The counters a result carries per agent for team messages: sends, messages read at a step, and names a send
+#: did not reach because that member had ended.
+MESSAGE_COUNTERS = ("sent", "received", "undelivered")
+
+
+def team_message_counts(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    """Sent, received and undelivered team messages per agent of a native-jsonl trajectory, keyed as ``_agent_work``
+    keys its counters; an agent that neither sent nor received one is left out."""
+    counts: dict[str, dict[str, int]] = {}
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+        elif agent is None:
+            continue
+        elif type_ == "team/send":
+            sender = counts.setdefault(agent, dict.fromkeys(MESSAGE_COUNTERS, 0))
+            sender["sent"] += 1
+            sender["undelivered"] += len(data.get("undelivered") or ())
+        elif type_ == "user/message" and (data.get("source") or {}).get("kind") == "message":
+            counts.setdefault(agent, dict.fromkeys(MESSAGE_COUNTERS, 0))["received"] += 1
+    return counts
+
+
+def sum_message_counts(runs: Iterable[Mapping[str, Mapping[str, int]]]) -> dict[str, dict[str, int]]:
+    """``team_message_counts`` of several episodes added up per agent, by agent name."""
+    total: dict[str, dict[str, int]] = {}
+    for counts in runs:
+        for agent, agent_counts in counts.items():
+            sums = total.setdefault(agent, dict.fromkeys(MESSAGE_COUNTERS, 0))
+            for key in MESSAGE_COUNTERS:
+                sums[key] += agent_counts.get(key, 0)
+    return {agent: total[agent] for agent in sorted(total)}
 
 
 def _sum_agents(runs: Any) -> dict[str, dict[str, int]]:
