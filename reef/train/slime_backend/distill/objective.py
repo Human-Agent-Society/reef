@@ -50,7 +50,7 @@ from torch.utils.checkpoint import checkpoint
 
 from reef.train.slime_backend.distill.algorithm import DIVERGENCES, DistillSettings, settings_from_args
 from reef.train.slime_backend.score_centering import settings_from_args as centering_settings_from_args
-from reef.train.slime_backend.score_centering.term import importance_weight, score_centering_term
+from reef.train.slime_backend.score_centering.term import score_centering_term
 from reef.train.slime_backend.vocab_parallel import (
     gather_log_probs_at_ids,
     global_log_sum_exp,
@@ -382,8 +382,6 @@ def distill_loss(
         raise NotImplementedError("the distill loss supports context parallel = 1 only")
     settings = settings_from_args(args)
     centering_settings = centering_settings_from_args(args)
-    if centering_settings is not None:
-        centering_weight = settings.score_centering_weight
     total_lengths = batch["total_lengths"]
     response_lengths = batch["response_lengths"]
     unconcat_tokens = batch["unconcat_tokens"]
@@ -435,17 +433,12 @@ def distill_loss(
                 with_entropy=False,
             )
             if settings.importance_sampling_level == "token":
-                if centering_settings is not None:
-                    # Match the correction's f(p/q), including very small ratios.
-                    weights = [
-                        importance_weight((student.float() - rollout.float()).exp(), centering_weight)
-                        for student, rollout in zip(outputs["log_probs"], rollout_log_probs, strict=True)
-                    ]
-                else:
-                    weights = [
-                        token_importance_weights(student, rollout, settings.importance_sampling_cap)
-                        for student, rollout in zip(outputs["log_probs"], rollout_log_probs, strict=True)
-                    ]
+                # This is the correction's own f(p / q) = min(p / q, cap); the clamp on the log ratio only
+                # moves ratios below about 2e-9, where the weight is negligible and exp would underflow.
+                weights = [
+                    token_importance_weights(student, rollout, settings.importance_sampling_cap)
+                    for student, rollout in zip(outputs["log_probs"], rollout_log_probs, strict=True)
+                ]
             else:
                 weights = [
                     sequence_importance_weight(student, rollout, mask, settings.importance_sampling_cap)
@@ -484,7 +477,7 @@ def distill_loss(
             ],
         }
         correction, centering_metrics = score_centering_term(
-            args, centering_batch, logits, sum_of_sample_mean, centering_weight, centering_settings
+            args, centering_batch, logits, sum_of_sample_mean, settings.score_centering_weight, centering_settings
         )
         loss = loss + correction
         metrics.update(centering_metrics)
