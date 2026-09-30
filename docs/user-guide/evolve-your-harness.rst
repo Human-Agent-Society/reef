@@ -338,13 +338,36 @@ Evaluating the result
 Two settings shape the evaluation result:
 
 - ``evolution.min_win_margin: M`` (0 by default) is a noise floor on the
-  result: the candidate must win more than ``M`` task pairings beyond its
-  losses, so on a stochastic episode a single lucky flip does not publish.
+  default ``score_comparison`` result: the candidate must win more than ``M``
+  task pairings beyond its losses, so on a stochastic episode a single lucky
+  flip does not publish.
 - ``evolution.max_rejected_history: N`` (25 by default, 0 off) keeps the
   last ``N`` rejected proposals in the scenario state, each with its step,
   its mutations with the options they carried, and the result's reason; a
   ``propose`` whose signature names ``rejected`` receives them and can stop
   re-proposing what the evaluation already refused.
+
+``evolution.selection: paired_confidence`` selects a candidate only when its
+gain is larger than chance explains. It averages the pairings of each task
+(``episode_repeats`` of them) into one difference, candidate minus current,
+and selects when an exact one sided sign test over the tasks and a bootstrap
+interval over the tasks both clear ``min_effect`` at ``confidence_level``. At
+a confidence level of 0.95, a candidate needs at least five tasks to pass.
+Four ``evolution`` keys configure it; every other selection refuses them:
+
+- ``min_valid_pairs`` (1): with fewer valid pairings, the step is rejected as
+  ``invalid_evaluation``.
+- ``min_effect`` (0, in score units) and ``confidence_level`` (0.95): a gain
+  that does not clear them is rejected as ``insufficient_confidence``.
+- ``infra_reruns`` (0): how many times a pairing that an infrastructure fault
+  hit runs again, on both sides, before it becomes void (see `Edge cases`_).
+
+The decision records ``valid_pairs`` and ``void_pairs``,
+``sign_test_p_value``, ``interval_lower`` and ``interval_upper``, and the
+``wins``, ``losses`` and ``ties`` counted per task. On Harbor tasks, set
+``evolution.evaluate`` to
+``reef.train.cordis_backend.strategies:required_verifier_reward``, so that a
+verifier that wrote no reward gives an invalid episode, not a score of 0.
 
 By default a successful evaluation is served at once.
 ``evolution.publish: review`` holds every win as a pending release instead,
@@ -499,12 +522,26 @@ Edge cases in the loop are resolved conservatively, so a step never
 publishes accidentally.
 
 - A ``None`` proposal skips the step.
-- An episode that could not run ranks below every real score, so a
-  candidate cannot win on a crash.
-- When both sides fail, the step is a tie.
+- Under ``score_comparison``, an episode that could not run ranks below every
+  real score, so a candidate cannot win on a crash, and when both sides fail,
+  the step is a tie.
+- Under ``paired_confidence``, an episode that failed through the harness (a
+  timeout, an unreadable trajectory, residue, a native turn that ended on an
+  error) takes the lowest score of the evaluation. One that failed through the
+  infrastructure (the binary or the sandbox could not start, a Harbor trial
+  that never ran, a scorer that raised ``ScoreUnavailable``) runs both sides
+  again, up to ``infra_reruns`` times. A pairing still faulted after that is
+  void and counts as a candidate loss, so a fault that a candidate forges on
+  its own side never wins its pairing.
 - A native episode whose turn ended on an error (a tree that cannot load, a
   graph that cannot run) counts as one that could not run, whatever its
   text.
+- With ``evolution.task_manifest``, eval failures stay in the evaluation
+  record and never reach the proposer's failure manifest. An eval task is
+  exposed once a consumed batch names it, by its digest or by one of its
+  source records; an exposed task is not run again, and the step records the
+  count as ``not_run_tasks``. When every eval task is exposed, each step
+  skips until a new manifest and a restart bring fresh eval tasks.
 - When the result is a rejection, Reef restores the snapshot it took before
   the mutation.
 

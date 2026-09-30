@@ -86,6 +86,16 @@ selection policy evaluates; ``floor`` evaluates only the candidate. The
 ``result`` contains the exit code, stdout, stderr, and parsed ``trajectory``.
 Episodes that could not run do not reach ``evaluate``.
 
+An episode that ran but left nothing to score, such as a verifier that wrote
+no reward, should raise ``ScoreUnavailable`` (from
+``reef.train.cordis_backend``) instead of returning 0. Reef records the
+episode as ``invalid`` with an infrastructure fault: ``paired_confidence``
+reruns its pairing up to ``evolution.infra_reruns`` times and then counts it
+as void, and the other policies see a missing score. Any other exception
+stops the step.
+``reef.train.cordis_backend.strategies:required_verifier_reward`` does this
+for Harbor tasks; ``verifier_reward`` in the same module returns 0 instead.
+
 Other method options
 ~~~~~~~~~~~~~~~~~~~~
 
@@ -102,6 +112,11 @@ than ``evolution.min_win_margin``, if a margin is set. ``floor`` runs only the
 candidate and selects it when every task reaches ``evolution.floor_score``
 (default ``1.0``). An episode that could not run misses the floor. The
 current release does not run under ``floor``, so ``current_scores`` is empty.
+``paired_confidence`` reruns a pairing an infrastructure fault hit, up to
+``evolution.infra_reruns`` times, and selects when an exact sign test and a
+bootstrap interval over tasks both clear ``evolution.min_effect`` at
+``evolution.confidence_level``; see `Evolve your harness
+<../user-guide/evolve-your-harness.rst#evaluating-the-result>`__.
 ``always`` selects every applied mutation.
 
 .. warning::
@@ -234,8 +249,12 @@ Selection policies
 
 A policy reads ``EvaluationResult.metrics``. It contains per-task score lists
 in task order: ``candidate_scores`` and ``current_scores``. A score is
-``None`` when an episode could not run. The policy below selects a candidate
-only when at least one task improves and none regresses.
+``None`` when an episode could not run. When both sides ran, index aligned
+lists say why: ``candidate_labels`` and ``current_labels`` hold ``valid``,
+``execution_error`` or ``invalid`` per episode, and ``candidate_faults`` and
+``current_faults`` hold ``None`` for a scored episode, else ``harness`` or
+``infrastructure``. The policy below selects a candidate only when at least
+one task improves and none regresses.
 
 .. code:: python
 

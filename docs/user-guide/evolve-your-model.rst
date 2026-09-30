@@ -258,6 +258,9 @@ inference is a record. When the verifier scores the episode, one report reaches
 ``/reef/report``: the reward as the score, the receipts as the references, and
 the task's name, path and digest under ``metadata.task``. The recipe's reported
 processor turns those records into training samples like any other report.
+``--side`` picks the manifest's ``train``, ``eval`` or ``test`` split; a test
+task plays and prints its line but sends no report, so no training scenario
+consumes it.
 ``--instructions FILE`` appends a file to every task's instruction and
 ``--label name=value`` tags the calls and the report, so two arms of one task
 stay apart. The proxy the agent talks to listens on this host's loopback; an
