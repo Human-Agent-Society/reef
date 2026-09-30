@@ -37,6 +37,33 @@ Use the structured template that matches the work:
   project work that a maintainer has created or approved.
 - **Roadmap** only for a maintainer-owned, time-bounded coordination issue.
 
+### Issue and RFC writing
+
+Write for a reviewer deciding what to do next. Ordinary issues usually need
+only a few paragraphs; aim for roughly 300–500 words for a focused RFC.
+These are defaults, not limits: include detail when it changes the decision.
+
+- Lead with the concrete problem and requested outcome or decision. Use one
+  short example when it makes the proposed behavior clearer.
+- Describe the smallest useful change and what existing mechanisms it reuses.
+  Do not add frameworks, configuration, or requirements without a concrete need.
+- State each point once. Cut repeated summaries, conversational history,
+  speculative edge cases, and lists of unrelated non-goals.
+- Use plain language and short paragraphs or bullets. Include implementation
+  details only when needed to assess feasibility, compatibility, or a trade-off.
+- Use the template to check coverage, not to generate length. Keep required
+  answers brief; use “Not applicable” where appropriate. When writing outside
+  the form, group related topics under a few headings while covering the
+  applicable questions.
+- Preserve material risks, compatibility constraints, and acceptance checks.
+  Separate verified behavior from proposals and untested assumptions. Link
+  supporting code, results, and related work instead of copying them into the body.
+
+Before submitting, remove any sentence that neither helps explain the problem
+nor affects the decision or its verification. The concise proposal in
+[#688](https://github.com/Human-Agent-Society/reef/issues/688) illustrates this
+style; it is not a required outline or an endorsement of its design.
+
 ### Issue titles and classification
 
 An issue title starts with exactly one controlled type prefix:

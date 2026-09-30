@@ -10,6 +10,10 @@ from typing import Any
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, resolve_args_loss_family, resolve_objective_paths
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError
 
+#: ``--custom-loss-function-path`` of a custom-loss family with score centering on;
+#: the family's own path moves to ``args.reef_score_centering_base_loss_path``.
+SCORE_CENTERED_CUSTOM_LOSS_PATH = "reef.train.slime_backend.score_centering.term.score_centered_custom_loss"
+
 _WORKER_METRICS: dict[str, float] = {}
 _WORKER_STEP_METRICS: list[dict[str, float]] = []
 #: Key under which ``drain_worker_metrics`` returns the per-optimizer-step
@@ -96,6 +100,7 @@ def initialize_megatron_objective(args) -> None:
     _install_lora_hf_bootstrap(args)
     _install_versioned_updaters()
     _install_pg_primitive(args)
+    _install_score_centering(args)
 
 
 def _install_external_batch_keys(args) -> None:
@@ -350,6 +355,36 @@ def _install_pg_primitive(args) -> None:
     # ``advantage_estimator`` was already routed to "cispo" driver-side
     # (``configure_reef_loss_args``); the worker only swaps the callsite.
     loss.compute_cispo_loss = compute_custom_pg_loss
+
+
+def _install_score_centering(args) -> None:
+    """Add score centering to the family's loss: around ``policy_loss_function``, or in place of a custom path."""
+    # A critic derives its namespace from the actor's; its value loss has no
+    # policy-gradient term to center.
+    if not args.score_centering or args.loss_type == "value_loss":
+        return
+    if args.loss_type == "custom_loss":
+        if args.custom_loss_function_path != SCORE_CENTERED_CUSTOM_LOSS_PATH:
+            args.reef_score_centering_base_loss_path = args.custom_loss_function_path
+            args.custom_loss_function_path = SCORE_CENTERED_CUSTOM_LOSS_PATH
+        return
+    if args.loss_type != "policy_loss":
+        raise RuntimeError(f"score centering adds to a policy-gradient loss, not --loss-type {args.loss_type}")
+    from slime.backends.megatron_utils import loss
+
+    from reef.train.slime_backend.score_centering.term import add_score_centering
+
+    current = loss.policy_loss_function
+    if getattr(current, "_reef_score_centering", False):
+        return
+
+    def policy_loss_function(args, batch, logits, sum_of_sample_mean):
+        base, log = current(args, batch, logits, sum_of_sample_mean)
+        return add_score_centering(args, batch, logits, sum_of_sample_mean, base, log)
+
+    marked_policy_loss_function: Any = policy_loss_function
+    marked_policy_loss_function._reef_score_centering = True
+    loss.policy_loss_function = policy_loss_function
 
 
 def record_worker_metrics(metrics: Mapping[str, Any]) -> None:

@@ -20,21 +20,22 @@ def _turn(
     log_probs: list[float],
     *,
     runtime_load_id: str = "wv-1",
+    topk: list[tuple[list[int], list[float]]] | None = None,
 ) -> AgentRecord:
+    training = {
+        "tokens": tokens,
+        "loss_mask": loss_mask,
+        "rollout_log_probs": log_probs,
+        "runtime_load_id": runtime_load_id,
+    }
+    if topk is not None:
+        training["topk_indices"] = [ids for ids, _ in topk]
+        training["topk_log_probs"] = [values for _, values in topk]
     return AgentRecord.create(
         scenario="s",
         request_type=RequestType.INFERENCE,
         agent_record_id=agent_record_id,
-        payload={
-            "response": {
-                "training": {
-                    "tokens": tokens,
-                    "loss_mask": loss_mask,
-                    "rollout_log_probs": log_probs,
-                    "runtime_load_id": runtime_load_id,
-                }
-            }
-        },
+        payload={"response": {"training": training}},
     )
 
 
@@ -196,6 +197,58 @@ def test_multi_turn_policy_sample_assembles_clean_linear_history() -> None:
     assert sample.training.get("runtime_load_id", None) == "wv-1"
     assert sample.training.get("turn_count", 1) == 3
     assert (sample.training.get("turn_count", 1) > 1) is True
+
+
+@pytest.mark.unit
+def test_multi_turn_policy_sample_keeps_sampler_top_k_aligned_with_the_response() -> None:
+    sample = make_multi_turn_policy_trajectory(
+        [
+            _turn(
+                "i1", [10, 11, 20, 21], [1, 1], [-0.1, -0.2], topk=[([20, 7], [-0.1, -2.0]), ([21, 8], [-0.2, -3.0])]
+            ),
+            _turn("i2", [10, 11, 20, 21, 30, 40], [1], [-0.3], topk=[([40, 9], [-0.3, -1.0])]),
+        ],
+        1.0,
+        source_agent_record_id="report-1",
+    )
+
+    assert sample is not None
+    assert tuple(sample.training.get("loss_mask", [])) == (1, 1, 0, 1)
+    # The inserted context position 30 gets an empty row; trained rows keep their own head.
+    assert sample.training.get("topk_indices", []) == [[20, 7], [21, 8], [], [40, 9]]
+    assert sample.training.get("topk_log_probs", []) == [[-0.1, -2.0], [-0.2, -3.0], [], [-0.3, -1.0]]
+
+
+@pytest.mark.unit
+def test_multi_turn_policy_sample_masks_the_top_k_of_a_realigned_response() -> None:
+    sample = make_multi_turn_policy_trajectory(
+        [
+            _turn("i1", [1, 2, 3], [1], [-0.3], topk=[([3, 5], [-0.3, -1.0])]),
+            _turn("i2", [1, 2, 30, 4], [1], [-0.4], topk=[([4, 6], [-0.4, -1.0])]),
+        ],
+        1.0,
+        source_agent_record_id="report-1",
+    )
+
+    assert sample is not None
+    assert tuple(sample.training.get("loss_mask", [])) == (0, 1)
+    assert sample.training.get("topk_indices", []) == [[], [4, 6]]
+
+
+@pytest.mark.unit
+def test_multi_turn_policy_sample_drops_top_k_unless_every_turn_recorded_it() -> None:
+    sample = make_multi_turn_policy_trajectory(
+        [
+            _turn("i1", [10, 11, 20], [1], [-0.1], topk=[([20, 7], [-0.1, -2.0])]),
+            _turn("i2", [10, 11, 20, 30, 40], [1], [-0.3]),
+        ],
+        1.0,
+        source_agent_record_id="report-1",
+    )
+
+    assert sample is not None
+    assert sample.training.get("topk_indices", []) == []
+    assert sample.training.get("topk_log_probs", []) == []
 
 
 @pytest.mark.unit

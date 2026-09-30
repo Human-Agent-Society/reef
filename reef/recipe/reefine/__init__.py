@@ -4,13 +4,15 @@
 It accepts the same ``evolution`` settings as ``CordisRecipe``; the shipped
 ``reefine`` profile supplies the health task and seed. Custom tasks should
 also supply their own ``evolution.evaluate`` scorer. The bundled scorer only
-recognizes the profile's health task.
+recognizes the profile's health task: the prompt, or on an adapter that plays
+a Harbor task directory (terminus) the ``health`` task directory beside this
+module, which the recipe runs in the prompt's place.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -22,7 +24,7 @@ from reef.recipe.config_fields import config_field
 from reef.recipe.cordis import CordisRecipe
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine.agent import AgentProposer
-from reef.recipe.reefine.evolution import EXTENSION_ADAPTER
+from reef.recipe.reefine.evolution import EXTENSION_ADAPTER, HEALTH_TASK_DIRECTORY
 from reef.recipe.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
 from reef.runtime.interfaces import MultimodalRelay
 
@@ -94,14 +96,20 @@ class ReefineRecipe(CordisRecipe):
             "selection": "floor",
         }
         merged = {**defaults, **evolution}
+        try:
+            descriptor = get_adapter(adapter)
+        except DescriptorError as exc:
+            raise RecipeConfigError(str(exc)) from exc
+        tasks = merged.get("tasks")
+        if descriptor.is_prompt_task_directory and isinstance(tasks, Sequence) and not isinstance(tasks, str):
+            # The adapter's prompt is a Harbor task directory, so the health prompt runs as the same check in
+            # that form, scored by its verifier.
+            merged["tasks"] = [HEALTH_TASK_DIRECTORY if str(task).startswith("[health]") else task for task in tasks]
         # The /reefine command and the update notice are entries the adapter ships; on an adapter that ships
         # one of them not, the profile runs without it: a request still arrives through reef-<adapter> evolve,
         # and reef-<adapter> update installs a release. An adapter Reef installs nothing for (terminus) has no
         # wrapper: a request comes through POST /reef/train and the published tree through GET /reef/harness.
-        try:
-            installs = get_adapter(adapter).install is not None
-        except DescriptorError as exc:
-            raise RecipeConfigError(str(exc)) from exc
+        installs = descriptor.install is not None
         channel = "requests come through POST /reef/train; GET /reef/harness serves a published tree"
         # Warnings, so the startup log shows them, as the docs say.
         if merged.get("requests") is True and not ships_requests(adapter):

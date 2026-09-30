@@ -405,6 +405,81 @@ review notes and the person judge that. Set both ``evolution.tasks`` and
 ``evolution.selection: score_comparison`` to require the candidate to beat
 the current release on them instead.
 
+An adapter whose prompt is a Harbor task directory, ``terminus``, cannot
+take this prompt. There the recipe runs the same check as the task
+directory ``reef/recipe/reefine/health`` in its place: the agent writes the
+output of ``echo reef-ok`` to a file in the task container, and the bundled
+evaluator reads the task verifier's reward.
+
+Terminus
+--------
+
+``--recipe.config.evolution.adapter terminus`` runs the profile on
+Terminal-Bench's Terminus 2. Prepare a model endpoint with its API key, and
+Docker or E2B for the task container. With Docker, the default, prepare a
+working Docker installation on the service host. On macOS, Docker must share
+``~/.reef/episodes`` with the host. Other platforms use the temp directory;
+set ``TMPDIR`` for the service if Docker's VM does not share it. To run the
+task containers on E2B instead, see `Docker or E2B
+<../../developer-guide/harness-adapters.rst#docker-or-e2b>`__.
+
+Terminus runs one Harbor task at a time through ``reef-terminus --task``.
+Submit evolution requests over HTTP and inspect their result pages. The
+interactive install and reload steps in `How it works`_ do not apply:
+
+* There is no install script. ``GET /reef/harness/install?adapter=terminus``
+  answers HTTP 400.
+* There is no ``reef-terminus`` client wrapper, so ``reef-terminus evolve``
+  and ``reef-terminus update`` do not exist.
+* There is no session, so there is no ``/reefine`` to type. The ``/reefine``
+  command and the update notice are pi entries, so start the profile with
+  both turned off:
+
+.. code:: bash
+
+   export REEF_UPSTREAM_API_KEY=sk-or-...
+   reef serve --recipe reefine \
+     --inference.upstream-url https://openrouter.ai/api \
+     --inference.upstream-model openai/gpt-4o-mini \
+     --recipe.config.evolution.adapter terminus \
+     --recipe.config.evolution.requests false \
+     --recipe.config.evolution.version_check false
+
+In another terminal, create a scenario, read its ``release_id`` from
+``GET /reef/harness``, and send a request to ``POST /reef/train``. Replace
+``<release_id>`` and ``<what it should do>`` with those values. If the service
+requires authentication, set ``REEF_TOKEN`` to its token in this terminal:
+
+.. code:: bash
+
+   curl -sS http://127.0.0.1:8901/reef/scenarios -H "Authorization: Bearer $REEF_TOKEN" \
+     -H "Content-Type: application/json" -d '{"name": "terminus-demo"}'
+   curl -sS http://127.0.0.1:8901/reef/harness \
+     -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: terminus-demo"
+   curl -sS http://127.0.0.1:8901/reef/train \
+     -H "Authorization: Bearer $REEF_TOKEN" -H "x-reef-scenario: terminus-demo" \
+     -H "Content-Type: application/json" \
+     -d '{"text": "<what it should do>", "session": "terminal-1", "release_id": "<release_id>"}'
+
+The answer carries the request's ``agent_record_id``. Open
+``GET /reef/harness/requests/<id>/page`` for that scenario to inspect the step:
+accepting the request alone does not mean it passed evaluation. The bundled
+health task should score 1; inspect the selection result and published release
+on the page before using the new tree.
+
+Docker context and published files
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+With local Docker, the episode uses the Docker your shell uses: it keeps the
+service's ``DOCKER_HOST``, ``DOCKER_CONTEXT`` and ``DOCKER_CONFIG`` (default
+``~/.docker``, where colima and Docker Desktop set the current context). On
+macOS its files live under ``~/.reef/episodes``, because colima does not
+share ``$TMPDIR`` with its VM; on Linux, WSL and Windows they stay in the
+temp directory. An episode on E2B gets none of these.
+``GET /reef/harness`` serves the published tree; `Harness adapters
+<../../developer-guide/harness-adapters.rst>`__ shows the config that runs
+it through Reef yourself, including the ``x-reef-scenario`` header.
+
 What the step records
 ---------------------
 
