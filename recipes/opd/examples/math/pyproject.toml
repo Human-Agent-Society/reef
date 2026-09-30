@@ -2,7 +2,7 @@
 name = "reef-opd-math-example"
 version = "0.1.0"
 requires-python = ">=3.12"
-dependencies = ["reef-client", "datasets>=3,<5", "transformers==5.12.1", "matplotlib>=3.8", "PyYAML>=6"]
+dependencies = ["reef-client", "datasets>=3,<5", "pyarrow>=15", "huggingface-hub>=0.34", "transformers==5.12.1", "matplotlib>=3.8", "PyYAML>=6"]
 
 [project.optional-dependencies]
-sft = ["flash-linear-attention==0.4.2", "fla-core==0.4.2", "causal-conv1d==1.7.0"]
+sft = ["flash-linear-attention==0.4.2", "fla-core==0.4.2", "causal-conv1d==1.7.0", "peft==0.21.0"]

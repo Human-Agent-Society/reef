@@ -32,6 +32,7 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         help="Weight-conversion implementation selected by the Reef Slime adapter.",
     )
     parser.add_argument("--megatron-lora-rank", type=int, default=0)
+    parser.add_argument("--megatron-lora-init", default=None, help="Initial unfused Qwen3.5 PEFT adapter directory")
     parser.add_argument("--megatron-lora-alpha", type=int, default=None)
     parser.add_argument("--megatron-lora-dropout", type=float, default=0.0)
     parser.add_argument("--megatron-lora-target-modules", type=str, nargs="+", default=None)

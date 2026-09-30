@@ -1,7 +1,7 @@
-"""Prepare a full-parameter Qwen3.5 language-model SFT starting checkpoint.
+"""Prepare a full-parameter or LoRA Qwen3.5 language-model SFT checkpoint.
 
-Launch with torchrun on four GPUs. The unused vision encoder stays frozen;
-all text decoder, embedding and output parameters train, without adapters.
+Launch with torchrun. The unused vision encoder stays frozen. A positive
+--lora-rank trains only text MLP down and full-attention output adapters.
 """
 
 import argparse
@@ -61,9 +61,14 @@ def main() -> None:
     )
     parser.add_argument("--workers", type=int, default=16)
     parser.add_argument("--resume", type=str)
+    parser.add_argument("--lora-rank", type=int, default=0)
+    parser.add_argument("--lora-alpha", type=int, default=32)
+    parser.add_argument("--learning-rate", type=float, default=1e-4)
     args = parser.parse_args()
     if min(args.steps, args.global_batch_size, args.max_length, args.workers) <= 0 or args.save_steps < 0:
         parser.error("Steps, batch size, length and workers must be positive; save-steps must be nonnegative")
+    if args.lora_rank < 0 or args.lora_alpha <= 0 or args.learning_rate <= 0:
+        parser.error("LoRA rank must be nonnegative; alpha and learning rate must be positive")
     if args.tokenize_only:
         data = load_dataset("json", data_files=str(args.data), split="train")
         data = data.map(
@@ -86,14 +91,41 @@ def main() -> None:
     if not is_fast_path_available:
         raise RuntimeError("Qwen3.5 SFT requires flash-linear-attention and causal-conv1d; refusing the slow fallback")
     tokenizer = AutoTokenizer.from_pretrained(args.tokenizer)
-    # FP32 master parameters and optimizer state; FSDP runs the forward in bf16.
+    # Full tuning uses FP32 master parameters; LoRA keeps the frozen base in bf16.
     model = AutoModelForImageTextToText.from_pretrained(
-        args.model, dtype=torch.float32, attn_implementation="flash_attention_2"
+        args.model, dtype=torch.bfloat16 if args.lora_rank else torch.float32, attn_implementation="flash_attention_2"
     )
     model.config.use_cache = False
     model.config.get_text_config().use_cache = False
     for parameter in model.model.visual.parameters():
         parameter.requires_grad_(False)
+    if args.lora_rank:
+        from peft import LoraConfig, TaskType, get_peft_model
+
+        targets = [
+            name
+            for name, _ in model.named_modules()
+            if name.startswith("model.language_model.layers.")
+            and name.endswith((".mlp.down_proj", ".self_attn.o_proj"))
+        ]
+        if not targets:
+            raise ValueError("No supported Qwen3.5 text LoRA targets found")
+        model = get_peft_model(
+            model,
+            LoraConfig(
+                task_type=TaskType.CAUSAL_LM,
+                r=args.lora_rank,
+                lora_alpha=args.lora_alpha,
+                lora_dropout=0.0,
+                target_modules=targets,
+                bias="none",
+            ),
+        )
+        unexpected = [
+            name for name, parameter in model.named_parameters() if parameter.requires_grad and ".lora_" not in name
+        ]
+        if unexpected:
+            raise RuntimeError(f"Non-adapter SFT parameters are trainable: {unexpected[:8]}")
     parameter_counts = {
         "total_parameters": sum(parameter.numel() for parameter in model.parameters()),
         "trainable_parameters": sum(parameter.numel() for parameter in model.parameters() if parameter.requires_grad),
@@ -114,7 +146,7 @@ def main() -> None:
         max_steps=args.steps,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=args.global_batch_size // world_size,
-        learning_rate=1e-4,
+        learning_rate=args.learning_rate,
         lr_scheduler_type="linear",
         warmup_steps=0,
         weight_decay=0.0,

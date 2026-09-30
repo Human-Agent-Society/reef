@@ -1,5 +1,67 @@
 # OPD on mathematical reasoning
 
+## Small LoRA experiment
+
+The active experiment uses a smaller protocol to test whether OPD improves an
+SFT student. The previous full-parameter SFT was stopped at the contributor's
+request after step 1239/3000 (last saved checkpoint: 1200). Its original
+roadmap acceptance remains separate; this LoRA experiment does not establish
+the original approximately ten-point, full-parameter reproduction target.
+
+- Keep the pinned Qwen3.5-9B-Base student and frozen Qwen3.5-9B teacher below.
+- Select 4096 complete OpenThoughts3 math demonstrations with at most 8192
+  tokens, including the prompt and answer. Use deterministic shuffled shards,
+  exclude normalized whole-question AIME overlap, and deduplicate questions.
+  This is not a paraphrase contamination audit. Preserve the selection manifest.
+- Train one epoch: 128 updates, global batch 32, initial learning rate 1e-4
+  with linear decay. Freeze the base; use LoRA rank/alpha 32, dropout zero,
+  on all language-model MLP down projections and full-attention output
+  projections (18,874,368 trainable parameters for this model).
+- Continue the same adapter with 30 OPD updates, 64 independent DeepMath
+  prompts per update and four student responses per prompt. Responses are
+  capped at 4096 tokens; learning rate is 5e-5. No answer rewards are used.
+- Evaluate the SFT adapter and final update 30 only, using all 30 AIME'24
+  questions and seeds 0 through 15 with a 32768-output-token budget.
+  Report any observed gain separately from the operational 3-percentage-point
+  target and paired question-bootstrap uncertainty. Improvement is not assured.
+  The earlier 64K teacher score is not a matched control for this 32K protocol.
+
+`prepare_small.py` consumes the pinned source files from `prepare.py` and writes
+`manifest.json`, the selected JSONL files, and an untruncated tokenized dataset:
+
+```bash
+python recipes/opd/examples/math/prepare_small.py --source /work/data --output /work/lora-small/data
+torchrun --standalone --nproc-per-node=4 recipes/opd/examples/math/sft.py \
+  --data /work/lora-small/data/sft.jsonl --tokenized /work/lora-small/data/tokenized \
+  --output /work/lora-small/sft --steps 128 --global-batch-size 32 \
+  --max-length 8192 --save-steps 64 --lora-rank 32 --lora-alpha 32
+```
+
+For deployment, point `OPD_MODEL_PATH` to the unchanged pinned Base weights
+with the teacher's tokenizer/chat template, `OPD_ADAPTER_PATH` to the SFT
+`final` adapter, and `OPD_RUN_DIR` to a fresh experiment directory. Export
+`REEF_TOKEN`, then use `serve.lora-small.yaml`. The importer validates all 80
+adapter tensors and splits row-parallel tensors across TP4 before creating
+optimizer master weights. Only these unfused Qwen3.5 projections and pipeline
+parallel size one are supported. Frozen teacher/reference passes clear the
+student adapter before backing up their weights.
+
+```bash
+reef serve -c recipes/opd/examples/math/serve.lora-small.yaml
+# In another terminal with the same environment:
+python recipes/opd/examples/math/run.py \
+  --config recipes/opd/examples/math/serve.lora-small.yaml \
+  --url http://127.0.0.1:28994 --scenario opd-lora-small \
+  --train-data /work/lora-small/data/deepmath.jsonl \
+  --eval-data /work/lora-small/data/aime24.jsonl --output /work/lora-small/results \
+  --steps 30 --prompts-per-step 64 --samples-per-prompt 4 \
+  --train-tokens 4096 --eval-tokens 32768 --eval-repeats 16 --eval-every 30 --concurrency 64
+python recipes/opd/examples/math/analyze.py /work/lora-small/results \
+  --final-step 30 --eval-every 30 --target-improvement 0.03 --training-mode LoRA
+```
+
+## Original full-parameter protocol
+
 This example targets roadmap [#502](https://github.com/Human-Agent-Society/reef/issues/502):
 full-parameter on-policy distillation from `Qwen/Qwen3.5-9B` into an
 OpenThoughts3-SFT initialization of `Qwen/Qwen3.5-9B-Base`. It runs on local GPU

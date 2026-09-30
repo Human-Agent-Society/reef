@@ -209,3 +209,21 @@ are retained on B200 under `/raid/x9zou/reef-opd-state`. Large disposable smoke
 checkpoint copies were removed after validation; the public source models,
 prepared training data and validation records remain. PR #683 and experiment
 issue #682 track the remaining benchmark work.
+
+
+## Small LoRA integration, 2026-09-30
+
+The prior full-parameter run was stopped by request. A separate B200 smoke run
+completed two SFT updates (8 examples, rank/alpha 32, 18,874,368 trainable
+adapter parameters), then imported that adapter into Reef's TP4 actor.
+A one-update OPD run on four arithmetic prompts completed teacher scoring,
+training, adapter publication, and inference against a new live release.
+Both drivers exited zero. OPD loss was 0.275383 and gradient norm 0.485756;
+reported trainable base parameters were zero. All 80 published adapter tensors
+matched receiver checksums. This verifies integration only, not AIME gains.
+The 4096-example SFT and 30-update efficacy experiment remain pending.
+
+For this change, 135 focused OPD, LoRA-import, teacher, and publication-recovery
+tests passed. Repository-wide pre-commit and mypy (337 source files) passed;
+new untracked source/configuration files also passed focused pre-commit. The
+full test suite is still running and is not claimed as passed here.

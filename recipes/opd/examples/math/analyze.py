@@ -2,6 +2,7 @@
 
 import argparse
 import json
+import math
 import random
 from collections import defaultdict
 from pathlib import Path
@@ -38,10 +39,18 @@ def paired_interval(baseline: dict, final: dict, *, draws: int = 10000) -> list[
 
 
 def analyze(
-    results: Path, *, final_step: int = 200, eval_every: int = 20, questions: int = 30, repeats: int = 16
+    results: Path,
+    *,
+    final_step: int = 200,
+    eval_every: int = 20,
+    questions: int = 30,
+    repeats: int = 16,
+    target_improvement: float = 0.10,
 ) -> dict:
     if final_step < 0 or eval_every <= 0:
         raise ValueError("Final step must be nonnegative and evaluation interval must be positive")
+    if not math.isfinite(target_improvement) or not 0 < target_improvement <= 1:
+        raise ValueError("Target improvement must be finite and in (0, 1]")
     baseline, baseline_release = read_scores(results / "eval-0000.jsonl")
     expected = {key[0] for key in baseline}
     if len(expected) != questions or any(
@@ -80,9 +89,10 @@ def analyze(
         "eval_every": eval_every,
         "questions": questions,
         "samples_per_question": repeats,
-        "target_absolute_improvement": 0.10,
+        "target_absolute_improvement": target_improvement,
         "absolute_improvement": improvement,
-        "target_met": improvement >= 0.10,
+        "target_met": improvement >= target_improvement,
+        "observed_positive_improvement": improvement > 0,
         "paired_question_bootstrap_95_interval": paired_interval(baseline, final),
         "uncertainty_note": "Question-cluster bootstrap, 10,000 resamples, seed 0; the point-estimate target is separate from statistical significance.",
         "curve": curve,
@@ -94,8 +104,15 @@ def main() -> None:
     parser.add_argument("results", type=Path)
     parser.add_argument("--final-step", type=int, default=200)
     parser.add_argument("--eval-every", type=int, default=20)
+    parser.add_argument("--target-improvement", type=float, default=0.10)
+    parser.add_argument("--training-mode", choices=["full-parameter", "LoRA"], default="full-parameter")
     args = parser.parse_args()
-    report = analyze(args.results, final_step=args.final_step, eval_every=args.eval_every)
+    report = analyze(
+        args.results,
+        final_step=args.final_step,
+        eval_every=args.eval_every,
+        target_improvement=args.target_improvement,
+    )
     (args.results / "acceptance.json").write_text(json.dumps(report, indent=2) + "\n")
     import matplotlib
 
@@ -105,8 +122,17 @@ def main() -> None:
     curve = report["curve"]
     figure, axes = plt.subplots(figsize=(8, 4.5), layout="constrained")
     axes.plot([point["step"] for point in curve], [100 * point["accuracy"] for point in curve], marker="o")
-    axes.axhline(100 * (curve[0]["accuracy"] + 0.10), linestyle="--", color="gray", label="SFT baseline + 10 pp")
-    axes.set(xlabel="OPD optimizer updates", ylabel="AIME'24 mean accuracy (%)", title="Qwen3.5-9B full-parameter OPD")
+    axes.axhline(
+        100 * (curve[0]["accuracy"] + args.target_improvement),
+        linestyle="--",
+        color="gray",
+        label=f"SFT baseline + {100 * args.target_improvement:g} pp",
+    )
+    axes.set(
+        xlabel="OPD optimizer updates",
+        ylabel="AIME'24 mean accuracy (%)",
+        title=f"Qwen3.5-9B {args.training_mode} OPD",
+    )
     axes.legend()
     axes.grid(alpha=0.2)
     figure.savefig(args.results / "learning-curve.png", dpi=180)

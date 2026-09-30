@@ -353,3 +353,33 @@ def test_campaign_prevents_two_drivers_for_one_output(monkeypatch, campaign_args
         with pytest.raises(RuntimeError, match="Another driver"):
             campaign.run()
     assert service.inference_calls == 0
+
+
+@pytest.mark.parametrize("target", [0, -0.1, 1.1, float("nan"), float("inf")])
+def test_acceptance_rejects_invalid_improvement_target(tmp_path, target):
+    from recipes.opd.examples.math.analyze import analyze
+
+    with pytest.raises(ValueError, match="Target improvement"):
+        analyze(tmp_path, target_improvement=target)
+
+
+def test_small_experiment_reports_positive_gain_separately_from_target(tmp_path):
+    from recipes.opd.examples.math.analyze import analyze
+
+    for step in [0, 30]:
+        rows = [
+            {
+                "question_id": str(i),
+                "seed": 0,
+                "evaluation": True,
+                "correct": step > 0 and i == 0,
+                "release_id": str(step),
+            }
+            for i in range(30)
+        ]
+        (tmp_path / f"eval-{step:04d}.jsonl").write_text("\n".join(json.dumps(row) for row in rows))
+    result = analyze(tmp_path, final_step=30, eval_every=30, questions=30, repeats=1, target_improvement=0.05)
+    assert result["observed_positive_improvement"] is True
+    assert result["target_met"] is False
+    assert result["target_absolute_improvement"] == 0.05
+    assert result["absolute_improvement"] == pytest.approx(1 / 30)
