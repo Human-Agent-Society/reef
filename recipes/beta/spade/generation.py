@@ -17,6 +17,7 @@ from collections.abc import Sequence
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from reef.core.tasks import SplitName
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
 from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset.designer import SKILL_PATTERN
@@ -160,6 +161,8 @@ class TaskMeasure:
     plain_rewards: tuple[float, ...]
     hint_rewards: tuple[float, ...]
     record: PlayRecord
+    #: The split the task was placed in before play; None when its group's splits disagree.
+    split: SplitName | None = "train"
 
     @property
     def regret(self) -> float:
@@ -182,7 +185,8 @@ class GenerationRecord:
 
     @property
     def experience(self) -> tuple[PlayRecord, ...]:
-        return tuple(measure.record for measure in self.measures)
+        """The train tasks' records: a prompt that showed an eval task would teach the Designer the eval split."""
+        return tuple(measure.record for measure in self.measures if measure.split == "train")
 
 
 def skill_tag(skill: str | None) -> dict[str, str]:
@@ -226,6 +230,7 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
                 "skill": measure.skill,
                 "path": str(measure.task_path),
                 "digest": measure.digest,
+                "split": measure.split,
                 "plain_rewards": list(measure.plain_rewards),
                 "hint_rewards": list(measure.hint_rewards),
                 "regret": measure.regret,
@@ -233,7 +238,7 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
             }
             for measure in record.measures
         ],
-        "experience": [asdict(measure.record) for measure in record.measures],
+        "experience": [asdict(experience) for experience in record.experience],
     }
     path = report_path_for(state_dir, record.generation)
     path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")

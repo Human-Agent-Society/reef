@@ -286,6 +286,30 @@ class HarnessCandidate(UpdateCandidate):
         super().__post_init__()
 
 
+@dataclass(frozen=True)
+class EvalSplitTask:
+    """A task of a task manifest's eval split: its digest and the source records it was made from."""
+
+    digest: str
+    source_record_ids: frozenset[str] = frozenset()
+
+
+def exposed_eval_digests(samples: Sequence[TrajectoryItem], eval_split_tasks: Mapping[str, EvalSplitTask]) -> set[str]:
+    """The digests of the eval split tasks the samples name, by the task's digest or by one of its source records."""
+    eval_digests = {task.digest for task in eval_split_tasks.values()}
+    exposed: set[str] = set()
+    sample_record_ids: set[str] = set()
+    for sample in samples:
+        # The task player names its task under metadata.task; the processor keeps it on the sample.
+        task = sample.metadata.get("task")
+        digest = task.get("digest") if isinstance(task, Mapping) else None
+        if isinstance(digest, str) and digest in eval_digests:
+            exposed.add(digest)
+        sample_record_ids.update(sample.source_agent_record_ids)
+    exposed.update(task.digest for task in eval_split_tasks.values() if task.source_record_ids & sample_record_ids)
+    return exposed
+
+
 #: Characters kept per text in the step record; a longer text ends in a clip marker.
 RECORD_TEXT_CAP = 20_000
 #: The record file of an attempt directory that re-evaluated a kept candidate; it names the first attempt.
@@ -812,9 +836,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
         on_stale: StaleResultPolicy = "merge",
+        eval_split_tasks: Mapping[str, EvalSplitTask] | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
+        if eval_split_tasks is not None and set(eval_split_tasks) != set(tasks):
+            raise ValueError("eval_split_tasks must name exactly the evaluation tasks")
+        # A task manifest's eval split: a task a consumed batch named is skipped, and eval failures stay out of the
+        # proposer's failure manifest. None for prompt tasks.
+        self.eval_split_tasks = None if eval_split_tasks is None else dict(eval_split_tasks)
         if step_record_dir is not None and not str(step_record_dir):
             raise ValueError("step_record_dir must be a non-empty path when set")
         if isinstance(models, ModelBinding):
@@ -1128,8 +1158,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
         # The previous step's manifest threads through every state this step
         # can return; the key is written only when present, so its absence
-        # stays "unknown", never an empty manifest (the consumed_ids rule).
-        previous_manifest = state.get("failure_manifest")
+        # stays "unknown", never an empty manifest (the consumed_ids rule). Eval split failures never reach the
+        # proposer, so a task manifest keeps none.
+        previous_manifest = state.get("failure_manifest") if self.eval_split_tasks is None else None
         carried: dict[str, Any] = {} if previous_manifest is None else {"failure_manifest": previous_manifest}
         # Carried through skips so a budget or streak skip keeps the grown suite.
         promoted = list(state.get("promoted_tasks", ()))
@@ -1147,6 +1178,12 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         rejected = list(state.get("rejected_proposals", ()))
         if rejected:
             carried["rejected_proposals"] = rejected
+        # Every state this step returns carries the exposure, skips included: a skip consumes its batch too.
+        exposed: set[str] = set()
+        if self.eval_split_tasks is not None:
+            exposed = set(state.get("exposed_task_digests", ())) | exposed_eval_digests(samples, self.eval_split_tasks)
+            if exposed:
+                carried["exposed_task_digests"] = sorted(exposed)
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(samples)}
         # The budgets stop a runaway automatic loop; a skip consumes its batch, so an instruction runs instead.
@@ -1195,6 +1232,17 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         if self._promote_failures:
             metrics["evaluation_task_count"] = len(evaluation_tasks)
             metrics["promoted_tasks"] = len(evaluation_tasks) - len(self._tasks)
+        if self.eval_split_tasks is not None:
+            # An eval task a consumed batch named is no longer held out, so the evaluation does not run it.
+            unexposed = tuple(task for task in evaluation_tasks if self.eval_split_tasks[task].digest not in exposed)
+            if len(unexposed) < len(evaluation_tasks):
+                metrics["not_run_tasks"] = len(evaluation_tasks) - len(unexposed)
+            if not unexposed:
+                return PreparedStep.skipped(
+                    state={"steps": steps, "entries": self._entries(), **carried},
+                    metrics={**metrics, "skipped": "every evaluation task is exposed"},
+                )
+            evaluation_tasks = unexposed
         step_dir = self._claim_step_dir(steps)
         self._current_step_record = step_dir
         if step_dir is not None:
@@ -1490,8 +1538,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         previous_state = prepared.state.get("failure_manifest")
         previous = None if previous_state is None else FailureManifest.from_state(previous_state)
         # A side the evaluation did not run showed nothing, so its manifest carries over untouched, as through a skip.
+        # Eval split failures stay in the evaluation record: a proposer that read them would learn the eval tasks.
         manifest = None
-        if committed_side in evaluation_metrics.get(
+        if self.eval_split_tasks is None and committed_side in evaluation_metrics.get(
             "evaluation_sides", evaluation_metrics.get("gate_sides", EVALUATION_SIDES)
         ):
             manifest = advance(

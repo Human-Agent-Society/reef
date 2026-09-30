@@ -544,11 +544,12 @@ def test_the_first_look_for_a_batch_runs_generation_zero_end_to_end(tmp_path: Pa
 
     names = ["harbor-00000-000-inspection", "harbor-00000-001-repair", "harbor-00000-002-inspection"]
     assert generator.checks == [tmp_path / "tasks" / name for name in names]
+    manifest = read_split_manifest(tmp_path / "tasks" / "manifest-00000.json")
     arms = [
         (call["task"], call["arm"], call["plays"], call["is_reporting"], call["extra"]) for call in generator.plays
     ]
-    assert arms[0] == (names[0], "plain", 2, True, ())
-    assert arms[1] == (names[0], "hint", 1, True, ("solution/hint.txt",))
+    assert arms[0] == (names[0], "plain", 2, names[0] in manifest.train, ())
+    assert arms[1] == (names[0], "hint", 1, names[0] in manifest.train, ("solution/hint.txt",))
     assert all(call["tags"] == {"generation": "0", "skill": call["task"].split("-")[-1]} for call in generator.plays)
 
     assert [r["record_id"] for r in generator.reports] == ["designer-1", "designer-2", "designer-3"]
@@ -558,17 +559,45 @@ def test_the_first_look_for_a_batch_runs_generation_zero_end_to_end(tmp_path: Pa
     assert metadata["skill"] == "inspection" and metadata["generation"] == 0
 
     assert generator.manifests == [{"generation": 0, "names": names, "eval_fraction": 0.3, "seed": 7}]
-    manifest = read_split_manifest(tmp_path / "tasks" / "manifest-00000.json")
     assert sorted([*manifest.train, *manifest.eval]) == names and len(manifest.eval) == 1
 
     document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
     assert document["manifest"] == str(tmp_path / "tasks" / "manifest-00000.json") and document["error"] == ""
-    assert [task["name"] for task in document["tasks"]] == names and len(document["experience"]) == 3
+    assert [task["name"] for task in document["tasks"]] == names and len(document["experience"]) == len(manifest.train)
     assert [proposal["designer_report_id"] for proposal in document["proposals"]] == [
         "report-1",
         "report-2",
         "report-3",
     ]
+
+
+def test_an_eval_task_plays_unreported_and_the_next_prompt_shows_train_tasks_only(tmp_path: Path) -> None:
+    p, generator = generating(tmp_path)
+    assert not looked(p)
+    manifest = read_split_manifest(tmp_path / "tasks" / "manifest-00000.json")
+    assert manifest.train and manifest.eval
+    # The split was known before play: every eval play went unreported, both arms, and every train play reported.
+    assert {(call["task"], call["arm"]) for call in generator.plays if not call["is_reporting"]} == {
+        (name, arm) for name in manifest.eval for arm in ("plain", "hint")
+    }
+    assert all(call["is_reporting"] == (call["task"] in manifest.train) for call in generator.plays)
+    # An eval task is still measured, so the Designer's regret report covers it.
+    assert [r["score"] for r in generator.reports] == [0.5, 0.5, 0.5]
+    document = json.loads((tmp_path / "state" / "generation-00000.json").read_text())
+    assert {task["name"]: task["split"] for task in document["tasks"]} == {
+        **dict.fromkeys(manifest.train, "train"),
+        **dict.fromkeys(manifest.eval, "eval"),
+    }
+    assert [record["name"] for record in document["experience"]] == list(manifest.train)
+
+    for task in manifest.train:
+        played(p, task, 0, 1.0)
+        played(p, task, 1, 0.0)
+    p.acknowledge(p.build_batch().batch_id)
+    assert not looked(p) and len(generator.proposals) == 6
+    for proposal in generator.proposals[3:]:
+        text = proposal["request"].experience_text
+        assert all(name in text for name in manifest.train) and not any(name in text for name in manifest.eval)
 
 
 def test_the_next_generation_waits_for_batches_per_generation_and_carries_the_experience(tmp_path: Path) -> None:
@@ -627,7 +656,7 @@ def test_a_restarted_processor_carries_on_from_the_reports_on_disk(tmp_path: Pat
     assert again.status()["generation"] == {"in_flight": None, "next": 1, "completed": 1, "of": 2, "last_error": ""}
     assert not looked(again)
     assert generator.proposals[0]["generation"] == 1
-    assert "harbor-00000-000-inspection" in generator.proposals[0]["request"].experience_text
+    assert "harbor-00000-002-inspection" in generator.proposals[0]["request"].experience_text
     assert again.status()["generation"]["completed"] == 2
     assert not looked(again), "the cap is reached"
     assert len(generator.proposals) == 3

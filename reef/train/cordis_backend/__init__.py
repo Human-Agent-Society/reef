@@ -15,7 +15,9 @@ default policy selects a candidate with more task wins than losses; the
 ``floor`` policy runs the candidate alone and selects it when every task
 scores at least ``floor_score``; the ``paired_confidence`` policy reruns
 pairs an infrastructure fault hit and selects when a paired test over tasks
-clears ``min_effect`` at ``confidence_level``.
+clears ``min_effect`` at ``confidence_level``. When the tasks are a task
+manifest's eval split, a task a consumed batch named is not evaluated again
+and eval failures never reach the proposer.
 
 Versioning goes through reef's native artifact stack: a selected mutation
 renders to a directory and returns a ``TrainStepResult`` with the artifact
@@ -31,6 +33,7 @@ of the training loop.
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.train.cordis_backend.backend import (
     CordisBackend,
+    EvalSplitTask,
     FloorMixin,
     FloorPlugin,
     FloorPluginFactory,
@@ -57,6 +60,7 @@ __all__ = [
     "CordisBackend",
     "CordisProcessor",
     "EpisodeScorer",
+    "EvalSplitTask",
     "FailureManifest",
     "FailureObservation",
     "FailureRecord",

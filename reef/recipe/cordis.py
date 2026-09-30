@@ -24,7 +24,7 @@ from urllib.parse import quote
 from reef.core.errors import ReefError
 from reef.core.model_metadata import ModelMetadata
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import TaskSplitError, manifest_task_paths
+from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, read_harbor_task
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
@@ -52,6 +52,7 @@ from reef.surface.harnesses import create_harness_surface
 from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import (
     CordisBackend,
+    EvalSplitTask,
     FloorPluginFactory,
     PairedConfidencePluginFactory,
     ScoreComparisonPluginFactory,
@@ -330,6 +331,8 @@ class CordisRecipe(Recipe):
     agent_executor: EpisodeExecutor | None = None
     agent_timeout_s: float = 1800.0
     agent_trial_timeout_s: float = 300.0
+    #: The eval split of ``task_manifest`` by task path, so the backend skips an eval task a consumed batch named.
+    eval_split_tasks: Mapping[str, EvalSplitTask] | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
     batch_size: int = config_field(1)
@@ -404,6 +407,7 @@ class CordisRecipe(Recipe):
         tasks = evolution.get("tasks")
         manifest_path = evolution.get("task_manifest")
         tasks_root = evolution.get("tasks_root")
+        eval_split_tasks: dict[str, EvalSplitTask] | None = None
         if manifest_path is not None:
             if tasks is not None:
                 raise RecipeConfigError("evolution.tasks and evolution.task_manifest cannot both be set")
@@ -439,6 +443,13 @@ class CordisRecipe(Recipe):
             if not task_paths:
                 raise RecipeConfigError(f"evolution.task_manifest {manifest_path} names no eval tasks")
             tasks = [str(path) for path in task_paths]
+            eval_split_tasks = {}
+            for path in task_paths:
+                try:
+                    task = read_harbor_task(path)
+                except HarborTaskError as exc:
+                    raise RecipeConfigError(str(exc)) from exc
+                eval_split_tasks[str(path)] = EvalSplitTask(task.digest, frozenset(task.source_agent_record_ids))
         elif tasks_root is not None:
             raise RecipeConfigError("evolution.tasks_root is only read with evolution.task_manifest")
         elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
@@ -661,6 +672,7 @@ class CordisRecipe(Recipe):
             "worker_executor": worker_executor,
             "worker_gpus": worker_gpus,
             "tasks": tuple(str(task) for task in tasks),
+            "eval_split_tasks": eval_split_tasks,
             "adapter": adapter,
             "binary": binary,
             "episode_timeout_s": float(timeout),
@@ -837,6 +849,7 @@ class CordisRecipe(Recipe):
             "agent_executor": self.agent_executor,
             "agent_timeout_s": self.agent_timeout_s,
             "agent_trial_timeout_s": self.agent_trial_timeout_s,
+            "eval_split_tasks": self.eval_split_tasks,
         }
 
     def _build_trainer(

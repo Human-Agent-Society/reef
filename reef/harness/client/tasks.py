@@ -4,12 +4,12 @@ The agent's model calls go through Reef's capture proxy, so every inference is a
 and its receipt comes back here. When the verifier scores the episode, one report goes to
 ``/reef/report``: the reward as the score, the receipts as the references, and the task's name, path
 and digest under ``metadata.task``. A recipe's reported processor turns those records into training
-samples the way it does for any report. The agent is the caller's choice: any name Harbor knows
-(``terminus-2`` unless told otherwise) or an import path, with the served model and the proxy filled
-into the ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders of its configuration. The proxy
-listens on the host's loopback, which an agent running in the host process reaches; an agent that runs
-inside the task container (Harbor's installed agents) needs ``agent_host``, an address of this host the
-container can reach, and the proxy then listens on every interface.
+samples the way it does for any report; a manifest's test split plays unreported. The agent is the
+caller's choice: any name Harbor knows (``terminus-2`` unless told otherwise) or an import path, with the
+served model and the proxy filled into the ``{model}``, ``{base_url}`` and ``{api_key}`` placeholders of
+its configuration. The proxy listens on the host's loopback, which an agent running in the host process
+reaches; an agent that runs inside the task container (Harbor's installed agents) needs ``agent_host``, an
+address of this host the container can reach, and the proxy then listens on every interface.
 """
 
 from __future__ import annotations
@@ -386,7 +386,12 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
     parser.add_argument("tasks", nargs="*", type=Path, help="task directories; or --manifest with --tasks-root")
     parser.add_argument("--manifest", type=Path, help="a split manifest written by reef.core.tasks")
     parser.add_argument("--tasks-root", type=Path, help="the directory the manifest's task names live under")
-    parser.add_argument("--side", choices=("train", "eval"), default="train", help="which side of the manifest")
+    parser.add_argument(
+        "--side",
+        choices=("train", "eval", "test"),
+        default="train",
+        help="which split of the manifest; a test task plays and prints, and is never reported",
+    )
     parser.add_argument("--reef-url", required=True, help="the Reef service, e.g. http://127.0.0.1:8900")
     parser.add_argument("--scenario", required=True, help="the scenario the records and reports belong to")
     parser.add_argument("--model", required=True, help="the served model name the agent asks for")
@@ -430,6 +435,8 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
         for task_path in task_paths:
             if not (task_path / "task.toml").is_file():
                 raise TaskPlayError(f"{task_path} is not a Harbor task directory: no task.toml")
+        # A test task is never trained on or proposed from, so its episodes send no report a scenario could consume.
+        is_reporting = arguments.manifest is None or arguments.side != "test"
         agent = json.loads(arguments.agent_json) if arguments.agent_json else None
         if agent is not None and not isinstance(agent, dict):
             raise TaskPlayError("--agent-json must hold an object")
@@ -445,6 +452,7 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
             labels=parsed_labels(arguments.label),
             extra_instruction_paths=arguments.instructions,
             per_receipt=arguments.per_receipt,
+            is_reporting=is_reporting,
             lab=lab,
         )
     except (TaskPlayError, TaskSplitError, HarborTaskError, json.JSONDecodeError) as exc:
@@ -456,7 +464,8 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
         except TaskPlayError as exc:
             line = {"task": task_path.name, "error": str(exc)}
         print(json.dumps(line), flush=True)
-        is_complete = is_complete and bool(line.get("reports"))
+        # An unreported test task is complete once it scored.
+        is_complete = is_complete and bool(line.get("reports") if is_reporting else line.get("reward") is not None)
     return 0 if is_complete else 1
 
 
