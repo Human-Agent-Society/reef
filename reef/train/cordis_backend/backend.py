@@ -42,6 +42,7 @@ from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor,
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
 from reef.harness.episodes.run import (
     EpisodeError,
+    EpisodeRenderError,
     EpisodeResult,
     EpisodeTimeoutError,
     TrajectoryKeepError,
@@ -150,9 +151,11 @@ class EpisodeEvaluationWorker:
                 keep_dir=keep_dir,
             )
         except EpisodeError as error:
-            # A timeout is the harness's own failure, so a rerun cannot give it more tries; any other launch
-            # failure is the host's.
-            fault: EpisodeFault = "harness" if isinstance(error, EpisodeTimeoutError) else "infrastructure"
+            # A timeout, or a render the tree's own files broke, is the harness's failure, so a rerun cannot give it
+            # more tries; any other launch failure is the host's.
+            fault: EpisodeFault = (
+                "harness" if isinstance(error, (EpisodeTimeoutError, EpisodeRenderError)) else "infrastructure"
+            )
             scored = _ScoredEpisode(
                 None,
                 FailureObservation(task=task, stage="launch", cause=str(error)),
@@ -230,6 +233,20 @@ class EpisodeEvaluationWorker:
                 self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
             )
         except ScoreUnavailable as error:
+            if result.exit_code != 0 and not result.trajectory:
+                # The harness exited on an error before it wrote anything to score (a terminus tree that cannot
+                # load): its own failure, not a score the scorer could not find.
+                stderr_lines = result.stderr.strip().splitlines()
+                cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
+                return _ScoredEpisode(
+                    None,
+                    FailureObservation(task=task, stage="exit", cause=cause),
+                    residue,
+                    agents,
+                    path,
+                    fault="harness",
+                    label="execution_error",
+                )
             # The episode ran and its scorer found no score: invalid, never an ordinary zero.
             return _ScoredEpisode(
                 None,
@@ -726,8 +743,8 @@ class FloorPluginFactory(CandidatePluginFactory):
 
 
 class PairedConfidencePlugin(PairedConfidenceMixin):
-    """Evaluate the candidate and the current tree as pairs, rerunning infrastructure faults up to
-    ``infra_reruns`` rounds, and decide by the paired confidence rule."""
+    """Evaluate the candidate and the current tree as pairs, rerunning the current side's infrastructure faults up
+    to ``infra_reruns`` rounds, and decide by the paired confidence rule."""
 
     def __init__(
         self, candidate_backend: CordisBackend, settings: PairedConfidenceSettings, *, infra_reruns: int = 0
@@ -1396,8 +1413,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         current episode runs, ``current_scores`` is empty and the other
         ``current_*`` keys are absent, and ``evaluation_sides`` records the choice.
         A paired evaluation also carries each episode's label and fault. With
-        ``infra_reruns``, every side of a pair an infrastructure fault hit runs
-        again, up to that many rounds, and the last runs are the result.
+        ``infra_reruns``, both sides of a pair whose current episode had an
+        infrastructure fault run again, up to that many rounds, and the last
+        runs are the result. A candidate episode's fault reruns nothing: the
+        candidate could have caused it after seeing that it was losing.
         """
         candidate = self._require_harness_candidate(candidate)
         sides = tuple(sides)
@@ -1405,6 +1424,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             raise ValueError(f"sides must name one or both of {EVALUATION_SIDES}, got {sides!r}")
         if isinstance(infra_reruns, bool) or not isinstance(infra_reruns, int) or infra_reruns < 0:
             raise ValueError("infra_reruns must be an integer of at least 0")
+        if infra_reruns and sides != EVALUATION_SIDES:
+            raise ValueError("infra_reruns reruns pairs, so it needs both sides")
         # Episodes run against the tree plus the model binding. The binding
         # is appended at render time and never enters the candidate's files,
         # so the published artifact carries no endpoint or credential.
@@ -1437,13 +1458,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
         rerun_rounds = rerun_pairs = 0
         for attempt in range(1, infra_reruns + 1):
-            # Both sides of the pair run again, so they run under the same conditions; a rerun writes its own
-            # record directory and is a new submission, so the pool still never replays failed work.
-            faulted = [
-                index
-                for index in range(len(runs[sides[0]]))
-                if any(runs[side][index].fault == "infrastructure" for side in sides)
-            ]
+            # Only the current episode's fault reruns a pair; a candidate that could redraw the pairs it faulted
+            # would fault on the ones it was losing. Both sides run again, so they run under the same conditions; a
+            # rerun writes its own record directory and is a new submission, so the pool never replays failed work.
+            faulted = [index for index, run in enumerate(runs["current"]) if run.fault == "infrastructure"]
             if not faulted:
                 break
             reruns: list[tuple[Mapping[str, str], str, Path | None]] = []

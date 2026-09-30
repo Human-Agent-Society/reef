@@ -14,10 +14,11 @@ atomically and receives one selection decision, never one per mutation. The
 default policy selects a candidate with more task wins than losses; the
 ``floor`` policy runs the candidate alone and selects it when every task
 scores at least ``floor_score``; the ``paired_confidence`` policy reruns
-pairs an infrastructure fault hit and selects when a sign test over tasks
-passes and the bootstrap lower bound of the mean gain is above ``min_effect``. When the tasks are a task
-manifest's eval split, a task a consumed batch named is not evaluated again
-and eval failures never reach the proposer.
+pairs whose current episode an infrastructure fault hit and selects when a
+sign test over tasks passes and the bootstrap lower bound of the mean gain is
+above ``min_effect``. When the tasks are a task manifest's eval split, a task
+a consumed batch named is not evaluated again and eval failures never reach
+the proposer.
 
 Versioning goes through reef's native artifact stack: a selected mutation
 renders to a directory and returns a ``TrainStepResult`` with the artifact

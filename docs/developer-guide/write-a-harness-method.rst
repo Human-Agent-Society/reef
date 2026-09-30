@@ -90,9 +90,10 @@ An episode that ran but left nothing to score, such as a verifier that wrote
 no reward, should raise ``ScoreUnavailable`` (from
 ``reef.train.cordis_backend``) instead of returning 0. Reef records the
 episode as ``invalid`` with an infrastructure fault: ``paired_confidence``
-reruns its pairing up to ``evolution.infra_reruns`` times and then counts it
-as void, and the other policies see a missing score. Any other exception
-stops the step.
+counts its pairing as void, after up to ``evolution.infra_reruns`` reruns
+when the episode was the current tree's, and the other policies see a
+missing score. An episode that exited on an error and left no trajectory is
+the harness's failure instead. Any other exception stops the step.
 ``reef.train.cordis_backend.strategies:required_verifier_reward`` does this
 for Harbor tasks; ``verifier_reward`` in the same module returns 0 instead.
 
@@ -112,10 +113,11 @@ than ``evolution.min_win_margin``, if a margin is set. ``floor`` runs only the
 candidate and selects it when every task reaches ``evolution.floor_score``
 (default ``1.0``). An episode that could not run misses the floor. The
 current release does not run under ``floor``, so ``current_scores`` is empty.
-``paired_confidence`` reruns a pairing an infrastructure fault hit, up to
-``evolution.infra_reruns`` times, and selects when an exact sign test over
-tasks passes at ``evolution.confidence_level`` and the bootstrap lower bound
-of the mean task gain is above ``evolution.min_effect``; see `Evolve your harness
+``paired_confidence`` reruns a pairing whose current episode an
+infrastructure fault hit, up to ``evolution.infra_reruns`` times, and selects
+when an exact sign test over tasks passes at ``evolution.confidence_level``
+and the bootstrap lower bound of the mean task gain is above
+``evolution.min_effect``; see `Evolve your harness
 <../user-guide/evolve-your-harness.rst#evaluating-the-result>`__.
 ``always`` selects every applied mutation.
 

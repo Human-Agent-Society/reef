@@ -134,3 +134,22 @@ def test_an_episode_without_a_reward_is_invalid_and_the_infrastructures_fault() 
     assert scored.failure.cause == f"the verifier for {TASK!r} wrote no reward"
     rewarded = worker._score_result(episode(verifier({"reward": 1.0})), TASK)
     assert rewarded.score == 1.0 and rewarded.label == "valid" and rewarded.fault is None
+
+
+def test_a_runner_that_exited_before_any_trial_is_the_harnesss_failure() -> None:
+    """No verifier row and a nonzero exit: the terminus runner stopped before its trial, as when the tree cannot
+    load. The current tree's own crash is then a candidate win, not a void pair."""
+    worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("terminus"),
+        scorer=resolve_episode_scorer(required_verifier_reward),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+    crashed = worker._score_result(
+        EpisodeResult(exit_code=1, stdout="", stderr="TerminusTreeError: no model", trajectory=(), residue=()), TASK
+    )
+    assert crashed.score is None and crashed.label == "execution_error" and crashed.fault == "harness"
+    assert crashed.failure is not None and crashed.failure.stage == "exit"
+    assert crashed.failure.cause == "exit 1: TerminusTreeError: no model"

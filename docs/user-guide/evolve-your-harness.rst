@@ -361,8 +361,9 @@ Four ``evolution`` keys configure it; every other selection refuses them:
   ``invalid_evaluation``.
 - ``min_effect`` (0, in score units) and ``confidence_level`` (0.95): a gain
   that does not clear them is rejected as ``insufficient_confidence``.
-- ``infra_reruns`` (0): how many times a pairing that an infrastructure fault
-  hit runs again, on both sides, before it becomes void (see `Edge cases`_).
+- ``infra_reruns`` (0): how many times a pairing whose current episode an
+  infrastructure fault hit runs again, on both sides, before it becomes void
+  (see `Edge cases`_).
 
 The decision records ``valid_pairs`` and ``void_pairs``,
 ``sign_test_p_value``, ``interval_lower`` and ``interval_upper`` (the one
@@ -528,14 +529,17 @@ publishes accidentally.
 - Under ``score_comparison``, an episode that could not run ranks below every
   real score, so a candidate cannot win on a crash, and when both sides fail,
   the step is a tie.
-- Under ``paired_confidence``, an episode that failed through the harness (a
-  timeout, an unreadable trajectory, residue, a native turn that ended on an
-  error) ranks below every real score of the evaluation. One that failed through the
-  infrastructure (the binary or the sandbox could not start, a Harbor trial
-  that never ran, a scorer that raised ``ScoreUnavailable``) runs both sides
-  again, up to ``infra_reruns`` times. A pairing still faulted after that is
-  void and counts as a candidate loss, so a fault that a candidate forges on
-  its own side never wins its pairing.
+- Under ``paired_confidence``, an episode that failed through the harness
+  ranks below every real score of the evaluation: a timeout, a render its own
+  files broke, an unreadable trajectory, residue, a native turn that ended on
+  an error, or a runner that exited on an error before it wrote anything to
+  score. An episode that failed through the infrastructure (the binary or the
+  sandbox could not start, a Harbor trial that never ran, a scorer that raised
+  ``ScoreUnavailable``) voids its pairing, and a void pairing counts as a
+  candidate loss. When the fault is on the current side, both sides first run
+  again, up to ``infra_reruns`` times. A fault on the candidate side is never
+  rerun, so a fault that a candidate forges on its own side never wins its
+  pairing.
 - A native episode whose turn ended on an error (a tree that cannot load, a
   graph that cannot run) counts as one that could not run, whatever its
   text.

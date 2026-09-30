@@ -223,12 +223,13 @@ class CordisRecipe(Recipe):
     candidate-selection policy: ``score_comparison``, the default; ``floor``,
     which runs the candidate alone and selects it when every task scores at
     least ``floor_score``, default ``1.0``; ``paired_confidence``, which
-    reruns both sides of a pair an infrastructure fault hit up to
-    ``infra_reruns`` times (default 0), counts a pair still faulted as a
-    candidate loss, and selects when at least ``min_valid_pairs`` (default 1)
-    pairs are valid, an exact sign test over tasks passes at
-    ``confidence_level`` (default 0.95) and the bootstrap lower bound of the
-    mean task gain is above ``min_effect`` (default 0);
+    reruns both sides of a pair whose current episode an infrastructure
+    fault hit up to ``infra_reruns`` times (default 0), counts a pair still
+    faulted, or faulted on the candidate side, as a candidate loss, and
+    selects when at least ``min_valid_pairs`` (default 1) pairs are valid, an
+    exact sign test over tasks passes at ``confidence_level`` (default 0.95)
+    and the bootstrap lower bound of the mean task gain is above
+    ``min_effect`` (default 0);
     ``always``;
     or a dotted reference to a ``CandidatePluginFactory`` subclass or instance),
     optional ``step_record_dir`` (a directory under which every scenario's

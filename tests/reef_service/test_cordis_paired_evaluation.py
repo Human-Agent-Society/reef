@@ -1,6 +1,6 @@
 """A fault decides its pair (#698): the evaluation types every episode without a score by whose failure it is,
-reruns the pairs an infrastructure fault hit, and ``paired_confidence`` counts a pair still faulted as a candidate
-loss, where the score comparison counts a failed current episode as a candidate win."""
+reruns the pairs whose current episode an infrastructure fault hit, and ``paired_confidence`` counts a pair still
+faulted as a candidate loss, where the score comparison counts a failed current episode as a candidate win."""
 
 from __future__ import annotations
 
@@ -19,7 +19,7 @@ from reef.harness.episodes.executor import (
     LocalExecutor,
     ProcessOutcome,
 )
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, EpisodeTimeoutError
+from reef.harness.episodes.run import EpisodeError, EpisodeRenderError, EpisodeResult, EpisodeTimeoutError
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
 from reef.train.cordis_backend import (
@@ -161,6 +161,23 @@ def test_a_pair_still_faulted_after_every_rerun_stays_void(tmp_path: Path, monke
             b.evaluate(candidate, infra_reruns=bad)
 
 
+def test_a_candidate_side_fault_voids_its_pair_without_a_rerun(tmp_path: Path, monkeypatch) -> None:
+    """A candidate that faulted the pairs it was losing would otherwise draw them again until it won."""
+    b = paired_backend(tmp_path)
+    candidate = prepared_candidate(b)
+    script = ScriptedPairings([faulted("task one"), scored(1.0), scored(0.5), scored(0.5)])
+    monkeypatch.setattr(b, "_evaluate_pairings", script)
+    evaluation = b.evaluate(candidate, infra_reruns=3)
+    assert len(script.calls) == 1
+    assert (evaluation.metrics["rerun_rounds"], evaluation.metrics["rerun_pairs"]) == (0, 0)
+    assert evaluation.metrics["candidate_faults"] == ("infrastructure", None)
+    decision = PairedConfidencePlugin(b, PairedConfidenceSettings()).decide(candidate, evaluation)
+    assert (decision.metrics["void_pairs"], decision.metrics["losses"], decision.metrics["ties"]) == (1, 1, 1)
+    # Reruns redraw pairs, so an evaluation of the candidate alone takes none.
+    with pytest.raises(ValueError, match="infra_reruns reruns pairs, so it needs both sides"):
+        b.evaluate(candidate, sides=("candidate",), infra_reruns=1)
+
+
 def test_a_paired_step_settles_with_its_labels_in_the_selection_record(tmp_path: Path) -> None:
     """Real episodes of the fake harness: the step record keeps each episode's label and fault, and the commit
     row keeps the decision's counts while the vectors stay inside the selection record."""
@@ -221,6 +238,24 @@ def test_a_timeout_is_the_harnesss_fault_and_another_launch_failure_the_infrastr
     assert result.failure == FailureObservation(task="task one", stage="launch", cause=str(error))
     record = json.loads((tmp_path / "episode" / "episode.json").read_text())
     assert (record["label"], record["fault"]) == ("execution_error", fault)
+
+
+def test_a_render_the_trees_own_files_broke_is_the_harnesss_fault(tmp_path: Path) -> None:
+    """The current tree's broken render is its own failure: the candidate that fixes it wins, not a void pair."""
+    assert issubclass(EpisodeRenderError, EpisodeError)
+    worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("pi"),
+        scorer=resolve_episode_scorer(evaluate),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+    result = worker.run({"../outside.md": "x"}, "task one", tmp_path / "episode")
+    assert result.score is None and result.fault == "harness" and result.label == "execution_error"
+    assert result.failure == FailureObservation(
+        task="task one", stage="launch", cause="render path '../outside.md' escapes the episode root"
+    )
 
 
 def test_every_failure_stage_names_whose_fault_it_is() -> None:
