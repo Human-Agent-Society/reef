@@ -1,7 +1,8 @@
-"""What the process that starts a native episode sets and the tree cannot: the episode's token budget.
+"""What the process that starts a native episode sets and the tree cannot: the token budget and the stop flag.
 
 ``run_episode`` passes the budget as ``REEF_EPISODE_TOKENS`` from ``evolution.episode_tokens``; no node renders it,
-so a candidate tree cannot raise the budget it is judged under.
+so a candidate tree cannot raise the budget it is judged under. Both are shared by every agent turn of the
+episode, the members of a team stage included, and read before each step.
 """
 
 from __future__ import annotations
@@ -49,8 +50,26 @@ class TeamBudget:
         return self.token_limit is not None and self.spent_tokens >= self.token_limit
 
 
+class EpisodeStop:
+    """Set once by whoever runs the episode; every run reads it before its next step and ends its turn there."""
+
+    def __init__(self) -> None:
+        self.stop_event = threading.Event()
+        self.reason = ""
+
+    def set(self, reason: str) -> None:
+        if not self.stop_event.is_set():
+            self.reason = reason
+            self.stop_event.set()
+
+    @property
+    def is_set(self) -> bool:
+        return self.stop_event.is_set()
+
+
 @dataclass(frozen=True)
 class EpisodeControl:
     """What the process that starts an episode sets and the tree cannot; the default sets no limit."""
 
     budget: TeamBudget = field(default_factory=lambda: TeamBudget(None))
+    stop: EpisodeStop = field(default_factory=EpisodeStop)

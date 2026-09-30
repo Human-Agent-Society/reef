@@ -400,20 +400,32 @@ class Run:
                     raise _Escalate(str(decision.get("reason") or f"{tool.name} needs approval"))
                 return decision
 
-            result = loop._invoke(
-                tools, name, raw, self.workdir, full_output_path=full_output_path, gate=gate, enforcer=loop.enforcer
-            )
-            payload = {
-                "step": step,
-                "call_id": call_id,
-                "name": name,
-                "arguments": result.get("arguments"),
-                "result": result,
-            }
-            verdict = loop._decide(self.session, self.hooks["post_execute"], "post_execute", step, payload)
-            result = loop._judged(result, verdict)
-            # A jail that could not run is the sandbox's failure, not the tool's: it moves no branch on tool errors.
-            if result.get("is_error") and (result.get("error") or {}).get("code") != "SANDBOX_FAILED":
+            verdict: Mapping[str, Any] = {}
+            if loop.control.stop.is_set:
+                # The episode is stopping: the rest of the batch does not run, and no hook is asked about it.
+                result = loop.tool_error("STOPPED", "the episode stopped before this call ran", raw)
+            else:
+                result = loop._invoke(
+                    tools,
+                    name,
+                    raw,
+                    self.workdir,
+                    full_output_path=full_output_path,
+                    gate=gate,
+                    enforcer=loop.enforcer,
+                )
+                payload = {
+                    "step": step,
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": result.get("arguments"),
+                    "result": result,
+                }
+                verdict = loop._decide(self.session, self.hooks["post_execute"], "post_execute", step, payload)
+                result = loop._judged(result, verdict)
+            # A jail that could not run, or a call the stop kept from running, is no failure of the tool: it moves
+            # no branch on tool errors.
+            if result.get("is_error") and (result.get("error") or {}).get("code") not in ("SANDBOX_FAILED", "STOPPED"):
                 self.tool_errors += 1
             # The log says what was enforced on this tool, whether or not the call reached its run.
             called = tools.get(name)

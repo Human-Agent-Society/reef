@@ -1,6 +1,7 @@
 """Reef's native coding agent: a headless single prompt loop whose tools and loop events are composition nodes.
 
-One episode is one process and one turn. The rendered composition root
+One episode is one process and one root turn; the members of a team stage are agent turns that run at once on
+threads of that process. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``,
 ``graphs/``, ``agents/``, ``loops/`` and ``models.json``; the loop reads them once into a
 ``NativeHost`` (``reef.harness.runners.native.host``), talks to the served model
@@ -486,12 +487,14 @@ class Session:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = path.open("a", encoding="utf-8")
         self._seq = 0
+        self.write_lock = threading.Lock()
 
     def write(self, type_: str, data: Mapping[str, Any]) -> None:
-        event = {"type": type_, "seq": self._seq, "time": int(time.time() * 1000), "data": dict(data)}
-        self._seq += 1
-        self._handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-        self._handle.flush()
+        with self.write_lock:
+            event = {"type": type_, "seq": self._seq, "time": int(time.time() * 1000), "data": dict(data)}
+            self._seq += 1
+            self._handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            self._handle.flush()
 
     def close(self) -> None:
         self._handle.close()
@@ -845,17 +848,29 @@ class _Loop:
         self.control = control or EpisodeControl()
         self.turns = 1
         self.open: list[Session] = []
+        # Team members run on threads of this process, so the turn and stage run counters are taken under a lock.
+        self.turn_lock = threading.Lock()
+        self.team_stage_runs = 0
 
     def open_turn(self, agent: str) -> tuple[Session, int]:
         """A session file for one agent turn, numbered in run order under ``agents/``; the root's file sorts last."""
-        self.turns += 1
-        session = Session(self.session_dir / "agents" / f"{self.turns:03d}-{agent}.jsonl")
-        self.open.append(session)
-        return session, self.turns
+        with self.turn_lock:
+            self.turns += 1
+            session = Session(self.session_dir / "agents" / f"{self.turns:03d}-{agent}.jsonl")
+            self.open.append(session)
+            return session, self.turns
+
+    def next_team_stage_run(self) -> int:
+        """The number of the team stage run that starts now, from 1 in this episode."""
+        with self.turn_lock:
+            self.team_stage_runs += 1
+            return self.team_stage_runs
 
     def before_step(self, run: Any) -> None:
-        """Called at the top of every model stage: a spent episode budget ends the turn there, before the call."""
-        budget = self.control.budget
+        """Called at the top of every model stage: a stop or a spent budget ends the turn there, before the call."""
+        stop, budget = self.control.stop, self.control.budget
+        if stop.is_set:
+            run.end_turn({"kind": "stopped", "reason": stop.reason}, "budget")
         if budget.is_spent:
             run.end_turn({"kind": "max-tokens", "tokens": budget.token_limit, "spent": budget.spent_tokens}, "budget")
 
@@ -863,6 +878,7 @@ class _Loop:
     _complete = staticmethod(_complete)
     _request = staticmethod(_request)
     _invoke = staticmethod(_invoke)
+    tool_error = staticmethod(_error)
     enforcer_for = staticmethod(enforcer_for)
     _judged = staticmethod(_judged)
     _texts = staticmethod(_texts)
