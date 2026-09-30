@@ -6,10 +6,14 @@ from pathlib import Path
 
 import pytest
 
+from reef.harness.adapters import get_adapter
+from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import primary_reward
 from reef.harness.runners.terminus.runner import trial_record
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, verifier_reward
+from reef.train.cordis_backend import ScoreUnavailable
+from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
+from reef.train.cordis_backend.strategies import required_verifier_reward, resolve_episode_scorer, verifier_reward
 
 TASK = "/tasks/openenv-00012-003-deduction"
 
@@ -85,3 +89,48 @@ def test_the_terminus_row_carries_harbor_primary_reward(tmp_path: Path) -> None:
     assert trial_record(TASK, {"a": 1, "b": 2}, tmp_path)["reward"] is None
     failed = trial_record(TASK, {}, tmp_path, "docker compose build failed")
     assert failed["failed"] and failed["reward"] is None and failed["error"] == "docker compose build failed"
+
+
+@pytest.mark.parametrize(
+    ("result", "message"),
+    [
+        (episode(verifier({}, failed=True)), "the verifier for '/tasks/openenv-00012-003-deduction' failed"),
+        (episode(verifier({}, failed=True), exit_code=1), "failed"),
+        (episode(exit_code=1), "exited 1 without a verifier record"),
+        (episode(verifier({})), "wrote no reward"),
+    ],
+)
+def test_the_required_reward_has_no_score_where_the_plain_reward_writes_zero(
+    result: EpisodeResult, message: str
+) -> None:
+    assert verifier_reward(TASK, result) == 0.0
+    with pytest.raises(ScoreUnavailable, match=message):
+        required_verifier_reward(TASK, result)
+
+
+def test_the_required_reward_scores_and_refuses_as_the_plain_reward_does() -> None:
+    assert required_verifier_reward(TASK, episode(verifier({"reward": 0}))) == 0.0
+    assert required_verifier_reward(TASK, episode(verifier({"tests_passed": 7, "reward": 0.7}))) == 0.7
+    assert required_verifier_reward(TASK, episode(verifier({"accuracy": 1}))) == 1.0
+    with pytest.raises(ValueError, match="names '/tasks/other'"):
+        required_verifier_reward(TASK, episode(verifier({"reward": 1.0}, task="/tasks/other")))
+    with pytest.raises(ValueError, match="must be a finite number"):
+        required_verifier_reward(TASK, episode(verifier({"reward": float("nan")})))
+
+
+def test_an_episode_without_a_reward_is_invalid_and_the_infrastructures_fault() -> None:
+    """The worker catches the scorer's ``ScoreUnavailable``: the episode ran, so it is invalid, not an error."""
+    worker = EpisodeEvaluationWorker(
+        descriptor=get_adapter("terminus"),
+        scorer=resolve_episode_scorer(required_verifier_reward),
+        binary=None,
+        timeout=10,
+        executor=LocalExecutor(),
+        forbid_residue=False,
+    )
+    scored = worker._score_result(episode(verifier({}), exit_code=1), TASK)
+    assert scored.score is None and scored.label == "invalid" and scored.fault == "infrastructure"
+    assert scored.failure is not None and scored.failure.stage == "score"
+    assert scored.failure.cause == f"the verifier for {TASK!r} wrote no reward"
+    rewarded = worker._score_result(episode(verifier({"reward": 1.0})), TASK)
+    assert rewarded.score == 1.0 and rewarded.label == "valid" and rewarded.fault is None

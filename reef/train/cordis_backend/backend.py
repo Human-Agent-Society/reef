@@ -40,7 +40,13 @@ from reef.harness.compose.loader import EntryOptions, Loader
 from reef.harness.episodes.e2b import E2BExecutor
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
+from reef.harness.episodes.run import (
+    EpisodeError,
+    EpisodeResult,
+    EpisodeTimeoutError,
+    TrajectoryKeepError,
+    run_episode,
+)
 from reef.harness.episodes.trajectory import TrajectoryError, final_assistant_text
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.mutations import (
@@ -76,11 +82,13 @@ from reef.train.cordis_backend.strategies import (
     Promoter,
     Proposer,
     ProposerCalls,
+    ScoreUnavailable,
     StepProposal,
     accepts_keyword,
     accepts_manifest,
 )
 from reef.train.evaluation.evaluators import BackendEvaluateMixin, CandidatePluginFactory
+from reef.train.evaluation.paired import EpisodeFault, EpisodeLabel, PairedConfidenceMixin, PairedConfidenceSettings
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
 
 
@@ -119,8 +127,9 @@ class EpisodeEvaluationWorker:
         self, files: Mapping[str, str], task: str, keep_dir: Path | None, models: ModelBindings | None
     ) -> _ScoredEpisode:
         """Score one side's episode; a ``None`` score marks an episode that
-        could not run. The observation keeps what the exception handling
-        would otherwise discard: the failure's stage and cause. A native turn
+        could not run or that its scorer found no score for, and its fault
+        says whose failure it is. The observation keeps what the exception
+        handling would otherwise discard: the failure's stage and cause. A native turn
         that ended on an error could not run either; any other nonzero exit
         still scores, as before, and is observed alongside the score.
         The residue counts files the episode left outside the cleanup
@@ -141,11 +150,24 @@ class EpisodeEvaluationWorker:
                 keep_dir=keep_dir,
             )
         except EpisodeError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
+            # A timeout is the harness's own failure, so a rerun cannot give it more tries; any other launch
+            # failure is the host's.
+            fault: EpisodeFault = "harness" if isinstance(error, EpisodeTimeoutError) else "infrastructure"
+            scored = _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage="launch", cause=str(error)),
+                fault=fault,
+                label="execution_error",
+            )
             _write_episode_record(keep_dir, task, None, scored)
             return scored
         except TrajectoryError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="trajectory", cause=str(error)))
+            scored = _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage="trajectory", cause=str(error)),
+                fault="harness",
+                label="execution_error",
+            )
             _write_episode_record(keep_dir, task, None, scored)
             return scored
         finally:
@@ -162,14 +184,26 @@ class EpisodeEvaluationWorker:
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
+                None,
+                FailureObservation(task=task, stage="residue", cause=cause),
+                residue,
+                agents,
+                path,
+                fault="harness",
+                label="execution_error",
             )
         trial_error = _failed_trial_error(result.trajectory)
         if trial_error:
             # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
             # start): no answer was given, so it ranks below every real score instead of tying a zero.
             return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="trial", cause=trial_error), residue, agents, path
+                None,
+                FailureObservation(task=task, stage="trial", cause=trial_error),
+                residue,
+                agents,
+                path,
+                fault="infrastructure",
+                label="execution_error",
             )
         if path.get("error") is not None:
             # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
@@ -181,13 +215,34 @@ class EpisodeEvaluationWorker:
                 cause = f"agent {path['errored_agent']}: {cause}"
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
-            return _ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
-        score = float(
-            self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
-        )
+            return _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage=stage, cause=cause),
+                residue,
+                agents,
+                path,
+                fault="harness",
+                label="execution_error",
+            )
+        reply = final_assistant_text(result.trajectory)
+        try:
+            score = float(
+                self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
+            )
+        except ScoreUnavailable as error:
+            # The episode ran and its scorer found no score: invalid, never an ordinary zero.
+            return _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage="score", cause=str(error)),
+                residue,
+                agents,
+                path,
+                reply,
+                fault="infrastructure",
+                label="invalid",
+            )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
-        reply = final_assistant_text(result.trajectory)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
@@ -274,9 +329,11 @@ def _mutation_record(mutation: Mutation) -> dict[str, Any]:
     return {"op": mutation.op, "id": mutation.id, "options": options}
 
 
-def _episode_name(side: str, task_index: int, repeat: int) -> str:
-    """The record directory of one evaluation episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
-    return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
+def _episode_name(side: str, task_index: int, repeat: int, attempt: int = 0) -> str:
+    """The record directory of one evaluation episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``
+    and a rerun ``-rerun-<attempt>``."""
+    name = f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
+    return name if attempt == 0 else f"{name}-rerun-{attempt}"
 
 
 def _prompt_of(sample: TrajectoryItem) -> str | None:
@@ -642,6 +699,41 @@ class FloorPluginFactory(CandidatePluginFactory):
 
     def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
         return FloorPlugin(candidate_backend, floor_score=self.floor_score)
+
+
+class PairedConfidencePlugin(PairedConfidenceMixin):
+    """Evaluate the candidate and the current tree as pairs, rerunning infrastructure faults up to
+    ``infra_reruns`` rounds, and decide by the paired confidence rule."""
+
+    def __init__(
+        self, candidate_backend: CordisBackend, settings: PairedConfidenceSettings, *, infra_reruns: int = 0
+    ) -> None:
+        super().__init__(settings)
+        self.candidate_backend = candidate_backend
+        self.infra_reruns = infra_reruns
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        return self.candidate_backend.evaluate(candidate, infra_reruns=self.infra_reruns)
+
+
+@dataclass(frozen=True)
+class PairedConfidencePluginFactory(CandidatePluginFactory):
+    """Bind a scenario's paired confidence policy with its settings and its infrastructure rerun rounds."""
+
+    settings: PairedConfidenceSettings = field(default_factory=PairedConfidenceSettings)
+    infra_reruns: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.infra_reruns, bool) or not isinstance(self.infra_reruns, int) or self.infra_reruns < 0:
+            raise ValueError("infra_reruns must be an integer of at least 0")
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        if not isinstance(candidate_backend, CordisBackend):
+            raise TypeError(
+                "the paired confidence selection evaluates through a CordisBackend, "
+                f"not {type(candidate_backend).__name__}"
+            )
+        return PairedConfidencePlugin(candidate_backend, self.settings, infra_reruns=self.infra_reruns)
 
 
 def _score_vectors(
@@ -1246,18 +1338,25 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics=metrics,
         )
 
-    def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
+    def evaluate(
+        self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES, infra_reruns: int = 0
+    ) -> EvaluationResult:
         """Run the evaluation episodes of the named ``sides`` and return their scores.
 
         The default runs the candidate and the current tree as pairs. A policy
         that evaluates the candidate alone (a floor) passes ``("candidate",)``: no
         current episode runs, ``current_scores`` is empty and the other
         ``current_*`` keys are absent, and ``evaluation_sides`` records the choice.
+        A paired evaluation also carries each episode's label and fault. With
+        ``infra_reruns``, every side of a pair an infrastructure fault hit runs
+        again, up to that many rounds, and the last runs are the result.
         """
         candidate = self._require_harness_candidate(candidate)
         sides = tuple(sides)
         if not sides or any(side not in EVALUATION_SIDES for side in sides):
             raise ValueError(f"sides must name one or both of {EVALUATION_SIDES}, got {sides!r}")
+        if isinstance(infra_reruns, bool) or not isinstance(infra_reruns, int) or infra_reruns < 0:
+            raise ValueError("infra_reruns must be an integer of at least 0")
         # Episodes run against the tree plus the model binding. The binding
         # is appended at render time and never enters the candidate's files,
         # so the published artifact carries no endpoint or credential.
@@ -1286,8 +1385,32 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # The evaluation's size for the page; the pool answers all at once, so no per-episode count is kept.
             self._step_progress = replace(progress, phase="evaluating", episodes_total=len(pairings))
         scored = self._evaluate_pairings(pairings)
-        runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
+        runs = {side: list(scored[offset :: len(sides)]) for offset, side in enumerate(sides)}
         tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
+        rerun_rounds = rerun_pairs = 0
+        for attempt in range(1, infra_reruns + 1):
+            # Both sides of the pair run again, so they run under the same conditions; a rerun writes its own
+            # record directory and is a new submission, so the pool still never replays failed work.
+            faulted = [
+                index
+                for index in range(len(runs[sides[0]]))
+                if any(runs[side][index].fault == "infrastructure" for side in sides)
+            ]
+            if not faulted:
+                break
+            reruns: list[tuple[Mapping[str, str], str, Path | None]] = []
+            for index in faulted:
+                task_index, repeat = divmod(index, self._episode_repeats)
+                for side in sides:
+                    name = _episode_name(side, task_index, repeat, attempt)
+                    keep_dir = None if episodes_dir is None else episodes_dir / name
+                    reruns.append((files[side], tasks[side][index], keep_dir))
+            rescored = self._evaluate_pairings(reruns)
+            for position, index in enumerate(faulted):
+                for offset, side in enumerate(sides):
+                    runs[side][index] = rescored[position * len(sides) + offset]
+            rerun_rounds += 1
+            rerun_pairs += len(faulted)
         scores = {side: tuple(run.score for run in runs[side]) for side in sides}
         metrics: dict[str, Any] = {
             "candidate_scores": scores.get("candidate", ()),
@@ -1320,8 +1443,16 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                 }
                 for task, run in list(zip(tasks["candidate"], runs["candidate"], strict=True))[:EPISODE_SUMMARIES]
             ]
-        if sides != EVALUATION_SIDES:
+        if sides == EVALUATION_SIDES:
+            # Index aligned with the score vectors, for a policy that tells a harness fault from the host's.
+            for side in sides:
+                metrics[f"{side}_labels"] = tuple(run.label for run in runs[side])
+                metrics[f"{side}_faults"] = tuple(run.fault for run in runs[side])
+        else:
             metrics["evaluation_sides"] = list(sides)
+        if infra_reruns:
+            metrics["rerun_rounds"] = rerun_rounds
+            metrics["rerun_pairs"] = rerun_pairs
         return EvaluationResult(evaluator="harness_episode_pairs", evaluator_version="1", metrics=metrics)
 
     def settle_step(
@@ -1340,8 +1471,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # comparison metrics, while this backend keeps the stable episode
         # totals at the top level of the commit metrics.
         evaluation_metrics = dict(decision.evaluation.metrics)
-        evaluation_metrics.pop("candidate_scores", None)
-        evaluation_metrics.pop("current_scores", None)
+        for key in (
+            "candidate_scores",
+            "current_scores",
+            "candidate_labels",
+            "current_labels",
+            "candidate_faults",
+            "current_faults",
+        ):
+            evaluation_metrics.pop(key, None)
         candidate_failures = evaluation_metrics.pop("candidate_failures", ())
         current_failures = evaluation_metrics.pop("current_failures", ())
 
@@ -1733,6 +1871,9 @@ class _ScoredEpisode:
     reply: str | None = None
     #: Whether the reader found a session log; a scored episode without one left a text grader nothing to read.
     transcript_read: bool = True
+    #: Whose failure an episode without a score is; ``None`` for a scored episode.
+    fault: EpisodeFault | None = None
+    label: EpisodeLabel = "valid"
     #: Remote workers return the kept trajectory; the driver owns its durable path.
     record_archive: bytes | None = field(default=None, repr=False)
 
@@ -1759,6 +1900,8 @@ def _write_episode_record(
         "task": _clip(task),
         "score": scored.score,
         "failure": None if scored.failure is None else scored.failure.to_dict(),
+        "label": scored.label,
+        "fault": scored.fault,
         "path": scored.path,
         "exit_code": None if result is None else result.exit_code,
         "stdout": None if result is None else _clip(result.stdout),

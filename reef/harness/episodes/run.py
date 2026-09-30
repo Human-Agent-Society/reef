@@ -46,6 +46,10 @@ class EpisodeError(ReefError):
     """The episode could not be launched or torn down."""
 
 
+class EpisodeTimeoutError(EpisodeError):
+    """The episode ran past its timeout."""
+
+
 class TrajectoryKeepError(ReefError):
     """The episode ran but its trajectory could not be kept, so the step has no record of it."""
 
@@ -217,7 +221,7 @@ def run_episode(
         except EpisodeLaunchError as exc:
             raise EpisodeError(str(exc)) from exc
         except EpisodeTimeout as exc:
-            raise EpisodeError(str(exc)) from exc
+            raise EpisodeTimeoutError(str(exc)) from exc
         trajectory = reader(root / descriptor.trajectory_path)
         residue = tuple(
             sorted(

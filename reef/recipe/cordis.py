@@ -53,6 +53,7 @@ from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import (
     CordisBackend,
     FloorPluginFactory,
+    PairedConfidencePluginFactory,
     ScoreComparisonPluginFactory,
     tree_files,
 )
@@ -67,11 +68,13 @@ from reef.train.cordis_backend.strategies import (
     resolve_proposer,
 )
 from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory, CandidatePluginFactory
+from reef.train.evaluation.paired import PairedConfidenceSettings
 from reef.train.trainer import Trainer
 
 _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
     "score_comparison": ScoreComparisonPluginFactory(),
     "floor": FloorPluginFactory(),
+    "paired_confidence": PairedConfidencePluginFactory(),
     "always": AlwaysSelectPluginFactory(),
 }
 
@@ -218,7 +221,13 @@ class CordisRecipe(Recipe):
     algorithm state always wins over the seed), optional ``selection`` (the
     candidate-selection policy: ``score_comparison``, the default; ``floor``,
     which runs the candidate alone and selects it when every task scores at
-    least ``floor_score``, default ``1.0``; ``always``;
+    least ``floor_score``, default ``1.0``; ``paired_confidence``, which
+    reruns both sides of a pair an infrastructure fault hit up to
+    ``infra_reruns`` times (default 0), counts a pair still faulted as a
+    candidate loss, and selects when at least ``min_valid_pairs`` (default 1)
+    pairs are valid and an exact sign test and a bootstrap interval over tasks
+    clear ``min_effect`` (default 0) at ``confidence_level`` (default 0.95);
+    ``always``;
     or a dotted reference to a ``CandidatePluginFactory`` subclass or instance),
     optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each evaluation
@@ -508,6 +517,23 @@ class CordisRecipe(Recipe):
             if selection != "floor":
                 raise RecipeConfigError("evolution.floor_score applies only to the floor selection")
             candidate_plugin = FloorPluginFactory(floor_score=float(floor_score))
+        paired_options = {
+            key: evolution[key]
+            for key in ("min_valid_pairs", "min_effect", "confidence_level", "infra_reruns")
+            if key in evolution
+        }
+        if paired_options:
+            if selection != "paired_confidence":
+                raise RecipeConfigError(
+                    f"evolution.{next(iter(paired_options))} applies only to the paired_confidence selection"
+                )
+            infra_reruns = paired_options.pop("infra_reruns", 0)
+            try:
+                candidate_plugin = PairedConfidencePluginFactory(
+                    PairedConfidenceSettings(**paired_options), infra_reruns=infra_reruns
+                )
+            except ValueError as exc:
+                raise RecipeConfigError(f"evolution.{exc}") from exc
         # A recheck compares two trees; the floor evaluates one.
         if selection == "floor" and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")

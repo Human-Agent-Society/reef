@@ -13,7 +13,9 @@ composite proposal: it applies
 atomically and receives one selection decision, never one per mutation. The
 default policy selects a candidate with more task wins than losses; the
 ``floor`` policy runs the candidate alone and selects it when every task
-scores at least ``floor_score``.
+scores at least ``floor_score``; the ``paired_confidence`` policy reruns
+pairs an infrastructure fault hit and selects when a paired test over tasks
+clears ``min_effect`` at ``confidence_level``.
 
 Versioning goes through reef's native artifact stack: a selected mutation
 renders to a directory and returns a ``TrainStepResult`` with the artifact
@@ -33,6 +35,8 @@ from reef.train.cordis_backend.backend import (
     FloorPlugin,
     FloorPluginFactory,
     HarnessCandidate,
+    PairedConfidencePlugin,
+    PairedConfidencePluginFactory,
     ScoreComparisonMixin,
     ScoreComparisonPlugin,
     ScoreComparisonPluginFactory,
@@ -40,7 +44,14 @@ from reef.train.cordis_backend.backend import (
 from reef.train.cordis_backend.contracts import StepProgress
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation, FailureRecord
 from reef.train.cordis_backend.processor import CordisProcessor
-from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, StepProposal, untrusted_text
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Promoter,
+    Proposer,
+    ScoreUnavailable,
+    StepProposal,
+    untrusted_text,
+)
 
 __all__ = [
     "CordisBackend",
@@ -55,11 +66,14 @@ __all__ = [
     "HarnessCandidate",
     "Mutation",
     "MutationError",
+    "PairedConfidencePlugin",
+    "PairedConfidencePluginFactory",
     "Promoter",
     "Proposer",
     "ScoreComparisonMixin",
     "ScoreComparisonPlugin",
     "ScoreComparisonPluginFactory",
+    "ScoreUnavailable",
     "StepProgress",
     "StepProposal",
     "untrusted_text",
