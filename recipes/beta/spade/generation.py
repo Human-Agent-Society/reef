@@ -246,7 +246,11 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
 
 
 def load_experience(report_path: Path) -> tuple[PlayRecord, ...]:
-    """The play records a generation report holds, for the next generation's prompts."""
+    """The play records of the tasks a generation report places in train, for the next generation's prompts.
+
+    A report written before splits were decided before play gives its tasks no split and lists eval tasks in its
+    experience too, so it gives none.
+    """
     try:
         document = json.loads(Path(report_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -254,8 +258,14 @@ def load_experience(report_path: Path) -> tuple[PlayRecord, ...]:
     records = document.get("experience") if isinstance(document, dict) else None
     if not isinstance(records, list):
         raise GenerationError(f"{report_path} holds no experience")
+    tasks = document.get("tasks")
+    train_names = {
+        task.get("name")
+        for task in (tasks if isinstance(tasks, list) else ())
+        if isinstance(task, dict) and task.get("split") == "train"
+    }
     try:
-        return tuple(PlayRecord(**record) for record in records)
+        return tuple(record for record in (PlayRecord(**record) for record in records) if record.name in train_names)
     except (TypeError, ValueError) as exc:
         raise GenerationError(f"{report_path} holds a record the Designer cannot take: {exc}") from exc
 

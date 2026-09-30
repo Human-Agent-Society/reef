@@ -13,6 +13,7 @@ import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime
 
 from recipes.beta.spade import SpadeObjective, SpadeProcessor, SpadeRecipe
+from recipes.beta.spade.generation import load_experience
 from recipes.beta.spade.processor import GenerationJob, reported_task_name
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ScoredRolloutReport
@@ -660,6 +661,27 @@ def test_a_restarted_processor_carries_on_from_the_reports_on_disk(tmp_path: Pat
     assert again.status()["generation"]["completed"] == 2
     assert not looked(again), "the cap is reached"
     assert len(generator.proposals) == 3
+
+
+def test_a_report_written_before_splits_came_before_play_gives_a_restart_no_experience(tmp_path: Path) -> None:
+    """An older report gives its tasks no split and lists the eval tasks in its experience too."""
+    p, _ = generating(tmp_path)
+    assert not looked(p)
+    report_path = tmp_path / "state" / "generation-00000.json"
+    document = json.loads(report_path.read_text())
+    train = [task["name"] for task in document["tasks"] if task["split"] == "train"]
+    assert train and [record.name for record in load_experience(report_path)] == train
+    older_path = tmp_path / "state" / "generation-00001.json"
+    older_path.write_text(
+        json.dumps(
+            {
+                **document,
+                "tasks": [{key: value for key, value in task.items() if key != "split"} for task in document["tasks"]],
+                "experience": [{**document["experience"][0], "name": task["name"]} for task in document["tasks"]],
+            }
+        )
+    )
+    assert load_experience(older_path) == ()
 
 
 def test_refused_proposals_are_reported_as_zero_and_never_stay_under_the_root(tmp_path: Path) -> None:
