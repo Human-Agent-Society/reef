@@ -206,6 +206,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -232,6 +233,7 @@ from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
+from reef.harness.episodes.vendor_install import version_probe_env
 from reef.harness.episodes.version_check import ships_version_check
 from reef.harness.step_result import design_sections, next_action, rejection_text
 
@@ -813,6 +815,21 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
+class CaptureProxyServer(ThreadingHTTPServer):
+    """The proxy's HTTP server, quiet when a client resets a connection.
+
+    An agent that drops a kept alive connection with a reset, as hermes does
+    on every run, ends that connection normally, so no traceback reaches the
+    person's terminal; every other error still prints one."""
+
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        if isinstance(sys.exc_info()[1], ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
+
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
@@ -844,7 +861,7 @@ class CaptureProxy:
         self._store = _TaggedStore(self.tags)
         handler = build_handler(self._config, self._store)
         self._handler = handler if observer is None else _observing_handler(handler, observer)
-        self._server: ThreadingHTTPServer | None = None
+        self._server: CaptureProxyServer | None = None
 
     @property
     def port(self) -> int:
@@ -853,7 +870,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
+        server = CaptureProxyServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):
@@ -1191,6 +1208,24 @@ def keep_client_files(kept: Mapping[ClientState, PurePosixPath], temp: Path, com
         os.replace(staging, destination)
 
 
+#: Where an adapter's binary keeps the sessions a person resumes, and the file name around a session's id. The
+#: binary's own exit hint names the bare vendor command, which runs outside this install and its proxy.
+RESUMABLE_SESSION_LAYOUTS = {"hermes": ("sessions", "session_", ".json")}
+
+
+def resumable_session_mtimes(adapter: str, compose_dir: str) -> dict[str, float]:
+    """The ids of the sessions the adapter's binary keeps in the installed tree, each with its file's mtime."""
+    session_layout = RESUMABLE_SESSION_LAYOUTS.get(adapter)
+    if session_layout is None:
+        return {}
+    directory, prefix, suffix = session_layout
+    return {
+        path.name[len(prefix) : -len(suffix)]: path.stat().st_mtime
+        for path in (Path(compose_dir) / directory).glob(f"{prefix}*{suffix}")
+        if path.is_file()
+    }
+
+
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
     descriptor = get_adapter(adapter)
     install_root = Path(compose_dir).parent.resolve()
@@ -1346,6 +1381,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
+    session_mtimes_before = resumable_session_mtimes(adapter, compose_dir)
     # Ahead of the person's arguments: a binary that reads the last of a repeated flag keeps the person's.
     # A version flag starts no session, and a binary may take it only when nothing is ahead of it.
     leading_args = () if args and args[0] in descriptor.client_version_args else descriptor.client_args
@@ -1403,6 +1439,17 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
 
+    # The one session this run wrote, by its file: the newest row would pick a session another run keeps open.
+    written_session_ids = [
+        session_id
+        for session_id, mtime in resumable_session_mtimes(adapter, compose_dir).items()
+        if session_mtimes_before.get(session_id) != mtime
+    ]
+    if len(written_session_ids) == 1:
+        print(
+            f"reef-{adapter}: resume this session with: reef-{adapter} --resume {written_session_ids[0]}",
+            file=sys.stderr,
+        )
     # As a shell reports it: 128 plus the signal the wrapper passed on, or the one that ended the agent (130 after
     # Ctrl-C).
     if received:
@@ -2591,7 +2638,12 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             rows.append((False, "service", f"{upstream} unreachable: {exc}"))
     if Path(binary).is_file():
         try:
-            version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            # The descriptor's env on a scratch root: hermes writes a home skeleton on --version.
+            with tempfile.TemporaryDirectory(prefix="reef-probe-") as probe_root:
+                probe_env = {**os.environ, **version_probe_env(get_adapter(adapter), Path(probe_root))}
+                version = subprocess.run(
+                    [binary, "--version"], capture_output=True, text=True, timeout=20, env=probe_env
+                )
             first = (version.stdout or version.stderr).strip().splitlines()
             rows.append((version.returncode == 0, "binary", f"{binary} ({first[0] if first else 'no output'})"))
         except (OSError, subprocess.TimeoutExpired) as exc:

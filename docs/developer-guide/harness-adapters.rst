@@ -449,13 +449,22 @@ The ``hermes`` adapter runs ``hermes chat -Q --oneshot -q "<task>"`` with
 quirks write the merged configuration as YAML. They enforce these defaults
 so an episode stays self-contained and makes one request:
 
-- ``approval.tirith_enabled`` disables the terminal scanner download.
+- ``security.tirith_enabled`` disables the terminal scanner download. The
+  scanner would also block a command it cannot resolve, such as
+  ``"$REEF_HARNESS_WRAPPER" evolve``.
 - ``auxiliary.title_generation.enabled`` disables the title model call.
-- ``memory.nudge_interval: 0`` disables background memory reviews.
+- ``memory.nudge_interval: 0`` and ``skills.creation_nudge_interval: 0``
+  disable the background memory and skill reviews, which make model calls
+  and write skills into the tree.
+- ``curator.enabled: false`` disables the curator. It writes its state into
+  the tree's ``skills/`` at the first start, and later archives and backs up
+  the skills there, which in a ``reef-hermes`` session are the installed
+  release's.
 - ``sessions.write_json_snapshots`` enables the per-session snapshot read by
   ``hermes-session-json``.
 
-Rendering rejects a tree that changes any of those settings. The quirks
+Rendering rejects a tree that changes any of those settings, or that puts a
+value that is not an object where a section holding one belongs. The quirks
 also write ``.no-bundled-skills``, so episodes use the tree's skills instead
 of the bundled catalog.
 
@@ -463,16 +472,54 @@ Node paths and transformations are:
 
 - ``rules`` becomes the home-level ``SOUL.md`` that Hermes reads.
   ``AGENTS.md`` is project-scoped and read from the working-directory chain.
+  The rules follow Hermes's own default identity: Hermes treats ``SOUL.md``
+  as the agent's identity and writes its default there only while the file
+  is absent, so rules written alone would replace it.
 - ``skill`` becomes ``skills/<name>/SKILL.md``. The adapter adds the required
   ``name`` and ``description`` frontmatter if the node text lacks it.
-- ``agent_command`` becomes a skill under ``hermes-commands``, listed in
-  ``skills.external_dirs``. Hermes exposes skills as ``/name`` commands and
-  has no separate command surface.
+- ``agent_command`` becomes a skill under ``hermes-commands``, which the
+  quirks add to ``skills.external_dirs``. Hermes exposes skills as ``/name``
+  commands and has no separate command surface.
 - ``code_extension`` becomes a plugin package at
   ``plugins/<name>/__init__.py`` defining ``register(ctx)``. The quirks
   write its manifest, ``plugins.enabled`` entry, and ``tools.override``
   permission. Hermes requires this consent before loading a plugin; plugin
   tools are then available through ``tool_search`` and ``tool_call``.
+
+Command and plugin configuration
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+The quirks add the commands root to ``skills.external_dirs`` twice: beside
+the home (``${HERMES_HOME}/../hermes-commands``) for an episode, and under
+the install root (``${REEF_HARNESS_DEST}/hermes-commands``) for a
+``reef-hermes`` session, whose home is a temporary copy. Hermes skips an
+entry that names no directory.
+
+The tree's own entries in ``skills.external_dirs``, ``plugins.enabled``, and
+a rendered plugin's ``granted_capabilities`` stay ahead of the ones the
+quirks add, because a config node's list replaces the list below it. A
+string in ``skills.external_dirs`` is one entry, as Hermes reads it.
+Rendering rejects any other value in these three settings that is not a
+list of strings.
+
+Session state
+^^^^^^^^^^^^^
+
+A ``reef-hermes`` session keeps ``state.db``, the session snapshots under
+``sessions/``, and the logs under ``logs/`` in the installed tree, so a
+later session finds what an earlier one wrote. Hermes ends a session by
+naming ``hermes --resume <id>``, which runs outside the install, so
+``reef-hermes`` then names ``reef-hermes --resume <id>`` for the one session
+the run wrote. Hermes also writes files of
+its own into ``skills/`` that no config key turns off: the bundled skill
+manifest it rewrites at every start, the one essential skill it seeds
+(``autonomous-ai-agents/hermes-agent``), and the usage counts it updates
+when a skill is loaded (``.usage.json`` and its lock). An episode lists them
+in ``cleanup_whitelist``; in a ``reef-hermes`` session they are written into
+the installed release's ``skills/``.
+
+Model binding and approvals
+^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The model binding uses a custom provider with a literal key in
 ``config.yaml`` and supports only the ``openai`` dialect. Hermes's default
@@ -1088,6 +1135,107 @@ Descriptor fields
   run, rather than reported as drift.
 - ``quirks`` names an optional module for adapter-specific render checks
   and boot mutations.
+
+Model binding checks
+~~~~~~~~~~~~~~~~~~~~
+
+These checks restrict the configuration rendered from a harness tree for
+``claude``, ``dsh``, ``hermes``, ``pi``, and ``terminus``. They are not request-time
+model authorization: the proxy forwards ``model`` and ``models`` as sent, so a
+tool or plugin that constructs its own request can still name another model.
+
+For rendered configuration, Reef's model binding supplies the endpoint, model,
+and credential after the tree and replaces every value it writes. A tree may
+not contain an inline credential. The renderer accepts the binding's complete
+configuration shape and rejects tree entries that independently change model
+routing. The following groups describe the adapter-specific restrictions.
+
+Claude Code routing
+^^^^^^^^^^^^^^^^^^^
+
+Rendering rejects these settings:
+
+- In ``settings.json`` ``env``: ``ANTHROPIC_`` variables, cloud provider switches
+  and credentials (including Bedrock, Vertex, and Foundry), proxies, endpoints,
+  and model names. Names are matched without case, as on Windows.
+- Model choices such as ``model``, ``fallbackModel``, ``availableModels``,
+  ``modelOverrides``, and ``advisorModel``.
+- Credential helpers: ``apiKeyHelper``, ``awsAuthRefresh``,
+  ``awsCredentialExport``, ``gcpAuthRefresh``, and ``proxyAuthHelper``, plus
+  the login method.
+- ``model`` in command or skill frontmatter. An unreadable frontmatter block
+  is also rejected when it contains the word ``model`` or an escape.
+
+The binding writes the credential as ``ANTHROPIC_AUTH_TOKEN``.
+
+Hermes routing
+^^^^^^^^^^^^^^
+
+Rendering rejects alternative routes and model choices:
+
+- ``providers``, ``custom_providers``, ``fallback_model``, ``fallback_providers``,
+  ``moa`` presets (``presets``, or the older ``reference_models`` and
+  ``aggregator``), and ``auxiliary.openrouter_model``.
+- Aliases (``model_aliases``, ``model.aliases``) and endpoint, model, or credential
+  fields such as ``model.model``, ``model.name``, ``model.api_base``, and
+  ``model.key_env``. Top-level ``provider``, ``base_url``, and ``api_base``
+  are included because Hermes moves them into ``model``.
+- ``model.api_mode`` and ``model.openai_runtime``. These can bypass the custom
+  provider: ``bedrock_converse`` calls AWS Bedrock, while ``codex_app_server``
+  delegates to a ``codex app-server`` subprocess.
+- Provider, endpoint, credential, ``api_mode``, model, ``fallback_chain``, or
+  ``prefer_fast_model`` settings for auxiliary tasks, delegation, cron, or
+  ``curator.auxiliary``. An auxiliary provider may remain ``auto`` or ``main``
+  to use the main model.
+
+The binding writes the credential as ``model.api_key``.
+
+DeepSeek Harness routing
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Rendering rejects:
+
+- ``llm-pi-ai`` routes other than ``reef``, or fields on that route that the
+  binding does not write.
+- ``agent-default-model``, ``llm-deepseek``, and web-search endpoint/model
+  overrides.
+- Provider or model choices for the title call, subagents, declared agents,
+  or compaction summaries.
+- A patch entry naming another package, or JavaScript expressions in the
+  routing plugins, whose values cannot be inspected during rendering.
+
+The binding's credential is ``REEF_API_KEY``.
+
+Pi routing
+^^^^^^^^^^
+
+Rendering rejects providers in ``models.json`` other than ``reef``, fields on
+``reef`` that the binding does not write, ``enabledModels``, and ``httpProxy``.
+The latter would forward all calls through another host. The binding writes
+``providers.reef.apiKey``.
+
+Terminus routing
+^^^^^^^^^^^^^^^^
+
+Rendering rejects ``llm_kwargs`` fields that the binding does not write.
+It also rejects ``llm_call_kwargs`` arguments that select an endpoint, provider,
+credential, model, fallback, or logging callback, including ``base_url``,
+``api_base``, ``custom_llm_provider``, ``model``, and ``fallbacks``. The
+Terminus quirk lists the recognized routing arguments. The binding writes
+``llm_kwargs.api_key``.
+
+Request-body fields
+^^^^^^^^^^^^^^^^^^^
+
+A request body that a tree passes to the bound endpoint reaches the
+provider with the bound key, so rendering rejects one that names a model:
+``model``, or ``models``, which OpenRouter reads as fallback models. These
+bodies are the ``claude`` ``CLAUDE_CODE_EXTRA_BODY`` env value (which must
+be a JSON object), the hermes ``extra_body`` of an auxiliary task or of the
+curator, ``delegation.request_overrides`` with its ``extra_body``, and the
+terminus ``llm_call_kwargs`` (litellm sends a key it does not read in the
+body) with its ``extra_body``. Other body fields, such as OpenRouter's
+``provider`` preferences, stay admitted.
 
 Installed session files
 ~~~~~~~~~~~~~~~~~~~~~~~
