@@ -180,6 +180,7 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 _CONFIG_ENV = {
     "OPD_MODEL_PATH": "/root/models/Qwen3.5-9B-SFT",
     "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
+    "OPD_ADAPTER_PATH": "/root/models/Qwen3.5-9B-SFT-adapter",
     "REEF_TOKEN": "config-test-token",
     "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
     "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
@@ -400,6 +401,7 @@ def test_cookbook_training_configs_are_discovered() -> None:
         "recipes/sdft/examples/skill_stream/serve.yaml",
         "recipes/sdpo/examples/sciknoweval/serve.yaml",
         "recipes/opd/examples/math/serve.yaml",
+        "recipes/opd/examples/math/serve.lora-small.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/guidance_ttt/serve.yaml",
     }
@@ -427,6 +429,8 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/sdft/examples/skill_stream/serve.yaml",
         "recipes/sdpo/examples/sciknoweval/serve.yaml",
         "recipes/opd/examples/math/serve.yaml",
+        "recipes/opd/examples/math/serve.lora-small.yaml",
+        "recipes/opd/examples/math/results/2026-09-29-qwen3.5-9b/teacher/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

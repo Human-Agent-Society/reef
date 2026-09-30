@@ -225,5 +225,14 @@ The 4096-example SFT and 30-update efficacy experiment remain pending.
 
 For this change, 135 focused OPD, LoRA-import, teacher, and publication-recovery
 tests passed. Repository-wide pre-commit and mypy (337 source files) passed;
-new untracked source/configuration files also passed focused pre-commit. The
-full test suite is still running and is not claimed as passed here.
+new source/configuration files also passed focused pre-commit.
+
+The complete suite finished with 5311 passed, 166 skipped, and six failures.
+Three failures were caused by the existing Node.js installation missing from
+the checks process PATH. The other three required registering the shipped
+LoRA and teacher-control configurations and providing a representative
+`OPD_ADAPTER_PATH` in configuration tests. After those corrections, all 42
+configuration tests and all 128 harness recipe/step-record tests passed.
+Focused pre-commit also passed. The entire suite has not been rerun after
+these corrections; the initial full run and focused reruns are reported
+separately. No remaining failure from that full run is unresolved.
