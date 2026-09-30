@@ -370,6 +370,11 @@ class CordisRecipe(Recipe):
         object.__setattr__(self, "episode_workers", requirements.workers)
         if self.batch_policy not in ("reports", "records"):
             raise ValueError("batch_policy must be 'reports' or 'records'")
+        if self.batch_policy == "records" and self.eval_split_tasks is not None:
+            raise ValueError(
+                "batch_policy 'records' cannot take evolution.task_manifest: a records batch carries no report, so "
+                "it names no task, and the plays of an eval task would reach the proposer unnoticed"
+            )
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
@@ -451,7 +456,7 @@ class CordisRecipe(Recipe):
                     task = read_harbor_task(path)
                 except HarborTaskError as exc:
                     raise RecipeConfigError(str(exc)) from exc
-                eval_split_tasks[str(path)] = EvalSplitTask(task.digest, frozenset(task.source_agent_record_ids))
+                eval_split_tasks[str(path)] = EvalSplitTask(task.name, frozenset(task.source_agent_record_ids))
         elif tasks_root is not None:
             raise RecipeConfigError("evolution.tasks_root is only read with evolution.task_manifest")
         elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:

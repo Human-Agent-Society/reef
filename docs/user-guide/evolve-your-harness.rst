@@ -201,7 +201,8 @@ In ``auto`` mode, two settings determine when Reef should start a step:
   earlier batches are dropped.
 - ``records``: every inference counts as one unit. The report requirement is
   dropped entirely: recorded traffic alone batches, unscored, for methods
-  that judge for themselves.
+  that judge for themselves. A records batch names no task, so this policy
+  cannot take ``evolution.task_manifest``.
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -545,8 +546,10 @@ publishes accidentally.
   text.
 - With ``evolution.task_manifest``, eval failures stay in the evaluation
   record and never reach the proposer's failure manifest. An eval task is
-  exposed once a consumed batch names it, by its digest or by one of its
-  source records; an exposed task is not run again, and the step records the
+  exposed once a consumed batch names it, by its name, or once any commit of
+  the scenario consumed one of its source records, commits before a restart
+  included. An eval task that shares a source record with an exposed one is
+  exposed too. An exposed task is not run again, and the step records the
   count as ``not_run_tasks``. When every eval task is exposed, each step
   skips until a new manifest and a restart bring fresh eval tasks.
 - When the result is a rejection, Reef restores the snapshot it took before

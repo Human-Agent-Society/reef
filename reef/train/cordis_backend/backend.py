@@ -18,7 +18,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
@@ -33,6 +33,7 @@ from reef.core.evaluation import (
     UpdateCandidate,
 )
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
+from reef.core.tasks.split import task_groups
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
@@ -305,26 +306,34 @@ class HarnessCandidate(UpdateCandidate):
 
 @dataclass(frozen=True)
 class EvalSplitTask:
-    """A task of a task manifest's eval split: its digest and the source records it was made from."""
+    """A task of a task manifest's eval split: its name and the source records it was made from."""
 
-    digest: str
+    name: str
     source_record_ids: frozenset[str] = frozenset()
 
 
-def exposed_eval_digests(samples: Sequence[TrajectoryItem], eval_split_tasks: Mapping[str, EvalSplitTask]) -> set[str]:
-    """The digests of the eval split tasks the samples name, by the task's digest or by one of its source records."""
-    eval_digests = {task.digest for task in eval_split_tasks.values()}
-    exposed: set[str] = set()
-    sample_record_ids: set[str] = set()
+def named_tasks(samples: Sequence[TrajectoryItem]) -> set[str]:
+    """The names of the tasks the samples' reports named; the processor keeps a report's task on its sample."""
+    names: set[str] = set()
     for sample in samples:
-        # The task player names its task under metadata.task; the processor keeps it on the sample.
         task = sample.metadata.get("task")
-        digest = task.get("digest") if isinstance(task, Mapping) else None
-        if isinstance(digest, str) and digest in eval_digests:
-            exposed.add(digest)
-        sample_record_ids.update(sample.source_agent_record_ids)
-    exposed.update(task.digest for task in eval_split_tasks.values() if task.source_record_ids & sample_record_ids)
-    return exposed
+        if isinstance(task, Mapping) and isinstance(task.get("name"), str):
+            names.add(task["name"])
+    return names
+
+
+def exposed_eval_tasks(
+    eval_split_tasks: Mapping[str, EvalSplitTask], consumed_task_names: Collection[str], consumed_record_ids: set[str]
+) -> set[str]:
+    """The eval split tasks a consumed batch named, by name or by one of their source records, and every eval task
+    that shares a source record with one of them: a reworded sibling of a task the proposer saw is not held out."""
+    named = {
+        path
+        for path, task in eval_split_tasks.items()
+        if task.name in consumed_task_names or not task.source_record_ids.isdisjoint(consumed_record_ids)
+    }
+    groups = task_groups({path: task.source_record_ids for path, task in eval_split_tasks.items()})
+    return {path for group in groups if not named.isdisjoint(group) for path in group}
 
 
 #: Characters kept per text in the step record; a longer text ends in a clip marker.
@@ -862,6 +871,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # A task manifest's eval split: a task a consumed batch named is skipped, and eval failures stay out of the
         # proposer's failure manifest. None for prompt tasks.
         self.eval_split_tasks = None if eval_split_tasks is None else dict(eval_split_tasks)
+        # Every record a commit of the scenario consumed, the trainer's recovery included, for the eval split.
+        self.consumed_record_ids: set[str] = set()
         if step_record_dir is not None and not str(step_record_dir):
             raise ValueError("step_record_dir must be a non-empty path when set")
         if isinstance(models, ModelBinding):
@@ -1195,12 +1206,17 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         rejected = list(state.get("rejected_proposals", ()))
         if rejected:
             carried["rejected_proposals"] = rejected
-        # Every state this step returns carries the exposure, skips included: a skip consumes its batch too.
+        # Every state this step returns carries the tasks consumed batches named, skips included: a skip consumes
+        # its batch too. A task named before it joined the eval split is exposed once it does.
         exposed: set[str] = set()
         if self.eval_split_tasks is not None:
-            exposed = set(state.get("exposed_task_digests", ())) | exposed_eval_digests(samples, self.eval_split_tasks)
-            if exposed:
-                carried["exposed_task_digests"] = sorted(exposed)
+            consumed_task_names = set(state.get("consumed_task_names", ())) | named_tasks(samples)
+            if consumed_task_names:
+                carried["consumed_task_names"] = sorted(consumed_task_names)
+            batch_record_ids = {record_id for sample in samples for record_id in sample.source_agent_record_ids}
+            exposed = exposed_eval_tasks(
+                self.eval_split_tasks, consumed_task_names, self.consumed_record_ids | batch_record_ids
+            )
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(samples)}
         # The budgets stop a runaway automatic loop; a skip consumes its batch, so an instruction runs instead.
@@ -1251,7 +1267,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics["promoted_tasks"] = len(evaluation_tasks) - len(self._tasks)
         if self.eval_split_tasks is not None:
             # An eval task a consumed batch named is no longer held out, so the evaluation does not run it.
-            unexposed = tuple(task for task in evaluation_tasks if self.eval_split_tasks[task].digest not in exposed)
+            unexposed = tuple(task for task in evaluation_tasks if task not in exposed)
             if len(unexposed) < len(evaluation_tasks):
                 metrics["not_run_tasks"] = len(evaluation_tasks) - len(unexposed)
             if not unexposed:
@@ -1662,6 +1678,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         """Episodes compare candidate and current under one set of weights, so a result survives a weights change
         as the recipe's ``on_stale`` says: merged by default."""
         return self.on_stale
+
+    def observe_consumed_records(self, record_ids: frozenset[str]) -> None:
+        # Only an eval split needs them: a consumed source record exposes the eval task made from it.
+        if self.eval_split_tasks is not None:
+            self.consumed_record_ids.update(record_ids)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Discard this backend's render source after its commit is durable."""

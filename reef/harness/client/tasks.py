@@ -435,7 +435,7 @@ def main(argv: Sequence[str] | None = None, *, lab: TaskLab | None = None) -> in
         for task_path in task_paths:
             if not (task_path / "task.toml").is_file():
                 raise TaskPlayError(f"{task_path} is not a Harbor task directory: no task.toml")
-        # A test task is never trained on or proposed from, so its episodes send no report a scenario could consume.
+        # A test task is never trained on or proposed from, so its episodes send no report a reported recipe reads.
         is_reporting = arguments.manifest is None or arguments.side != "test"
         agent = json.loads(arguments.agent_json) if arguments.agent_json else None
         if agent is not None and not isinstance(agent, dict):
