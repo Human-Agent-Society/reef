@@ -33,6 +33,7 @@ from reef_client.client import ReefClient, ReefClientError
 
 from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, read_harbor_task
 from reef.harness.client.wrapper import CaptureProxy
+from reef.harness.episodes.trajectory import primary_reward
 
 #: Terminus 2 with its model and endpoint left to the binding, the same placeholders the adapter descriptors use.
 #: LiteLLM routes to api_base only under a provider prefix and strips it before the call, so Reef sees the model name.
@@ -143,10 +144,8 @@ def checked_labels(labels: Mapping[str, str]) -> dict[str, str]:
 
 
 def episode_reward(rewards: Mapping[str, float]) -> float | None:
-    """The verifier's reward: the ``reward`` entry, else the first one; None when the verifier wrote nothing finite."""
-    if not rewards:
-        return None
-    value = rewards["reward"] if "reward" in rewards else next(iter(rewards.values()))
+    """The verifier's primary reward (``primary_reward``); None when it names none or wrote nothing finite."""
+    value = primary_reward(rewards)
     if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
         return None
     return float(value)
@@ -312,6 +311,8 @@ class TaskPlayer:
         failed_calls = len(turns) - len(receipts)
         error = row.error or ("" if receipts else call_failure(turns))
         reward = episode_reward(row.rewards)
+        if row.rewards and primary_reward(row.rewards) is None and not error:
+            error = f"the verifier wrote {', '.join(sorted(row.rewards))} and no reward entry"
         report_ids: tuple[str, ...] = ()
         if self.is_reporting and reward is not None and receipts:
             try:

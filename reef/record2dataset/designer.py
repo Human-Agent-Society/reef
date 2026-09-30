@@ -120,7 +120,7 @@ HARBOR_RULES_TEXT = """RULES:
 - tests/test.sh is the verifier: it runs after the agent, with /tests holding the tests/ files, and writes one number in [0, 1] to /logs/verifier/reward.txt (1 for success). It checks the outcome, never the transcript, and needs nothing the image lacks. It writes the reward on every path, the failure path included (`echo 0 > /logs/verifier/reward.txt`), and the file holds the number only.
 - solution/solve.sh is a reference solution: the commands that complete the task from the same starting point. The task is accepted only if this script scores 1 and doing nothing scores below 1.
 - HIDDEN STATE: the task needs the agent to inspect the container (files, logs, a running process, a database) before it can act. The agent runs as the image's user: root unless the Dockerfile adds a user and switches to it with USER; the verifier always runs as root. An environment that answers the agent step by step (a game, a puzzle, a simulated tool) is a program in the image whose state the agent cannot read: keep the state under a root only path, run the agent as a non root user, and let a sudoers rule for that one command drive it.
-- TARGET: an agent at the frontier completes the task in one of four to three of four attempts; too easy or out of reach is refused later.
+- TARGET: an agent at the frontier completes the task in one of four to three of four attempts; a task it always or never completes teaches it little.
 - Files are plain text; paths are relative, no directories above the task, at most four levels."""
 
 HARBOR_OUTPUT_TEXT = """OUTPUT exactly one fenced json block and nothing else, with these keys:
