@@ -119,6 +119,15 @@ def _wrapper_quoted(text: str) -> str:
     return quoted.replace("\\", "\\\\").replace("$", "\\$").replace("`", "\\`")
 
 
+def probe_quoted(value: str) -> str:
+    """A descriptor env value for the version probe in shell: ``{root}`` becomes the scratch ``$PROBE_ROOT``."""
+    head, *rest = value.split("{root}")
+    text = _single_quoted(head) if head else ""
+    for part in rest:
+        text += '"$PROBE_ROOT"' + (_single_quoted(part) if part else "")
+    return text
+
+
 def _single_quoted(text: str) -> str:
     return "'" + text.replace("'", "'\\''") + "'"
 
@@ -282,10 +291,24 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         pin = f"{install.package}@{install.version}"
         steps = [f'        npm install --prefix "$PREFIX" {_single_quoted(pin)}']
         pattern = f'    *" {install.version} "*)'
+    # The probe gets the descriptor's env, each directory it relocates made under a scratch root that is removed
+    # after, so a binary that writes its state on --version (hermes, opencode) leaves the person's home alone.
+    relocated = [value for value in descriptor.env.values() if "{root}" in value]
     probe_env = " ".join(
-        f"{key}={_single_quoted(value)}" for key, value in descriptor.env.items() if "{root}" not in value
+        f"{key}={probe_quoted(value)}" if "{root}" in value else f"{key}={_single_quoted(value)}"
+        for key, value in descriptor.env.items()
     )
     probe = f'{probe_env} "$BINARY"'.lstrip()
+    version_line = f'    installed="$({probe} --version 2>/dev/null || true)"'
+    if relocated:
+        probe_lines = [
+            '    PROBE_ROOT="$(mktemp -d)"',
+            "    mkdir -p " + " ".join(probe_quoted(value) for value in relocated),
+            version_line,
+            '    rm -rf "$PROBE_ROOT"',
+        ]
+    else:
+        probe_lines = [version_line]
     return [
         f"# Ensure the pinned binary ({pin}) via the vendor's channel.",
         *prelude,
@@ -294,7 +317,7 @@ def _ensure_binary_lines(descriptor: AdapterDescriptor, install: InstallSpec) ->
         "}",
         'installed=""',
         f'if [ -x "$BINARY" ]{pin_check}; then',
-        f'    installed="$({probe} --version 2>/dev/null || true)"',
+        *probe_lines,
         "fi",
         'case " $installed " in',
         pattern,
@@ -727,7 +750,10 @@ def render_install_script(
         raise ValueError("content_id must be a non-empty string")
     install = descriptor.install
     if install is None:
-        raise DescriptorError(f"adapter {descriptor.name!r} declares no install section")
+        raise DescriptorError(
+            f"adapter {descriptor.name!r} declares no install section, so there is no install script or client "
+            "wrapper for it; GET /reef/harness serves its tree and POST /reef/train takes a request"
+        )
     env_var, compose_dir = descriptor.compose_relocation()
     wrapper_name = f"reef-{descriptor.name}"
     bindings = dict(binding_files or {})

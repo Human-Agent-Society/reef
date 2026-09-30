@@ -28,13 +28,17 @@ When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
   3. Runs the agent binary as a subprocess, with the adapter's
      ``client_args`` ahead of the person's arguments unless the first is one
      of its ``client_version_args``. SIGHUP (the terminal closed) and SIGTERM
-     are passed to the agent; once it exits, the steps below still run and
-     the wrapper exits 128 plus the signal number.
+     are passed to the agent, and Ctrl-C reaches it too, so the wrapper waits
+     for it to exit and prints no traceback; once it exits, the steps below
+     still run.
   4. After the agent exits, persists the captured receipts (the
-     ``x-reef-agent-record-id`` values from each response) to disk and
-     removes the temp copy. Before that, for codex, it keeps the folder trust
-     the person answered in the temp ``config.toml`` in ``~/.reef/trust``,
-     outside the install root, and adds it to the next session's copy.
+     ``x-reef-agent-record-id`` values from each response) to disk, removes
+     the temp copy, and exits with the agent's status: 128 plus the signal
+     number when the wrapper passed SIGHUP or SIGTERM on or a signal ended
+     the agent (130 for Ctrl-C). Before removing the copy, for codex, it
+     keeps the folder trust the person answered in the temp ``config.toml``
+     in ``~/.reef/trust``, outside the install root, and adds it to the next
+     session's copy.
 
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
@@ -186,7 +190,8 @@ wrapper also exports ``REEF_HARNESS_WRAPPER``, the path of the ``reef-<adapter>`
 script in ``~/.reef/installs/<sha256 of the install root>``, beside the
 record (at the install root, for an install made before Reef wrote it
 there), so an extension in the agent can run ``update`` and ``setup`` from
-the session.
+the session, and the descriptor's ``client_env`` variables, ``{root}`` in a
+value naming the install root, unless the shell already sets them.
 """
 
 from __future__ import annotations
@@ -201,6 +206,7 @@ import re
 import shlex
 import shutil
 import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -227,6 +233,7 @@ from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
+from reef.harness.episodes.vendor_install import version_probe_env
 from reef.harness.episodes.version_check import ships_version_check
 from reef.harness.step_result import design_sections, next_action, rejection_text
 
@@ -329,31 +336,75 @@ class WrapperError(Exception):
 
 @dataclass(frozen=True)
 class _Binding:
-    """One place the adapter's model binding writes ``{base_url}``: the target file, the key path, the template."""
+    """One place the adapter's model binding writes a placeholder: the target file, the key path, and per API
+    dialect the template there with the plain values the dialect writes beside it (pi and dsh name the API there)."""
 
     target: str
     path: tuple[str, ...]
-    template: str
-
-    @property
-    def suffix(self) -> str:
-        return self.template.split("{base_url}", 1)[1]
+    dialects: tuple[tuple[str, Mapping[str, str]], ...]
 
 
 def _bindings(descriptor: AdapterDescriptor, placeholder: str = "{base_url}") -> list[_Binding]:
     """The places the adapter's model binding renders ``placeholder``: Reef's address, or with ``{api_key}`` its token."""
-    found: dict[tuple[str, tuple[str, ...]], _Binding] = {}
+    found: dict[tuple[str, tuple[str, ...]], list[tuple[str, Mapping[str, str]]]] = {}
     for templates in descriptor.model_binding.values():
         for node in templates:
             target = str(node.get("target", "primary"))
             stack: list[tuple[tuple[str, ...], Any]] = [((), node.get("data", {}))]
             while stack:
                 path, value = stack.pop()
-                if isinstance(value, Mapping):
-                    stack.extend(((*path, str(key)), item) for key, item in value.items())
-                elif isinstance(value, str) and placeholder in value:
-                    found.setdefault((target, path), _Binding(target, path, value))
-    return list(found.values())
+                if not isinstance(value, Mapping):
+                    continue
+                for key, item in value.items():
+                    if isinstance(item, str) and placeholder in item:
+                        plain = {
+                            str(name): text
+                            for name, text in value.items()
+                            if isinstance(text, str) and "{" not in text
+                        }
+                        found.setdefault((target, (*path, str(key))), []).append((item, plain))
+                    else:
+                        stack.append(((*path, str(key)), item))
+    return [_Binding(target, path, tuple(dialects)) for (target, path), dialects in found.items()]
+
+
+def installed_url_suffix(binding: _Binding, file: Path, url: str) -> str:
+    """What the binding's template writes after ``{base_url}`` in the dialect the tree was installed with.
+
+    Dialects may share a key path but not the suffix: pi and dsh reach
+    anthropic at Reef's bare address and openai under ``/v1``. The installed
+    dialect is the one whose own plain values (the API name, which no other
+    dialect writes the same) sit beside ``url`` in the Reef entry: the
+    mapping under the binding's parent key, wherever the adapter's quirks
+    nested it (the items of a list sit under the list's key), so a second
+    provider at any address never decides it. A tree that shows none of
+    them gets the first dialect's suffix."""
+    suffixes = [template.split("{base_url}", 1)[1] for template, _ in binding.dialects]
+    if len(set(suffixes)) == 1:
+        return suffixes[0]
+    markers = [
+        (
+            suffix,
+            {key: text for key, text in plain.items() if any(other.get(key) != text for _, other in binding.dialects)},
+        )
+        for suffix, (_, plain) in zip(suffixes, binding.dialects, strict=True)
+    ]
+    parent = binding.path[-2] if len(binding.path) > 1 else None
+    try:
+        stack: list[tuple[str | None, Any]] = [(None, _parse_binding_file(file))]
+    except (WrapperError, ValueError, yaml.YAMLError):
+        return suffixes[0]
+    while stack:
+        holding_key, value = stack.pop()
+        if isinstance(value, list):
+            stack.extend((holding_key, item) for item in value)
+        elif isinstance(value, Mapping):
+            stack.extend((str(name), item) for name, item in value.items())
+            if holding_key == parent and value.get(binding.path[-1]) == url:
+                for suffix, dialect_values in markers:
+                    if dialect_values and all(value.get(key) == text for key, text in dialect_values.items()):
+                        return suffix
+    return suffixes[0]
 
 
 def _binding_file(descriptor: AdapterDescriptor, compose_dir: Path, binding: _Binding) -> Path:
@@ -408,9 +459,16 @@ def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
         if match is None:
             continue
         url = match.group("url").rstrip("/")
-        suffix = binding.suffix.rstrip("/")
+        suffix = installed_url_suffix(binding, file, match.group("url")).rstrip("/")
         return url[: -len(suffix)] if suffix and url.endswith(suffix) else url
     return None
+
+
+class BindingLoader(yaml.SafeLoader):
+    """Safe YAML that reads a tag a harness defines for itself (dsh's ``!!js`` expressions) as its plain scalar."""
+
+
+BindingLoader.add_constructor(None, lambda loader, node: loader.construct_scalar(node))
 
 
 def _parse_binding_file(file: Path) -> Any:
@@ -422,7 +480,7 @@ def _parse_binding_file(file: Path) -> Any:
     if suffix == ".toml":
         return tomllib.loads(text)
     if suffix in {".yaml", ".yml"}:
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=BindingLoader)
     if file.name == ".env" or suffix == ".env":
         pairs = (line.split("=", 1) for line in text.splitlines() if "=" in line and not line.lstrip().startswith("#"))
         return {key.strip(): value.strip().strip("\"'") for key, value in pairs}
@@ -511,9 +569,10 @@ def _materialize(temp: Path, compose: Path, relative: PurePosixPath) -> Path:
 def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port: int) -> None:
     """Copy each binding file into the temp copy with the binding's URL, and only it, pointed at the proxy.
 
-    The rewritten value is the proxy plus the template's own suffix (``/v1``
-    where the adapter expects it), whatever the tree spelled, so the agent's
-    request paths land where the proxy captures them."""
+    The rewritten value is the proxy plus the template's suffix in the dialect
+    the tree was installed with (``/v1`` where that dialect expects it),
+    whatever the tree spelled, so the agent's request paths land where the
+    proxy captures them."""
     descriptor = get_adapter(adapter)
     proxy = f"http://127.0.0.1:{proxy_port}"
     for binding in _bindings(descriptor):
@@ -525,7 +584,7 @@ def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port:
         if match is None:
             continue
         span = match.span("url")
-        text = text[: span[0]] + proxy + binding.suffix + text[span[1] :]
+        text = text[: span[0]] + proxy + installed_url_suffix(binding, src, match.group("url")) + text[span[1] :]
         dst = _materialize(temp_dir, compose_dir, PurePosixPath(src.relative_to(compose_dir).as_posix()))
         if dst.is_symlink() or dst.exists():
             dst.unlink()
@@ -756,6 +815,21 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
+class CaptureProxyServer(ThreadingHTTPServer):
+    """The proxy's HTTP server, quiet when a client resets a connection.
+
+    An agent that drops a kept alive connection with a reset, as hermes does
+    on every run, ends that connection normally, so no traceback reaches the
+    person's terminal; every other error still prints one."""
+
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        if isinstance(sys.exc_info()[1], ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
+
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
@@ -787,7 +861,7 @@ class CaptureProxy:
         self._store = _TaggedStore(self.tags)
         handler = build_handler(self._config, self._store)
         self._handler = handler if observer is None else _observing_handler(handler, observer)
-        self._server: ThreadingHTTPServer | None = None
+        self._server: CaptureProxyServer | None = None
 
     @property
     def port(self) -> int:
@@ -796,7 +870,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
+        server = CaptureProxyServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):
@@ -1134,6 +1208,24 @@ def keep_client_files(kept: Mapping[ClientState, PurePosixPath], temp: Path, com
         os.replace(staging, destination)
 
 
+#: Where an adapter's binary keeps the sessions a person resumes, and the file name around a session's id. The
+#: binary's own exit hint names the bare vendor command, which runs outside this install and its proxy.
+RESUMABLE_SESSION_LAYOUTS = {"hermes": ("sessions", "session_", ".json")}
+
+
+def resumable_session_mtimes(adapter: str, compose_dir: str) -> dict[str, float]:
+    """The ids of the sessions the adapter's binary keeps in the installed tree, each with its file's mtime."""
+    session_layout = RESUMABLE_SESSION_LAYOUTS.get(adapter)
+    if session_layout is None:
+        return {}
+    directory, prefix, suffix = session_layout
+    return {
+        path.name[len(prefix) : -len(suffix)]: path.stat().st_mtime
+        for path in (Path(compose_dir) / directory).glob(f"{prefix}*{suffix}")
+        if path.is_file()
+    }
+
+
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
     descriptor = get_adapter(adapter)
     install_root = Path(compose_dir).parent.resolve()
@@ -1256,9 +1348,10 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             if subdir in path.parents and not is_client_state(descriptor, path)
         )
     env = os.environ.copy()
-    # What an interactive run needs beyond the episode env; the person's own setting wins.
+    # What an interactive run needs beyond the episode env, {root} naming the install root (a directory
+    # outside the relocated composition is read in place); the person's own setting wins.
     for key, value in descriptor.client_env.items():
-        env.setdefault(key, value)
+        env.setdefault(key, value.replace("{root}", str(install_root)))
     # The values the person gave setup, for the extensions that read them; a variable the shell sets wins.
     for key, value in stored.items():
         if not env.get(key):
@@ -1288,6 +1381,7 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
+    session_mtimes_before = resumable_session_mtimes(adapter, compose_dir)
     # Ahead of the person's arguments: a binary that reads the last of a repeated flag keeps the person's.
     # A version flag starts no session, and a binary may take it only when nothing is ahead of it.
     leading_args = () if args and args[0] in descriptor.client_version_args else descriptor.client_args
@@ -1301,10 +1395,17 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
         if agent is not None:
             agent.send_signal(signum)
 
-    # A signal the caller ignores (nohup) stays ignored, for the agent too.
+    def leave_to_agent(signum: int, frame: FrameType | None) -> None:
+        return None
+
+    # A signal the caller ignores (nohup) stays ignored, for the agent too. Ctrl-C reaches the agent itself, in the
+    # same process group, so the wrapper only waits for it: a handler that does nothing, not SIG_IGN, since exec
+    # resets it and the agent keeps the default action, and no KeyboardInterrupt can land between waitpid reaping
+    # the agent and Popen recording its status, which would lose the status and read as 0.
+    handlers = {signal.SIGHUP: forward, signal.SIGTERM: forward, signal.SIGINT: leave_to_agent}
     previous = {
-        signum: signal.signal(signum, forward)
-        for signum in (signal.SIGHUP, signal.SIGTERM)
+        signum: signal.signal(signum, handler)
+        for signum, handler in handlers.items()
         if signal.getsignal(signum) is not signal.SIG_IGN
     }
     temp_dir: str | None = None
@@ -1316,7 +1417,6 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             add_codex_trust(compose_dir, Path(temp_dir) / "config.toml")
         env[env_var] = temp_dir
         if not received:
-            # As subprocess.run does: Ctrl-C reaches the agent too, and a KeyboardInterrupt here kills it.
             with subprocess.Popen([binary, *leading_args, *args], env=env) as agent:
                 if received:
                     agent.send_signal(received[0])  # it came while the agent started
@@ -1339,7 +1439,22 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
             for signum, handler in previous.items():
                 signal.signal(signum, handler)
 
-    sys.exit(128 + received[0] if received else returncode)
+    # The one session this run wrote, by its file: the newest row would pick a session another run keeps open.
+    written_session_ids = [
+        session_id
+        for session_id, mtime in resumable_session_mtimes(adapter, compose_dir).items()
+        if session_mtimes_before.get(session_id) != mtime
+    ]
+    if len(written_session_ids) == 1:
+        print(
+            f"reef-{adapter}: resume this session with: reef-{adapter} --resume {written_session_ids[0]}",
+            file=sys.stderr,
+        )
+    # As a shell reports it: 128 plus the signal the wrapper passed on, or the one that ended the agent (130 after
+    # Ctrl-C).
+    if received:
+        sys.exit(128 + received[0])
+    sys.exit(128 - returncode if returncode < 0 else returncode)
 
 
 def _reportable(turn: Mapping[str, Any]) -> bool:
@@ -2523,7 +2638,12 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             rows.append((False, "service", f"{upstream} unreachable: {exc}"))
     if Path(binary).is_file():
         try:
-            version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            # The descriptor's env on a scratch root: hermes writes a home skeleton on --version.
+            with tempfile.TemporaryDirectory(prefix="reef-probe-") as probe_root:
+                probe_env = {**os.environ, **version_probe_env(get_adapter(adapter), Path(probe_root))}
+                version = subprocess.run(
+                    [binary, "--version"], capture_output=True, text=True, timeout=20, env=probe_env
+                )
             first = (version.stdout or version.stderr).strip().splitlines()
             rows.append((version.returncode == 0, "binary", f"{binary} ({first[0] if first else 'no output'})"))
         except (OSError, subprocess.TimeoutExpired) as exc:

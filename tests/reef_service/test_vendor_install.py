@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -287,6 +288,25 @@ def test_version_probe_uses_the_adapters_offline_and_update_guards(monkeypatch, 
     on_path(_npm_shim(tmp_path, log))
     assert resolve_binary(get_adapter("pi"), prefix=prefix) == str(binary)
     assert not log.exists()
+
+
+@pytest.mark.unit
+def test_version_probe_writes_nothing_in_the_home_directory(monkeypatch, tmp_path, on_path) -> None:
+    """The service probes with the descriptor's directories on a scratch root it removes, as the install does."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    prefix = tmp_path / "prefix"
+    binary = _write_executable(
+        prefix / "node_modules/.bin/pi",
+        '#!/bin/sh\nstate="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n',
+    )
+    log = tmp_path / "npm.log"
+    on_path(_npm_shim(tmp_path, log))
+    assert resolve_binary(get_adapter("pi"), prefix=prefix) == str(binary)
+    assert not log.exists() and not (tmp_path / "home" / ".pi").exists()
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.unit

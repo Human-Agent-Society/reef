@@ -15,6 +15,7 @@ import yaml
 import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
+from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
 from reef.harness.adapters.opencode.quirks import read_frontmatter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
 from reef.harness.tree.mutations import Mutation, admit_mutations
@@ -55,7 +56,9 @@ def golden_tree(adapter: str) -> dict[str, str]:
 
 
 def test_pi_render_matches_the_golden_tree() -> None:
-    assert render_composition(NODES, get_adapter("pi")) == golden_tree("pi")
+    # pi keeps every model call on the binding, so the provider and model choice in NODES are swapped for a setting.
+    nodes = [("config", {"data": {"defaultThinkingLevel": "off"}}), *(node for node in NODES if node[0] != "config")]
+    assert render_composition(nodes, get_adapter("pi")) == golden_tree("pi")
 
 
 def test_opencode_render_matches_the_golden_tree() -> None:
@@ -217,17 +220,21 @@ def test_terminus_renders_one_extension_without_executing_it() -> None:
         render_composition([node, ("code_extension", {**node[1], "name": "second"})], get_adapter("terminus"))
 
 
-def test_terminus_binding_renders_the_litellm_provider() -> None:
+@pytest.mark.parametrize("model", ["m1", "qwen/qwen3-coder"])
+def test_terminus_binding_renders_the_litellm_provider(model: str) -> None:
     descriptor = get_adapter("terminus")
-    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model=model, api_key="k-1")
     files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
     config = json.loads(files["terminus/config.json"])
-    assert config["model_name"] == "m1"
+    # The served name stays the model name Harbor looks the context limit up under; litellm_proxy routes litellm
+    # to api_base whatever vendor prefix that name carries, with the tree's call arguments in the request body.
+    assert config["model_name"] == model
     assert config["api_base"] == "http://127.0.0.1:9/v1"
-    assert config["llm_kwargs"] == {"api_key": "k-1"}
+    assert config["llm_kwargs"] == {"api_key": "k-1", "custom_llm_provider": "litellm_proxy"}
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
+DSH_WEB_PATCH = "dsh/profiles/web/cordis.patch.yml"
 
 
 def _dsh_nodes():
@@ -274,6 +281,127 @@ def test_dsh_quirks_emit_the_patch_layer_the_env_file_and_skill_frontmatter() ->
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
+    own = ("skill", {"name": "own", "text": "---\r\nname: own\r\ndescription: mine\r\n---\r\nBody.\r\n"})
+    assert render_composition([own], descriptor)["dsh/skills/own/SKILL.md"] == own[1]["text"]
+    # The web profile reef-dsh web boots: the same defaults and binding (the config node targets the headless
+    # patch alone), the headless profile's extension by relative path, and a manifest that reads the patch once.
+    web = yaml.safe_load(files[DSH_WEB_PATCH].replace("!!js ", ""))
+    assert web[:-1] == [row for row in patch[:-1] if row["id"] != "agent-loop"]
+    assert web[-1] == {"insert": [{"id": "extension-tracer", "name": "../headless/extensions/tracer.mjs"}]}
+    assert json.loads(files["dsh/profiles/web/package.json"]) == {
+        "name": "dsh-profile-web",
+        "private": True,
+        "dependencies": {},
+        "dsh": {
+            "profile": {"bundles": ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"], "patchReload": "startup"}
+        },
+    }
+
+
+def test_dsh_command_with_its_own_frontmatter_stays_user_only() -> None:
+    """A command's frontmatter, read the way dsh reads it, keeps the node's keys, but only the person can run it,
+    and a name or description dsh would not accept is filled in; frontmatter that does not parse is refused."""
+    descriptor = get_adapter("dsh")
+    path = "dsh-agents/skills/chat/SKILL.md"
+    user_only = "---\nname: chat\ndescription: Chat\ndisable-model-invocation: true\n---\n"
+
+    def command(text: str) -> str:
+        return render_composition([("agent_command", {"name": "chat", "text": text})], descriptor)[path]
+
+    own = "---\nname: chat\ndescription: Enter chat mode\nwhenToUse: on request\n---\n# Chat\n\nSearch only.\n"
+    assert command(own) == (
+        "---\nname: chat\ndescription: Enter chat mode\nwhenToUse: on request\ndisable-model-invocation: true\n"
+        "---\n# Chat\n\nSearch only.\n"
+    )
+    # The node cannot make its command model invocable or hide it from the person, and dsh ignores a skill that
+    # holds a camelCase invocation key.
+    flipped = "---\nname: chat\ndescription: Chat\ndisable-model-invocation: false\nuser-invocable: false\n---\nBody\n"
+    assert command(flipped) == user_only + "Body\n"
+    legacy = "---\nname: chat\ndescription: Chat\nuserInvocable: true\ndisableModelInvocation: false\nmodelInvocable: true\n"
+    assert command(legacy + "---\nBody\n") == user_only + "Body\n"
+    # dsh ignores a skill whose name is not a skill name or whose description is empty or not a string, so a header
+    # that lacks either, or holds another value, gets the one a header without frontmatter gets.
+    for header in (
+        "description: Chat",
+        "name:\ndescription: ''",
+        "name: 123\ndescription: [a]",
+        "name: Chat Mode",
+        "description: 09",
+    ):
+        assert command(f"---\n{header}\n---\n# Chat\n") == user_only + "# Chat\n"
+    for empty in ("---\n---\n# Chat\n", "---\n~\n---\n# Chat\n"):
+        assert command(empty) == user_only + "# Chat\n"
+    # dsh reads YAML 1.2, where Yes and 1:30 are strings, so the header does too, and every header is written so
+    # that YAML 1.2 reads a string back where YAML 1.1 or 1.2 would read another type.
+    for written in ("Yes", "off", "1:30", "=", "'09'", "'0o17'"):
+        value = written.strip("'")
+        assert command(f"---\nname: chat\ndescription: {written}\n---\nBody\n") == (
+            f"---\nname: chat\ndescription: '{value}'\ndisable-model-invocation: true\n---\nBody\n"
+        )
+    assert command("1e3\n") == "---\nname: chat\ndescription: '1e3'\ndisable-model-invocation: true\n---\n1e3\n"
+    # A scalar tagged ! is a string to dsh, so the name true and the description 123 are kept, a list tagged ! is
+    # a list, and a quoted true with a newline is written quoted again.
+    assert command("---\nname: ! true\ndescription: ! 123\nx: ! [a]\n---\nBody\n") == (
+        "---\nname: 'true'\ndescription: '123'\nx:\n- a\ndisable-model-invocation: true\n---\nBody\n"
+    )
+    assert command('---\nname: chat\ndescription: ! "true\\n"\n---\nBody\n') == (
+        "---\nname: chat\ndescription: 'true\n\n  '\ndisable-model-invocation: true\n---\nBody\n"
+    )
+    # dsh takes a fence line less one trailing carriage return, and a close at the end of the file.
+    assert command("---\r\nname: chat\r\ndescription: Chat\r\n---\r\nBody\r\n") == user_only + "Body\r\n"
+    assert command("---\nname: chat\ndescription: Chat\n---") == user_only
+    for broken, reason in (
+        ("---\nname: [chat\n---\nBody\n", "not valid YAML"),
+        ("---\nname: chat\ndescription: !!binary aGk=\n---\nBody\n", "not valid YAML: a value has the tag"),
+        ("---\n- chat\n---\nBody\n", "not a YAML mapping"),
+        ("---\nname: chat\nx: " + "[" * 3000 + "]" * 3000 + "\n---\nBody\n", "nested too deeply"),
+        # An integer past Python's digit limit fails its conversion; the proposal is refused, the step goes on.
+        ("---\nname: chat\nx: " + "9" * 4301 + "\n---\nBody\n", "cannot read"),
+        ("---\nname: chat\ndescription: Chat\nBody\n", "never closes"),
+        ("---\r\nname: chat\r\ndescription: Chat\r\nBody\r\n", "never closes"),
+    ):
+        with pytest.raises(RenderError, match=f"{path} .*{reason}"):
+            command(broken)
+
+
+def test_dsh_command_frontmatter_that_cannot_be_written_again_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A header that loaded can still fail to be written again (nesting the writer recurses on); that is a refusal
+    of the proposal, never an exception out of render."""
+    import reef.harness.adapters.dsh.quirks as dsh_quirks
+
+    def deep(*args: object, **kwargs: object) -> str:
+        raise RecursionError("maximum recursion depth exceeded")
+
+    monkeypatch.setattr(dsh_quirks.yaml, "dump", deep)
+    text = "---\nname: chat\ndescription: Chat\n---\nBody\n"
+    with pytest.raises(RenderError, match="cannot write again"):
+        dsh_quirks._with_frontmatter("dsh-agents/skills/chat/SKILL.md", text, True)
+
+
+@pytest.mark.parametrize(
+    ("api", "route_api", "base_url"),
+    [
+        ("openai", "openai-completions", "http://127.0.0.1:9/v1"),
+        ("anthropic", "anthropic-messages", "http://127.0.0.1:9"),
+    ],
+)
+def test_dsh_binds_both_profiles_in_every_dialect(api, route_api, base_url) -> None:
+    """The headless and the web patch each carry the same Reef route and default model, in the dialect bound."""
+    descriptor = get_adapter("dsh")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1", api=api)
+    files = render_composition([*_dsh_nodes(), *binding.compose_nodes(descriptor)], descriptor)
+    route = {
+        "displayName": "Reef",
+        "apiKeyEnv": "REEF_API_KEY",
+        "api": route_api,
+        "baseURL": base_url,
+        "models": [{"id": "m1"}],
+    }
+    for patch_path in (DSH_PATCH, DSH_WEB_PATCH):
+        by_id = {row["id"]: row for row in yaml.safe_load(files[patch_path].replace("!!js ", "")) if "id" in row}
+        assert by_id["llm-pi-ai"]["config"] == {"providers": {"reef": route}}, patch_path
+        assert by_id["agent-default-model"]["config"] == {"provider": "reef", "model": "m1"}, patch_path
+    assert files["dsh/.env"] == "REEF_API_KEY=k-1\n"
 
 
 def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
@@ -286,6 +414,27 @@ def test_dsh_quirks_refuse_a_patch_that_breaks_the_episode() -> None:
         render_composition([("config", {"data": {"session-telemetry-otel": {"disabled": False}}})], descriptor)
     with pytest.raises(RenderError, match="must be an object"):
         render_composition([("config", {"data": {"agent-loop": "nope"}})], descriptor)
+    with pytest.raises(RenderError, match="must be an object"):
+        render_composition([("config", {"data": {"session-persistence-jsonl": "zstd"}})], descriptor)
+    # The web profile's patch is held to the same checks: a compressed web profile refuses the shared sessions root.
+    with pytest.raises(RenderError, match=f"uncompressed .* in {DSH_WEB_PATCH}"):
+        render_composition(
+            [
+                (
+                    "config",
+                    {"target": "web", "data": {"session-persistence-jsonl": {"config": {"compression": "zstd"}}}},
+                )
+            ],
+            descriptor,
+        )
+    with pytest.raises(RenderError, match=f"session-title-llm disabled in {DSH_WEB_PATCH}"):
+        render_composition(
+            [("config", {"target": "web", "data": {"session-title-llm": {"disabled": False}}})], descriptor
+        )
+    # And its manifest keeps the patch read once at start: with live reload dsh web exits at start.
+    live = {"dsh": {"profile": {"patchReload": "live"}}}
+    with pytest.raises(RenderError, match="patchReload startup"):
+        render_composition([("config", {"target": "web_manifest", "data": live})], descriptor)
 
 
 HERMES_CONFIG = "hermes/config.yaml"
@@ -320,11 +469,17 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
     # An OpenRouter host is hermes's own provider, whose key it reads from the environment or its home's .env.
     assert files["hermes/.env"] == "OPENAI_API_KEY=k-1\n"
     assert config["agent"] == {"max_turns": 40}
-    # The defaults that keep an episode hermetic and single request, and the second skill root.
-    assert config["approval"] == {"tirith_enabled": False}
+    # The defaults that keep an episode hermetic and single request, and the second skill root, found beside
+    # the episode home and, in a reef-hermes session whose home is a temp copy, at the install root.
+    assert config["security"] == {"tirith_enabled": False} and "approval" not in config
     assert config["auxiliary"] == {"title_generation": {"enabled": False}}
     assert config["memory"] == {"nudge_interval": 0} and config["sessions"] == {"write_json_snapshots": True}
-    assert config["skills"] == {"external_dirs": ["${HERMES_HOME}/../hermes-commands"]}
+    # No background review or curator writes skills into the tree: in a reef-hermes session it is the release.
+    assert config["curator"] == {"enabled": False}
+    assert config["skills"] == {
+        "creation_nudge_interval": 0,
+        "external_dirs": ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"],
+    }
     # A rendered plugin is enabled and granted, and gets its manifest.
     assert config["plugins"] == {
         "enabled": ["tracer"],
@@ -344,17 +499,101 @@ def test_hermes_quirks_emit_the_config_the_plugin_grants_and_skill_frontmatter()
     )
     own = ("skill", {"name": "own", "text": "---\nname: own\ndescription: mine\n---\nBody.\n"})
     assert render_composition([own], descriptor)["hermes/skills/own/SKILL.md"] == own[1]["text"]
-    assert files["hermes/SOUL.md"] == "Answer briefly.\n\nPrefer the standard library.\n"
+    # The rules follow hermes's own identity, which hermes writes only to a SOUL.md that does not exist yet; a tree
+    # that already starts with it is left as it is.
+    assert files["hermes/SOUL.md"] == f"{DEFAULT_IDENTITY}\n\nAnswer briefly.\n\nPrefer the standard library.\n"
+    kept = render_composition([("rules", {"text": f"{DEFAULT_IDENTITY}\n\nMine."})], descriptor)["hermes/SOUL.md"]
+    assert kept.count(DEFAULT_IDENTITY) == 1
 
 
 def test_hermes_quirks_refuse_a_config_that_breaks_the_episode() -> None:
     descriptor = get_adapter("hermes")
     with pytest.raises(RenderError, match="tirith_enabled false"):
-        render_composition([("config", {"data": {"approval": {"tirith_enabled": True}}})], descriptor)
+        render_composition([("config", {"data": {"security": {"tirith_enabled": True}}})], descriptor)
     with pytest.raises(RenderError, match=r"title_generation\.enabled false"):
         render_composition([("config", {"data": {"auxiliary": {"title_generation": {"enabled": True}}}})], descriptor)
     with pytest.raises(RenderError, match="write_json_snapshots true"):
         render_composition([("config", {"data": {"sessions": {"write_json_snapshots": False}}})], descriptor)
+    for review in ({"memory": {"nudge_interval": 10}}, {"skills": {"creation_nudge_interval": 10}}):
+        with pytest.raises(RenderError, match=r"skills\.creation_nudge_interval 0"):
+            render_composition([("config", {"data": review})], descriptor)
+    with pytest.raises(RenderError, match=r"curator\.enabled false"):
+        render_composition([("config", {"data": {"curator": {"enabled": True}}})], descriptor)
+
+
+def test_hermes_admission_refuses_a_config_section_that_is_not_an_object() -> None:
+    """A config mutation that turns a section the render checks read into a string or a list is a refused
+    proposal, not an error raised out of the admission."""
+    descriptor = get_adapter("hermes")
+    sections = (
+        {"security": "off"},
+        {"auxiliary": {"title_generation": "off"}},
+        {"memory": "on"},
+        {"skills": "notes"},
+        {"curator": "on"},
+        {"sessions": [True]},
+    )
+    for data in sections:
+        entries, refusal = admit_mutations(
+            [], [Mutation("create", "c1", {"name": "config", "config": {"data": data}})], descriptor
+        )
+        assert entries == [] and refusal is not None and refusal.startswith("hermes composition must keep"), data
+    tracer = Mutation(
+        "create",
+        "e1",
+        {"name": "code_extension", "config": {"name": "tracer", "code": "def register(ctx):\n    pass\n"}},
+    )
+    for plugins in ("tracer", {"entries": ["tracer"]}, {"entries": {"tracer": "on"}}):
+        config = Mutation("create", "c1", {"name": "config", "config": {"data": {"plugins": plugins}}})
+        entries, refusal = admit_mutations([], [config, tracer], descriptor)
+        assert entries == [] and refusal is not None and "each rendered plugin's entry objects" in refusal, plugins
+
+
+def test_hermes_admission_refuses_plugin_names_that_are_not_a_list_of_strings() -> None:
+    """The grant adds the rendered plugin to plugins.enabled and tools.override to its granted_capabilities. A value
+    there that is not a list of strings is a refused proposal: not an error raised out of the admission, and not a
+    string or an object read one character or key at a time. The tree's own names stay ahead of the grant's."""
+    descriptor = get_adapter("hermes")
+    extension = ("code_extension", {"name": "tracer", "code": "def register(ctx):\n    pass\n"})
+    tracer = Mutation("create", "e1", {"name": "code_extension", "config": extension[1]})
+    for value in (1, True, 1.5, "", "tracer", {"tracer": True}, ["tracer", 2]):
+        for key, plugins in (
+            ("plugins.enabled", {"enabled": value}),
+            ("plugins.entries.tracer.granted_capabilities", {"entries": {"tracer": {"granted_capabilities": value}}}),
+        ):
+            config = Mutation("create", "c1", {"name": "config", "config": {"data": {"plugins": plugins}}})
+            entries, refusal = admit_mutations([], [config, tracer], descriptor)
+            assert entries == [] and refusal == f"hermes composition must keep {key} a list of strings", (key, value)
+    own = {"enabled": ["other"], "entries": {"tracer": {"granted_capabilities": ["llm.model_override"]}}}
+    files = render_composition([("config", {"data": {"plugins": own}}), extension], descriptor)
+    assert yaml.safe_load(files[HERMES_CONFIG])["plugins"] == {
+        "enabled": ["other", "tracer"],
+        "entries": {"tracer": {"granted_capabilities": ["llm.model_override", "tools.override"]}},
+    }
+
+
+def test_hermes_quirks_add_both_commands_roots_after_the_external_dirs_a_tree_sets() -> None:
+    """A config node's list replaces the one below it, so a tree that sets skills.external_dirs would drop the
+    commands roots and every agent command would be unknown to hermes; the roots follow the tree's own entries, and
+    a string is one entry, as hermes reads it. A value hermes cannot read as entries is a refused proposal."""
+    descriptor = get_adapter("hermes")
+    roots = ["${HERMES_HOME}/../hermes-commands", "${REEF_HARNESS_DEST}/hermes-commands"]
+    for listed, expected in (
+        ([], roots),
+        (None, roots),
+        ("extra", ["extra", *roots]),
+        (["extra"], ["extra", *roots]),
+        ([roots[1], "extra"], [roots[1], "extra", roots[0]]),
+    ):
+        files = render_composition([("config", {"data": {"skills": {"external_dirs": listed}}})], descriptor)
+        assert yaml.safe_load(files[HERMES_CONFIG])["skills"]["external_dirs"] == expected, listed
+    refused = "hermes composition must keep skills.external_dirs a list of strings"
+    for listed in (1, True, 1.5, {"extra": True}, ["extra", 2]):
+        config = Mutation(
+            "create", "c1", {"name": "config", "config": {"data": {"skills": {"external_dirs": listed}}}}
+        )
+        entries, refusal = admit_mutations([], [config], descriptor)
+        assert entries == [] and refusal == refused, listed
 
 
 NATIVE_TOOL = (
@@ -390,12 +629,12 @@ def test_native_render_matches_the_golden_tree() -> None:
 def test_config_nodes_deep_merge_in_tree_order() -> None:
     files = render_composition(
         [
-            ("config", {"data": {"compaction": {"enabled": True, "keep": 4}, "defaultProvider": "a"}}),
+            ("config", {"data": {"compaction": {"enabled": True, "keep": 4}, "defaultThinkingLevel": "off"}}),
             ("config", {"data": {"compaction": {"keep": 8}}}),  # later node wins per key
         ],
         get_adapter("pi"),
     )
-    assert '"defaultProvider": "a"' in files["pi-agent/settings.json"]  # sibling keys survive the merge
+    assert '"defaultThinkingLevel": "off"' in files["pi-agent/settings.json"]  # sibling keys survive the merge
     assert '"enabled": true' in files["pi-agent/settings.json"]
     assert '"keep": 8' in files["pi-agent/settings.json"]
 
@@ -856,11 +1095,17 @@ def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> Non
         "pi": (ClientState("pi-agent/sessions", "directory"), ClientState("pi-agent/settings.json", "file")),
         "claude": (ClientState("claude/projects", "directory"), ClientState("claude/.claude.json", "file")),
         "codex": (ClientState("codex/sessions", "directory"),),
-        "hermes": (ClientState("hermes/state.db", "sqlite"),),
+        "hermes": (
+            ClientState("hermes/state.db", "sqlite"),
+            ClientState("hermes/sessions", "directory"),
+            ClientState("hermes/logs", "directory"),
+        ),
         "dsh": (
             ClientState("dsh/.credentials.yaml", "file"),
             ClientState("dsh/settings.yaml", "file"),
             ClientState("dsh/.agent-presets", "directory"),
+            ClientState("dsh/sessions", "directory"),
+            ClientState("dsh/storages", "directory"),
         ),
     }
 
@@ -890,6 +1135,34 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("host_env", ["DOCKER_HOST"], "'host_env' must map variable names"),
+        ("host_env", {"NOT A NAME": ""}, "'host_env' must map variable names"),
+        ("host_env", {"PI_CODING_AGENT_DIR": ""}, "'env' already sets: PI_CODING_AGENT_DIR"),
+        ("is_root_bind_mounted", "yes", "'is_root_bind_mounted' must be a boolean"),
+    ],
+)
+def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
+    data[field] = value
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=message):
+        load_descriptor(target)
+
+
+def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
+    """Every other bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
+    terminus = get_adapter("terminus")
+    assert terminus.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
+    assert terminus.is_root_bind_mounted
+    for name in sorted(set(available_adapters()) - {"terminus"}):
+        descriptor = get_adapter(name)
+        assert descriptor.host_env == {} and not descriptor.is_root_bind_mounted, name
 
 
 def test_a_client_state_file_that_is_a_config_target_names_the_keys_the_binary_may_change() -> None:

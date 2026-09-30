@@ -15,6 +15,9 @@ precedence over repository guidance.
 - Before opening an issue or pull request, search existing issues and PRs for
   overlapping work. Follow the RFC criteria in `CONTRIBUTING.md` for changes to
   architecture, public contracts, persistence, or project policy.
+- Before drafting or updating an issue or RFC, follow
+  [Issue and RFC writing](CONTRIBUTING.md#issue-and-rfc-writing). Keep the
+  proposal concise; do not expand the design just to fill template sections.
 - Reproduce bugs and inspect the relevant implementation before changing it.
   Avoid speculative fixes, unrelated formatting, and unnecessary abstractions.
 - Before submitting a pull request, review every changed line against

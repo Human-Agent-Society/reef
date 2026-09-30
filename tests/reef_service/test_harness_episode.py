@@ -8,6 +8,8 @@ import json
 import os
 import sqlite3
 import stat
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -41,7 +43,12 @@ session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 session_dir.mkdir(parents=True, exist_ok=True)
 rules_path = agent_dir / "AGENTS.md"
 events = [
-    {"type": "session", "root": str(agent_dir.parent), "offline": os.environ.get("PI_OFFLINE")},
+    {
+        "type": "session",
+        "root": str(agent_dir.parent),
+        "offline": os.environ.get("PI_OFFLINE"),
+        "docker_host": os.environ.get("DOCKER_HOST"),
+    },
     {"type": "agent_end", "prompt": prompt, "rules": rules_path.read_text() if rules_path.exists() else ""},
 ]
 (session_dir / "session.jsonl").write_text("".join(json.dumps(event) + "\\n" for event in events))
@@ -204,6 +211,18 @@ def test_episode_root_is_removed_after_the_run(tmp_path: Path) -> None:
     assert not root.exists()
 
 
+def test_an_adapter_without_host_env_keeps_no_service_variable_and_roots_in_the_temp_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only terminus declares host_env and is_root_bind_mounted; every other episode stays hermetic, on macOS too."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
+    session = result.trajectory[0]
+    assert session["docker_host"] is None
+    assert Path(session["root"]).parent == Path(tempfile.gettempdir())
+
+
 def test_episode_cleanup_repairs_permissions(tmp_path: Path) -> None:
     root = tmp_path / "root"
     locked = root / "locked"
@@ -258,6 +277,39 @@ def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_pat
     assert result.exit_code == 0
     assert json.loads(result.stdout)["item"]["text"] == "done"
     assert [event["type"] for event in result.trajectory] == ["session_meta", "event_msg"]
+    assert result.residue == ()
+
+
+HERMES_FAKE = """\
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+home = Path(os.environ["HERMES_HOME"])
+snapshot = {"session_id": "s1", "model": "m", "messages": [{"role": "user", "content": sys.argv[-1]}]}
+(home / "sessions").mkdir()
+(home / "sessions" / "session_s1.json").write_text(json.dumps(snapshot))
+# Against an OpenRouter endpoint, hermes records the key it finds in its environment in the credential pool.
+(home / "auth.lock").write_text("")
+pool = {"openai-api": [{"source": "env:OPENAI_API_KEY", "secret_fingerprint": "sha256:0123456789abcdef"}]}
+(home / "auth.json").write_text(json.dumps({"version": 1, "providers": {}, "credential_pool": pool}))
+(home / "logs").mkdir()
+(home / "logs" / "agent.log").write_text("started\\n")
+if not (home / "SOUL.md").exists():
+    (home / "SOUL.md").write_text("You are Hermes Agent.\\n")  # the default rules file, for a tree with no rules
+# A skill_view of a tree skill counts the load in the usage file beside the skills, under a lock file.
+(home / "skills" / ".usage.json.lock").write_text("")
+(home / "skills" / ".usage.json").write_text(json.dumps({"notes": {"view_count": 1, "use_count": 1}}))
+print("done")
+"""
+
+
+def test_hermes_episode_whitelists_what_hermes_writes_at_boot_and_on_a_skill_load(tmp_path: Path) -> None:
+    files = render_composition([("skill", {"name": "notes", "text": "Keep notes."})], get_adapter("hermes"))
+    result = run_episode(get_adapter("hermes"), files, "list files", binary=fake_binary(tmp_path, HERMES_FAKE))
+    assert result.exit_code == 0
+    assert [event["type"] for event in result.trajectory] == ["session", "message"]
+    # The credential pool, its lock, the default rules file, the log and the skill usage counts with their lock.
     assert result.residue == ()
 
 
