@@ -540,7 +540,7 @@ def test_terminus_extension_uses_shared_recipe_episode_runner_and_publication(tm
                 assert "MANDATORY FALSIFICATION CHECKPOINT" in cls._get_completion_confirmation_message(
                     object.__new__(cls), "output"
                 )
-            return SimpleNamespace(rewards={"accuracy": float(bool(config.agent.import_path))}, tags={})
+            return SimpleNamespace(rewards={"accuracy": float(bool(config.agent.import_path))}, tags={}, uri=None)
 
     def launch(self, argv, *, root, workspace, env, timeout, writable_paths, readonly_paths):
         launches.append(root)

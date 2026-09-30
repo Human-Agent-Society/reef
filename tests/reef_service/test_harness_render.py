@@ -56,7 +56,9 @@ def golden_tree(adapter: str) -> dict[str, str]:
 
 
 def test_pi_render_matches_the_golden_tree() -> None:
-    assert render_composition(NODES, get_adapter("pi")) == golden_tree("pi")
+    # pi keeps every model call on the binding, so the provider and model choice in NODES are swapped for a setting.
+    nodes = [("config", {"data": {"defaultThinkingLevel": "off"}}), *(node for node in NODES if node[0] != "config")]
+    assert render_composition(nodes, get_adapter("pi")) == golden_tree("pi")
 
 
 def test_opencode_render_matches_the_golden_tree() -> None:
@@ -218,14 +220,17 @@ def test_terminus_renders_one_extension_without_executing_it() -> None:
         render_composition([node, ("code_extension", {**node[1], "name": "second"})], get_adapter("terminus"))
 
 
-def test_terminus_binding_renders_the_litellm_provider() -> None:
+@pytest.mark.parametrize("model", ["m1", "qwen/qwen3-coder"])
+def test_terminus_binding_renders_the_litellm_provider(model: str) -> None:
     descriptor = get_adapter("terminus")
-    binding = ModelBinding(base_url="http://127.0.0.1:9", model="m1", api_key="k-1")
+    binding = ModelBinding(base_url="http://127.0.0.1:9", model=model, api_key="k-1")
     files = render_composition([*binding.compose_nodes(descriptor)], descriptor)
     config = json.loads(files["terminus/config.json"])
-    assert config["model_name"] == "m1"
+    # The served name stays the model name Harbor looks the context limit up under; litellm_proxy routes litellm
+    # to api_base whatever vendor prefix that name carries, with the tree's call arguments in the request body.
+    assert config["model_name"] == model
     assert config["api_base"] == "http://127.0.0.1:9/v1"
-    assert config["llm_kwargs"] == {"api_key": "k-1"}
+    assert config["llm_kwargs"] == {"api_key": "k-1", "custom_llm_provider": "litellm_proxy"}
 
 
 DSH_PATCH = "dsh/profiles/headless/cordis.patch.yml"
@@ -624,12 +629,12 @@ def test_native_render_matches_the_golden_tree() -> None:
 def test_config_nodes_deep_merge_in_tree_order() -> None:
     files = render_composition(
         [
-            ("config", {"data": {"compaction": {"enabled": True, "keep": 4}, "defaultProvider": "a"}}),
+            ("config", {"data": {"compaction": {"enabled": True, "keep": 4}, "defaultThinkingLevel": "off"}}),
             ("config", {"data": {"compaction": {"keep": 8}}}),  # later node wins per key
         ],
         get_adapter("pi"),
     )
-    assert '"defaultProvider": "a"' in files["pi-agent/settings.json"]  # sibling keys survive the merge
+    assert '"defaultThinkingLevel": "off"' in files["pi-agent/settings.json"]  # sibling keys survive the merge
     assert '"enabled": true' in files["pi-agent/settings.json"]
     assert '"keep": 8' in files["pi-agent/settings.json"]
 
@@ -1130,6 +1135,34 @@ def test_descriptor_client_state_is_a_known_kind_below_the_composition(tmp_path,
     target.write_text(yaml.safe_dump(data), encoding="utf-8")
     with pytest.raises(DescriptorError, match=message):
         load_descriptor(target)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("host_env", ["DOCKER_HOST"], "'host_env' must map variable names"),
+        ("host_env", {"NOT A NAME": ""}, "'host_env' must map variable names"),
+        ("host_env", {"PI_CODING_AGENT_DIR": ""}, "'env' already sets: PI_CODING_AGENT_DIR"),
+        ("is_root_bind_mounted", "yes", "'is_root_bind_mounted' must be a boolean"),
+    ],
+)
+def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: str, value, message: str) -> None:
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "pi" / "descriptor.yaml").read_text())
+    data[field] = value
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=message):
+        load_descriptor(target)
+
+
+def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
+    """Every other bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
+    terminus = get_adapter("terminus")
+    assert terminus.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
+    assert terminus.is_root_bind_mounted
+    for name in sorted(set(available_adapters()) - {"terminus"}):
+        descriptor = get_adapter(name)
+        assert descriptor.host_env == {} and not descriptor.is_root_bind_mounted, name
 
 
 def test_a_client_state_file_that_is_a_config_target_names_the_keys_the_binary_may_change() -> None:
