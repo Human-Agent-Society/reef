@@ -916,6 +916,19 @@ valid, as they are for a clipped ratio. ``validate_scheduling`` rejects
 ``epochs > 1`` otherwise, at recipe build and again in each backend before
 preparation.
 
+A ``TrainingMethod`` (``reef.core.training_method``, re-exported from
+``reef.train.algos``) is the objective one job trains with, plus an optional
+``LearningRateSchedule``. ``WeightTrainingRecipe.training_method_selector()``
+returns a ``TrainingMethodSelector``, whose ``select(batch, algorithm_state)``
+picks each job's method from the batch and the committed algorithm state.
+The default ``FixedTrainingMethod`` trains every job with
+``training_spec().objective``. ``RuntimeCandidateBackend`` calls the selector
+before each job and passes the method to ``TrainingRuntime.prepare_training_step``.
+The backend resolves the objective and records the method in the job payload,
+so the method takes part in the job's identity. `Write a recipe
+<../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__
+describes selection and schedule semantics.
+
 ``StepSignal`` carries:
 
 - ``action``: ``train`` runs backend training; ``skip`` commits a state-only
@@ -941,10 +954,10 @@ Migration: move the former ``StepPreparer.__call__`` body to
 ``WeightTrainingSpec(objective=..., scheduling=...)``, and ``StepSignal`` no
 longer carries ``scheduling``. Declare ``supports_multiple_epochs = True`` on
 an objective whose loss is clipped for off-policy passes. Plain function
-references are replaced by objective class/instance references. Runtime
-preparation's string argument is now named ``objective`` and is followed by
-the recipe's ``scheduling`` in every ``prepare_training_step`` signature,
-including the coordinator RPC. Update custom runtimes and upgrade coordinators
+references are replaced by objective class/instance references. The second
+argument of every ``prepare_training_step``, including the coordinator RPC, is
+the job's ``TrainingMethod``, followed by the recipe's ``scheduling``; read the
+objective reference from ``method.objective``. Update custom runtimes and upgrade coordinators
 and workers together. Experiment backend metadata now uses ``objective`` and
 ``scheduling`` instead of ``step_preparer``; committed algorithm state,
 training payloads, checkpoints and artifact formats are unchanged.

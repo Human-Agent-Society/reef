@@ -10,6 +10,7 @@ import pytest
 from reef_service._trajectories import policy_trajectory, recorded_trajectory
 
 from reef.core import AgentRecord, RequestType, RuntimeLoadSpan
+from reef.core.training_method import TrainingMethod
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import (
     make_trajectory,
@@ -79,8 +80,8 @@ def test_algorithms_consume_json_roundtripped_atif_with_identical_payloads(algor
     loaded = TrainingBatch(
         "batch", tuple(replace(item, trajectory=json.loads(json.dumps(item.trajectory))) for item in items)
     )
-    assert prepare_slime_step(loaded, algorithm, {}, SCHEDULING[algorithm]) == prepare_slime_step(
-        original, algorithm, {}, SCHEDULING[algorithm]
+    assert prepare_slime_step(loaded, TrainingMethod(algorithm), {}, SCHEDULING[algorithm]) == prepare_slime_step(
+        original, TrainingMethod(algorithm), {}, SCHEDULING[algorithm]
     )
     assert loaded.items[0].training["runtime_load_spans"] == [{"start": 0, "end": 3, "runtime_load_id": "weights-1"}]
 
@@ -167,14 +168,14 @@ def test_existing_algorithms_reject_tasks_without_consuming_or_changing_state(al
     batch = TrainingBatch("mixed", (replace(captured_trajectory(), group_id="a"), TaskItem(Path("tasks/example"))))
     state = {"steps": 3}
     with pytest.raises(TypeError, match="unsupported item 1"):
-        prepare_slime_step(batch, algorithm, state, SCHEDULING[algorithm])
+        prepare_slime_step(batch, TrainingMethod(algorithm), state, SCHEDULING[algorithm])
     assert state == {"steps": 3}
     assert isinstance(batch.items[1], TaskItem)
 
 
 def test_policy_backend_reports_missing_training_data_without_inventing_tokens():
     item = atif_item()
-    prepared = prepare_slime_step(TrainingBatch("plain", (item,)), "sao", {}, SCHEDULING["sao"])
+    prepared = prepare_slime_step(TrainingBatch("plain", (item,)), TrainingMethod("sao"), {}, SCHEDULING["sao"])
     from reef.train.slime_backend.data_builder import to_slime_rollout_data
 
     with pytest.raises(ValueError, match="training tensors"):
@@ -277,7 +278,7 @@ def test_independent_algorithms_ignore_group_metadata(algorithm):
     batch = TrainingBatch(
         "grouped", tuple(replace(captured_trajectory(str(index)), group_id="a") for index in range(2))
     )
-    result = prepare_slime_step(batch, algorithm, {}, SCHEDULING[algorithm])
+    result = prepare_slime_step(batch, TrainingMethod(algorithm), {}, SCHEDULING[algorithm])
     assert result.payload["rollout_ids"] == [0, 1]
     assert result.payload["source_rows"] == [0, 1]
 

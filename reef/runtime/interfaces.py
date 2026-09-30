@@ -38,6 +38,7 @@ from reef.artifact.artifact import Artifact
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.errors import ReefError
 from reef.core.evaluation import SelectionDecision, UpdateCandidate
+from reef.core.training_method import TrainingMethod
 from reef.surface.base import AdapterWeightRuntime, InferenceLease
 
 # -- Identities and errors ----------------------------------------------------
@@ -627,7 +628,7 @@ class TrainingRuntime(ABC):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
@@ -636,9 +637,10 @@ class TrainingRuntime(ABC):
     ) -> PreparedTrainingStep:
         """Turn one reserved batch into backend work, or a state-only skip.
 
-        ``objective`` names the recipe's training objective and ``scheduling``
-        is the recipe's step schedule; the backend resolves the objective in
-        its own process and cuts the batch into optimizer steps accordingly.
+        ``method`` is the objective and learning-rate schedule the recipe
+        selected for this job, and ``scheduling`` the recipe's step schedule;
+        the backend resolves the objective in its own process, refuses a method
+        it cannot train, and records the method in the job's payload.
         """
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
@@ -754,7 +756,7 @@ class TrainingBackend(ABC):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep: ...

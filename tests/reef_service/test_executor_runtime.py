@@ -33,7 +33,7 @@ from reef.service import assembly
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.runtime import connect_ray_runtime
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.algos import StepScheduling
+from reef.train.algos import StepScheduling, TrainingMethod
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.runtime import ExecutorTrainingRuntime
 
@@ -82,7 +82,9 @@ def test_local_executor_runs_candidate_activation_and_durable_commit(backend):
     try:
         assert runtime.model_path == "model-path"
         assert runtime.base_url == "http://router"
-        prepared = runtime.prepare_training_step(policy_batch(), "custom-objective", {}, StepScheduling(), 0)
+        prepared = runtime.prepare_training_step(
+            policy_batch(), TrainingMethod("custom-objective"), {}, StepScheduling(), 0
+        )
         assert prepared.payload["expected_runtime_load_id"] == "v0"
         candidate = runtime.train_candidate(prepared.payload)
         assert worker.calls == ["prepare", "execute"]

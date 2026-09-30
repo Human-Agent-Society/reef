@@ -31,6 +31,7 @@ from typing import Any, Literal
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.evaluation import SelectionDecision
+from reef.core.training_method import TrainingMethod
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import (
     ActivatedModel,
@@ -589,14 +590,14 @@ class RuntimeScheduler:
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
     ) -> PreparedTrainingStep:
         return self.training_runtime.prepare_training_step(
             batch,
-            objective,
+            method,
             algorithm_state,
             scheduling,
             scenario_step,
@@ -846,11 +847,11 @@ class TrainingCoordinator:
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        return self._training.prepare_training_step(batch, objective, algorithm_state, scheduling)
+        return self._training.prepare_training_step(batch, method, algorithm_state, scheduling)
 
     def shutdown(self) -> None:
         """Close training workers; deployment ownership closes inference separately."""

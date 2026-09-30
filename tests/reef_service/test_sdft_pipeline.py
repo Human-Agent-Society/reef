@@ -23,6 +23,7 @@ from recipes.sdft.slime import SdftSettings
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
+from reef.core.training_method import TrainingMethod
 from reef.core.trajectories import source_record_id
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
@@ -289,7 +290,7 @@ def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokeni
     processor.ingest(_report("r1", ("i1",)))
     batch = processor.build_batch()
 
-    prepared = prepare_slime_step(batch, "sdft", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, TrainingMethod("sdft"), {}, StepScheduling(unit="sample"))
     payload = prepared.payload
     assert payload is not None
     assert payload["loss"] == "sdft"

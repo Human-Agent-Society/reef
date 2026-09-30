@@ -13,6 +13,7 @@ from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
 from reef.core import AgentRecord, RequestType
+from reef.core.training_method import TrainingMethod
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
@@ -308,7 +309,7 @@ def test_backend_passes_raw_rewards_through_without_normalization() -> None:
         for index, reward in enumerate((1.0, -1.0, 0.0, 1.0))
     )
     batch = TrainingBatch("s:openclawrl:1", tuple(sample for sample in samples))
-    result = prepare_slime_step(batch, "openclawrl", {}, StepScheduling(unit="sample"))
+    result = prepare_slime_step(batch, TrainingMethod("openclawrl"), {}, StepScheduling(unit="sample"))
     assert result.payload is not None
     assert result.payload["advantages"] == [1.0, -1.0, 0.0, 1.0]
     assert result.payload["loss"] == "openclawrl"
@@ -324,7 +325,7 @@ def test_recipe_uses_weight_surface_and_builds_a_trainer() -> None:
     assert isinstance(surface.inference, WeightInferenceHooks)
     trainer = recipe.build("s", SQLiteRecordStore())
     assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
-    assert trainer.candidate_backend.objective == "openclawrl"
+    assert trainer.candidate_backend.method_selector.method.objective == "openclawrl"
     trainer.close()
 
 

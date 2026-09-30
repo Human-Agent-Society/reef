@@ -17,6 +17,7 @@ import pytest
 import ray
 from reef_service.slime_coordinator import build_slime_coordinator
 
+from reef.core.training_method import TrainingMethod
 from reef.runtime.recovery import LATEST_JOB_MARKER_FILENAME, read_marker
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.loss_families import resolve_loss_family
@@ -55,6 +56,7 @@ def _payload(rows: list[list[object]], rollout_ids: list[int] | None = None) -> 
         "samples": rows,
         "rollout_ids": list(range(len(rows))) if rollout_ids is None else rollout_ids,
         "loss": "sao",
+        "method": TrainingMethod("sao").to_dict(),
     }
 
 

@@ -12,6 +12,7 @@ from recipes.tttd import TTTDGroupedRolloutReport, TTTDProcessor
 from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
+from reef.core.training_method import TrainingMethod
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe import WeightTrainingRecipe
@@ -64,7 +65,7 @@ class _PreparingBackend(CandidateBackend):
 
     def prepare_step(self, batch, state, scenario_step):
         del scenario_step
-        prepared = prepare_slime_step(batch, self._objective, state, StepScheduling())
+        prepared = prepare_slime_step(batch, TrainingMethod(self._objective), state, StepScheduling())
         return PreparedStep.skipped(state=prepared.next_algorithm_state, metrics=prepared.metrics)
 
     def evaluate(self, candidate):
@@ -396,14 +397,16 @@ def test_algorithms_consume_formatted_batches_and_keep_algorithm_state() -> None
     sft_processor = ThresholdProcessor(ProcessorContext("math", {"batch_size": 1}))
     sft_processor.ingest(inference("i1"))
     sft_processor.ingest(report("r1", "i1", 1.0))
-    sft_result = prepare_slime_step(sft_processor.build_batch(), "sft", {}, StepScheduling())
+    sft_result = prepare_slime_step(sft_processor.build_batch(), TrainingMethod("sft"), {}, StepScheduling())
     assert sft_result.next_algorithm_state == {"steps": 1}
 
     grpo_processor = GroupedPolicyProcessor(ProcessorContext("math", {"batch_size": 1}))
     for rid, score in (("i3", 0.2), ("i4", 0.8)):
         grpo_processor.ingest(inference(rid))
         grpo_processor.ingest(report("r" + rid, rid, score, comparison_set="x"))
-    result = prepare_slime_step(grpo_processor.build_batch(), _GROUPED_PG_OBJECTIVE, {}, StepScheduling())
+    result = prepare_slime_step(
+        grpo_processor.build_batch(), TrainingMethod(_GROUPED_PG_OBJECTIVE), {}, StepScheduling()
+    )
     assert result.metrics["advantages"] == pytest.approx((-1.0, 1.0))
 
 
@@ -867,7 +870,7 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
     assert runtime.scenario_step == 1
     assert runtime.repository.current_artifact == runtime.repository.checkpoint_artifact
     prepare = training_runtime.calls[0]
-    assert prepare[2] == _GROUPED_PG_OBJECTIVE
+    assert prepare[2] == TrainingMethod(_GROUPED_PG_OBJECTIVE)
     assert trajectory_reward(trajectory_groups(prepare[1])[0][1]) == 0.8
     assert training_runtime.calls[1][1]["advantages"] == pytest.approx([-1.0, 1.0])
     assert [call[0] for call in training_runtime.calls] == ["prepare", "execute"]
@@ -914,7 +917,7 @@ def test_reported_samples_leave_required_tensor_validation_to_training_backend(m
     processor.ingest(report("r1", "i1", 1.0))
     batch = processor.build_batch()
     assert len(batch.items) == 1
-    prepared = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
     assert prepared.payload is not None
     with pytest.raises(ValueError):
         to_slime_rollout_data(prepared.payload)

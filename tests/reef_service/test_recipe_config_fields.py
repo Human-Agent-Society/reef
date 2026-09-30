@@ -216,7 +216,7 @@ def test_default_build_uses_declared_processor_and_config_fields() -> None:
     assert isinstance(trainer.candidate_backend, RuntimeCandidateBackend)
     assert isinstance(trainer.candidate_evaluator, BackendAlwaysSelectPlugin)
     assert trainer.candidate_evaluator._candidate_backend is trainer.candidate_backend
-    assert trainer.candidate_backend.objective == "sft"
+    assert trainer.candidate_backend.method_selector.method.objective == "sft"
     assert trainer.processor.context.config["batch_size"] == 2
     assert "max_staleness" not in trainer.processor.context.config
 

@@ -7,6 +7,7 @@ from dataclasses import asdict
 from typing import Any
 
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.training_method import TrainingMethod
 from reef.runtime.interfaces import (
     ActivatedModel,
     CandidateTrainingDeferred,
@@ -19,30 +20,34 @@ from reef.runtime.interfaces import (
     TrainingRuntime,
 )
 from reef.runtime.scheduler import JOB_OWNER_KEY, RuntimeScheduler
-from reef.train.algos import StepScheduling
+from reef.train.algos import StepScheduling, TrainingMethodSelector
 from reef.train.backend import CandidateBackend, PreparedStep
 from reef.train.types import TrainingBatch, TrainStepResult
 
 
 class RuntimeCandidateBackend(CandidateBackend):
-    """Map candidate evaluation and selection onto the runtime scheduler."""
+    """Map candidate evaluation and selection onto the runtime scheduler.
+
+    ``method_selector`` picks the training method of every job from its batch
+    and the committed algorithm state; the runtime prepares the job with it.
+    """
 
     def __init__(
         self,
         training_runtime: TrainingRuntime,
-        objective: str,
+        method_selector: TrainingMethodSelector,
         scheduling: StepScheduling,
         *,
         inference_runtime: InferenceRuntime,
         loss_family: str | None = None,
         scenario: str | None = None,
     ) -> None:
-        if not objective:
-            raise ValueError("objective must be non-empty")
+        if not isinstance(method_selector, TrainingMethodSelector):
+            raise TypeError(f"method_selector must be a TrainingMethodSelector, got {type(method_selector).__name__}")
         if not isinstance(scheduling, StepScheduling):
             raise TypeError(f"scheduling must be a StepScheduling, got {type(scheduling).__name__}")
         self.scheduler = RuntimeScheduler(training_runtime, inference_runtime)
-        self.objective = objective
+        self.method_selector = method_selector
         self.scheduling = scheduling
         self._loss_family = loss_family
         self._scenario = scenario
@@ -66,7 +71,7 @@ class RuntimeCandidateBackend(CandidateBackend):
     def experiment_config(self) -> Mapping[str, Any]:
         return {
             "runtime": type(self.training_runtime).__name__,
-            "objective": self.objective,
+            **self.method_selector.experiment_config(),
             "scheduling": asdict(self.scheduling),
             **({"loss_family": self._loss_family} if self._loss_family is not None else {}),
         }
@@ -100,9 +105,14 @@ class RuntimeCandidateBackend(CandidateBackend):
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
-        prepared = self.prepare_training_step(batch, self.objective, state, self.scheduling, scenario_step)
+        method = self.method_selector.select(batch, state)
+        if not isinstance(method, TrainingMethod):
+            raise TypeError(
+                f"{type(self.method_selector).__name__}.select must return a TrainingMethod, got {type(method).__name__}"
+            )
+        prepared = self.prepare_training_step(batch, method, state, self.scheduling, scenario_step)
         next_state = dict(prepared.next_algorithm_state)
-        metrics = dict(prepared.metrics)
+        metrics = {**prepared.metrics, "training_method": method.to_dict()}
         if prepared.action == "skip":
             return PreparedStep.skipped(state=next_state, metrics=metrics)
         if prepared.payload is None:
@@ -181,12 +191,12 @@ class RuntimeCandidateBackend(CandidateBackend):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
     ) -> PreparedTrainingStep:
-        return self.scheduler.prepare_training_step(batch, objective, algorithm_state, scheduling, scenario_step)
+        return self.scheduler.prepare_training_step(batch, method, algorithm_state, scheduling, scenario_step)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self.scheduler.execute_training_job(payload)

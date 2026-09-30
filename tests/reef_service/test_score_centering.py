@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import pytest
 from reef_service._trajectories import policy_trajectory
 
+from reef.core.training_method import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.algorithm import PolicyGradientWeight
 from reef.train.slime_backend.distill import DistillSettings
@@ -43,6 +44,8 @@ def sao_args(**overrides: object) -> SimpleNamespace:
         "custom_pg_loss_reducer_function_path": None,
         "eps_clip": 0.2,
         "eps_clip_high": 0.28,
+        "advantage_estimator": "grpo",
+        "reef_configured_advantage_estimator": None,
     }
     values.update(overrides)
     return SimpleNamespace(**values)
@@ -208,11 +211,13 @@ def test_payload_carries_each_wire_rows_top_k_in_schedule_order() -> None:
     }
     batch = TrainingBatch("batch", tuple(samples))
     # Two epochs repeat every row: the columns follow the wire rows.
-    step = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample", epochs=2), sampler_topk=True)
+    step = prepare_slime_step(
+        batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample", epochs=2), sampler_topk=True
+    )
     assert step.payload is not None
     rows = [row[0] for row in step.payload["samples"]]
     assert [ids[0][1] for ids in step.payload[TOPK_INDICES_KEY]] == [int(row[1:]) for row in rows]
-    plain = prepare_slime_step(batch, "sao", {}, StepScheduling(unit="sample"))
+    plain = prepare_slime_step(batch, TrainingMethod("sao"), {}, StepScheduling(unit="sample"))
     assert plain.payload is not None and TOPK_INDICES_KEY not in plain.payload
 
 

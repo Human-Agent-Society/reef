@@ -12,6 +12,7 @@ from typing import Any
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch, TrajectoryItem, trajectories
 from reef.core.evaluation import SelectionDecision
+from reef.core.training_method import TrainingMethod
 from reef.runtime.executor.connection import CoordinatorClient, training_job_status
 from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
@@ -51,14 +52,14 @@ class ExecutorTrainingRuntime(TrainingRuntime):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
         *,
         serving_runtime_load_id: str | None = None,
     ) -> PreparedTrainingStep:
-        prepared = self._train_group_handle.prepare_training_step(batch, objective, algorithm_state, scheduling)
+        prepared = self._train_group_handle.prepare_training_step(batch, method, algorithm_state, scheduling)
         if not isinstance(prepared, PreparedTrainingStep):
             raise TrainingRuntimeError(
                 f"train group handle returned invalid prepared training step: {type(prepared).__name__}"

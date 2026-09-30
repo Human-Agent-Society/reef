@@ -1,7 +1,8 @@
 """Tinker's in-process training runtime: one optimizer step per candidate, branched from the incumbent.
 
 The incumbent is the checkpoint Reef last committed, remembered on disk so a
-restart branches from the same weights and optimizer state; Reef reports
+restart branches from the same weights, optimizer state and learning-rate
+schedule progress; Reef reports
 commits through ``commit_candidate`` and rollbacks through
 ``restore_checkpoint``. The inference side, ``reef.inference.tinker``, reads
 each candidate's manifest from its artifact; nothing is shared in process.
@@ -13,7 +14,7 @@ import fcntl
 import hashlib
 import json
 from collections.abc import Mapping
-from dataclasses import asdict
+from dataclasses import replace
 from pathlib import Path
 from threading import RLock
 from typing import Any
@@ -21,13 +22,15 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.evaluation import SelectionDecision
+from reef.core.training_method import TrainingMethod
 from reef.runtime.interfaces import ModelCandidate, PreparedTrainingStep, StaleCandidate, TrainingRuntime
 from reef.runtime.recovery import read_json, write_json
+from reef.train.algos.methods import learning_rate_metrics
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import resolve_tinker_loss, row_from_payload
-from reef.train.tinker_backend.preparation import prepare_tinker_step
+from reef.train.tinker_backend.preparation import job_learning_rates, prepare_tinker_step
 
 INCUMBENT = "incumbent.json"
 
@@ -64,7 +67,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
                 self._base.write(base)
             self._base.validate_model(base_model, config.lora_rank)
             value = read_json(self._root / INCUMBENT)
-            self._incumbent = self._base if value is None else self._validated(TinkerCheckpoint(**value))
+            self._incumbent = self._base if value is None else self._validated(TinkerCheckpoint.from_dict(value))
         except BaseException:
             self._state_lock.close()
             raise
@@ -80,7 +83,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
 
     def _set_incumbent(self, checkpoint: TinkerCheckpoint) -> None:
         self._incumbent = self._validated(checkpoint)
-        write_json(self._root / INCUMBENT, asdict(checkpoint))
+        write_json(self._root / INCUMBENT, checkpoint.to_dict())
 
     def _candidate_directory(self, identity: str) -> Path:
         return self._root / "candidates" / identity
@@ -88,7 +91,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
@@ -97,7 +100,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
     ) -> PreparedTrainingStep:
         prepared = prepare_tinker_step(
             batch,
-            objective,
+            method,
             algorithm_state,
             scheduling,
             batch_size=self._config.batch_size,
@@ -122,9 +125,13 @@ class TinkerTrainingRuntime(TrainingRuntime):
                 return known[0]
             incumbent = self._incumbent
         loss = resolve_tinker_loss(payload["loss"])
+        method = TrainingMethod.from_dict(payload["method"])
         batches = [[row_from_payload(row) for row in batch] for batch in payload["batches"]]
-        checkpoint, metrics = self._client.train(incumbent, batches, loss)
-        self._validated(checkpoint)
+        learning_rates, schedule = job_learning_rates(
+            incumbent.learning_rate_schedule, method.learning_rate_schedule, len(batches), self._config.learning_rate
+        )
+        checkpoint, metrics = self._client.train(incumbent, batches, loss, learning_rates)
+        checkpoint = replace(self._validated(checkpoint), learning_rate_schedule=schedule)
         directory = self._candidate_directory(identity)
         checkpoint.write(directory)
         candidate = ModelCandidate(
@@ -132,7 +139,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
             training_job_id=identity,
             checkpoint_path=str(directory),
             current_runtime_load_id=payload.get("source_runtime_load_id"),
-            training_metrics=dict(metrics),
+            training_metrics={**metrics, **learning_rate_metrics(learning_rates, schedule)},
             metadata={"scenario_step": payload["scenario_step"]},
         )
         with self._lock:

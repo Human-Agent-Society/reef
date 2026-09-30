@@ -17,6 +17,7 @@ from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
 from reef.cli import main
 from reef.core.batches import TrainingBatch, TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision
+from reef.core.training_method import LearningRateSchedule, LearningRateScheduleState
 from reef.inference.tinker import SampleResult, TinkerInferenceRuntime, TinkerSampler
 from reef.runtime.deployment import RuntimeConfigError
 from reef.runtime.interfaces import TrainingRuntimeError, UpstreamStatusError
@@ -24,17 +25,17 @@ from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.surface.weights import WeightLoader
-from reef.train.algos import StepScheduling, StepSignal
+from reef.train.algos import FixedTrainingMethod, StepScheduling, StepSignal, TrainingMethod
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.runtime_backend import RuntimeCandidateBackend
-from reef.train.tinker_backend.checkpoint import TinkerCheckpoint
+from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.launch import TinkerDeployment, runtime_factory
 from reef.train.tinker_backend.losses import ImportanceSamplingLoss, TokenRow, resolve_tinker_loss
 from reef.train.tinker_backend.preparation import prepare_tinker_step
-from reef.train.tinker_backend.runtime import TinkerTrainingRuntime
+from reef.train.tinker_backend.runtime import INCUMBENT, TinkerTrainingRuntime
 
 
 class RemoteClient(TinkerClient, TinkerSampler):
@@ -43,6 +44,7 @@ class RemoteClient(TinkerClient, TinkerSampler):
     def __init__(self):
         self.initializations = 0
         self.calls = []
+        self.learning_rates = []
         self.sampled = []
         self.downloads = []
         self.closed = False
@@ -52,8 +54,9 @@ class RemoteClient(TinkerClient, TinkerSampler):
         self.initializations += 1
         return TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://base/state", "tinker://base/sampler")
 
-    def train(self, checkpoint, batches, loss):
+    def train(self, checkpoint, batches, loss, learning_rates):
         self.calls.append((checkpoint, batches, loss))
+        self.learning_rates.append(tuple(learning_rates))
         if self.fail:
             raise TimeoutError("uncertain remote optimizer result")
         number = len(self.calls)
@@ -119,7 +122,12 @@ class Deployment:
         self.inference = TinkerInferenceRuntime(client, base_model="Qwen/Qwen3-8B")
 
     def backend(self, objective):
-        return RuntimeCandidateBackend(self.training, objective.name, SCHEDULING, inference_runtime=self.inference)
+        return RuntimeCandidateBackend(
+            self.training,
+            FixedTrainingMethod(TrainingMethod(objective.name)),
+            SCHEDULING,
+            inference_runtime=self.inference,
+        )
 
     def shutdown(self):
         self.training.shutdown()
@@ -157,7 +165,7 @@ def item(version, group="g"):
 
 def prepared(runtime, objective, *, step=0):
     batch = TrainingBatch("batch", (item(runtime.inference.serving_runtime_load_id()),))
-    return runtime.training.prepare_training_step(batch, objective.name, {}, SCHEDULING, step)
+    return runtime.training.prepare_training_step(batch, TrainingMethod(objective.name), {}, SCHEDULING, step)
 
 
 def decision(selected):
@@ -331,7 +339,9 @@ def test_schedule_keeps_comparison_sets_and_handles_epochs(objective):
     objective.supports_multiple_epochs = True
     scheduling = StepScheduling(unit="comparison_set", batch_size=2, epochs=2, remainder="partial")
     batch = TrainingBatch("schedule", tuple(item("v", group) for group in ("a", "a", "b", "c")))
-    step = prepare_tinker_step(batch, objective.name, {}, scheduling, runtime_load_id="v", batch_size=1)
+    step = prepare_tinker_step(
+        batch, TrainingMethod(objective.name), {}, scheduling, runtime_load_id="v", batch_size=1
+    )
     assert [len(rows) for rows in step.payload["batches"]] == [3, 1, 3, 1]
     assert step.metrics["optimizer_steps"] == 4
     assert step.next_algorithm_state == {"steps": 1}
@@ -638,5 +648,111 @@ def test_configured_batch_size_respects_error_remainder(objective):
     scheduling = StepScheduling(batch_size="configured", remainder="error")
     with pytest.raises(ValueError, match="configured batch_size"):
         prepare_tinker_step(
-            TrainingBatch("batch", (item("v"),)), objective.name, {}, scheduling, runtime_load_id="v", batch_size=2
+            TrainingBatch("batch", (item("v"),)),
+            TrainingMethod(objective.name),
+            {},
+            scheduling,
+            runtime_load_id="v",
+            batch_size=2,
         )
+
+
+WARMUP = LearningRateSchedule("warmup", 1e-4, warmup_steps=4)
+POLICY = LearningRateSchedule("policy", 1e-5, warmup_steps=2)
+# Three samples, one optimizer step each: a schedule advances inside one job.
+ONE_SAMPLE_STEPS = StepScheduling(unit="sample", batch_size=1)
+
+
+class TttdLossObjective(SampleObjective):
+    """The sample objective trained with TTTD's Tinker loss instead of importance sampling."""
+
+    name = "tinker-test-tttd-objective"
+
+    def __init__(self):
+        super().__init__()
+        self.loss_family = "tttd"
+
+
+@pytest.fixture
+def second_objective():
+    value = TttdLossObjective()
+    register_objective(value)
+    yield value
+    unregister_objective(value.name)
+
+
+def scheduled(runtime, objective, schedule, *, step=0):
+    """Prepare one three-step job of ``objective`` that selects ``schedule``."""
+    version = runtime.inference.serving_runtime_load_id()
+    batch = TrainingBatch(f"batch-{step}", tuple(item(version, group=str(index)) for index in range(3)))
+    method = TrainingMethod(objective.name, schedule)
+    return runtime.training.prepare_training_step(batch, method, {}, ONE_SAMPLE_STEPS, step).payload
+
+
+def test_a_schedule_counts_optimizer_steps_across_jobs_rejections_and_restarts(runtime, objective):
+    value, client = runtime
+    first = value.training.train_candidate(scheduled(value, objective, WARMUP))
+    assert client.learning_rates[-1] == pytest.approx((0.0, 2.5e-5, 5e-5))
+    assert first.training_metrics["learning_rate"] == pytest.approx(5e-5)
+    assert first.training_metrics["learning_rate_schedule"] == {"name": "warmup", "completed_steps": 3}
+    manifest = TinkerCheckpoint.read(Path(first.checkpoint_path))
+    assert manifest.learning_rate_schedule == LearningRateScheduleState(WARMUP, 3)
+
+    # A rejected job leaves the incumbent and its progress: the next job repeats the same rates.
+    value.training.reject_candidate(first, decision(False))
+    kept = value.training.train_candidate(scheduled(value, objective, WARMUP, step=1))
+    assert client.learning_rates[-1] == pytest.approx((0.0, 2.5e-5, 5e-5))
+    value.training.commit_candidate(kept.training_job_id)
+
+    # A restart branches from the committed incumbent: the warmup continues instead of starting over.
+    value.shutdown()
+    restarted = Deployment(value.config, client)
+    try:
+        assert restarted.training.incumbent.learning_rate_schedule == LearningRateScheduleState(WARMUP, 3)
+        continued = restarted.training.train_candidate(scheduled(restarted, objective, WARMUP, step=2))
+        assert client.learning_rates[-1] == pytest.approx((7.5e-5, 1e-4, 1e-4))
+        restarted.training.commit_candidate(continued.training_job_id)
+        # A job that selects no schedule keeps the active one.
+        kept_schedule = restarted.training.train_candidate(scheduled(restarted, objective, None, step=3))
+        assert client.learning_rates[-1] == pytest.approx((1e-4, 1e-4, 1e-4))
+        assert kept_schedule.training_metrics["learning_rate_schedule"]["completed_steps"] == 9
+        restarted.training.commit_candidate(kept_schedule.training_job_id)
+        # Another schedule starts at its step 0 from the same optimizer state.
+        switched = restarted.training.train_candidate(scheduled(restarted, objective, POLICY, step=4))
+        assert client.learning_rates[-1] == pytest.approx((0.0, 5e-6, 1e-5))
+        assert client.calls[-1][0].state_path == TinkerCheckpoint.read(Path(kept_schedule.checkpoint_path)).state_path
+        assert switched.training_metrics["learning_rate_schedule"] == {"name": "policy", "completed_steps": 3}
+    finally:
+        restarted.shutdown()
+
+
+def test_without_a_selected_schedule_every_step_uses_the_configured_rate(runtime, objective, tmp_path):
+    value, client = runtime
+    candidate = value.training.train_candidate(scheduled(value, objective, None))
+    assert client.learning_rates[-1] == (value.config.learning_rate,) * 3
+    assert candidate.training_metrics["learning_rate"] == value.config.learning_rate
+    assert "learning_rate_schedule" not in candidate.training_metrics
+    value.training.commit_candidate(candidate.training_job_id)
+    # A checkpoint without a schedule keeps its manifest in the earlier shape.
+    assert "learning_rate_schedule" not in json.loads((Path(candidate.checkpoint_path) / MANIFEST).read_text())
+    assert "learning_rate_schedule" not in json.loads((Path(value.config.state_dir) / INCUMBENT).read_text())
+
+
+def test_each_job_trains_the_loss_of_its_selected_objective(runtime, objective, second_objective):
+    value, client = runtime
+    first = value.training.train_candidate(scheduled(value, objective, None))
+    value.training.commit_candidate(first.training_job_id)
+    second = value.training.train_candidate(scheduled(value, second_objective, None, step=1))
+    assert isinstance(client.calls[0][2], ImportanceSamplingLoss)
+    assert isinstance(client.calls[1][2], TttdTinkerLoss)
+    # The second objective continues the first one's weights and optimizer state.
+    assert client.calls[1][0].state_path == "tinker://update-1/state"
+    assert second.training_job_id != first.training_job_id
+
+
+def test_a_method_without_a_tinker_loss_is_refused_before_training(runtime):
+    value, client = runtime
+    batch = TrainingBatch("batch", (item(value.inference.serving_runtime_load_id()),))
+    with pytest.raises(ValueError, match="unsupported Tinker loss family 'sft'"):
+        value.training.prepare_training_step(batch, TrainingMethod("sft"), {}, SCHEDULING, 0)
+    assert client.calls == []
