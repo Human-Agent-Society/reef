@@ -77,10 +77,17 @@ def centering_term(
     """
     dtype = torch.promote_types(trainer_head_log_probs.dtype, torch.float32)
     trainer_head = trainer_head_log_probs.to(dtype)
+    # Every coefficient below is detached, so widening the arithmetic changes no gradient semantics, only
+    # how much precision survives to reach the graph. It has to be widened: a head that covers nearly all
+    # of the distribution, which is the ordinary case and the one the correction is most useful in, makes
+    # ``1 - head_mass`` cancel catastrophically in float32, and the tail ratio and the coefficients then
+    # carry that error. On already-rounded float32 log-probs with a tail near the floor the term drifts by
+    # 5e-3 and its gradient by 1.6% against the same formula in float64.
+    accumulate = torch.promote_types(dtype, torch.float64)
     with torch.no_grad():
-        sampler_log_probs = sampler_head_log_probs.to(dtype)
+        sampler_log_probs = sampler_head_log_probs.to(accumulate)
         sampler_head_probs = sampler_log_probs.exp()
-        trainer_head_probs = trainer_head.detach().exp()
+        trainer_head_probs = trainer_head.detach().to(accumulate).exp()
         sampler_head_mass = sampler_head_probs.sum(dim=-1)
         trainer_head_mass = trainer_head_probs.sum(dim=-1)
         sampler_tail = 1.0 - sampler_head_mass
@@ -89,14 +96,14 @@ def centering_term(
         tail_ratio = sampler_tail.clamp(min=min_tail_mass) / trainer_tail.clamp(min=min_tail_mass)
         # A tail token's ratio p / q is 1 / rho under the q = rho p approximation.
         alpha = tail_ratio * importance_weight(1.0 / tail_ratio, weight)
-        head_weight = importance_weight((trainer_head.detach() - sampler_log_probs).exp(), weight)
-        coefficients = sampler_head_probs * head_weight - alpha[:, None] * trainer_head_probs
+        head_weight = importance_weight((trainer_head.detach().to(accumulate) - sampler_log_probs).exp(), weight)
+        coefficients = (sampler_head_probs * head_weight - alpha[:, None] * trainer_head_probs).to(dtype)
     return CenteringTerm(
         term=advantages.to(dtype) * (coefficients * trainer_head).sum(dim=-1),
         correction=coefficients.abs().sum(dim=-1),
-        sampler_head_mass=sampler_head_mass,
-        trainer_head_mass=trainer_head_mass,
-        tail_ratio=tail_ratio,
+        sampler_head_mass=sampler_head_mass.to(dtype),
+        trainer_head_mass=trainer_head_mass.to(dtype),
+        tail_ratio=tail_ratio.to(dtype),
         tail_clipped=tail_clipped.to(dtype),
     )
 

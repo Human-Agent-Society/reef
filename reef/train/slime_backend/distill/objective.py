@@ -49,6 +49,8 @@ import torch.distributed as dist
 from torch.utils.checkpoint import checkpoint
 
 from reef.train.slime_backend.distill.algorithm import DIVERGENCES, DistillSettings, settings_from_args
+from reef.train.slime_backend.score_centering import settings_from_args as centering_settings_from_args
+from reef.train.slime_backend.score_centering.term import score_centering_term
 from reef.train.slime_backend.vocab_parallel import (
     gather_log_probs_at_ids,
     global_log_sum_exp,
@@ -379,6 +381,7 @@ def distill_loss(
     if mpu.get_context_parallel_world_size() > 1:
         raise NotImplementedError("the distill loss supports context parallel = 1 only")
     settings = settings_from_args(args)
+    centering_settings = centering_settings_from_args(args)
     total_lengths = batch["total_lengths"]
     response_lengths = batch["response_lengths"]
     unconcat_tokens = batch["unconcat_tokens"]
@@ -430,6 +433,8 @@ def distill_loss(
                 with_entropy=False,
             )
             if settings.importance_sampling_level == "token":
+                # This is the correction's own f(p / q) = min(p / q, cap); the clamp on the log ratio only
+                # moves ratios below about 2e-9, where the weight is negligible and exp would underflow.
                 weights = [
                     token_importance_weights(student, rollout, settings.importance_sampling_cap)
                     for student, rollout in zip(outputs["log_probs"], rollout_log_probs, strict=True)
@@ -461,6 +466,21 @@ def distill_loss(
     loss = sum_of_sample_mean(weighted)
     if weighted.numel() == 0:
         loss = loss + 0 * logits.sum()
+    if centering_settings is not None:
+        # sampled_reverse_kl's value is log p(y) - log teacher(y). Negate
+        # and detach it before IS weighting to get the OPD advantage.
+        centering_batch = {
+            **batch,
+            "advantages": [
+                -sample.detach() * float(sample_weight)
+                for sample, sample_weight in zip(per_sample_divergence, sample_weights, strict=True)
+            ],
+        }
+        correction, centering_metrics = score_centering_term(
+            args, centering_batch, logits, sum_of_sample_mean, settings.score_centering_weight, centering_settings
+        )
+        loss = loss + correction
+        metrics.update(centering_metrics)
     metrics["loss"] = loss.detach().clone()
     metrics["distill_divergence"] = sum_of_sample_mean(divergence.detach())
     metrics["distill_sample_weight"] = divergence.new_tensor([float(value) for value in sample_weights]).sum()

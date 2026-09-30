@@ -337,3 +337,40 @@ def test_sharded_term_matches_the_dense_computation_across_vocab_shards() -> Non
         probe.bind(("127.0.0.1", 0))
         port = probe.getsockname()[1]
     multiprocessing.spawn(sharded_worker, args=(4, port), nprocs=4, join=True)
+
+
+def test_float32_inputs_track_the_float64_term_when_the_head_covers_nearly_everything() -> None:
+    """The coefficients are detached, so they are evaluated wide enough to survive ``1 - head_mass``.
+
+    A head that leaves a tail near ``min_tail_mass`` is the case the correction is most useful in and the
+    one float32 handles worst: the subtraction cancels, and the tail ratio and coefficients inherit the
+    error. Evaluating the same already-rounded float32 log-probs both ways pins that drift down.
+    """
+    tail = torch.tensor([0.8e-6, 1.2e-6, 3e-6, 1e-9], dtype=torch.float64)
+    head = torch.linspace(1, 3, 128, dtype=torch.float64)
+    head /= head.sum()
+    trainer = ((1 - tail[:, None]) * head).log().float()
+    sampler = ((1 - tail.flip(0)[:, None]) * head.flip(0)).log().float()
+    advantages = torch.tensor([0.2, -0.5, 0.1, -0.2])
+    weight = PolicyGradientWeight("truncated", upper=2.0)
+
+    def run(dtype: torch.dtype) -> tuple[torch.Tensor, torch.Tensor]:
+        inputs = trainer.to(dtype).detach().requires_grad_()
+        term = centering_term(inputs, sampler.to(dtype), advantages.to(dtype), weight, 1e-6).term
+        (gradient,) = torch.autograd.grad(term.sum(), inputs)
+        return term.detach().double(), gradient.double()
+
+    narrow_value, narrow_gradient = run(torch.float32)
+    wide_value, wide_gradient = run(torch.float64)
+
+    # The independent algebra the wide path must agree with, straight from the paper's coefficients.
+    p, q = trainer.double().exp(), sampler.double().exp()
+    rho = (1 - q.sum(-1)).clamp_min(1e-6) / (1 - p.sum(-1)).clamp_min(1e-6)
+    alpha = torch.minimum(2 * rho, torch.ones_like(rho))
+    expected_gradient = advantages.double()[:, None] * (torch.minimum(p, 2 * q) - alpha[:, None] * p)
+    torch.testing.assert_close(wide_gradient, expected_gradient, atol=1e-12, rtol=1e-10)
+    torch.testing.assert_close(wide_value, (expected_gradient * trainer.double()).sum(-1), atol=1e-12, rtol=1e-10)
+
+    # Float32 storage still rounds the result, but the arithmetic behind it must not add error of its own.
+    assert (narrow_value - wide_value).abs().max() < 1e-6
+    assert (narrow_gradient - wide_gradient).norm() / wide_gradient.norm() < 1e-6
