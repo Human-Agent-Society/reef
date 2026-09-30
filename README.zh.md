@@ -142,7 +142,7 @@ curl -f http://127.0.0.1:8900/healthz          # ready to serve
 将推理请求发送至 Reef，并为每个响应上报分数。SAO recipe 使用每条符合条件的带分
 rollout 执行一次训练。
 
-Reef 的推理端点兼容 OpenAI 和 Anthropic：`/v1/chat/completions` 与 `/v1/messages`
+Reef 的推理端点兼容 OpenAI 和 Anthropic：`/v1/chat/completions`、`/v1/responses` 与 `/v1/messages`
 直接接收相应模型提供商的请求体。请求需包含 `x-reef-scenario` 请求头；新的名称会使用
 部署配置的 recipe 创建 scenario。请求本身不选择 recipe。
 
