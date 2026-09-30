@@ -122,7 +122,7 @@ class _WandbScenarioLogger(ExperimentLogger):
         self._defined_namespaces: set[str] = set()
 
     def log(self, metrics: Mapping[str, Any], *, namespace: str) -> None:
-        self._tracker._record_component(self, metrics, namespace)
+        self._tracker.record_namespace(self, metrics, namespace)
 
     def _context(self) -> TrainingExperimentContext:
         return TrainingExperimentContext(
@@ -179,6 +179,10 @@ class WandbExperimentTracker(ExperimentTracker):
         self._runs: dict[str, Any] = {}
         self._scenario_loggers: dict[str, _WandbScenarioLogger] = {}
         self._failed_run_ids: set[str] = set()
+        # Per run, the trainers seen so far: each gets its metric axis once and its backend in the config.
+        self.run_components: dict[str, dict[str, dict[str, Any]]] = {}
+        # Per run, the optimizer step keys already bound to a component's counter.
+        self.step_keys: dict[str, set[str]] = {}
         self._lock = RLock()
 
     @property
@@ -255,19 +259,19 @@ class WandbExperimentTracker(ExperimentTracker):
         )
         with self._lock:
             run = self._runs.pop(run_id, None)
+            self.run_components.pop(run_id, None)
+            self.step_keys.pop(run_id, None)
             if run is not None:
                 try:
-                    summary = getattr(run, "summary", None)
-                    if summary is not None:
-                        summary.update(
-                            {
-                                "reef/ended_by": "rollback",
-                                "reef/rollback_step": event.step,
-                                "reef/rollback_from_release_id": event.source_artifact_ref.release_id,
-                                "reef/rollback_target_release_id": event.target_release_id,
-                                "reef/current_release_id": event.produced_artifact_ref.release_id,
-                            }
-                        )
+                    run.summary.update(
+                        {
+                            "reef/ended_by": "rollback",
+                            "reef/rollback_step": event.step,
+                            "reef/rollback_from_release_id": event.source_artifact_ref.release_id,
+                            "reef/rollback_target_release_id": event.target_release_id,
+                            "reef/current_release_id": event.produced_artifact_ref.release_id,
+                        }
+                    )
                     run.finish()
                 except Exception as exc:
                     logger.warning("W&B rollback finalization failed (%s)", type(exc).__name__)
@@ -286,29 +290,46 @@ class WandbExperimentTracker(ExperimentTracker):
         if not self.config.active:
             return
         run_id = self._run_id(event.context)
+        component = event.context.component
+        # Decided before the run opens: opening it records the component in the config.
+        first_step = component is not None and component not in self.run_components.get(run_id, {})
         run = self._runs.get(run_id)
         if run is None:
             run = self._initialize_run(run_id, event.context)
         if run is None:
             return
-        self._update_run_config(run, event.context)
+        if first_step:
+            # A trainer's first step puts its metrics on the run's train/step axis, as train/* is. Its
+            # optimizer step rows get exact definitions as they appear (_record_optimizer_steps): a
+            # second glob under the same prefix would overlap this one, and W&B picks between
+            # overlapping globs in no fixed order.
+            try:
+                run.define_metric(f"{component}/*", step_metric="train/step")
+                run.define_metric(f"{component}/step/step")
+            except Exception as exc:
+                logger.warning("W&B metric definition failed (%s); training will continue", type(exc).__name__)
+        self._update_run_config(run, run_id, event.context)
         metadata = self._event_metadata(event, run_id)
         self._record_optimizer_steps(run, event)
         # The backend's drained metrics may themselves carry a "train/step"
         # (Slime's accumulated_step_id, which is not monotonic across jobs of
         # varying length); list the authoritative context counters last so
         # they win the dict merge and the train/* step axis stays monotonic.
+        numeric = _numeric_metrics(event.metrics)
+        component = event.context.component
+        if component is not None:
+            # Two trainers of one scenario log into one run; each one's metrics keep their own names.
+            numeric = {f"{component}/{key}": value for key, value in numeric.items()}
+            metadata = {**metadata, "component": component}
         values: dict[str, Any] = {
-            **_numeric_metrics(event.metrics),
+            **numeric,
             **{f"reef/{key}": value for key, value in metadata.items() if value is not None and key != "step"},
             "train/step": event.context.run_step,
             "reef/step": event.context.step,
         }
         try:
             run.log(values)
-            summary = getattr(run, "summary", None)
-            if summary is not None:
-                summary.update({f"reef/{key}": value for key, value in metadata.items() if value is not None})
+            run.summary.update({f"reef/{key}": value for key, value in metadata.items() if value is not None})
             if event.checkpoint_path and self.config.upload_checkpoints:
                 self._upload_checkpoint(run, event)
         except Exception as exc:
@@ -318,6 +339,8 @@ class WandbExperimentTracker(ExperimentTracker):
         with self._lock:
             runs, self._runs = tuple(self._runs.values()), {}
             self._scenario_loggers = {}
+            self.run_components = {}
+            self.step_keys = {}
         for run in runs:
             try:
                 run.finish()
@@ -339,25 +362,43 @@ class WandbExperimentTracker(ExperimentTracker):
         steps = event.metrics.get(OPTIMIZER_STEPS_KEY)
         if not isinstance(steps, Sequence) or isinstance(steps, str | bytes) or not steps:
             return
-        summary = getattr(run, "summary", None)
-        start = 0
-        if summary is not None:
-            try:
-                start = int(summary.get(OPTIMIZER_STEP_COUNTER) or 0)
-            except (TypeError, ValueError, AttributeError):
-                start = 0
+        # A trainer of several keeps its own step rows and counter, as its job level row keeps its own name.
+        component = event.context.component
+        prefix = "step" if component is None else f"{component}/step"
+        counter = OPTIMIZER_STEP_COUNTER if component is None else f"reef/{component}/optimizer_steps"
+        try:
+            start = int(run.summary.get(counter) or 0)
+        except (TypeError, ValueError):
+            start = 0
         logged = 0
+        defined = self.step_keys.setdefault(self._run_id(event.context), set())
         try:
             for step in steps:
                 if not isinstance(step, Mapping):
                     continue
-                values = {f"step/{key.removeprefix('train/')}": value for key, value in _numeric_metrics(step).items()}
-                values["step/step"] = start + logged
+                values = {
+                    f"{prefix}/{key.removeprefix('train/')}": value for key, value in _numeric_metrics(step).items()
+                }
+                if component is not None:
+                    # An exact definition binds the key to the component's counter ahead of any glob; a
+                    # definition the client refuses is not tried again, and the rows are logged anyway.
+                    for key in values:
+                        if key in defined:
+                            continue
+                        defined.add(key)
+                        try:
+                            run.define_metric(key, step_metric=f"{prefix}/step")
+                        except Exception as exc:
+                            logger.warning(
+                                "W&B metric definition of %s failed (%s); training will continue",
+                                key,
+                                type(exc).__name__,
+                            )
+                values[f"{prefix}/step"] = start + logged
                 values["reef/step"] = event.context.step
                 run.log(values)
                 logged += 1
-            if summary is not None:
-                summary[OPTIMIZER_STEP_COUNTER] = start + logged
+            run.summary[counter] = start + logged
         except Exception as exc:
             logger.warning("W&B optimizer-step logging failed (%s); training will continue", type(exc).__name__)
 
@@ -387,15 +428,7 @@ class WandbExperimentTracker(ExperimentTracker):
                 resume="allow",
                 reinit="create_new",
                 config={
-                    "reef": {
-                        "scenario": context.scenario,
-                        "recipe": context.recipe,
-                        "backend": context.backend,
-                        "model": self._model,
-                        "run_segment": context.run_segment,
-                        "source_artifact": encode_artifact_ref(context.source_artifact_ref),
-                    },
-                    "backend": _safe_mapping(context.backend_config or {}),
+                    **self.config_values(run_id, context),
                     "training": dict(self._training_config),
                 },
             )
@@ -410,7 +443,7 @@ class WandbExperimentTracker(ExperimentTracker):
             logger.warning("W&B initialization failed (%s); training will continue", type(exc).__name__)
             return None
 
-    def _record_component(
+    def record_namespace(
         self,
         scenario_logger: _WandbScenarioLogger,
         metrics: Mapping[str, Any],
@@ -448,23 +481,29 @@ class WandbExperimentTracker(ExperimentTracker):
             except Exception as exc:
                 logger.warning("W&B %s logging failed (%s); execution will continue", namespace, type(exc).__name__)
 
-    def _update_run_config(self, run: Any, context: TrainingExperimentContext) -> None:
-        config = getattr(run, "config", None)
-        if config is None:
-            return
-        values = {
-            "reef": {
-                "scenario": context.scenario,
-                "recipe": context.recipe,
-                "backend": context.backend,
-                "model": self._model,
-                "run_segment": context.run_segment,
-                "source_artifact": encode_artifact_ref(context.source_artifact_ref),
-            },
-            "backend": _safe_mapping(context.backend_config or {}),
+    def config_values(self, run_id: str, context: TrainingExperimentContext) -> dict[str, Any]:
+        """The run config: one backend for a flat scenario, one per component when several trainers share the run."""
+        reef: dict[str, Any] = {
+            "scenario": context.scenario,
+            "recipe": context.recipe,
+            "backend": context.backend,
+            "model": self._model,
+            "run_segment": context.run_segment,
+            "source_artifact": encode_artifact_ref(context.source_artifact_ref),
         }
+        backend: dict[str, Any] = _safe_mapping(context.backend_config or {})
+        if context.component is not None:
+            components = self.run_components.setdefault(run_id, {})
+            components[context.component] = {"backend": context.backend, "config": backend}
+            reef["backend"] = None
+            reef["components"] = {name: {"backend": entry["backend"]} for name, entry in components.items()}
+            backend = {name: entry["config"] for name, entry in components.items()}
+        return {"reef": reef, "backend": backend}
+
+    def _update_run_config(self, run: Any, run_id: str, context: TrainingExperimentContext) -> None:
+        values = self.config_values(run_id, context)
         try:
-            config.update(values, allow_val_change=True)
+            run.config.update(values, allow_val_change=True)
         except Exception as exc:
             logger.warning("W&B run config update failed (%s); execution will continue", type(exc).__name__)
 

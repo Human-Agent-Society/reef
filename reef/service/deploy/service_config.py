@@ -40,6 +40,11 @@ class ServiceConfig:
     tokens: tuple[str, ...] = config_option(
         (), public_path=("reef", "tokens"), help="Accepted bearer tokens as a JSON/YAML list."
     )
+    served_url: str | None = config_option(
+        None,
+        public_path=("reef", "served_url"),
+        help="URL the recipe's own evaluation calls reach this service at (default: loopback on the bind port).",
+    )
     console_origins: tuple[str, ...] = config_option(
         (), public_path=("reef", "console_origins"), help="Allowed console origins as a JSON/YAML list."
     )

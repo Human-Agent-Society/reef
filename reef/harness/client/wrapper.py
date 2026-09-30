@@ -2,18 +2,43 @@
 
 When invoked with agent arguments (e.g. ``reef-pi -p "fix the bug"``):
 
-  Checks the installed release's requirements before starting the proxy or
-  agent. Unmet items print their setup hints and exit 3. Required programs
-  must still be on PATH, even when setup previously checked them off.
+  First checks the files the install wrote against what it recorded in
+  ``~/.reef/installs``, outside the install root: a file that changed since
+  or is reached through a link (client state aside, but for the keys of pi's
+  ``settings.json`` outside its preferences) is named and the wrapper exits
+  3, and ``update`` restores it; an install root that now leads through a
+  link is refused the same way. A tree no install recorded is not checked, and the
+  wrapper says so on stderr. The install writes the wrapper itself beside the
+  record, outside the tree, since it runs the check. Then checks the
+  installed release's requirements before starting the proxy or agent.
+  Unmet items print their setup hints and exit 3. Required programs must
+  still be on PATH, even when setup previously checked them off.
 
   1. Starts a local capture proxy (``reef_client.serve``) that forwards to
      Reef, injecting ``x-reef-scenario`` so the user's agent binary never
      needs to know about Reef headers.
   2. Rewrites the provider config in a temp copy of the composition to point
-     the agent at the proxy instead of Reef directly.
-  3. Runs the agent binary as a subprocess.
+     the agent at the proxy instead of Reef directly. The copy is made in
+     ``$XDG_CACHE_HOME/reef-harness/sessions`` (``~/.cache`` by default),
+     never in TMPDIR, which the codex and dsh sandboxes can write. With a
+     record, the copy holds copies of the files the install wrote and links
+     to the client state, nothing else; a link a session put at a client
+     state path is removed first, but at a recorded settings file the check
+     refuses it.
+  3. Runs the agent binary as a subprocess, with the adapter's
+     ``client_args`` ahead of the person's arguments unless the first is one
+     of its ``client_version_args``. SIGHUP (the terminal closed) and SIGTERM
+     are passed to the agent, and Ctrl-C reaches it too, so the wrapper waits
+     for it to exit and prints no traceback; once it exits, the steps below
+     still run.
   4. After the agent exits, persists the captured receipts (the
-     ``x-reef-agent-record-id`` values from each response) to disk.
+     ``x-reef-agent-record-id`` values from each response) to disk, removes
+     the temp copy, and exits with the agent's status: 128 plus the signal
+     number when the wrapper passed SIGHUP or SIGTERM on or a signal ended
+     the agent (130 for Ctrl-C). Before removing the copy, for codex, it
+     keeps the folder trust the person answered in the temp ``config.toml``
+     in ``~/.reef/trust``, outside the install root, and adds it to the next
+     session's copy.
 
 When invoked with ``report`` (e.g. ``reef-pi report --score 0.0 --feedback "..."``):
 
@@ -26,16 +51,19 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
 ``reef-pi evolve "..." --wait [--timeout SECONDS]``; ``harness`` remains a compatibility alias):
 
   Sends an explicit manual training instruction to ``POST /reef/train`` with
-  the installed release and the oldest pending session's id (or a fresh id
+  the installed release and a session id: inside a session the wrapper
+  started, that session's (``REEF_HARNESS_SESSION``, the tag every call of
+  the run carries); outside one, the oldest pending session's (or a fresh id
   when nothing is spooled). The scenario must use ``training_mode: manual``
   or ``hybrid``. Acceptance queues a step without inference receipts or a
   feedback report; the merged ``requires`` list rides ``training_request``
   in the commit's metrics. The accepted line is followed by a link to the
-  request's page (``GET /reef/harness/requests/<id>/page`` with the scenario
-  and the token as query parameters, so a browser opens it as is). With
+  request's page, the ``page_path`` the service answered with (its query
+  holds the scenario and a page key, never the token, so a browser opens it
+  as is). With
   ``--wait`` the wrapper polls the release catalog every 5 s for the step
   that consumed the request (``--timeout`` seconds, 1800 by default), says
-  once when the request's record shows a step took it, and prints the
+  once when the request's progress shows a step took it, and prints the
   result with the next action (a pending release says it is not installed
   until promoted and names its page link; a skipped step's line quotes why
   the proposer produced nothing): exit 0 for a selected or pending release,
@@ -46,6 +74,17 @@ When invoked with ``evolve`` (e.g. ``reef-pi evolve "text me when you are blocke
   to use it.``; a pending release names its page, asks ``Promote now?
   [y/N]`` and, on yes, posts the promote and installs the new head the same
   way. Declined, or without a terminal, the next commands are printed.
+
+When invoked with ``wait`` (e.g. ``reef-claude wait <request id> --timeout 500``):
+
+  Waits for the step that takes a request ``evolve`` already filed and
+  reports it as ``evolve --wait`` does, with the same exit statuses. The
+  shipped ``/reefine`` command of an adapter without its own extension
+  files the request with ``evolve`` and calls ``wait --poll`` until it
+  stops printing ``no result yet``, since the agent's shell tool stops a
+  command after a few minutes; ``--poll`` exits 0 while the step still
+  runs, where a plain ``wait`` exits 2, since a shell tool counts a
+  nonzero exit as a failed call.
 
 When invoked with ``page`` (e.g. ``reef-pi page 3``, ``reef-pi page 3 --print``):
 
@@ -148,8 +187,11 @@ lines, mode 0600, written by ``setup`` alone. A session run through the
 wrapper gets each variable unless the shell already sets it (the shell
 wins); the values never enter the tree and are never sent anywhere. The
 wrapper also exports ``REEF_HARNESS_WRAPPER``, the path of the ``reef-<adapter>``
-script at the install root, so an extension in the agent can run ``update``
-and ``setup`` from the session.
+script in ``~/.reef/installs/<sha256 of the install root>``, beside the
+record (at the install root, for an install made before Reef wrote it
+there), so an extension in the agent can run ``update`` and ``setup`` from
+the session, and the descriptor's ``client_env`` variables, ``{root}`` in a
+value naming the install root, unless the shell already sets them.
 """
 
 from __future__ import annotations
@@ -161,7 +203,10 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import shutil
+import signal
+import socket
 import sqlite3
 import subprocess
 import sys
@@ -178,6 +223,7 @@ from collections.abc import Iterator, Mapping, MutableMapping, Sequence
 from dataclasses import asdict, dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path, PurePosixPath
+from types import FrameType
 from typing import Any
 
 import yaml
@@ -186,7 +232,10 @@ from reef_client.serve import CapturedTurn, CaptureStore, ServeConfig, build_han
 from reef.core.requirements import required_by
 from reef.core.training_request import CLIENT_COMMANDS
 from reef.harness.adapters import get_adapter
-from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor
+from reef.harness.adapters.descriptor import NO_TOKEN_API_KEY, AdapterDescriptor, ClientState
+from reef.harness.episodes.vendor_install import version_probe_env
+from reef.harness.episodes.version_check import ships_version_check
+from reef.harness.step_result import design_sections, next_action, rejection_text
 
 
 def _captures_dir() -> Path:
@@ -287,31 +336,75 @@ class WrapperError(Exception):
 
 @dataclass(frozen=True)
 class _Binding:
-    """One place the adapter's model binding writes ``{base_url}``: the target file, the key path, the template."""
+    """One place the adapter's model binding writes a placeholder: the target file, the key path, and per API
+    dialect the template there with the plain values the dialect writes beside it (pi and dsh name the API there)."""
 
     target: str
     path: tuple[str, ...]
-    template: str
-
-    @property
-    def suffix(self) -> str:
-        return self.template.split("{base_url}", 1)[1]
+    dialects: tuple[tuple[str, Mapping[str, str]], ...]
 
 
 def _bindings(descriptor: AdapterDescriptor, placeholder: str = "{base_url}") -> list[_Binding]:
     """The places the adapter's model binding renders ``placeholder``: Reef's address, or with ``{api_key}`` its token."""
-    found: dict[tuple[str, tuple[str, ...]], _Binding] = {}
+    found: dict[tuple[str, tuple[str, ...]], list[tuple[str, Mapping[str, str]]]] = {}
     for templates in descriptor.model_binding.values():
         for node in templates:
             target = str(node.get("target", "primary"))
             stack: list[tuple[tuple[str, ...], Any]] = [((), node.get("data", {}))]
             while stack:
                 path, value = stack.pop()
-                if isinstance(value, Mapping):
-                    stack.extend(((*path, str(key)), item) for key, item in value.items())
-                elif isinstance(value, str) and placeholder in value:
-                    found.setdefault((target, path), _Binding(target, path, value))
-    return list(found.values())
+                if not isinstance(value, Mapping):
+                    continue
+                for key, item in value.items():
+                    if isinstance(item, str) and placeholder in item:
+                        plain = {
+                            str(name): text
+                            for name, text in value.items()
+                            if isinstance(text, str) and "{" not in text
+                        }
+                        found.setdefault((target, (*path, str(key))), []).append((item, plain))
+                    else:
+                        stack.append(((*path, str(key)), item))
+    return [_Binding(target, path, tuple(dialects)) for (target, path), dialects in found.items()]
+
+
+def installed_url_suffix(binding: _Binding, file: Path, url: str) -> str:
+    """What the binding's template writes after ``{base_url}`` in the dialect the tree was installed with.
+
+    Dialects may share a key path but not the suffix: pi and dsh reach
+    anthropic at Reef's bare address and openai under ``/v1``. The installed
+    dialect is the one whose own plain values (the API name, which no other
+    dialect writes the same) sit beside ``url`` in the Reef entry: the
+    mapping under the binding's parent key, wherever the adapter's quirks
+    nested it (the items of a list sit under the list's key), so a second
+    provider at any address never decides it. A tree that shows none of
+    them gets the first dialect's suffix."""
+    suffixes = [template.split("{base_url}", 1)[1] for template, _ in binding.dialects]
+    if len(set(suffixes)) == 1:
+        return suffixes[0]
+    markers = [
+        (
+            suffix,
+            {key: text for key, text in plain.items() if any(other.get(key) != text for _, other in binding.dialects)},
+        )
+        for suffix, (_, plain) in zip(suffixes, binding.dialects, strict=True)
+    ]
+    parent = binding.path[-2] if len(binding.path) > 1 else None
+    try:
+        stack: list[tuple[str | None, Any]] = [(None, _parse_binding_file(file))]
+    except (WrapperError, ValueError, yaml.YAMLError):
+        return suffixes[0]
+    while stack:
+        holding_key, value = stack.pop()
+        if isinstance(value, list):
+            stack.extend((holding_key, item) for item in value)
+        elif isinstance(value, Mapping):
+            stack.extend((str(name), item) for name, item in value.items())
+            if holding_key == parent and value.get(binding.path[-1]) == url:
+                for suffix, dialect_values in markers:
+                    if dialect_values and all(value.get(key) == text for key, text in dialect_values.items()):
+                        return suffix
+    return suffixes[0]
 
 
 def _binding_file(descriptor: AdapterDescriptor, compose_dir: Path, binding: _Binding) -> Path:
@@ -366,9 +459,16 @@ def _extract_reef_url(adapter: str, compose_dir: Path) -> str | None:
         if match is None:
             continue
         url = match.group("url").rstrip("/")
-        suffix = binding.suffix.rstrip("/")
+        suffix = installed_url_suffix(binding, file, match.group("url")).rstrip("/")
         return url[: -len(suffix)] if suffix and url.endswith(suffix) else url
     return None
+
+
+class BindingLoader(yaml.SafeLoader):
+    """Safe YAML that reads a tag a harness defines for itself (dsh's ``!!js`` expressions) as its plain scalar."""
+
+
+BindingLoader.add_constructor(None, lambda loader, node: loader.construct_scalar(node))
 
 
 def _parse_binding_file(file: Path) -> Any:
@@ -380,7 +480,7 @@ def _parse_binding_file(file: Path) -> Any:
     if suffix == ".toml":
         return tomllib.loads(text)
     if suffix in {".yaml", ".yml"}:
-        return yaml.safe_load(text)
+        return yaml.load(text, Loader=BindingLoader)
     if file.name == ".env" or suffix == ".env":
         pairs = (line.split("=", 1) for line in text.splitlines() if "=" in line and not line.lstrip().startswith("#"))
         return {key.strip(): value.strip().strip("\"'") for key, value in pairs}
@@ -433,6 +533,19 @@ def _reef_token(adapter: str, compose_dir: str) -> str | None:
         sys.exit(f"reef-{adapter}: {exc}")
 
 
+def session_tree_token(adapter: str, compose_dir: str, upstream: str) -> str | None:
+    """The tree's own token for a session whose tool environment lost ``REEF_TOKEN`` (dsh strips every variable
+    named like a token from what its tools run), when the tree's binding names the session's service; a binding
+    another install rewrote belongs to another service, and its token is never sent here."""
+    try:
+        bound = _extract_reef_url(adapter, Path(compose_dir))
+        if bound is None or _strip_v1(bound.rstrip("/")) != upstream:
+            return None
+        return _extract_reef_token(adapter, Path(compose_dir))
+    except WrapperError:
+        return None
+
+
 def _strip_v1(url: str) -> str:
     return url[:-3] if url.endswith("/v1") else url
 
@@ -456,9 +569,10 @@ def _materialize(temp: Path, compose: Path, relative: PurePosixPath) -> Path:
 def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port: int) -> None:
     """Copy each binding file into the temp copy with the binding's URL, and only it, pointed at the proxy.
 
-    The rewritten value is the proxy plus the template's own suffix (``/v1``
-    where the adapter expects it), whatever the tree spelled, so the agent's
-    request paths land where the proxy captures them."""
+    The rewritten value is the proxy plus the template's suffix in the dialect
+    the tree was installed with (``/v1`` where that dialect expects it),
+    whatever the tree spelled, so the agent's request paths land where the
+    proxy captures them."""
     descriptor = get_adapter(adapter)
     proxy = f"http://127.0.0.1:{proxy_port}"
     for binding in _bindings(descriptor):
@@ -470,27 +584,139 @@ def _rewrite_config(adapter: str, compose_dir: Path, temp_dir: Path, proxy_port:
         if match is None:
             continue
         span = match.span("url")
-        text = text[: span[0]] + proxy + binding.suffix + text[span[1] :]
+        text = text[: span[0]] + proxy + installed_url_suffix(binding, src, match.group("url")) + text[span[1] :]
         dst = _materialize(temp_dir, compose_dir, PurePosixPath(src.relative_to(compose_dir).as_posix()))
         if dst.is_symlink() or dst.exists():
             dst.unlink()
         dst.write_text(text, encoding="utf-8")
 
 
-def _create_temp_composition(adapter: str, compose_dir: str, proxy_port: int) -> str:
-    """Symlink the composition into a temp dir, overriding the binding files."""
+def _create_temp_composition(
+    adapter: str,
+    compose_dir: str,
+    proxy_port: int,
+    copied: Sequence[PurePosixPath] | None = None,
+    linked: Sequence[PurePosixPath] = (),
+) -> str:
+    """Build the composition in a temp dir, overriding the binding files.
+
+    The temp dir is made in ``$XDG_CACHE_HOME/reef-harness/sessions``
+    (``~/.cache`` by default), readable by the person alone. ``copied`` names the files below the composition directory the
+    install recorded, each copied with its mode into real directories, and
+    ``linked`` the client state, linked one by one, so a file added to the
+    installed tree after the install never reaches a session, what the
+    binary writes over a copied file stays in the temp copy, and a binary
+    that skips a linked file (Codex skips a linked ``SKILL.md``) still reads
+    the tree. A recorded file that is a link now is not copied, so the copy
+    never reads through a link. None links every top-level item, for a tree
+    the install recorded nothing for."""
     compose = Path(compose_dir)
-    temp_dir = tempfile.mkdtemp(prefix="reef-harness-")
+    # The person's cache directory, never TMPDIR or /tmp: Codex's workspace-write sandbox and the dsh sandbox let a
+    # command write those, and the copy holds the config the agent reads again during the session (codex reads its
+    # config.toml and rules again on /new) and the binding with the token.
+    copies_dir = Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache") / "reef-harness" / "sessions"
+    copies_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    temp_dir = tempfile.mkdtemp(prefix="reef-harness-", dir=copies_dir)
     temp = Path(temp_dir)
 
-    for item in compose.iterdir():
-        dst = temp / item.name
-        if dst.exists() or dst.is_symlink():
+    for relative in copied or ():
+        src, dst = compose / relative, temp / relative
+        if src.is_symlink() or not src.is_file():
             continue
-        os.symlink(item, dst)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(src, dst)
+        shutil.copymode(src, dst)
+    for relative in [PurePosixPath(item.name) for item in compose.iterdir()] if copied is None else linked:
+        src, dst = compose / relative, temp / relative
+        if dst.exists() or dst.is_symlink() or not (src.exists() or src.is_symlink()):
+            continue
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.symlink(src, dst)
 
     _rewrite_config(adapter, compose, temp, proxy_port)
     return temp_dir
+
+
+#: The trust levels Codex writes for a folder when the person answers its trust prompt.
+CODEX_TRUST_LEVELS = ("trusted", "untrusted")
+
+
+def codex_trust_path(compose_dir: str) -> Path:
+    """Where reef-codex keeps the folder trust of one install root: ``~/.reef/trust``, outside the install root."""
+    install_root = str(Path(compose_dir).resolve().parent)
+    return Path.home() / ".reef" / "trust" / f"{hashlib.sha256(install_root.encode()).hexdigest()}.json"
+
+
+def codex_projects(config_path: Path) -> dict[str, Any]:
+    """The ``projects`` table of a Codex ``config.toml``; empty when the file does not parse."""
+    try:
+        projects = tomllib.loads(config_path.read_text(encoding="utf-8")).get("projects")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return {}
+    return projects if isinstance(projects, dict) else {}
+
+
+def add_codex_trust(compose_dir: str, config_path: Path) -> None:
+    """Add the folders the person trusted in earlier sessions to the temp ``config.toml`` Codex reads.
+
+    Codex writes the answer to its trust prompt into ``$CODEX_HOME/config.toml``,
+    the temp copy the wrapper removes after the run, so without this every
+    session asks again. A folder the tree's config already names keeps the
+    tree's entry, and a copy that would not parse is left as it was."""
+    try:
+        record = json.loads(codex_trust_path(compose_dir).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    stored = record.get("projects") if isinstance(record, dict) else None
+    if not isinstance(stored, dict):
+        return
+    present = codex_projects(config_path)
+    tables = "".join(
+        f"\n[projects.{json.dumps(folder)}]\ntrust_level = {json.dumps(level)}\n"
+        for folder, level in sorted(stored.items())
+        if isinstance(folder, str) and os.path.isabs(folder) and level in CODEX_TRUST_LEVELS and folder not in present
+    )
+    if not tables:
+        return
+    text = config_path.read_text(encoding="utf-8")
+    try:
+        tomllib.loads(text + tables)
+    except tomllib.TOMLDecodeError:
+        return
+    config_path.write_text(text + tables, encoding="utf-8")
+
+
+def keep_codex_trust(compose_dir: str, config_path: Path, cwd: Path) -> None:
+    """Keep the trust Codex wrote for this session's folder, the working directory or the repository above it.
+
+    Only those folders: a command in the session can write the temp copy,
+    and trust for another folder would load that folder's own Codex config
+    in a later session without the person answering for it."""
+    folders = {str(cwd)}
+    repository = next((folder for folder in (cwd, *cwd.parents) if (folder / ".git").exists()), None)
+    if repository is not None:
+        folders.add(str(repository))
+    answered = {
+        folder: entry["trust_level"]
+        for folder, entry in codex_projects(config_path).items()
+        if folder in folders and isinstance(entry, dict) and entry.get("trust_level") in CODEX_TRUST_LEVELS
+    }
+    if not answered:
+        return
+    path = codex_trust_path(compose_dir)
+    try:
+        record = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        record = {}
+    stored = record.get("projects") if isinstance(record, dict) else None
+    projects = {**(stored if isinstance(stored, dict) else {}), **answered}
+    if isinstance(stored, dict) and projects == stored:
+        return
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    file_descriptor, staging = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}-")
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+        json.dump({"install_root": str(Path(compose_dir).resolve().parent), "projects": projects}, handle, indent=2)
+    os.replace(staging, path)
 
 
 def _wait_for_proxy(port: int, timeout_s: float = 5.0) -> bool:
@@ -589,6 +815,21 @@ def _observing_handler(base: type[BaseHTTPRequestHandler], observer: ReleaseObse
     return Handler
 
 
+class CaptureProxyServer(ThreadingHTTPServer):
+    """The proxy's HTTP server, quiet when a client resets a connection.
+
+    An agent that drops a kept alive connection with a reset, as hermes does
+    on every run, ends that connection normally, so no traceback reaches the
+    person's terminal; every other error still prints one."""
+
+    def handle_error(
+        self, request: socket.socket | tuple[bytes, socket.socket], client_address: tuple[str, int]
+    ) -> None:
+        if isinstance(sys.exc_info()[1], ConnectionResetError):
+            return
+        super().handle_error(request, client_address)
+
+
 class CaptureProxy:
     """The capture proxy between an agent and Reef, in process.
 
@@ -620,7 +861,7 @@ class CaptureProxy:
         self._store = _TaggedStore(self.tags)
         handler = build_handler(self._config, self._store)
         self._handler = handler if observer is None else _observing_handler(handler, observer)
-        self._server: ThreadingHTTPServer | None = None
+        self._server: CaptureProxyServer | None = None
 
     @property
     def port(self) -> int:
@@ -629,7 +870,7 @@ class CaptureProxy:
         return int(self._server.server_address[1])
 
     def start(self) -> None:
-        server = ThreadingHTTPServer((self.listen_host, 0), self._handler)
+        server = CaptureProxyServer((self.listen_host, 0), self._handler)
         threading.Thread(target=server.serve_forever, daemon=True).start()
         self._server = server
         if not _wait_for_proxy(self.port):
@@ -664,9 +905,13 @@ def _release_file_path(compose_dir: str) -> Path:
 
 
 def _read_release_info(compose_dir: str) -> dict[str, Any] | None:
-    """The release file beside the installed tree as a dict; None when there is none or it is not JSON."""
+    """The release file beside the installed tree as a dict; None when there is none, it is not JSON, or it is not a
+    regular file (a FIFO there would block the read)."""
+    path = _release_file_path(compose_dir)
+    if not path.is_file():
+        return None
     try:
-        record = json.loads(_release_file_path(compose_dir).read_text(encoding="utf-8"))
+        record = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return None
     return record if isinstance(record, dict) else None
@@ -674,10 +919,170 @@ def _read_release_info(compose_dir: str) -> dict[str, Any] | None:
 
 def _write_release_info(compose_dir: str, record: Mapping[str, Any]) -> None:
     # Written beside and renamed over, so a session starting meanwhile reads the old record or the new, never half.
+    # O_EXCL after the unlink: a link a session put at the staging name is removed, never written through.
     release_file = _release_file_path(compose_dir)
     staging = release_file.with_name(f".{release_file.name}.part")
-    staging.write_text(json.dumps(dict(record), indent=2) + "\n", encoding="utf-8")
+    staging.unlink(missing_ok=True)
+    file_descriptor = os.open(staging, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+        handle.write(json.dumps(dict(record), indent=2) + "\n")
     os.replace(staging, release_file)
+
+
+def wrapper_directory(install_root: Path) -> Path:
+    """``~/.reef/installs/<sha256 of install_root>``, outside the root: the install writes the ``reef-<adapter>``
+    wrapper in it, and the record beside it, the same name with ``.json`` added. ``install_root`` is hashed as given,
+    so it must be the resolved root the install named, as the wrapper bakes it."""
+    return Path.home() / ".reef" / "installs" / hashlib.sha256(os.fsencode(install_root)).hexdigest()
+
+
+def read_install_record(compose_dir: str) -> dict[str, Any] | None:
+    """What the install script recorded for this install root: ``install_root``, ``service_url`` (the address the
+    script was served from), ``release_file`` (the checksum of the release file without its check offs), ``files``
+    (each file it wrote, relative to the root, with its sha256) and ``settings`` (for a JSON file the binary writes
+    too, its ``preference_keys`` and the ``checked_values`` of every other key). None when no install recorded one.
+
+    The record is beside the wrapper, outside the tree: the tree may sit in the project a session can write, and the
+    record must not. The root is the composition directory's parent as the wrapper names it, the resolved root the
+    install wrote, not resolved again: a link a session put at the root, or at the composition directory, would
+    move the lookup elsewhere."""
+    install_root = Path(compose_dir).parent
+    try:
+        record = json.loads(wrapper_directory(install_root).with_suffix(".json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(record, dict) or record.get("install_root") != str(install_root):
+        return None
+    return record
+
+
+def recorded_install_files(record: Mapping[str, Any]) -> dict[str, str]:
+    """The record's files, each root-relative path with its sha256."""
+    files = record.get("files")
+    if not isinstance(files, Mapping):
+        return {}
+    return {str(relative): str(checksum) for relative, checksum in files.items()}
+
+
+def recorded_settings(
+    descriptor: AdapterDescriptor, record: Mapping[str, object]
+) -> dict[str, tuple[frozenset[str], Mapping[str, object]]]:
+    """Each recorded file the binary writes too (a ``client_state`` file with ``preference_keys``), with the
+    preference keys the record lets it change and the value the install wrote for every other key. A file the record
+    keeps no entry of that shape for, a damaged record or one written before Reef checked settings, gets none of
+    either, so every key counts as changed and the start is refused until ``update`` records it again."""
+    entries = record.get("settings")
+    files = recorded_install_files(record)
+    checks: dict[str, tuple[frozenset[str], Mapping[str, object]]] = {}
+    for state in descriptor.client_state:
+        if not state.preference_keys or state.path not in files:
+            continue
+        entry = entries.get(state.path) if isinstance(entries, Mapping) else None
+        preference_keys = entry.get("preference_keys") if isinstance(entry, Mapping) else None
+        checked_values = entry.get("checked_values") if isinstance(entry, Mapping) else None
+        if isinstance(preference_keys, list) and isinstance(checked_values, Mapping):
+            checks[state.path] = (frozenset(str(key) for key in preference_keys), checked_values)
+        else:
+            checks[state.path] = (frozenset(), {})
+    return checks
+
+
+def changed_settings(
+    path: Path, preference_keys: frozenset[str], checked_values: Mapping[str, object]
+) -> list[str] | None:
+    """The top-level keys of the JSON object at ``path``, outside ``preference_keys``, whose value is not the one in
+    ``checked_values`` (a key added or removed included), sorted; None when the file is not a JSON object."""
+    try:
+        settings = json.loads(path.read_text(encoding="utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return None
+    if not isinstance(settings, dict):
+        return None
+    current = {key: value for key, value in settings.items() if key not in preference_keys}
+    return sorted(
+        key
+        for key in current.keys() | checked_values.keys()
+        if key not in current or key not in checked_values or current[key] != checked_values[key]
+    )
+
+
+def is_client_state(descriptor: AdapterDescriptor, relative: PurePosixPath) -> bool:
+    """Whether a root-relative path is client state or lies below it: the binary's to write, and not checked but for
+    the keys of a recorded settings file outside its preference keys."""
+    states = [PurePosixPath(state.path) for state in descriptor.client_state]
+    return any(relative == state or state in relative.parents for state in states)
+
+
+def link_on_path(install_root: Path, relative: str) -> str | None:
+    """How a link reaches ``relative`` below ``install_root``, in the words the refusal prints; None when none does.
+
+    The install writes a recorded file where it is, so a link at the file,
+    a link at a directory above it (the composition directory included) or
+    a second hard link to it would take that write elsewhere."""
+    parts = PurePosixPath(relative).parts
+    for depth in range(1, len(parts) + 1):
+        part = PurePosixPath(*parts[:depth])
+        if (install_root / part).is_symlink():
+            return "a link" if depth == len(parts) else f"{part} is a link"
+    path = install_root / relative
+    if path.is_file() and path.stat().st_nlink > 1:
+        return "a hard link"
+    return None
+
+
+def changed_install_files(descriptor: AdapterDescriptor, compose_dir: str, record: Mapping[str, Any]) -> list[str]:
+    """The files the install recorded that differ from the record now, relative to the install root.
+
+    A file is changed when it is gone, holds other bytes, is reached
+    through a link, or is not a regular file (a FIFO, say); the last two are
+    named after it: the next install would write through the link, a link
+    that reads the same bytes would pass as the file, and the install refuses
+    what is not a regular file until it is removed. Client state is skipped,
+    except a JSON file the binary writes too (pi's ``settings.json``): there
+    every key but the binary's preferences must hold the value the install
+    wrote, and the keys that do not are named after it. The release file
+    counts by the part the install wrote, without the check offs ``setup``
+    adds."""
+    install_root = Path(str(record["install_root"]))
+    settings_checks = recorded_settings(descriptor, record)
+    changed = []
+    for relative, checksum in sorted(recorded_install_files(record).items()):
+        if relative not in settings_checks and is_client_state(descriptor, PurePosixPath(relative)):
+            continue
+        path = install_root / relative
+        link = link_on_path(install_root, relative)
+        if link is not None:
+            changed.append(f"{relative} ({link})")
+        elif path.exists() and not path.is_file():
+            changed.append(f"{relative} (not a regular file)")
+        elif relative in settings_checks and path.is_file():
+            keys = changed_settings(path, *settings_checks[relative])
+            if keys is None:
+                changed.append(f"{relative} (not a JSON object)")
+            elif keys:
+                changed.append(f"{relative} (keys: {', '.join(keys)})")
+        elif not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != checksum:
+            changed.append(relative)
+    release_checksum = record.get("release_file")
+    if isinstance(release_checksum, str):
+        release_path = install_root / HARNESS_RELEASE_FILE
+        link = link_on_path(install_root, HARNESS_RELEASE_FILE)
+        info = _read_release_info(compose_dir)
+        written = {key: value for key, value in (info or {}).items() if key != "setup"}
+        text = json.dumps(written, indent=2) + "\n"
+        if link is not None:
+            changed.append(f"{HARNESS_RELEASE_FILE} ({link})")
+        elif release_path.exists() and not release_path.is_file():
+            changed.append(f"{HARNESS_RELEASE_FILE} (not a regular file)")
+        elif info is None or hashlib.sha256(text.encode("utf-8")).hexdigest() != release_checksum:
+            changed.append(HARNESS_RELEASE_FILE)
+    return changed
+
+
+def recorded_service_url(compose_dir: str) -> str | None:
+    """The Reef address the install recorded, without ``/v1``; None when no install recorded one."""
+    service_url = (read_install_record(compose_dir) or {}).get("service_url")
+    return _strip_v1(service_url.rstrip("/")) if isinstance(service_url, str) and service_url else None
 
 
 #: The values the person gave ``setup`` for ``env`` items, beside the release file; ``run_agent`` reads it.
@@ -691,9 +1096,14 @@ def _env_file_path(compose_dir: str) -> Path:
 
 
 def _read_env_file(compose_dir: str) -> dict[str, str]:
-    """The env file as a dict, ``NAME=VALUE`` per line; blank lines, ``#`` comments and lines without ``=`` are skipped."""
+    """The env file as a dict, ``NAME=VALUE`` per line; blank lines, ``#`` comments and lines without ``=`` are skipped.
+
+    Only a regular file is read: a FIFO a session put there would block the start."""
+    path = _env_file_path(compose_dir)
+    if not path.is_file():
+        return {}
     try:
-        lines = _env_file_path(compose_dir).read_text(encoding="utf-8").splitlines()
+        lines = path.read_text(encoding="utf-8").splitlines()
     except OSError:
         return {}
     values: dict[str, str] = {}
@@ -783,12 +1193,84 @@ def _item_line(item: Mapping[str, Any]) -> str:
     return f"{item['name']} ({item.get('kind', 'unknown')})" + (f": {check}" if check else "")
 
 
+def keep_client_files(kept: Mapping[ClientState, PurePosixPath], temp: Path, compose: Path) -> None:
+    """Copy each ``file`` kind of client state the binary wrote in the temp copy into the installed tree."""
+    for state, relative in kept.items():
+        written = temp / relative
+        # A file still linked was written through the link; a real one is new, or renamed over the link.
+        if state.kind != "file" or written.is_symlink() or not written.is_file():
+            continue
+        destination = compose / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        file_descriptor, staging = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}-")
+        os.close(file_descriptor)
+        shutil.copy2(written, staging)  # with its mode: dsh refuses credentials readable beyond their owner
+        os.replace(staging, destination)
+
+
+#: Where an adapter's binary keeps the sessions a person resumes, and the file name around a session's id. The
+#: binary's own exit hint names the bare vendor command, which runs outside this install and its proxy.
+RESUMABLE_SESSION_LAYOUTS = {"hermes": ("sessions", "session_", ".json")}
+
+
+def resumable_session_mtimes(adapter: str, compose_dir: str) -> dict[str, float]:
+    """The ids of the sessions the adapter's binary keeps in the installed tree, each with its file's mtime."""
+    session_layout = RESUMABLE_SESSION_LAYOUTS.get(adapter)
+    if session_layout is None:
+        return {}
+    directory, prefix, suffix = session_layout
+    return {
+        path.name[len(prefix) : -len(suffix)]: path.stat().st_mtime
+        for path in (Path(compose_dir) / directory).glob(f"{prefix}*{suffix}")
+        if path.is_file()
+    }
+
+
 def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_var: str, args: list[str]) -> None:
+    descriptor = get_adapter(adapter)
+    install_root = Path(compose_dir).parent.resolve()
+    # A session can write a tree installed in its project, and the next session must not run what it wrote.
+    install_record = read_install_record(compose_dir)
+    if install_record is not None and install_root != Path(compose_dir).parent:
+        # The install names the resolved root, so a link on the way to it (at the root or a directory above it) is
+        # new, and following it would check and run a tree the install never wrote; update would install there too.
+        print(
+            f"reef-{adapter}: cannot start agent; {Path(compose_dir).parent} now leads through a link to "
+            f"{install_root}, which the install did not make: remove the link and run the install command again",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+    if install_record is None and descriptor.install is not None:
+        # Said on every such start: an unchecked start must not look like a checked one.
+        print(
+            f"reef-{adapter}: {install_root} has no install record, so its files were not checked before this "
+            f"session; reef-{adapter} update records them",
+            file=sys.stderr,
+        )
+    changed = [] if install_record is None else changed_install_files(descriptor, compose_dir, install_record)
+    if changed:
+        print(
+            f"reef-{adapter}: cannot start agent; these files in {install_root} changed since the install wrote them:",
+            file=sys.stderr,
+        )
+        for changed_path in changed:
+            print(f"  {changed_path}", file=sys.stderr)
+        print(
+            f"reef-{adapter}: run reef-{adapter} update to restore them, then start the agent again",
+            file=sys.stderr,
+        )
+        sys.exit(3)
     upstream = _reef_url_of(adapter, compose_dir)
 
     record = _read_release_info(compose_dir) or {}
     release = _installed_release(compose_dir)
-    stored = _read_env_file(compose_dir)
+    if install_record is None:
+        stored = _read_env_file(compose_dir)
+    else:
+        # The check above covers the release file, so these env items are the release's own: another line in the
+        # env file, which a session can write too, never reaches the agent's environment.
+        wanted = {_env_variable(item) for item in _named_items(record.get("requires")) if item.get("kind") == "env"}
+        stored = {name: value for name, value in _read_env_file(compose_dir).items() if name in wanted}
     checked = {item["name"]: item for item in _named_items(record.get("setup"))}
     unmet = []
     missing_programs: set[str] = set()
@@ -826,70 +1308,153 @@ def run_agent(binary: str, compose_dir: str, scenario: str, adapter: str, env_va
     except WrapperError as exc:
         sys.exit(f"reef-{adapter}: {exc}")
 
-    descriptor = get_adapter(adapter)
     # The temp copy is removed after the run: state kept in the installed tree is linked into it
     # instead, so a later run finds the sessions and settings an earlier run saved.
-    kept = {
-        state: PurePosixPath(state.path).relative_to(descriptor.compose_relocation()[1])
-        for state in descriptor.client_state
-    }
+    subdir = PurePosixPath(descriptor.compose_relocation()[1])
+    kept = {state: PurePosixPath(state.path).relative_to(subdir) for state in descriptor.client_state}
     for state, relative in kept.items():
         path = Path(compose_dir) / relative
+        # A link here, which a session can make in a tree it can write, would take the binary's writes wherever it
+        # points, outside the tree too. The install writes client state only as a recorded settings file, whose link
+        # the check above refuses; here the link goes, and the state is the tree's own again. Removing a link leaves
+        # what it points at as it was.
+        for depth in range(1, len(relative.parts) + 1):
+            part = Path(compose_dir, *relative.parts[:depth])
+            if part.is_symlink():
+                target = os.readlink(part)
+                part.unlink()
+                print(
+                    f"reef-{adapter}: {part.relative_to(Path(compose_dir).parent)} in {install_root} was a link to "
+                    f"{target}; removed the link, and the session keeps this state in the tree",
+                    file=sys.stderr,
+                )
+                break
         if state.kind == "directory":
             path.mkdir(parents=True, exist_ok=True)
         elif state.kind == "sqlite" and not path.exists():
             path.parent.mkdir(parents=True, exist_ok=True)
             with contextlib.closing(sqlite3.connect(path)) as database:
                 database.execute("VACUUM")  # writes the database header, so the file is a database
-    temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port)
+    # With a record, the session gets copies of the files the install wrote and the client state, nothing else in
+    # the tree.
+    copied: list[PurePosixPath] | None
+    if install_record is None:
+        copied = None
+    else:
+        recorded = [PurePosixPath(relative) for relative in recorded_install_files(install_record)]
+        copied = sorted(
+            path.relative_to(subdir)
+            for path in recorded
+            if subdir in path.parents and not is_client_state(descriptor, path)
+        )
     env = os.environ.copy()
-    env[env_var] = temp_dir
-    # What an interactive run needs beyond the episode env; the person's own setting wins.
+    # What an interactive run needs beyond the episode env, {root} naming the install root (a directory
+    # outside the relocated composition is read in place); the person's own setting wins.
     for key, value in descriptor.client_env.items():
-        env.setdefault(key, value)
+        env.setdefault(key, value.replace("{root}", str(install_root)))
     # The values the person gave setup, for the extensions that read them; a variable the shell sets wins.
     for key, value in stored.items():
         if not env.get(key):
             env[key] = value
     # The update notice extension needs the service address, the scenario,
     # and the true install root; the relocated temp copy carries none of them.
-    install_root = Path(compose_dir).resolve().parent
     env["REEF_SERVICE_URL"] = upstream
     env["REEF_SCENARIO"] = scenario
     env["REEF_HARNESS_DEST"] = str(install_root)
-    wrapper = install_root / f"reef-{adapter}"
+    # The wrapper the install wrote, so an extension can run its update and setup from the session: beside the
+    # record, where a session that can write only its project cannot rewrite it (its record removed or not), or in
+    # the tree for an install made before Reef wrote it there.
+    installed_wrapper = wrapper_directory(install_root) / f"reef-{adapter}"
+    wrapper = installed_wrapper if installed_wrapper.is_file() else install_root / f"reef-{adapter}"
     if wrapper.is_file():
-        # The wrapper the install wrote, so an extension can run its update and setup from the session.
         env["REEF_HARNESS_WRAPPER"] = str(wrapper)
     if token:
         env["REEF_TOKEN"] = token  # the extensions in the agent reach reef with the token the proxy uses
-    # An evolved tool that starts a second agent session finds this harness's own binary first.
-    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), env.get("PATH", "")])
+    # The session tag every call of this run carries, so a request filed from inside the session names it.
+    env["REEF_HARNESS_SESSION"] = tags["session"]
+    # An evolved tool that starts a second agent session finds this harness's own binary first, and a command
+    # that runs reef-<adapter> by name reaches this install's wrapper, not the one another install linked. For an
+    # install that wrote its wrapper beside the record that is the wrapper's own directory, never the tree, where a
+    # program a session adds (a node, say) would run in the next session unchecked.
+    env["PATH"] = os.pathsep.join([str(Path(binary).resolve().parent), str(wrapper.parent), env.get("PATH", "")])
     if adapter == "native":
         # The loop's session log outlives the temp copy: it lands beside the installed tree.
         env.setdefault("REEF_NATIVE_SESSION_DIR", str(Path(compose_dir).resolve() / "sessions"))
 
+    session_mtimes_before = resumable_session_mtimes(adapter, compose_dir)
+    # Ahead of the person's arguments: a binary that reads the last of a repeated flag keeps the person's.
+    # A version flag starts no session, and a binary may take it only when nothing is ahead of it.
+    leading_args = () if args and args[0] in descriptor.client_version_args else descriptor.client_args
+    # A closed terminal (SIGHUP) or a kill (SIGTERM) would end the wrapper before its cleanup, leaving the temp
+    # copy, whose binding holds the token, behind: pass the signal to the agent, wait for it, then clean up.
+    received: list[int] = []
+    agent: subprocess.Popen[bytes] | None = None
+
+    def forward(signum: int, frame: FrameType | None) -> None:
+        received.append(signum)
+        if agent is not None:
+            agent.send_signal(signum)
+
+    def leave_to_agent(signum: int, frame: FrameType | None) -> None:
+        return None
+
+    # A signal the caller ignores (nohup) stays ignored, for the agent too. Ctrl-C reaches the agent itself, in the
+    # same process group, so the wrapper only waits for it: a handler that does nothing, not SIG_IGN, since exec
+    # resets it and the agent keeps the default action, and no KeyboardInterrupt can land between waitpid reaping
+    # the agent and Popen recording its status, which would lose the status and read as 0.
+    handlers = {signal.SIGHUP: forward, signal.SIGTERM: forward, signal.SIGINT: leave_to_agent}
+    previous = {
+        signum: signal.signal(signum, handler)
+        for signum, handler in handlers.items()
+        if signal.getsignal(signum) is not signal.SIG_IGN
+    }
+    temp_dir: str | None = None
+    returncode = 0
+    cwd = Path.cwd().resolve()
     try:
-        result = subprocess.run([binary, *args], env=env)
+        temp_dir = _create_temp_composition(adapter, compose_dir, proxy.port, copied, sorted(set(kept.values())))
+        if adapter == "codex":
+            add_codex_trust(compose_dir, Path(temp_dir) / "config.toml")
+        env[env_var] = temp_dir
+        if not received:
+            with subprocess.Popen([binary, *leading_args, *args], env=env) as agent:
+                if received:
+                    agent.send_signal(received[0])  # it came while the agent started
+                try:
+                    returncode = agent.wait()
+                except BaseException:
+                    agent.kill()
+                    raise
     finally:
         proxy.publish_turn()
         proxy.stop()
         try:
-            for state, relative in kept.items():
-                written = Path(temp_dir) / relative
-                # A file still linked was written through the link; a real one is new, or renamed over the link.
-                if state.kind != "file" or written.is_symlink() or not written.is_file():
-                    continue
-                destination = Path(compose_dir) / relative
-                destination.parent.mkdir(parents=True, exist_ok=True)
-                file_descriptor, staging = tempfile.mkstemp(dir=destination.parent, prefix=f".{destination.name}-")
-                os.close(file_descriptor)
-                shutil.copy2(written, staging)  # with its mode: dsh refuses credentials readable beyond their owner
-                os.replace(staging, destination)
+            if temp_dir is not None:
+                keep_client_files(kept, Path(temp_dir), Path(compose_dir))
+                if adapter == "codex":
+                    keep_codex_trust(compose_dir, Path(temp_dir) / "config.toml", cwd)
         finally:
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            if temp_dir is not None:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            for signum, handler in previous.items():
+                signal.signal(signum, handler)
 
-    sys.exit(result.returncode)
+    # The one session this run wrote, by its file: the newest row would pick a session another run keeps open.
+    written_session_ids = [
+        session_id
+        for session_id, mtime in resumable_session_mtimes(adapter, compose_dir).items()
+        if session_mtimes_before.get(session_id) != mtime
+    ]
+    if len(written_session_ids) == 1:
+        print(
+            f"reef-{adapter}: resume this session with: reef-{adapter} --resume {written_session_ids[0]}",
+            file=sys.stderr,
+        )
+    # As a shell reports it: 128 plus the signal the wrapper passed on, or the one that ended the agent (130 after
+    # Ctrl-C).
+    if received:
+        sys.exit(128 + received[0])
+    sys.exit(128 - returncode if returncode < 0 else returncode)
 
 
 def _reportable(turn: Mapping[str, Any]) -> bool:
@@ -988,29 +1553,36 @@ def _spooled_session(scenario: str) -> str | None:
     return None
 
 
+#: How much of a release's How to use a result line carries: its first paragraph, cut only when it runs long (entering
+#: and leaving a mode often share one).
+USAGE_CHARS = 1200
+
+
 def _clip(text: str, limit: int) -> str:
     """The first ``limit`` characters of a text, the cut marked."""
     return text if len(text) <= limit else f"{text[: limit - 3]}..."
 
 
-def _page_link(upstream: str, path: str, scenario: str, token: str | None) -> str:
-    """A page a browser opens: the query carries what the wrapper sends as headers, the scenario and the token."""
-    query = f"scenario={urllib.parse.quote(scenario, safe='')}"
-    if token:
-        query += f"&token={urllib.parse.quote(token, safe='')}"
-    return f"{upstream}{path}?{query}"
+def page_link(upstream: str, answer: Mapping[str, Any], route: str, scenario: str) -> str:
+    """The link a browser opens for a page: ``upstream`` and the ``page_path`` the service answered (a filed
+    request, a catalog row), whose query carries the scenario and a page key in place of the token, since a
+    session's model reads the link. A service from before page paths gets ``route`` with the scenario alone."""
+    path = answer.get("page_path")
+    if isinstance(path, str) and path.startswith("/"):
+        return f"{upstream}{path}"
+    return f"{upstream}{route}?scenario={urllib.parse.quote(scenario, safe='')}"
 
 
-def _request_page_link(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
-    """The link to a request's page, ``GET /reef/harness/requests/<id>/page``."""
-    return _page_link(
-        upstream, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario, token
+def _request_page_link(upstream: str, scenario: str, answer: Mapping[str, Any], record_id: str) -> str:
+    """The link to a request's page, ``GET /reef/harness/requests/<id>/page``, from the filing's answer."""
+    return page_link(
+        upstream, answer, f"/reef/harness/requests/{urllib.parse.quote(record_id, safe='')}/page", scenario
     )
 
 
-def _step_page_link(upstream: str, scenario: str, token: str | None, step: int) -> str:
-    """The link to a step's page, ``GET /reef/harness/releases/<step>/page``."""
-    return _page_link(upstream, f"/reef/harness/releases/{step}/page", scenario, token)
+def _step_page_link(upstream: str, scenario: str, rows: Sequence[Mapping[str, Any]], step: int) -> str:
+    """The link to a step's page, ``GET /reef/harness/releases/<step>/page``, from the step's catalog row."""
+    return page_link(upstream, rows[step], f"/reef/harness/releases/{step}/page", scenario)
 
 
 def _metrics_of(row: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -1046,14 +1618,32 @@ def result_of(row: Mapping[str, Any], rows: Sequence[Mapping[str, Any]] = ()) ->
     return str(row.get("operation") or "unknown")
 
 
-def _uncovered(row: Mapping[str, Any]) -> list[str]:
-    """What the step's review left uncovered, when it recorded one."""
+def review_points(row: Mapping[str, Any], key: str) -> list[str]:
+    """One list the step's review recorded: ``uncovered`` for what the entries left uncovered, ``limits`` for what
+    the harness's notes put out of reach; empty when the review recorded none."""
     notes = _metrics_of(row).get("proposal_notes")
     review = notes.get("review") if isinstance(notes, Mapping) else None
-    items = review.get("uncovered") if isinstance(review, Mapping) else None
+    items = review.get(key) if isinstance(review, Mapping) else None
     if not isinstance(items, list):
         return []
     return [item.strip() for item in items if isinstance(item, str) and item.strip()]
+
+
+def declined_reason(row: Mapping[str, Any]) -> str:
+    """Why the proposer wrote no entry on purpose, when its design said no entry can deliver the request."""
+    notes = _metrics_of(row).get("proposal_notes")
+    reason = notes.get("declined") if isinstance(notes, Mapping) else None
+    return reason.strip() if isinstance(reason, str) else ""
+
+
+def release_usage(row: Mapping[str, Any]) -> str:
+    """The first paragraph of the release's How to use on one line, cut only when long: the form a person types,
+    from the release itself, never from the request's wording. Markdown backticks go, so a model that quotes the line
+    in its own inline code renders it whole. Empty when the design has none."""
+    notes = _metrics_of(row).get("proposal_notes")
+    _, usage = design_sections(notes if isinstance(notes, Mapping) else {})
+    first = usage.split("\n\n", 1)[0]
+    return _clip(" ".join(first.replace("`", "").split()), USAGE_CHARS)
 
 
 def _failure_of(row: Mapping[str, Any]) -> str:
@@ -1063,28 +1653,46 @@ def _failure_of(row: Mapping[str, Any]) -> str:
     return failure.strip() if isinstance(failure, str) else ""
 
 
-def result_line(adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str) -> str:
+def result_line(
+    adapter: str, step: int, rows: Sequence[Mapping[str, Any]], page: str, unmet: Sequence[str] = ()
+) -> str:
     """One line for a settled step: its result and the next action, quoting the request's first 60 characters.
 
     The extension's watch says the same in the session; ``evolve --wait``
     and ``doctor`` say it here. ``page`` is the step's page link, which the
-    pending line names as the review."""
+    pending line names as the review; ``unmet`` names the items the release still needs set up."""
     row = rows[step]
     metrics = _metrics_of(row)
     ask = _clip(str(_request_of(row).get("text") or "").strip(), 60)
     release = str(row.get("release_id") or "")[:8]
     selection_result = result_of(row, rows)
+    notice = ships_version_check(adapter)
     if selection_result == "selected":
-        return f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it (the update notice offers it)."
+        if notice:
+            return (
+                f"'{ask}' is published as release {release}. Restart reef-{adapter} to install it "
+                "(the update notice offers it)."
+            )
+        action = next_action(adapter, step, selection_result, str(_request_of(row).get("id") or ""), unmet)
+        commands = ", then ".join(action.terminal) if action is not None else f"reef-{adapter} update"
+        return f"'{ask}' is published as release {release}. Run {commands}, then restart reef-{adapter}."
     if selection_result == "pending":
+        where = (
+            f"/versions v{step} opens the page, /versions v{step} install serves it"
+            if notice
+            else f"reef-{adapter} page {step} opens the page"
+        )
         return (
             f"'{ask}' is ready as release {release}. This release changes an extension, so read it before it "
-            f"runs: /versions v{step} opens the page, /versions v{step} install serves it. Page: {page}"
+            f"runs: {where}. Page: {page}"
         )
     if selection_result == "rejected":
-        selection = metrics.get("selection")
-        reason = (selection.get("reason") if isinstance(selection, Mapping) else None) or "no reason recorded"
-        return f"'{ask}' did not pass the checks ({reason}). Nothing changed; rephrase or split the request."
+        return f"'{ask}' {rejection_text(metrics)}"
+    if selection_result == "skipped" and declined_reason(row):
+        return (
+            f"'{ask}' was answered with no change: {declined_reason(row)}. The design and what is out of reach are on "
+            f"the page: {page}"
+        )
     if selection_result == "skipped":
         # The proposer's own reason, when the step recorded one: a failed model call, a reply with no entry.
         failure = _failure_of(row)
@@ -1098,8 +1706,10 @@ def _step_of(rows: Sequence[Mapping[str, Any]], record_id: str) -> int | None:
     return next((step for step, row in enumerate(rows) if _request_of(row).get("id") == record_id), None)
 
 
-def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> str:
-    """Read the request's explicit progress: started, gone, or waiting.
+def _request_state(upstream: str, scenario: str, token: str | None, record_id: str) -> tuple[str, Mapping[str, Any]]:
+    """Where the request stands by its progress (``GET /reef/harness/requests/<id>/progress``, the request page's
+    reading), and that reading: ``started`` once its state is past ``queued`` (a settled request's state is its
+    result), ``gone`` when the service answers 404 (its scenario was reset), else ``waiting``.
 
     A read that fails for any other reason is no reason to stop waiting, so
     it reads as waiting and the next poll asks again."""
@@ -1107,14 +1717,29 @@ def _request_state(upstream: str, scenario: str, token: str | None, record_id: s
     req = urllib.request.Request(f"{upstream}{path}", headers=_reef_headers(scenario, token))
     try:
         with urllib.request.urlopen(req, timeout=30) as response:
-            record = json.loads(response.read())
+            progress = json.loads(response.read())
     except urllib.error.HTTPError as exc:
-        return "gone" if exc.code == 404 else "waiting"
+        return ("gone" if exc.code == 404 else "waiting"), {}
     except (OSError, ValueError):
-        return "waiting"
-    if isinstance(record, Mapping) and isinstance(record.get("state"), str) and record["state"] != "queued":
-        return "started"
-    return "waiting"
+        return "waiting", {}
+    if isinstance(progress, Mapping) and isinstance(progress.get("state"), str) and progress["state"] != "queued":
+        return "started", progress
+    return "waiting", {}
+
+
+def step_words(progress: Mapping[str, Any]) -> str:
+    """Where a running step stands, for the line a wait ends with: its phase and its time so far, which grows with
+    every wait, so no two waits print the same line (a harness that stops an identical repeated call reads it
+    as a loop); empty before a step took the request."""
+    state = progress.get("state")
+    if not isinstance(state, str) or not state:
+        return ""
+    started_at = progress.get("started_at")
+    if isinstance(started_at, (int, float)) and not isinstance(started_at, bool):
+        whole = max(0, int(time.time() - started_at))
+        clock = f"{whole} s" if whole < 120 else f"{whole // 60} min {whole % 60:02d} s"
+        return f"; the step is {state}, {clock} in"
+    return f"; the step is {state}"
 
 
 def _await_step(
@@ -1134,22 +1759,29 @@ def _await_step(
     ``"gone"`` when two polls in a row find no record of the request (its
     scenario was reset; one missing read can be a record not written yet).
     One line says when the record shows a step took it, so the wait is seen
-    to move."""
+    to move; the timeout line names the phase the last progress read showed."""
     deadline = time.monotonic() + timeout_s
     started = False
     missing = 0
+    progress: Mapping[str, Any] = {}
     while True:
         rows = _catalog(upstream, scenario, adapter, token)
         step = _step_of(rows, record_id)
         if step is not None:
             return step, rows
         if time.monotonic() >= deadline:
-            print(
-                f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s; /versions shows it when it settles"
+            later = (
+                "/versions shows it when it settles"
+                if ships_version_check(adapter)
+                else f"reef-{adapter} wait {record_id} waits again"
             )
+            print(f"reef-{adapter}: no result yet for '{ask}' after {timeout_s:g} s{step_words(progress)}; {later}")
             return "timeout"
+        # Read on every poll, so the line a timeout prints names the phase the step is in now.
+        state, reading = _request_state(upstream, scenario, token, record_id)
+        if reading:
+            progress = reading
         if not started:
-            state = _request_state(upstream, scenario, token, record_id)
             missing = missing + 1 if state == "gone" else 0
             if missing >= 2:
                 print(
@@ -1159,7 +1791,7 @@ def _await_step(
                 return "gone"
             if state == "started":
                 started = True
-                print(f"reef-{adapter}: the step started; usually one to three minutes")
+                print(f"reef-{adapter}: the step started; usually a few minutes")
         time.sleep(poll_s)
 
 
@@ -1200,13 +1832,31 @@ def _promote(upstream: str, scenario: str, adapter: str, token: str | None, rele
     return head
 
 
-def _next_commands(adapter: str, step: int, selection_result: str) -> str:
-    """The commands that take the next step by hand, for a person who declined it or has no terminal."""
-    if selection_result == "pending":
-        return (
-            f"/versions v{step} install in a reef-{adapter} session, or reef-{adapter} setup and reef-{adapter} update"
-        )
-    return f"reef-{adapter} setup, then reef-{adapter} update"
+def next_commands(adapter: str, step: int, selection_result: str, record_id: str, unmet: Sequence[str]) -> str:
+    """The commands that take the next step by hand, for a person who declined it or has no terminal: the terminal
+    commands of the step's :class:`NextAction`, setup named only while ``unmet`` names an item."""
+    action = next_action(adapter, step, selection_result, record_id, unmet)
+    if action is None:
+        return ""
+    terminal = ", then ".join(action.terminal)
+    if selection_result != "pending":
+        return terminal
+    if ships_version_check(adapter):
+        return f"{action.commands[0]} in a reef-{adapter} session, or {' and '.join(action.terminal)}"
+    return f"{terminal} in a terminal"
+
+
+def unmet_requires(compose_dir: str, rows: Sequence[Mapping[str, Any]], release: str) -> list[str]:
+    """The names of the items ``release`` requires that this machine has not met: its chain's union, read as update
+    reads it, an env item the environment or the env file sets counting as met; nothing is written."""
+    record = _read_release_info(compose_dir) or {}
+    recorded = {item["name"]: item for item in _named_items(record.get("setup"))}
+    values = _read_env_file(compose_dir)
+    return [
+        item["name"]
+        for item in required_by(rows, release)
+        if not (_met(item, recorded.get(item["name"])) or _auto_met(item, values))
+    ]
 
 
 def _install(scenario: str, adapter: str, compose_dir: str, release: str) -> int:
@@ -1229,6 +1879,7 @@ def _next_step(
     row: Mapping[str, Any],
     step: int,
     selection_result: str,
+    unmet: Sequence[str],
 ) -> int:
     """After a release, hand the person the next step: install a selected one, promote then install a pending one.
 
@@ -1238,20 +1889,21 @@ def _next_step(
     release = str(row.get("release_id") or "")
     if selection_result not in ("selected", "pending") or not release:
         return 0
+    record_id = str(_request_of(row).get("id") or "")
     if not sys.stdin.isatty():
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
+        print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
     if selection_result == "pending":
         print(f"reef-{adapter}: read the change first: reef-{adapter} page {step}")
         if not _confirm(adapter, "Promote now? [y/N]", default_yes=False):
-            print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
+            print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
             return 0
         head = _promote(upstream, scenario, adapter, token, release)
         if head is None:
             return 1
         release = head
     elif not _confirm(adapter, "Install now? [Y/n]", default_yes=True):
-        print(f"reef-{adapter}: next: {_next_commands(adapter, step, selection_result)}")
+        print(f"reef-{adapter}: next: {next_commands(adapter, step, selection_result, record_id, unmet)}")
         return 0
     return _install(scenario, adapter, compose_dir, release)
 
@@ -1284,8 +1936,9 @@ def harness(
         )
     upstream = _reef_url_of(adapter, compose_dir)
 
-    # Session and release identify where the request came from; they do not select an inference batch.
-    session = _spooled_session(scenario) or str(uuid.uuid4())
+    # Session and release identify where the request came from; they do not select an inference batch. Inside a
+    # session the wrapper named it; outside one, the oldest spooled run's.
+    session = os.environ.get("REEF_HARNESS_SESSION") or _spooled_session(scenario) or str(uuid.uuid4())
 
     body = {"text": text, "session": session, "release_id": release, "client": client_report()}
     token = _reef_token(adapter, compose_dir)
@@ -1308,25 +1961,105 @@ def harness(
         # A 200 without the id is a reef this wrapper does not know; say so instead of a traceback.
         sys.exit(f"reef-{adapter}: reef answered 200 without an agent_record_id: {json.dumps(answer)[:200]}")
     print(f"reef-{adapter}: training request {record_id} accepted")
-    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, token, record_id)}")
+    print(f"reef-{adapter}: watch it here: {_request_page_link(upstream, scenario, answer, record_id)}")
     if not wait:
-        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or check /versions later")
+        later = (
+            "check /versions later" if ships_version_check(adapter) else f"run reef-{adapter} wait {record_id} later"
+        )
+        print(f"reef-{adapter}: reef is running the step; add --wait to stay here, or {later}")
         return 0
-    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
-    settled = _await_step(
-        upstream, scenario, adapter, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
+    return report_request(
+        scenario, adapter, compose_dir, upstream, token, record_id, _clip(text, 60), timeout_s=timeout_s, poll_s=poll_s
     )
+
+
+def wait_request(
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    record_id: str,
+    *,
+    timeout_s: float = 1800.0,
+    poll_s: float = 5.0,
+    poll: bool = False,
+) -> int:
+    """Wait for the step that takes the filed request ``record_id`` and report its result, as ``evolve --wait`` does.
+
+    A harness whose shell tool stops a command after a few minutes files
+    the request with ``evolve`` and calls this until it stops answering 2;
+    with ``poll`` a step that still runs answers 0 instead, since such a
+    tool counts a nonzero exit as a failed call, and the printed line says
+    the step still runs."""
+    record_id = record_id.strip()
+    if not record_id:
+        sys.exit(f"reef-{adapter} wait: name the request id evolve printed")
+    upstream = _reef_url_of(adapter, compose_dir)
+    token = _reef_token(adapter, compose_dir)
+    status = report_request(
+        scenario,
+        adapter,
+        compose_dir,
+        upstream,
+        token,
+        record_id,
+        f"request {record_id[:8]}",
+        timeout_s=timeout_s,
+        poll_s=poll_s,
+    )
+    return 0 if poll and status == 2 else status
+
+
+def report_request(
+    scenario: str,
+    adapter: str,
+    compose_dir: str,
+    upstream: str,
+    token: str | None,
+    record_id: str,
+    ask: str,
+    *,
+    timeout_s: float,
+    poll_s: float,
+) -> int:
+    """Wait for the request's step and print its result; the status ``harness`` documents."""
+    print(f"reef-{adapter}: reef is running the step; waiting up to {timeout_s:g} s for its result")
+    settled = _await_step(upstream, scenario, adapter, token, record_id, ask, timeout_s=timeout_s, poll_s=poll_s)
     if isinstance(settled, str):
         return 2 if settled == "timeout" else 1  # timeout: the step still runs; gone: nothing will come
     step, rows = settled
-    print(f"reef-{adapter}: {result_line(adapter, step, rows, _step_page_link(upstream, scenario, token, step))}")
-    uncovered = _uncovered(rows[step])
-    if uncovered:
-        print(f"reef-{adapter}: not covered: {'; '.join(uncovered)}")
+    release = str(rows[step].get("release_id") or "")
+    unmet = unmet_requires(compose_dir, rows, release) if release else []
+    page = _step_page_link(upstream, scenario, rows, step)
+    print(f"reef-{adapter}: {result_line(adapter, step, rows, page, unmet)}")
+    uncovered = review_points(rows[step], "uncovered")
     selection_result = result_of(rows[step], rows)
+    usage = release_usage(rows[step])
+    if usage and selection_result in ("selected", "pending"):
+        # The form the release is used by, so nobody guesses it from the request (codex takes $chat, not /chat).
+        print(f"reef-{adapter}: how to use: {usage}")
+    if uncovered:
+        # After a rejection the checks decided; the review's points are notes on the change, not the cause.
+        label = "review notes (they did not decide this result)" if selection_result == "rejected" else "not covered"
+        print(f"reef-{adapter}: {label}: {joined_points(uncovered)}")
+    limits = review_points(rows[step], "limits")
+    if limits:
+        # One point per line: a point may hold a '; ' of its own.
+        print(f"reef-{adapter}: out of reach on this harness:")
+        for point in limits:
+            print(f"  - {point}")
     if selection_result in ("rejected", "skipped"):
         return 1
-    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result)
+    return _next_step(scenario, adapter, compose_dir, upstream, token, rows[step], step, selection_result, unmet)
+
+
+def joined_points(points: Sequence[str]) -> str:
+    """Review points on one line: each point's own final period dropped, so no '.;' sits between them, and a
+    point after the first starting in lower case unless its first word is an acronym or a name in capitals."""
+    cleaned = [point.rstrip().rstrip(".") for point in points]
+    return "; ".join(
+        point if index == 0 or point[1:2].isupper() else point[:1].lower() + point[1:]
+        for index, point in enumerate(cleaned)
+    )
 
 
 def _page_cache_dir() -> Path:
@@ -1381,7 +2114,13 @@ def page(scenario: str, adapter: str, compose_dir: str, step: int, *, open_page:
 
 
 def _reef_url_of(adapter: str, compose_dir: str) -> str:
-    """Reef's base URL from the installed tree, or an exit naming what is missing."""
+    """Reef's base URL: the one the install recorded, else from the installed tree, or an exit naming what is missing.
+
+    The record comes first: a session can change the model binding of a tree
+    in its project, and ``update`` must not run a script from that address."""
+    recorded = recorded_service_url(compose_dir)
+    if recorded is not None:
+        return recorded
     try:
         reef_url = _extract_reef_url(adapter, Path(compose_dir))
     except WrapperError as exc:
@@ -1489,11 +2228,11 @@ def _load_setup(scenario: str, adapter: str, compose_dir: str, release: str | No
         session_root
         and session_service
         and session_scenario
-        and Path(session_root).resolve() == Path(compose_dir).resolve().parent
+        and Path(session_root).resolve() == Path(compose_dir).parent.resolve()
     ):
         upstream = _strip_v1(session_service.rstrip("/"))
         scenario = session_scenario
-        token = os.environ.get("REEF_TOKEN") or None
+        token = os.environ.get("REEF_TOKEN") or session_tree_token(adapter, compose_dir, upstream)
     else:
         upstream = _reef_url_of(adapter, compose_dir)
         token = _reef_token(adapter, compose_dir)
@@ -1752,24 +2491,41 @@ def setup_run(scenario: str, adapter: str, compose_dir: str, name: str, *, relea
     return 0 if met else 1
 
 
-def _run_install_script(script: bytes, install_root: Path, token: str | None) -> int:
+def binary_install_prefix(adapter: str) -> str | None:
+    """Where the first install put the binary (the script's ``PREFIX``): the baked ``REEF_HARNESS_BINARY`` with the
+    descriptor's ``install.binary_path`` taken off its end; ``None`` when it does not end that way (a binary of the
+    person's own, or an adapter reef does not install)."""
+    binary = os.environ.get("REEF_HARNESS_BINARY")
+    install = get_adapter(adapter).install
+    if not binary or install is None:
+        return None
+    tail = "/" + install.binary_path.strip("/")
+    return binary[: -len(tail)] if binary.endswith(tail) and len(binary) > len(tail) else None
+
+
+def _run_install_script(script: bytes, install_root: Path, token: str | None, prefix: str | None = None) -> int:
     """Run a fetched install script with ``bash`` for ``install_root``; its exit status, 127 when bash cannot run.
 
-    ``REEF_TOKEN`` rides in the script's environment, so the binding it
-    writes keeps the token the wrapper reaches reef with."""
+    The script reaches bash on its standard input, as ``curl ... | bash``
+    runs it, and never sits in a file: bash reads a script file while it
+    runs, and a copy in TMPDIR is one a sandboxed command could rewrite
+    first. ``REEF_TOKEN`` rides in the script's environment, so the binding
+    it writes keeps the token the wrapper reaches reef with; ``prefix``, the
+    script's second argument, keeps the binary where the first install put
+    it."""
     env = os.environ.copy()
     if token:
         env["REEF_TOKEN"] = token
-    with tempfile.NamedTemporaryFile(prefix="reef-harness-install-", suffix=".sh", delete=False) as handle:
-        handle.write(script)
-        path = Path(handle.name)
+    # Keep the exact interpreter, including when it has no python3 sibling on PATH.
+    env["REEF_PYTHON"] = sys.executable
+    # Older services generate scripts that still resolve python3 on PATH.
+    env["PATH"] = os.pathsep.join([str(Path(sys.executable).parent), env.get("PATH", "")])
     try:
-        return subprocess.run(["bash", str(path), str(install_root)], env=env).returncode
+        arguments = [str(install_root)] if prefix is None else [str(install_root), prefix]
+        return subprocess.run(["bash", "-s", "--", *arguments], input=script, env=env).returncode
     except OSError as exc:
         print(f"reef-harness: cannot run bash: {exc}", file=sys.stderr)
         return 127
-    finally:
-        path.unlink(missing_ok=True)
 
 
 def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None = None) -> int:
@@ -1779,7 +2535,18 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     the scenario header and runs with ``bash`` and the install root as its
     destination; 1 when the fetch or the script fails. While the release
     requires an item that is not met the items are printed and nothing is
-    fetched: 3, the script would refuse anyway, this says why first."""
+    fetched: 3, the script would refuse anyway, this says why first. 3 too,
+    fetching nothing, when the recorded install root now leads through a link."""
+    install_root = Path(compose_dir).parent
+    if read_install_record(compose_dir) is not None and install_root.resolve() != install_root:
+        # The install names the resolved root, so a link on the way to it is new: an install through it would write
+        # the tree, and prune it, wherever the link points.
+        print(
+            f"reef-{adapter} update: {install_root} now leads through a link to {install_root.resolve()}, which the "
+            "install did not make: remove the link and run the install command again",
+            file=sys.stderr,
+        )
+        return 3
     state = _load_setup(scenario, adapter, compose_dir, release, "update")
     if state is None:
         return 1
@@ -1812,11 +2579,14 @@ def update(scenario: str, adapter: str, compose_dir: str, *, release: str | None
     except OSError as exc:
         print(f"reef-{adapter} update: reef unreachable at {state.upstream}: {exc}", file=sys.stderr)
         return 1
-    status = _run_install_script(script, Path(compose_dir).resolve().parent, state.token)
+    status = _run_install_script(script, install_root.resolve(), state.token, binary_install_prefix(adapter))
     if status != 0:
         print(f"reef-{adapter} update: the install script exited {status}", file=sys.stderr)
         return 1
     print(f"reef-{adapter} update: installed release {_installed_release(compose_dir) or state.release_id}")
+    usage = release_usage(state.row)
+    if usage:
+        print(f"reef-{adapter} update: how to use: {usage}")
     return 0
 
 
@@ -1843,7 +2613,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     except Exception as exc:  # pragma: no cover - the wrapper itself imports both
         rows.append((False, "interpreter", f"{sys.executable} does not import reef: {exc}"))
     try:
-        upstream = _extract_reef_url(adapter, Path(compose_dir))
+        upstream = recorded_service_url(compose_dir) or _extract_reef_url(adapter, Path(compose_dir))
     except WrapperError as exc:
         upstream = None
         rows.append((False, "service", f"binding unreadable: {exc}"))
@@ -1868,7 +2638,12 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
             rows.append((False, "service", f"{upstream} unreachable: {exc}"))
     if Path(binary).is_file():
         try:
-            version = subprocess.run([binary, "--version"], capture_output=True, text=True, timeout=20)
+            # The descriptor's env on a scratch root: hermes writes a home skeleton on --version.
+            with tempfile.TemporaryDirectory(prefix="reef-probe-") as probe_root:
+                probe_env = {**os.environ, **version_probe_env(get_adapter(adapter), Path(probe_root))}
+                version = subprocess.run(
+                    [binary, "--version"], capture_output=True, text=True, timeout=20, env=probe_env
+                )
             first = (version.stdout or version.stderr).strip().splitlines()
             rows.append((version.returncode == 0, "binary", f"{binary} ({first[0] if first else 'no output'})"))
         except (OSError, subprocess.TimeoutExpired) as exc:
@@ -1914,7 +2689,7 @@ def doctor(scenario: str, adapter: str, compose_dir: str, binary: str) -> int:
     # A release held for review is not something the install needs, but it is what the person is waiting on.
     if catalog is not None and upstream is not None:
         for step, waiting in _waiting_for_review(catalog):
-            page = _step_page_link(upstream, scenario, token, step)
+            page = _step_page_link(upstream, scenario, catalog, step)
             rows.append((True, "review", f"{str(waiting.get('release_id'))[:8]} waits for your review: {page}"))
     for ok, label, value in rows:
         print(_doctor_row(ok, label, value))
@@ -1932,19 +2707,28 @@ def _waiting_for_review(rows: Sequence[Mapping[str, Any]]) -> list[tuple[int, Ma
 def _usage(adapter: str) -> str:
     """The wrapper's own subcommands, printed before the agent's help."""
     prog = f"reef-{adapter}"
-    return "\n".join(
-        [
-            f"{prog}: run {adapter} through reef's capture proxy, or one of",
-            f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
-            f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
-            f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
-            f"  {prog} doctor                                                     check what the install needs",
-            f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
-            f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
-            f"  {prog} update [--release ID]                                       install the served release here",
-            f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.",
-        ]
-    )
+    descriptor = get_adapter(adapter)
+    lines = [
+        f"{prog}: run {adapter} through reef's capture proxy, or one of",
+        f"  {prog} report --score S [--feedback TEXT] [--per-receipt]      score the last run's receipts",
+        f'  {prog} evolve "<what it should do>" [--wait] [--timeout SECONDS]   ask for a harness change',
+        f"  {prog} wait <request id> [--timeout SECONDS] [--poll]            wait for a request's result",
+        f"  {prog} page <step> [--print]                                     fetch a step's page and open it",
+        f"  {prog} doctor                                                     check what the install needs",
+        f"  {prog} setup [--yes] [--mark NAME] [--release ID]                 check off what a release requires",
+        f"  {prog} setup --json | --set NAME=VALUE | --run NAME [--release ID]  one item at a time, for scripts",
+        f"  {prog} update [--release ID]                                       install the served release here",
+    ]
+    if descriptor.client_args:
+        version_flags = ", ".join(descriptor.client_version_args)
+        exception = f", unless the first is one of {version_flags}" if version_flags else ""
+        lines.append(
+            f"Anything else runs {adapter} with {shlex.join(descriptor.client_args)} ahead of the same arguments"
+            f"{exception}; --help and -h print its help after this."
+        )
+    else:
+        lines.append(f"Anything else runs {adapter} with the same arguments; --help and -h print its help after this.")
+    return "\n".join(lines)
 
 
 def main() -> None:
@@ -1961,7 +2745,7 @@ def main() -> None:
 
     args = sys.argv[1:]
     if args and args[0] in ("--help", "-h", "help"):
-        print(_usage(adapter))
+        print(_usage(adapter), flush=True)
         if args[0] == "help":
             return
         # --help and -h go on to the agent below, so its own help follows.
@@ -1986,6 +2770,17 @@ def main() -> None:
         # Intermixed, so the flags read the same before and after the request.
         ns = parser.parse_intermixed_args(args[1:])
         sys.exit(harness(scenario, adapter, compose, " ".join(ns.request), wait=ns.wait, timeout_s=ns.timeout))
+    elif args and args[0] == "wait":
+        parser = argparse.ArgumentParser(prog=f"reef-{adapter} wait")
+        parser.add_argument("request", help="the request id evolve printed")
+        parser.add_argument(
+            "--timeout", type=float, default=1800.0, metavar="SECONDS", help="how long to wait (default 1800)"
+        )
+        parser.add_argument(
+            "--poll", action="store_true", help="exit 0 while the step still runs (a plain wait exits 2)"
+        )
+        ns = parser.parse_args(args[1:])
+        sys.exit(wait_request(scenario, adapter, compose, ns.request, timeout_s=ns.timeout, poll=ns.poll))
     elif args and args[0] == "page":
         parser = argparse.ArgumentParser(prog=f"reef-{adapter} page")
         parser.add_argument("step", type=step_of_version, help="the version, as /versions lists it: v3 or 3")

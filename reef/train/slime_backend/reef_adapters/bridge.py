@@ -50,6 +50,7 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
     RetentionConfig,
     critic_checkpoint_due,
 )
+from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 
 # One training step (train + checkpoint + publish) legitimately takes hours;
 # this bounds a single Ray RPC from the bridge to its workers.
@@ -108,8 +109,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         loss_family: str | None = None,
         loss_family_config: object | None = None,
         loss_runtime: SlimeAlgorithm | None = None,
+        score_centering: ScoreCenteringSettings | None = None,
     ) -> None:
         self._worker_failure: ExecutorFailure | None = None
+        self._score_centering = score_centering
         self._group = actor_group
         self._critic_group = critic_group
         self._critic_save_root = critic_save_root if critic_group is not None else None
@@ -192,22 +195,22 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         payload: Mapping[str, Any],
         *,
         job_id: str,
-        rollout_id: int,
+        scenario_step: int,
         prior_marker: Mapping[str, Any] | None,
     ) -> Iterator[PreparedTrainingJob | TrainingJobResult]:
         scenario = self._job_scenario(payload)
-        scenario_step = rollout_id
-        if scenario is not None:
-            # Scenario steps are per scenario; the bridge's checkpoint index
-            # stays one monotonic sequence across all of them.
-            rollout_id = self._next_rollout_id
-        elif rollout_id != self._next_rollout_id:
-            raise RuntimeError(f"expected rollout {self._next_rollout_id}, got {rollout_id}")
+        # The checkpoint index is the bridge's own sequence, not the scenario step.
+        rollout_id = self._next_rollout_id
         max_staleness = _max_staleness(payload)
         checkpoint = Path(self._checkpoint_path(rollout_id))
         if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
             raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
         rollout_data = to_slime_rollout_data(dict(payload))
+        if self._score_centering is not None:
+            # Torch, like the tensorization that follows; loaded only when the term is on.
+            from reef.train.slime_backend.score_centering.heads import attach_sampler_heads
+
+            attach_sampler_heads(rollout_data, payload, self._score_centering)
         rollout_versions = rollout_data.get("producing_runtime_load_ids")
         if (
             max_staleness > 0
@@ -243,7 +246,9 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             packed = self._batch_processor.prepare_external_train_data(rollout_data)
             yield _SlimePreparedTrainingJob(
                 self,
-                checkpoint=TrainingCheckpoint(rollout_id, checkpoint, scenario, scenario_step if scenario else None),
+                checkpoint=TrainingCheckpoint(
+                    rollout_id=rollout_id, path=checkpoint, scenario_step=scenario_step, scenario=scenario
+                ),
                 job_id=job_id,
                 rollout_data=rollout_data,
                 packed=packed,
@@ -278,7 +283,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         """Persist the paired model/optimizer checkpoints and record the step."""
         checkpoint = job.checkpoint
         rollout_id = checkpoint.rollout_id
-        self._group.save_model(rollout_id, force_sync=True)
+        self._group.save_model(rollout_id, force_sync=True, scenario_step=checkpoint.scenario_step)
         if self._critic_save_root is not None and critic_checkpoint_due(rollout_id, self.critic_save_interval):
             # Persist the critic's weights and optimizer alongside the actor
             # pair: every commit by default, critic-only warmup included,
@@ -286,7 +291,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             # stated cold-start concern). A larger interval skips the full
             # critic save on the commits in between. No HF export: the
             # critic never serves.
-            self._critic_group.save_model(rollout_id, force_sync=True)
+            self._critic_group.save_model(rollout_id, force_sync=True, scenario_step=checkpoint.scenario_step)
         if checkpoint.path.is_symlink() or not checkpoint.path.is_dir():
             raise RuntimeError(f"checkpoint is missing or unsafe: {checkpoint.path}")
         if self._storage is not None:
@@ -347,7 +352,9 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
         """Prepare a framework-neutral Reef batch with Slime-owned logic."""
-        prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
+        prepared = prepare_slime_step(
+            batch, objective, algorithm_state, scheduling, sampler_topk=self._score_centering is not None
+        )
         if prepared.payload is not None:
             self._algo.validate_payload(prepared.payload)
         return prepared
@@ -457,4 +464,5 @@ def create_training_backend(
         critic_save_interval=args.critic_save_interval,
         loss_family=preparation.loss_family,
         loss_family_config=loss_family_config,
+        score_centering=settings_from_args(args),
     )

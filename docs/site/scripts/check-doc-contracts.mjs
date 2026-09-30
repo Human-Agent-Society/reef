@@ -173,6 +173,11 @@ const simplifiedTerminology = [
 // string contents; names, surrounding code, comments, and filenames still count.
 const preservedModelPrompts = new Map([
   [
+    // Native Codex prompts must match the pinned CLI; keep catalog keys and other values checked.
+    "reef/harness/adapters/codex/bundled_models.json",
+    /(^[ \t]*"(?:base_instructions|persistent_instructions|instructions_template|classifier_instructions|policy|policy_template)": ")((?:[^"\\\n]|\\.)*)(")/gm,
+  ],
+  [
     "recipes/openclawrl/prm.py",
     /(^_JUDGE_SYSTEM_PROMPT = \(\n)((?:[ \t]+(?:"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*')[ \t]*\n)+)(\))/gm,
   ],

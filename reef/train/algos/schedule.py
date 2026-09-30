@@ -14,7 +14,8 @@ import zlib
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from reef.core.batches import StepScheduling
+from reef.core.batches import StepScheduling, TrainingBatch, trajectories
+from reef.core.trajectories import source_record_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +52,12 @@ class MaterializedSchedule:
 def schedule_seed(batch_id: str) -> int:
     """Deterministic shuffle seed for one batch, stable across replays."""
     return zlib.crc32(batch_id.encode("utf-8"))
+
+
+def batch_schedule_seed(batch: TrainingBatch) -> int:
+    """The shuffle seed of one batch from its rows: a reload numbers batches again, the rows stay the same."""
+    ids = [source_record_id(item) for item in trajectories(batch)]
+    return schedule_seed("|".join(ids) if ids else batch.batch_id)
 
 
 def materialize_schedule(

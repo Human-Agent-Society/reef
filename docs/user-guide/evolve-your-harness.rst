@@ -116,10 +116,23 @@ names the kind, and ``harness_try`` refuses to mount one on a serving process:
 the model proposes a loop, a person serves it.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
-``skill``. Codex rejects ``code_extension`` because lifecycle hooks run outside
-its command sandbox. Terminus accepts one Python module defining
-``Agent(Terminus2)`` when Reef's sandbox isolates the runner and Harbor uses
-remote E2B tasks. See the adapter guide for the required deployment settings.
+``skill``. A Codex ``agent_command`` is a skill invoked as ``$name``.
+Codex rejects ``code_extension`` because lifecycle hooks run outside its
+command sandbox. See `Run a Codex session`_ for approvals and network access.
+
+Terminus accepts one Python module defining ``Agent(Terminus2)`` when Reef's
+sandbox isolates the runner and Harbor uses remote E2B tasks. See the adapter
+guide for the required deployment settings.
+
+A tree does not choose where model calls go. Reef's model binding writes the
+endpoint, the key and the model when it renders an episode or an install,
+and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
+adapters, render refuses a ``config`` entry, a command or a skill that sets
+them or names another provider, a transport, a proxy, a credential helper,
+a fallback or another model, also inside a request body the tree passes to
+the endpoint. These checks read the config the tree renders, not the
+requests a run sends, so a request that a tool or a plugin builds itself can
+still name another model. The adapter guide lists the keys for each adapter.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
@@ -582,12 +595,15 @@ still running:
 
 .. code:: bash
 
-   curl -sS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: harness-evolve-demo" \
+   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
      http://127.0.0.1:8900/reef/harness            # the seed tree until a step publishes
-   curl -sS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: harness-evolve-demo" \
+   curl -sS -H "x-reef-scenario: harness-evolve-demo" \
      http://127.0.0.1:8900/reef/harness/releases
+
+The demo service listens on loopback only and runs without a token. On a
+shared machine, export ``REEF_TOKEN`` before ``run.sh`` starts it: the
+service then requires that token, and every ``curl`` on this page needs
+``-H "Authorization: Bearer $REEF_TOKEN"``.
 
 One step is six episodes, three tasks on each of the two trees, and the
 reference run finished in 63 s on Qwen3-8B: one failing task entered the
@@ -627,33 +643,114 @@ the install works before any step has run:
 
 .. code:: bash
 
-   curl -fsS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: harness-evolve-demo" \
+   curl -fsS -H "x-reef-scenario: harness-evolve-demo" \
      'http://127.0.0.1:8900/reef/harness/install?adapter=pi' | bash
 
+   reef-pi doctor
    reef-pi -p "fix the failing test in auth.py"
    reef-pi report --score 0 --feedback "missed the empty-token case"
 
-The script installs the pinned agent, writes the tree, writes the agent's
-model binding pointed at the address the script came from, which behind a
-gateway is the gateway's (Reef reads ``x-forwarded-host`` and
-``x-forwarded-proto`` when a proxy sets them); the served tree itself carries
-no endpoint or credential, and the binding takes its token from
-``REEF_TOKEN`` in your shell when the script runs. It also puts a
-``reef-<adapter>`` wrapper (here ``reef-pi``) on your PATH; the wrapper runs
-through the interpreter that imported reef when the script ran and reads the
-token back from the binding, so the shell that runs it later needs neither
-on its own. The wrapper keeps
-the receipts from a run, so ``report`` only needs the result. ``reef-pi doctor`` prints one line per thing the install needs
-(the interpreter and its imports, the service and its token, the binary,
-the tools on PATH, the installed release against the served head) and exits
-0 when they all hold; it also lists every release that waits for your
-review, in the words ``reef-pi evolve --wait`` prints. ``reef-pi --help``
-(``-h``, ``help``) prints the wrapper's own subcommands (``report``,
-``evolve``, ``page``, ``doctor``, ``setup``, ``update``; anything else
-runs pi) before pi's help. Pinning,
-rollback, and the raw manifest routes are in `HTTP API
-<../reference/http-api.rst#harness-artifacts>`__.
+The script installs into ``~/reef-harness/<scenario>``, here
+``~/reef-harness/harness-evolve-demo``; ``bash -s -- <dir>`` names another
+install root. Keep any install root outside the project the agent works in.
+An agent can write files in its project, also from a sandbox such as
+Codex's ``workspace-write``, so with the install root there a session can
+change the files the next session runs, for example rewrite the agent's
+config so that the next session runs without approvals. For ``reef-codex``
+and ``reef-dsh``, also keep it out of ``/tmp`` and ``$TMPDIR``: the Codex and
+dsh sandboxes let a command write there too, so an install root there is as
+open to a session as one in the project. The default is outside all of
+these, unless the agent's project is your home directory itself.
+
+The script installs the pinned agent, writes the tree and its model binding,
+and writes a ``reef-<adapter>`` wrapper (here ``reef-pi``) outside the tree,
+in ``~/.reef/installs``, with ``~/.local/bin/reef-pi`` linked to it. With
+a token on the service, the exported ``REEF_TOKEN`` also reaches the script,
+which writes it into the binding. Later sessions read the token from that
+binding, and the wrapper keeps each run's receipts for ``report``.
+
+The binding points to the address that served the script. Behind a gateway,
+Reef uses ``x-forwarded-host`` and ``x-forwarded-proto`` when the proxy sets
+them. The published tree itself contains no endpoint or credential.
+
+The wrapper uses the interpreter that imported Reef during installation:
+``REEF_PYTHON`` when set, otherwise ``python3`` on PATH. Wrapper updates pass
+their own interpreter as ``REEF_PYTHON``. Install from a Python environment
+outside the project the agent works in: a session can write a virtual
+environment in its project, and code there runs as you when ``reef-pi``
+starts, before its check.
+
+``reef-pi doctor`` checks the interpreter and imports, service authentication,
+agent binary, tools on PATH, and installed release against the served head.
+It exits 0 when all checks pass and lists releases awaiting review, using the
+same descriptions as ``reef-pi evolve --wait``.
+
+``reef-pi --help`` (also ``-h`` or ``help``) lists wrapper subcommands before
+pi's help: ``report``, ``evolve``, ``wait``, ``page``, ``doctor``, ``setup``,
+and ``update``. Other arguments run pi. For pinning, rollback, and raw manifest
+routes, see `HTTP API <../reference/http-api.rst#harness-artifacts>`__.
+
+Reef pins Claude Code's version, so ``reef-claude`` runs Claude Code with
+``DISABLE_UPDATES=1`` unless your shell sets it. ``reef-claude upgrade`` and
+``reef-claude install`` reach Claude Code's own update and install commands,
+which print that updates are disabled, and ``reef-claude update`` is Reef's
+own command, which installs the served release. Reef refuses a harness tree
+whose ``settings.json`` sets ``DISABLE_UPDATES``, but a ``.claude/settings.json``
+of your own in the project folder can still turn those commands back on:
+Claude Code applies that file's ``env`` over the environment, and it reads
+``DISABLE_UPDATES`` as on only for ``1``, ``true``, ``yes`` or ``on``.
+
+Recover a changed installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Before starting an agent, the wrapper checks the installed release's files
+against its install record. If a checked file changed, the wrapper names it,
+prints ``cannot start agent``, and exits with status 3. Restore the files with:
+
+.. code:: bash
+
+   reef-pi update
+   reef-pi doctor
+
+Then start ``reef-pi`` again. If ``update`` names a link outside the install
+root or a non-regular file at a destination, remove that named entry before
+retrying. The installer refuses to write through it. Session state is not
+checked. pi's ``settings.json``, which the model binding writes, is checked,
+except the preferences pi saves itself (the model, the theme and the other
+``/settings`` choices but Default project trust, which decides whose code
+loads). ``reef-pi install``, ``reef-pi remove`` and ``reef-pi config``, and
+that one ``/settings`` choice, change keys the check covers, so the next start
+names them, for example ``pi-agent/settings.json (keys: packages)``, until
+``reef-pi update``, which rewrites ``settings.json`` as the install wrote it
+and so also resets the preferences pi saved there.
+
+The check stops a session that can write only its project, ``/tmp`` and
+``$TMPDIR``, as commands inside the Codex and dsh sandboxes can. A session
+that can write your home directory can also change the record in
+``~/.reef/installs`` and the wrapper, and then the check passes: pi, opencode
+and Hermes run commands with no sandbox, and Claude Code, and Codex outside
+its sandbox, run the commands you approve.
+
+Upgrade an older installation
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+An install made before Reef recorded file checksums, or one whose record was
+removed, prints ``<install root> has no install record`` at each session
+start. Run ``reef-pi update`` once to write the record and enable the check.
+The update also moves the wrapper out of the tree, beside the record, and
+removes the ``reef-pi`` in the install root: run ``reef-pi`` from your PATH,
+or ``~/.local/bin/reef-pi``, which links to the latest install's wrapper. For
+another install of the same adapter, run the ``wrapper:`` path its install
+printed.
+
+Keep the install root, and the Python environment the wrapper runs, outside
+the project and, for Codex and dsh, outside ``/tmp`` and ``$TMPDIR``.
+See `Installed session files
+<../developer-guide/harness-adapters.rst#installed-session-files>`__ for the
+check's scope, state handling, and cleanup behavior.
+
+Ask for a harness change
+~~~~~~~~~~~~~~~~~~~~~~~
 
 You can also ask for a harness change in plain words. The tutorial's
 ``deployment.yaml`` runs in ``data.training_mode: hybrid``, so an ask needs
@@ -671,25 +768,36 @@ no mode switch there; a scenario in ``auto`` takes asks after a switch to
 ``reef-pi harness`` remains a compatibility alias for ``reef-pi evolve``.
 
 The wrapper submits to ``POST /reef/train`` with the installed release id
-from the release metadata file and the oldest pending session's id, or a fresh session id
-when nothing is spooled. A request can execute without inference receipts;
+from the release metadata file and a session id: inside a session the
+wrapper started, that session's (``REEF_HARNESS_SESSION``, the tag every
+call of the run carries); outside one, the oldest pending session's, or a
+fresh session id when nothing is spooled. A request can execute without inference receipts;
 captured receipts remain available for a later feedback report. Acceptance
 returns a training record id and does not mean the change has passed the
 evaluation: the wrapper prints ``watch it here: <link>``, the request's page
-(``GET /reef/harness/requests/<id>/page`` with the scenario and the token
-as query parameters, so a browser opens it as is), and says ``reef is
+(``GET /reef/harness/requests/<id>/page`` with the scenario and its page
+key as query parameters, so a browser opens it as is; the key opens this
+scenario's two pages alone and never carries the token, since a session's
+model reads the link), and says ``reef is
 running the step; add --wait to stay here, or check /versions later``.
 With ``--wait`` (``--timeout SECONDS``, 1800 by default) it polls the
 release catalog every 5 s for the step that consumed the request, says
-``the step started; usually one to three minutes`` once the request's
-record shows a step took it, and prints one line with the result and the
+``the step started; usually a few minutes`` once the request's
+progress (``GET /reef/harness/requests/<id>/progress``) shows a step took it,
+and prints one line with the result and the
 next action, quoting the request: a selected release to restart ``reef-pi``
 for; a pending one with ``This release changes an extension, so read it before
 it runs: /versions <version> opens the page, /versions <version> install
-serves it. Page: <link>``; a rejected step with the evaluation's reason; a skipped step with why
-(the proposer's own reason when the step recorded one, such as a failed
+serves it. Page: <link>``; a rejected step with the evaluation's reason and
+the first task it missed, with why the episode failed or its score and the
+reply that was graded (``no transcript was read from the episode's session
+log`` when the harness's log could not be read, which is no failure: a grader
+that reads files still judged the run), and ``rephrase or split the request``
+only when the episodes ran, left a transcript and scored low; a skipped step with
+why (the proposer's own reason when the step recorded one, such as a failed
 model call); ``not covered: ...`` follows when the step's review lists
-points the change left out. The exit status is 0 for a selected or pending
+points the change left out, and after a rejection the same points read as
+``review notes (they did not decide this result)``. The exit status is 0 for a selected or pending
 release, 1 for a rejected or skipped step, 2 when the timeout passes first.
 On a terminal the wrapper then hands you the next step: a selected release
 asks ``Install now? [Y/n]`` and, on yes, runs ``reef-pi setup`` for it and
@@ -697,7 +805,18 @@ then ``reef-pi update``, closing with ``Installed release <id>. Restart
 reef-pi to use it.``; a pending release names ``reef-pi page <version>`` to
 read it, asks ``Promote now? [y/N]`` and, on yes, promotes it and installs
 the new head the same way. Declined, or in a script without a terminal,
-it prints the commands to run instead.
+it prints the commands to run instead: ``reef-pi update``, with ``reef-pi
+setup`` first only while the release requires something this machine has
+not met. ``update`` keeps the binary where the first install put it.
+``reef-pi wait <request id> [--timeout SECONDS] [--poll]`` waits for a
+request that ``evolve`` already filed and reports it the same way, with the
+same exit statuses; a harness whose shell tool stops a command after a few
+minutes files with ``evolve`` and calls ``wait --poll`` until it stops
+printing ``no result yet``: ``--poll`` exits 0 while the step still runs,
+where a plain ``wait`` exits 2, since such a tool counts a nonzero exit as a
+failed call. On an
+adapter other than pi, which has no ``/versions`` and no update notice, the
+lines name ``reef-<adapter> wait`` and ``reef-<adapter> update`` instead.
 To return to failure driven
 evolution alone, use the same update endpoint with
 ``{"training_mode": "auto"}``. The commands surface an error when the
@@ -793,8 +912,10 @@ setup`` shows the prompt and asks you for the value (without echo when the
 name contains TOKEN, KEY, SECRET or PASSWORD; ``--yes`` asks nothing) and
 stores it there: ``NAME=VALUE`` lines, readable by you alone (mode 0600),
 written by ``setup`` only, never in the tree and never sent anywhere. Every
-``reef-pi`` session gets each stored variable in its environment unless
-your shell already sets it (the shell wins), so an evolved extension reads
+``reef-pi`` session gets each stored variable an ``env`` item of the
+installed release names (every stored variable on an install with no
+record in ``~/.reef/installs``) in its environment unless your shell
+already sets it (the shell wins), so an evolved extension reads
 ``process.env.NAME`` and keeps no file of its own. Three more forms take
 one item at a time, for scripts and for the session's extensions:
 ``reef-pi setup --json`` prints the release to set up and its items as one
@@ -868,8 +989,8 @@ with the same five settings the script bakes into ``reef-pi``:
 
 .. code:: bash
 
-   python3 -c 'from reef_client import ReefClient; ReefClient("http://127.0.0.1:8900", token="reef-local").harness_pull("harness-evolve-demo", "./reef-harness")'
-   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "reef-local", "model": "qwen3-8b"}\n' > reef-harness/native/models.json
+   python3 -c 'import os; from reef_client import ReefClient; ReefClient("http://127.0.0.1:8900", token=os.environ.get("REEF_TOKEN")).harness_pull("harness-evolve-demo", "./reef-harness")'
+   printf '{"api": "openai", "base_url": "http://127.0.0.1:8900", "api_key": "%s", "model": "qwen3-8b"}\n' "${REEF_TOKEN:-reef-no-token}" > reef-harness/native/models.json
    export REEF_HARNESS_BINARY="$(command -v reef-native)" REEF_HARNESS_COMPOSE="$PWD/reef-harness/native"
    export REEF_HARNESS_SCENARIO=harness-evolve-demo REEF_HARNESS_ADAPTER=native REEF_HARNESS_ENV_VAR=REEF_NATIVE_DIR
    python3 -m reef.harness.client.wrapper -p "fix the failing test in auth.py"
@@ -896,18 +1017,60 @@ the head), and name it to the promote route yourself. Both
 calls name the scenario your install used: the ``x-reef-scenario`` header
 you gave the install command or, without one, the generated name the script
 baked into ``reef-pi`` as ``REEF_HARNESS_SCENARIO``;
-``grep REEF_HARNESS_SCENARIO ./reef-harness/reef-pi`` prints it. The
+``grep REEF_HARNESS_SCENARIO ~/.local/bin/reef-pi`` prints it. The
 deployment listens on port 8901.
 
 .. code:: bash
 
-   curl -sS -H "Authorization: Bearer reef-local" \
-     -H "x-reef-scenario: <scenario>" \
+   curl -sS -H "x-reef-scenario: <scenario>" \
      http://127.0.0.1:8901/reef/harness/releases    # the row with "pending": true
-   curl -sS -X POST -H "Authorization: Bearer reef-local" \
-     -H "Content-Type: application/json" \
+   curl -sS -X POST -H "Content-Type: application/json" \
      -d '{"release_id": "<the pending release id>"}' \
      http://127.0.0.1:8901/reef/scenarios/<scenario>/promote
+
+Run a Codex session
+-------------------
+
+Install a Codex harness with ``adapter=codex`` and run ``reef-codex`` from
+its project directory. Codex 0.153.4 exposes commands as skills: type
+``$reefine`` or another ``$name`` in the session, rather than ``/name``.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Run mode
+     - Shell access to Reef
+     - Web search
+   * - Interactive ``reef-codex``
+     - The shell has no network by default. A wrapper command that calls Reef
+       needs an escalation request and your approval.
+     - The tree may enable it through ``web_search``.
+   * - ``reef-codex exec``
+     - Approval is ``never``, so the shell cannot call Reef.
+     - Controlled by the installed tree and command-line options.
+   * - Evaluation episode
+     - No approval prompts; the shell cannot call Reef.
+     - Always disabled by the episode arguments.
+
+For a single wrapper call, choose "Yes, proceed". "Yes, and don't ask again"
+saves an execution rule; later matching calls need no new approval. An approved
+call runs the wrapper as it is at that moment. The install writes it in
+``~/.reef/installs``, outside the project, where a command inside the Codex
+sandbox cannot rewrite it.
+
+Trust and saved approvals
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Codex asks whether you trust the project folder. ``reef-codex`` keeps that
+answer for the folder, or its repository, in ``~/.reef/trust``, readable by
+you alone and outside the install root. It does not change the installed
+``codex/config.toml``. Delete the corresponding trust file to be asked again.
+
+Execution rules normally last only until the temporary session copy is removed.
+If the installed tree contains ``codex/rules``, the session links that directory
+and rules persist there. The adapter guide's `Codex CLI
+<../developer-guide/harness-adapters.rst#codex-cli>`__ section describes how
+command text and ``prefix_rule`` determine which calls a saved rule allows.
 
 Serve the harness as a resident process
 ---------------------------------------

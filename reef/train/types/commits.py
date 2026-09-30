@@ -28,3 +28,6 @@ class PreparedCommit:
     released_ids: frozenset[str] = frozenset()
     metrics: Mapping[str, Any] | None = None
     training_job_id: str | None = None
+    #: The release the step's batch was reserved against; the committer
+    #: refuses a result whose base is no longer the served release.
+    base_release_id: str | None = None

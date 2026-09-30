@@ -303,6 +303,7 @@ def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokeni
         list(STUDENT_LOG_PROBS),
         0.0,
         [*prompt_ids, 1, 2, 3],
+        1.0,
     ]
 
     data = to_slime_rollout_data({key: value for key, value in payload.items() if key != "source_rows"})
@@ -311,10 +312,12 @@ def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokeni
     assert data["response_lengths"] == [3]
     assert data["rollout_log_probs"] == [list(STUDENT_LOG_PROBS)]
     assert data["teacher_tokens"] == [[*prompt_ids, 1, 2, 3]]
+    # Every SDFT sample weighs the same in the step's mean.
+    assert data["distill_sample_weights"] == [1.0]
 
 
 def _payload(teacher_tokens: list[Any], **overrides: Any) -> dict[str, Any]:
-    row = ["i1", list(STUDENT_TOKENS), list(STUDENT_LOSS_MASK), list(STUDENT_LOG_PROBS), 0.0, teacher_tokens]
+    row = ["i1", list(STUDENT_TOKENS), list(STUDENT_LOSS_MASK), list(STUDENT_LOG_PROBS), 0.0, teacher_tokens, 1.0]
     return {"samples": [row], "rollout_ids": [0], "loss": "sdft", **overrides}
 
 
@@ -404,11 +407,18 @@ def test_sdft_settings_reject_invalid_values(name: str, value: Any) -> None:
 def test_sdft_backend_validation_pins_the_loss_type_and_one_step_per_rollout() -> None:
     family = resolve_loss_family("sdft")
     accepted = {"loss_type": "custom_loss", "use_rollout_logprobs": True, "num_steps_per_rollout": 1}
-    family.validate_backend_args(SimpleNamespace(**accepted))
+
+    def _args(**changes: Any) -> SimpleNamespace:
+        # The driver stamps the family's settings on args before it validates them.
+        args = SimpleNamespace(**{**accepted, **changes})
+        family.apply_driver_options(args, None)
+        return args
+
+    family.validate_backend_args(_args())
 
     with pytest.raises(RuntimeError, match="loss-type custom_loss"):
-        family.validate_backend_args(SimpleNamespace(**{**accepted, "loss_type": "policy_loss"}))
+        family.validate_backend_args(_args(loss_type="policy_loss"))
     with pytest.raises(RuntimeError, match="use-rollout-logprobs"):
-        family.validate_backend_args(SimpleNamespace(**{**accepted, "use_rollout_logprobs": False}))
+        family.validate_backend_args(_args(use_rollout_logprobs=False))
     with pytest.raises(RuntimeError, match="num-steps-per-rollout"):
-        family.validate_backend_args(SimpleNamespace(**{**accepted, "num_steps_per_rollout": 2}))
+        family.validate_backend_args(_args(num_steps_per_rollout=2))

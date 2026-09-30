@@ -75,7 +75,7 @@ def test_existing_backend_keeps_receiver_paused_until_matching_durable_commit(co
         assert isinstance(training, ExecutorTrainingRuntime)
         assert isinstance(inference, ExecutorInferenceRuntime)
         assert not hasattr(inference, "train_candidate")
-        candidate = backend.train_candidate({"rollout_id": 0})
+        candidate = backend.train_candidate({"scenario_step": 0})
         assert inference.inference_admission_status["open"] is (not colocate)
         backend.activate_candidate(candidate)
         pending = asyncio.create_task(inference.acquire_inference())
@@ -100,7 +100,7 @@ def test_existing_backend_keeps_receiver_paused_until_matching_durable_commit(co
 
 def test_training_adapter_never_constructs_an_inference_component():
     training = ExecutorTrainingRuntime(Coordinator(inference_url=None))
-    candidate = training.train_candidate({"rollout_id": 0})
+    candidate = training.train_candidate({"scenario_step": 0})
     assert candidate.checkpoint_path == "/checkpoint"
     assert not hasattr(training, "inference_runtime")
     assert not hasattr(training, "base_url")
@@ -113,7 +113,7 @@ def test_receiver_shutdown_does_not_stop_training_workers():
     training, inference = connect_executor_runtimes(train_group_handle=control)
     inference.shutdown()
     assert control.shutdown_events == []
-    training.train_candidate({"rollout_id": 0})
+    training.train_candidate({"scenario_step": 0})
     training.shutdown()
     assert control.shutdown_events == ["shutdown"]
 

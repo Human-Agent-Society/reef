@@ -15,8 +15,20 @@ precedence over repository guidance.
 - Before opening an issue or pull request, search existing issues and PRs for
   overlapping work. Follow the RFC criteria in `CONTRIBUTING.md` for changes to
   architecture, public contracts, persistence, or project policy.
+- Before drafting or updating an issue or RFC, follow
+  [Issue and RFC writing](CONTRIBUTING.md#issue-and-rfc-writing). Keep the
+  proposal concise; do not expand the design just to fill template sections.
 - Reproduce bugs and inspect the relevant implementation before changing it.
   Avoid speculative fixes, unrelated formatting, and unnecessary abstractions.
+- Before submitting a pull request, review every changed line against
+  [Python style and design](#python-style-and-design),
+  [Code structure and readability](#code-structure-and-readability), and
+  [Naming and terminology](#naming-and-terminology), and fix any violation.
+  Passing pre-commit does not replace this review; these rules are not all
+  checked mechanically.
+- Before submitting a pull request that changes documentation, complete the
+  [Documentation review checklist](#documentation-review-checklist) and fix
+  any issues. Review the resulting sections in context, not only the diff.
 - Use [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md).
   Explain the problem, resulting behavior, compatibility impact, and actual
   verification results. Disclose non-trivial AI assistance. The human
@@ -195,6 +207,77 @@ Prefer concrete names over metaphors in code, UI text, logs, and documentation:
   compatibility is needed; keep those legacy names at the boundary rather than
   spreading them through new code or displayed labels.
 - Keep standard technical names such as neural-network gates and third-party identifiers.
+
+## Documentation review checklist
+
+Apply this checklist to documentation changes in `docs/`, READMEs, recipes,
+and tutorials before submitting a pull request. Passing link, terminology,
+and build checks does not establish readability.
+
+Documentation is user-facing: each page should expose only the interface its
+intended readers need. That interface varies by audience: workflows and
+configuration for users, API contracts for callers, and extension contracts or
+component boundaries for developers. Describe the behavior, guarantees, and
+constraints readers must rely on. Omit implementation details they do not need
+to use that interface correctly; moving those details to an advanced page does
+not by itself make them relevant.
+
+Every pull request must assess documentation impact; this does not require a
+documentation change. Internal refactors and implementation-only fixes normally
+need none when existing documentation remains accurate and sufficient. Explain
+that in the template's `Documentation impact` section. When documentation changes,
+state the reader question, updated pages, and actual verification, including
+anything not verified. Refer to results in `Verification` rather than duplicating them.
+
+- **Reader and purpose.** Identify the question the change answers and make
+  the page's purpose clear near the start. Keep explanations concise while
+  preserving necessary prerequisites, examples, and failure behavior. Update
+  affected workflows, interfaces, and defaults; do not document each PR's
+  implementation details. Keep implementation history and PR commentary in
+  the PR or issue.
+- **Content placement.** Keep each page focused. Put introductory workflows,
+  task instructions, API reference, and developer contracts in their appropriate
+  pages. Prefer revising existing explanations over appending sections; merge
+  duplicates and remove obsolete text in the affected sections. Add content
+  only for a reader need the existing text does not cover. Explain each concept
+  in its owning page and link to it elsewhere. Update navigation and links when
+  moving content.
+- **Reading order.** Explain the main workflow and define concepts before
+  relying on them. Introduce the normal path before optional modes, exceptions,
+  and troubleshooting. A reader should not need to understand several
+  internal types before learning what an operation does.
+- **Findable details.** Organize sections around reader tasks or distinct
+  responsibilities. Separate inputs, outputs, required behavior, and optional
+  configuration. Use lists for parallel items and tables for comparisons;
+  split paragraphs that mix different adapters, modes, or responsibilities.
+- **Useful examples.** For task instructions, include prerequisites, commands
+  or examples, and the expected result. For interfaces, explain inputs, return
+  values, and relevant failure behavior. Match the detail to the page's purpose
+  rather than forcing every page into one template.
+- **Accuracy and plain language.** Check claims, defaults, names, and examples
+  against the current implementation, tests, or actual runs. Preserve relevant
+  constraints when simplifying prose. Use concrete descriptions and established
+  terms; remove vague claims and redundant explanations. Optimize for reader
+  understanding rather than minimum word count.
+- **Final read-through.** Read the complete affected sections, and the whole
+  page when changing its structure. Check transitions, duplication, and
+  consistency with linked pages. Inspect rendered output when changing layout
+  and run the applicable documentation checks. Report actual verification and
+  any unverified examples in the PR.
+
+Use these reviewed changes as examples of specific improvements, not as blanket
+endorsements of every sentence or historical API detail:
+
+- @yanxz: [#185](https://github.com/Human-Agent-Society/reef/pull/185) and
+  [#561](https://github.com/Human-Agent-Society/reef/pull/561): introduce the
+  workflow and its concepts before expanding modes and configuration.
+- @yanxz: [#324](https://github.com/Human-Agent-Society/reef/pull/324): separate
+  the core loop from advanced state details and move reference material to
+  the pages that own it.
+- @YihongT: [#606](https://github.com/Human-Agent-Society/reef/pull/606) and
+  [#607](https://github.com/Human-Agent-Society/reef/pull/607): organize dense
+  method and adapter descriptions by responsibility, with explicit inputs,
+  outputs, and configuration mappings.
 
 ## Tests and checks
 

@@ -354,7 +354,7 @@ class RecordingRuntime(StubTrainingRuntime):
     ):
         del objective
         payload = {
-            "rollout_id": scenario_step,
+            "scenario_step": scenario_step,
             "sources": [source_record_id(sample) for sample in batch.items],
         }
         return PreparedTrainingStep(
@@ -367,11 +367,11 @@ class RecordingRuntime(StubTrainingRuntime):
     def train_candidate(self, payload):
         self.trained_batches.append(payload["sources"])
         runtime_load_id = f"w{len(self.trained_batches)}"
-        checkpoint = self._checkpoint_dir / str(payload["rollout_id"]) if self._checkpoint_dir else "/unused"
+        checkpoint = self._checkpoint_dir / str(payload["scenario_step"]) if self._checkpoint_dir else "/unused"
         if self._checkpoint_dir:
             checkpoint.mkdir(parents=True)
             (checkpoint / "model.txt").write_text(runtime_load_id)
-        job_id = f"job-{payload['rollout_id']}"
+        job_id = f"job-{payload['scenario_step']}"
         self._candidate_versions[job_id] = runtime_load_id
         return ModelCandidate(
             candidate_id=job_id,

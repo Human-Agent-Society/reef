@@ -10,7 +10,8 @@ The map, one subpackage per job:
     shared by serving and training (``mutations``).
 ``adapters/``
     one directory per agent, the mapping only: a ``descriptor.yaml`` (schema in
-    ``descriptor``) plus quirks. pi, opencode, claude, codex, dsh, hermes, and
+    ``descriptor``) plus quirks, and the ``harness_facts.yaml`` a text proposer
+    reads about the harness's own surface (``harness_facts``). pi, opencode, claude, codex, dsh, hermes, and
     the two programs Reef ships, native and terminus.
 ``episodes/``
     one headless run and its reading: launch on a rendered root, locally or
@@ -23,6 +24,9 @@ The map, one subpackage per job:
 ``client/``
     what runs on a user's machine: the wrapper the install script bakes
     around a pulled harness.
+``step_result``
+    what a settled step means for the person who asked, and the next action
+    it offers: the words the wrapper prints and the harness pages render.
 
 This package depends on core values and runtime contracts, never on training,
 recipes, scenario coordination, or the HTTP service.
@@ -39,7 +43,7 @@ driving a real coding agent binary per episode.
 
 from reef.harness.adapters.descriptor import AdapterDescriptor, ConfigTarget, DescriptorError, load_descriptor
 from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
-from reef.harness.episodes.trajectory import TrajectoryError, read_opencode_storage, read_pi_session
+from reef.harness.episodes.trajectory import TrajectoryError, read_opencode_session, read_pi_session
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 
@@ -54,7 +58,7 @@ __all__ = [
     "TrajectoryError",
     "TrajectoryKeepError",
     "load_descriptor",
-    "read_opencode_storage",
+    "read_opencode_session",
     "read_pi_session",
     "render_composition",
     "run_episode",

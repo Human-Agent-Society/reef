@@ -11,6 +11,7 @@ from __future__ import annotations
 import copy
 import json
 import os
+import shlex
 import signal
 import sys
 import tempfile
@@ -25,7 +26,7 @@ from typing import Any
 
 import yaml
 
-from reef.recipe.base import WeightTrainingRecipe
+from reef.harness.adapters import get_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.deployment import RuntimeConfigError
@@ -54,6 +55,7 @@ from reef.service.deploy.deployment_config import (
     normalize_component_config,
     normalize_component_layout,
     reject_null_settings,
+    selected_weight_training,
     translate_layout,
     translate_references,
 )
@@ -268,7 +270,10 @@ class _Stack:
         _log(f"stack up. logs: {self.run_dir}/*.log")
         hint = install_hint(self.config)
         if hint is not None:
-            _log(f"install the harness in another terminal: {hint}")
+            _log(
+                "install the harness in another terminal; keep its install root, the last argument, outside the "
+                f"project the agent works in: {hint}"
+            )
 
     def _watchdog(self) -> None:
         while not self._stopping.is_set():
@@ -359,10 +364,17 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
 
     Printed when the stack is up so nobody copies it from a README: the
     address the service listens on (loopback when it binds every interface),
-    the adapter the deployment evolves, and the token the config holds."""
-    evolution = config.get("evolution")
-    adapter = evolution.get("adapter") if isinstance(evolution, Mapping) else None
-    if not isinstance(adapter, str) or not adapter:
+    the adapter the deployment evolves, and the token the config holds. The
+    token is exported once, so curl's header and the script, whose binding
+    takes it from ``REEF_TOKEN``, read the same value: a script run without it
+    would install a harness every call of which answers 401. The script
+    installs under ``~/reef-harness/<scenario>`` by default, outside the
+    project the agent works in. An adapter Reef installs nothing for
+    (terminus) gets no line."""
+    # A schema-version 2 file (the shipped profiles) resolves the recipe's evolution section under reef; an
+    # unversioned file keeps it at the top level.
+    adapter = config_value(config, "reef", "evolution", "adapter") or config_value(config, "evolution", "adapter")
+    if not isinstance(adapter, str) or not adapter or get_adapter(adapter).install is None:
         return None
     host = str(config_value(config, "reef", "host", default="127.0.0.1"))
     if host in ("0.0.0.0", "::", ""):
@@ -373,8 +385,11 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
         tokens = config.get("reef", {}).get("tokens") if isinstance(config.get("reef"), Mapping) else None
         if isinstance(tokens, list) and tokens:
             token = str(tokens[0])
-    header = f"-H 'Authorization: Bearer {token}' " if token else ""
-    return f"curl -fsS {header}'http://{host}:{port}/reef/harness/install?adapter={adapter}' | bash"
+    url = f"'http://{host}:{port}/reef/harness/install?adapter={adapter}'"
+    if token:
+        header = '-H "Authorization: Bearer $REEF_TOKEN"'
+        return f"export REEF_TOKEN={shlex.quote(str(token))}; curl -fsS {header} {url} | bash"
+    return f"curl -fsS {url} | bash"
 
 
 def _component_selection(
@@ -423,7 +438,6 @@ def resolve_deployment_config(
     try:
         arguments = component_config_arguments(selected)
         recipe_type = recipe_class_for(config_value(selected, "reef", "recipe") or "recipe")
-        training = recipe_type is not None and issubclass(recipe_type, WeightTrainingRecipe)
         if versioned:
             config = normalize_component_layout(config, arguments)
         if versioned or standard:
@@ -439,6 +453,8 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
+        # A component named through ${VAR} is only known once the environment is applied.
+        training = recipe_type is not None and selected_weight_training(recipe_type, config) is not None
         if versioned or standard:
             reject_null_settings(config, arguments)
         if standard:

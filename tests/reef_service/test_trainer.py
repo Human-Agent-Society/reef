@@ -805,14 +805,14 @@ def test_scenario_runtime_executes_grpo_as_one_async_transaction(tmp_path) -> No
             self.calls.append(("prepare", batch, objective))
             return PreparedTrainingStep(
                 action="train",
-                payload={**prepared.payload, "rollout_id": scenario_step},
+                payload={**prepared.payload, "scenario_step": scenario_step},
                 next_algorithm_state=prepared.next_algorithm_state,
                 metrics=prepared.metrics,
             )
 
         def train_candidate(self, payload):
             self.calls.append(("execute", payload))
-            job_id = f"job-{payload['rollout_id']}"
+            job_id = f"job-{payload['scenario_step']}"
             return ModelCandidate(
                 candidate_id=job_id,
                 training_job_id=job_id,
@@ -970,8 +970,10 @@ def test_capacity_loss_skips_orphan_report_and_remains_visible_after_restart(tmp
 
 
 def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
-    from reef.scenario.factory import _consumed_by_committed_steps
+    from reef.core.components import RECORDS_COMPONENT
+    from reef.scenario.factory import recovered_trainer_states
     from reef.storage.commit_log import CommitLogScenarioStore
+    from reef.surface.base import Surface
 
     database = tmp_path / "records.sqlite3"
     for index in (1, 2):
@@ -985,7 +987,7 @@ def test_stale_batches_survive_restart_without_retiring_records(tmp_path):
                 candidate_backend=_PreparingBackend(),
             )
             with closing(CommitLogScenarioStore("math", records)) as session:
-                consumed = _consumed_by_committed_steps(session, None, "math")
+                consumed = recovered_trainer_states(session, "math", None, Surface())[RECORDS_COMPONENT].consumed_ids
                 trainer.reingest(up_to_sequence=0, consumed_ids=consumed)
                 batch = trainer.reserve_training_batch()
                 assert batch is not None

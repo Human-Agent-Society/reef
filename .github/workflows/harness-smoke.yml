@@ -100,7 +100,7 @@ jobs:
           node-version: "22"
       - run: python -m pip install ./third_party/reef-client
       - run: python -m pip install -e . aiohttp pyyaml huggingface_hub pytest
-      - run: npm install --prefix "$RUNNER_TEMP/codex" @openai/codex@0.152.1
+      - run: npm install --prefix "$RUNNER_TEMP/codex" @openai/codex@0.153.4
       - run: python -m pytest tests/smoke/test_real_codex.py
         env:
           REEF_REAL_CODEX_BINARY: ${{ runner.temp }}/codex/node_modules/.bin/codex

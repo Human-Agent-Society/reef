@@ -35,8 +35,8 @@ attempts and trains on those attempts at test time.
    * - Guidance-TTT
      - guidance-model weights; the executor stays frozen
      - ``recipes/tttd/``
-     - `Guidance-TTT <../../recipes/tttd/examples/guidance_ttt/README.md>`__
-     - `Guidance-TTT on TriMul <../../recipes/tttd/examples/guidance_ttt/README.md>`__
+     - `Guidance-TTT <recipes/guidance-ttt.rst>`__
+     - `Guidance-TTT on four discovery tasks <../../recipes/tttd/examples/guidance_ttt/README.md>`__
 
 Continual learning on a task stream
 -----------------------------------
@@ -62,6 +62,11 @@ learns from each score before the next task arrives.
      - ``recipes/sdft/``
      - `SDFT <recipes/sdft.rst>`__
      - `SDFT on a skill stream <../../recipes/sdft/examples/skill_stream/README.md>`__
+   * - SDPO
+     - model weights
+     - ``recipes/sdpo/``
+     - `SDPO <recipes/sdpo.rst>`__
+     - `SDPO on SciKnowEval Chemistry <../../recipes/sdpo/examples/sciknoweval/README.md>`__
    * - GEPA
      - harness tree: rules, skills, and agent commands
      - ``recipes/gepa/``

@@ -1,0 +1,17 @@
+# What reef's reefine proposer is told about Hermes Agent: see reef.harness.adapters.harness_facts.
+title: Hermes Agent
+command: >-
+  A person types an agent_command as /<id> in the session. Its text is a SKILL.md: YAML frontmatter with name and
+  description, then the instructions; what the person typed after /<id> reaches the model at the end of the
+  message, after the line 'The user has provided the following instruction alongside the skill invocation:'.
+tools: >-
+  browser_exec, clarify, cronjob, delegate_task, execute_code, memory, patch, process, read_file, search_files,
+  session_search, skill_manage, skill_view, skills_list, terminal, text_to_speech, todo, vision_analyze,
+  write_file, web_extract (reads one page) and web_search (searches the web; no key needed)
+conversation_mode:
+  name: Hermes
+  skill: >-
+    hermes puts a typed skill into the message after the line '[IMPORTANT: The user has invoked the "<name>"
+    skill'
+  escape: >-
+    a command the person runs in another terminal

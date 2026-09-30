@@ -22,11 +22,23 @@ everything the shared engines need to drive one harness binary:
 - ``install`` (optional): the vendor's install channel for the binary at a
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
+- ``client_env`` and ``client_args`` (optional): the variables and the leading
+  arguments a ``reef-<adapter>`` run adds when a person runs the binary, which
+  an episode never gets (``{root}`` in a ``client_env`` value is the install
+  root); ``client_version_args`` names the version flags that get no leading
+  arguments.
 - ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
-  keeps in the installed tree, so a later run finds them.
+  keeps in the installed tree, so a later run finds them; the check of the
+  installed files at a session start skips them, except the keys of a
+  settings file outside its ``preference_keys``.
 - ``self_isolating`` (optional): the adapter runs episodes inside its own
   container, so nesting in Reef's jail is refused unless its execution quirk
   validates a compatible configuration (such as a remote task environment).
+- ``host_env`` (optional): service environment variables a local episode
+  keeps, for a host tool the relocated ``HOME`` would otherwise hide.
+- ``is_root_bind_mounted`` (optional): the binary bind-mounts paths below the
+  episode root into a container, so on macOS a local episode makes its root
+  under the home directory, which Docker's VM shares with the host.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and its ``finalize_render`` callable gets the last word on
@@ -128,11 +140,22 @@ class ClientState:
     The wrapper runs the binary on a temp copy of links to the installed
     composition and removes the copy afterwards, so what the binary creates
     there is lost; a path that already exists in the installed tree is
-    linked, and what the binary writes through the link stays.
+    linked, and what the binary writes through the link stays. The wrapper
+    refuses a session when a file the install wrote has changed, and skips
+    these paths, which are the binary's to write; a link at one of them is
+    removed before the run, so the binary's writes stay in the tree. A file
+    with ``preference_keys`` is the exception: its other keys are checked,
+    and a link at it is refused.
+
+    ``preference_keys`` is for a ``file`` the install writes too, a JSON
+    object: the top-level keys the binary saves there itself and that load no
+    code. The install records the value of every other key, and the wrapper
+    refuses a session once one of those differs.
     """
 
     path: str
     kind: str
+    preference_keys: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -183,6 +206,14 @@ class AdapterDescriptor:
     #: the matching set when it runs evaluation episodes, so the served tree
     #: never carries a provider binding.
     model_binding: Mapping[str, tuple[Mapping[str, Any], ...]] = field(default_factory=dict)
+    #: Service environment variables an episode under the local executor keeps: the service's own value, else
+    #: the default, where ``{home}`` is the service's home directory; an empty default leaves the variable
+    #: unset. For a host tool the relocated ``HOME`` would otherwise hide, such as terminus's docker CLI.
+    host_env: Mapping[str, str] = field(default_factory=dict)
+    #: True when the binary bind-mounts paths below the episode root into a container. On macOS Docker runs in a VM
+    #: that shares the home directory, and colima does not share ``$TMPDIR``, so an episode under the local executor
+    #: then makes its root under ``~/.reef/episodes``; on other platforms the root stays in the temp directory.
+    is_root_bind_mounted: bool = False
     #: ``files.tree``: where the entries list travels with the rendered files (a JSON
     #: array of ``{id, name, config}``), so a resident process can reconcile the
     #: tree entry by entry; None for an adapter whose binary reads files only.
@@ -193,8 +224,15 @@ class AdapterDescriptor:
     #: Environment the ``reef-<adapter>`` wrapper adds when a person runs the
     #: binary: what an interactive run needs that an episode's ``env`` (offline,
     #: hermetic) must not carry, such as silencing the binary's self-updater
-    #: while reef pins its version.
+    #: while reef pins its version. ``{root}`` in a value is the install root,
+    #: for a directory of the installed tree outside the relocated composition.
     client_env: Mapping[str, str] = field(default_factory=dict)
+    #: Arguments the ``reef-<adapter>`` wrapper puts ahead of the person's own when
+    #: it runs the binary: a setting the rendered tree must not be able to undo.
+    client_args: tuple[str, ...] = ()
+    #: First arguments that get no ``client_args``: the binary's version flags, which start no
+    #: session and which a binary may answer early only when nothing else is on the command line.
+    client_version_args: tuple[str, ...] = ()
     #: Commands the binary expects on PATH at first start and otherwise fetches
     #: itself, as ``(command, package)``; the install script names the missing ones.
     client_tools: tuple[tuple[str, str], ...] = ()
@@ -266,6 +304,14 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         isinstance(key, str) and isinstance(value, str) for key, value in env.items()
     ):
         raise DescriptorError(f"{where} 'env' must map strings to strings")
+    host_env = data.get("host_env", {})
+    if not isinstance(host_env, Mapping) or not all(
+        isinstance(key, str) and key.isidentifier() and isinstance(value, str) for key, value in host_env.items()
+    ):
+        raise DescriptorError(f"{where} 'host_env' must map variable names to default strings")
+    overlap = sorted(set(host_env) & set(env))
+    if overlap:
+        raise DescriptorError(f"{where} 'host_env' names variables 'env' already sets: {', '.join(overlap)}")
     whitelist = _str_list(data.get("cleanup_whitelist", []), f"{where} 'cleanup_whitelist'")
     writable_paths = _relative_paths(data.get("writable_paths", []), f"{where} 'writable_paths'")
     self_isolating = data.get("self_isolating", False)
@@ -274,11 +320,16 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     is_prompt_task_directory = data.get("is_prompt_task_directory", False)
     if not isinstance(is_prompt_task_directory, bool):
         raise DescriptorError(f"{where} 'is_prompt_task_directory' must be a boolean")
+    is_root_bind_mounted = data.get("is_root_bind_mounted", False)
+    if not isinstance(is_root_bind_mounted, bool):
+        raise DescriptorError(f"{where} 'is_root_bind_mounted' must be a boolean")
     client_env = data.get("client_env", {})
     if not isinstance(client_env, Mapping) or not all(
         isinstance(key, str) and isinstance(value, str) for key, value in client_env.items()
     ):
         raise DescriptorError(f"{where} 'client_env' must map strings to strings")
+    client_args = _str_list(data.get("client_args", []), f"{where} 'client_args'")
+    client_version_args = _str_list(data.get("client_version_args", []), f"{where} 'client_version_args'")
     client_tools = _parse_client_tools(data.get("client_tools"), where)
     client_state = _parse_client_state(data.get("client_state"), where)
     finalize, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
@@ -297,10 +348,14 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         install=_parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         is_prompt_task_directory=is_prompt_task_directory,
+        host_env=dict(host_env),
+        is_root_bind_mounted=is_root_bind_mounted,
         model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
         tree_path=_parse_tree_path(files, where),
         validate_execution=validate_execution,
         client_env=dict(client_env),
+        client_args=client_args,
+        client_version_args=client_version_args,
         client_tools=client_tools,
         client_state=client_state,
     )
@@ -436,7 +491,8 @@ def _parse_client_tools(value: Any, where: str) -> tuple[tuple[str, str], ...]:
 
 
 def _parse_client_state(value: Any, where: str) -> tuple[ClientState, ...]:
-    """``client_state``: a list of ``{path, kind}`` an interactive run keeps in the installed tree."""
+    """``client_state``: a list of ``{path, kind}`` an interactive run keeps in the installed tree, a ``file`` with
+    the ``preference_keys`` the binary may change in it."""
     if value is None:
         return ()
     if not isinstance(value, list):
@@ -446,7 +502,10 @@ def _parse_client_state(value: Any, where: str) -> tuple[ClientState, ...]:
         if not isinstance(entry, Mapping) or entry.get("kind") not in CLIENT_STATE_KINDS:
             raise DescriptorError(f"{where} 'client_state' entries need a 'kind' in {CLIENT_STATE_KINDS}")
         (path,) = _relative_paths([entry.get("path")], f"{where} 'client_state' 'path'")
-        states.append(ClientState(path=path, kind=entry["kind"]))
+        if "preference_keys" in entry and entry["kind"] != "file":
+            raise DescriptorError(f"{where} 'client_state' 'preference_keys' is for a 'file' entry")
+        preference_keys = _str_list(entry.get("preference_keys", []), f"{where} 'client_state' 'preference_keys'")
+        states.append(ClientState(path=path, kind=entry["kind"], preference_keys=preference_keys))
     return tuple(states)
 
 

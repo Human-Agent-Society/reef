@@ -24,10 +24,9 @@ from reef.inference.chat import (
     normalize_finish_reason,
     positive_max_tokens,
 )
+from reef.inference.vllm.versions import TOKEN_RUNTIME_LOAD_IDS_KEY, UNKNOWN_RUNTIME_LOAD_ID
 
 VLLM_GENERATE_PATH = "/inference/v1/generate"
-#: The ``kv_transfer_params`` entry Reef's vLLM connector fills with one version per sampled token.
-TOKEN_RUNTIME_LOAD_IDS_KEY = "reef_token_runtime_load_ids"
 #: vLLM renders logprob tokens as ``token_id:N`` on this route.
 TOKEN_ID_PREFIX = "token_id:"
 
@@ -146,7 +145,7 @@ class VLLMGenerateClient(NativeGenerateClient):
             if not is_local_release(artifact.ref.release_id):
                 raise ValueError(
                     "vLLM generate response lacks per-token runtime load IDs; "
-                    "select Reef's version connector in the engine's --kv-transfer-config"
+                    "select Reef's connector in the engine's --kv-transfer-config"
                 )
             # A local release serves one fixed version, so every token carries it.
             version = getattr(artifact.ref, "runtime_load_id", None) or artifact.ref.release_id
@@ -154,7 +153,10 @@ class VLLMGenerateClient(NativeGenerateClient):
         if (
             not isinstance(stamped, list)
             or len(stamped) != count
-            or any(not isinstance(version, str) or not version for version in stamped)
+            or any(
+                not isinstance(version, str) or not version or version == UNKNOWN_RUNTIME_LOAD_ID
+                for version in stamped
+            )
         ):
             raise ValueError("vLLM generate response has incomplete token runtime load IDs")
         return list(stamped)

@@ -1154,7 +1154,8 @@ class BackendWeightPublisher(WeightPublisher, AdapterEngine):
         """
         history = self.require_history()
         residency = self.require_residency()
-        active = marker.get("scenario") if marker is not None else None
+        # A rejected job publishes nothing at startup: its scenario comes back from history like a peer.
+        active = marker.get("scenario") if marker is not None and marker.get("status") != "REJECTED" else None
         pending = [
             (scenario, adapter)
             for scenario in history.scenarios

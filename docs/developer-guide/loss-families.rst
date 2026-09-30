@@ -46,17 +46,17 @@ Family to driver flags
 The recipe's ``loss_family`` and the driver's flags must describe the same
 objective; the driver checks it at start and refuses a mismatch.
 
-+----------------+-----------------------------+----------------------------+
-| Loss family    | ``--loss-type``             | Rollout log-probs          |
-+================+=============================+============================+
-| ``sao``        | ``policy_loss``             | ``--use-rollout-logprobs`` |
-+----------------+-----------------------------+----------------------------+
-| ``tttd``       | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+----------------+-----------------------------+----------------------------+
-| ``openclawrl`` | ``custom_loss``             | not required               |
-+----------------+-----------------------------+----------------------------+
-| ``sdft``       | ``custom_loss``             | ``--use-rollout-logprobs`` |
-+----------------+-----------------------------+----------------------------+
++---------------------+-----------------------------+----------------------------+
+| Loss family         | ``--loss-type``             | Rollout log-probs          |
++=====================+=============================+============================+
+| ``sao``             | ``policy_loss``             | ``--use-rollout-logprobs`` |
++---------------------+-----------------------------+----------------------------+
+| ``tttd``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------+-----------------------------+----------------------------+
+| ``openclawrl``      | ``custom_loss``             | not required               |
++---------------------+-----------------------------+----------------------------+
+| ``sdft``            | ``custom_loss``             | ``--use-rollout-logprobs`` |
++---------------------+-----------------------------+----------------------------+
 
 The spec
 --------
@@ -92,6 +92,8 @@ rest has defaults. The overrides, in the order the pipeline reaches them:
 - ``bind``: a per-run instance carrying state such as a critic schedule.
 - ``train``: critic and actor orchestration; the default is one actor step.
 - ``rollout_metrics``: rollout version and timing metrics after the step.
+- ``policy_gradient_weight``: the weight the family's loss puts on the
+  sampled token's score, which score centering needs (below).
 
 Two loss lanes
 --------------
@@ -146,8 +148,8 @@ A family that ships more than the five policy columns declares them on the spec.
 Bundled families worth reading: ``recipes/tttd/slime/`` (two hooks, the default
 row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
-frozen Megatron teacher), ``recipes/sdft/slime/`` (a thin family on the
-distillation base below).
+frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
+(thin families on the distillation base below).
 
 The distillation base
 ---------------------
@@ -158,12 +160,15 @@ who the teacher is and which divergence is minimized. Both are settings of
 one implementation in the backend, ``reef/train/slime_backend/distill/``,
 and each such recipe's family is a thin subclass of it:
 
-- ``DistillAlgorithm`` is the driver-side base: the six-column wire row
+- ``DistillAlgorithm`` is the driver-side base: the seven-column wire row
   (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
-  by the student's response ids verbatim), the ``--<name>-*`` flags under
+  by the student's response ids verbatim, and ``sample_weight``, the factor
+  on that sample's mean divergence, 1 unless the recipe's processor sets
+  ``distill_sample_weight`` on the sample), the ``--<name>-*`` flags under
   the family's own prefix (``teacher``, ``divergence``, ``top-k``,
-  ``teacher-update-rate``, ``teacher-checkpoint``,
-  ``importance-sampling-cap``, ``skip-response-tokens``, ``jsd-beta``) and
+  ``top-k-source``, ``top-k-distribution``, ``teacher-update-rate``,
+  ``teacher-checkpoint``, ``importance-sampling-cap``,
+  ``importance-sampling-level``, ``skip-response-tokens``, ``jsd-beta``) and
   the settings they stamp on ``args`` under ``distill_*`` names, which the
   worker hooks read whatever the prefix was. A family names itself, sets
   its defaults in a ``DistillSettings`` subclass, and its ``objective.py``
@@ -178,14 +183,176 @@ and each such recipe's family is a thin subclass of it:
   actor back.
 - The divergence is the forward KL, the reverse KL or the generalized JSD,
   over the teacher's whole distribution (``top-k`` 0: one row of this rank's
-  vocab shard per response position, kept in float16 on the host) or over
-  the teacher's top-K ids renormalized, the reverse KL then estimated at the
-  sampled token. The kernels reduce across the vocab shards of tensor
-  parallel themselves and write the gradients out where autograd over one
-  shard would drop the coupling through the global log-sum-exp;
+  vocab shard per response position, kept in float16 on the host) or over K
+  ids per position, the teacher's own top-K or the current student's (one
+  more forward before the step, which needs zero dropout), either
+  renormalized over them, the reverse KL then estimated at the sampled
+  token, or with one bucket for the rest of the vocabulary as SDPO's
+  reference does. The kernels reduce across the vocab shards of tensor
+  parallel with ``reef/train/slime_backend/vocab_parallel.py`` and write the
+  gradients out where autograd over one shard would drop the coupling
+  through the global log-sum-exp;
   ``tests/reef_service/test_distill_parity.py`` pins them to a pure-Python
   reference and to the dense gradients across four ranks.
 
 The base registers no family and imports nothing from ``reef_adapters``;
-``recipes/openclawrl/slime/`` imports its packing schedule and its sharded
-gathers from it.
+``recipes/openclawrl/slime/`` imports its packing schedule from it. The
+operations over vocab shards (log-sum-exp, the log-probs at ids on any
+shard, the top-K ids) live in ``reef/train/slime_backend/vocab_parallel.py``,
+shared by the distillation base, score centering and OpenClaw-RL's teacher.
+
+Score centering
+---------------
+
+Score centering is a correction Reef adds to a family's own policy-gradient
+loss; it is not a loss family. It implements `Score Centering Stabilizes
+Off-policy Reinforcement Learning <https://arxiv.org/abs/2609.20807>`_
+(Appendix A, equations 9-14). When the rollout engine's distribution ``q``
+differs from the trainer's ``p`` (a quantized engine, stale weights), a
+policy gradient drifts toward ``q``; score centering subtracts that drift.
+It is off unless ``--score-centering`` is set, and only a family that
+declares the weight its loss puts on the sampled token's score accepts it.
+SAO and the distillation base's sampled reverse-KL mode support it.
+
+A family declares its weight with ``policy_gradient_weight``. Its loss must
+have the form ``-A_t * sg[f(p_t / q_t)] * log p_t``, with ``q`` the rollout
+engine's probability:
+
+.. code:: python
+
+   def policy_gradient_weight(self, args):
+       # SAO: the ratio masked to its trust region.
+       return PolicyGradientWeight("masked", lower=1 - args.eps_clip, upper=1 + args.eps_clip_high)
+
+``PolicyGradientWeight`` (``reef.train.slime_backend.algorithm``) is ``none``
+(``f = 1``, plain off-policy REINFORCE), ``truncated`` (``min(r, upper)``) or
+``masked`` (``r`` strictly inside ``(lower, upper)``, else 0). The default,
+``None``, refuses score centering: a clipped surrogate against a recomputed
+old policy or a full-distribution KL loss has no such weight. For unclipped
+importance sampling (``f = r``) the term below is identically zero, since
+that estimator has no drift.
+
+Reef then adds this term to the family's loss at every trained response
+position:
+
+.. code:: text
+
+   A * sum_{v in H} sg[q_v * f(p_v / q_v) - alpha * p_v] * log p_v
+
+   rho   = max(1 - q(H), eps) / max(1 - p(H), eps)
+   alpha = rho * f(1 / rho)
+
+``H`` is the sampler's recorded top-K ids, the sampler's tail is
+approximated as ``rho * p``, and ``sg`` stops the gradient. The term uses the
+loss's own advantages and is reduced with the same per-sample mean, so the
+loss's weighted score ends up centered under the sampler, tail included. It
+is zero when ``q = p``. It is added inside Slime's policy loss for a stock or
+pg-primitive family. The distillation base adds it inside its own loss, using
+the teacher signal and that loss's masks; other custom losses use a wrapper.
+
+To enable it, record the sampler's top-K and set the flags in
+``training.options``:
+
+.. code:: yaml
+
+   inference:
+     handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+     handler-config:
+       capture_topk: 128        # at least score-centering-top-k
+   training:
+     options:
+       score-centering: true
+       score-centering-top-k: 128
+
+Each step then reports the ``score_centering_*`` metrics listed below.
+
+For sampled on-policy distillation (OPD), select ``reverse`` divergence,
+a positive teacher ``top-k``, and ``renormalized`` top-K distribution on a
+family using ``DistillAlgorithm``. In this mode the reverse KL is estimated
+at the sampled token. Its advantage is the detached
+``log teacher(y) - log student(y)``. The correction uses that advantage
+before importance weighting, and preserves sample weights, loss masks and
+``skip-response-tokens``. No external advantages are needed.
+
+For example, add these options to an SDFT configuration along with the
+sampler capture and score-centering options above:
+
+.. code:: yaml
+
+   training:
+     options:
+       sdft-divergence: reverse
+       sdft-top-k: 128
+       sdft-top-k-distribution: renormalized
+       sdft-importance-sampling-level: token
+       sdft-importance-sampling-cap: 2.0
+
+Use the ``sdpo-`` prefix for SDPO. These settings change the recipe's
+default divergence. Centering accepts token-level truncated importance
+sampling, or no importance weighting (``importance-sampling-cap: 0``).
+It refuses sequence-level importance weights, full-vocabulary KL,
+top-K-plus-tail divergences, forward KL and JSD. OpenClaw-RL's separate
+top-K OPD surrogate is not supported.
+
+The sampler's ``capture_topk`` and ``score-centering-top-k`` describe the
+correction's head; the family's ``top-k`` describes the teacher pass.
+They need not match. Teacher top-K log-probs cannot replace the sampler's
+recorded head. Centering approximates the score correction with the tail
+model above; it does not correct the distribution of sampled prefixes or
+make the off-policy update an exact on-policy KL gradient.
+
++-----------------------------------+---------+-------------------------------------+
+| Flag                              | Default | Meaning                             |
++===================================+=========+=====================================+
+| ``score-centering``               | off     | add the term to the family's loss   |
++-----------------------------------+---------+-------------------------------------+
+| ``score-centering-top-k``         | 128     | sampler log-probs read per position |
++-----------------------------------+---------+-------------------------------------+
+| ``score-centering-min-tail-mass`` | 1e-6    | floor applied to both tail masses   |
++-----------------------------------+---------+-------------------------------------+
+
+Inputs and requirements:
+
+- Records need the sampler's top-K. Serve through a token-native handler
+  (SGLang or vLLM) with ``inference.handler-config.capture_topk`` at least
+  ``score-centering-top-k``. The recorded log-probs are the same distribution
+  as ``rollout_log_probs`` and the trainer's: after temperature and before the
+  top-k, top-p and min-p filters (see the configuration reference). With
+  those filters on, the correction centers against the unfiltered
+  distribution.
+- When the flag is on, the bridge adds each wire row's recorded top-K to the
+  payload as ``sampler_topk_indices`` and ``sampler_topk_log_probs``; the
+  family's wire row is unchanged. Multi-turn assembly keeps the recorded rows
+  aligned with the joined response, gives inserted context an empty row, and
+  drops top-K for the whole sample when a turn has none.
+- Before each step, the bridge keeps the first ``top-k`` entries of every
+  trained position. It refuses a sample with missing or short rows,
+  duplicate or negative ids, non-finite log-probs, or a head mass above one,
+  and, when the sample carries ``rollout_log_probs``, a head whose entry for
+  the sampled token disagrees with them (rows shifted against the
+  response). The worker also refuses ids outside the vocabulary. The check
+  runs in torch (``score_centering/heads.py``); 64 samples of 1,024 tokens at
+  ``top-k`` 128 take under a second on a CPU.
+- The driver refuses a family that declares no weight and
+  ``--context-parallel-size`` above 1. For a family on Slime's policy loss it
+  also refuses ``--use-tis``, ``--get-mismatch-metrics``, ``--use-opsm`` and
+  ``--custom-pg-loss-reducer-function-path``: Slime reweights, masks or
+  re-reduces the policy-gradient term under them, beyond the declared weight.
+  The critic's value loss is left alone.
+- The recorded top-K dominates record size: at ``capture_topk`` 128 a
+  response token carries about 3.5 KB of JSON instead of about 35 bytes. A
+  smaller head shrinks records, but leaves more of the drift uncorrected
+  when the sampler's tail differs from the trainer's (the paper found 32
+  effective in its settings).
+
+The step reports aggregate metrics only, as sums of per-sample means:
+``score_centering_term`` (the reduced term), ``score_centering_correction_l1``
+(the L1 norm of the centering coefficients),
+``score_centering_sampler_head_mass``, ``score_centering_trainer_head_mass``,
+``score_centering_tail_ratio`` and ``score_centering_tail_clipped`` (the
+fraction of positions where a tail fell below the floor); ``loss`` includes
+the term. ``tests/reef_service/test_score_centering_parity.py`` checks the
+term, added to each weight's loss and to SAO's own loss, against a
+full-vocabulary reference. ``tests/reef_service/test_distill_score_centering.py``
+checks the sampled OPD loss against that gradient, including skipped tokens,
+masked positions and sample weights.

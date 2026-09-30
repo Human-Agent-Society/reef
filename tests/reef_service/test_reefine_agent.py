@@ -416,8 +416,8 @@ def test_a_reply_cut_at_its_token_budget_says_so_rather_than_that_nothing_change
 def test_without_a_request_or_an_agent_the_text_proposer_answers(monkeypatch) -> None:
     seen = []
 
-    def text_proposer(nodes, samples, models, *, requests=(), entries=()):
-        seen.append(tuple(requests))
+    def text_proposer(nodes, samples, models, *, requests=(), entries=(), adapter="pi"):
+        seen.append((tuple(requests), adapter))
         return Mutation("remove", "tone")
 
     monkeypatch.setattr(reefine_agent.evolution, "propose", text_proposer)
@@ -425,7 +425,9 @@ def test_without_a_request_or_an_agent_the_text_proposer_answers(monkeypatch) ->
     propose = AgentProposer()
     assert propose(NODES, (), models, entries=ENTRIES).id == "tone"
     assert propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=None).id == "tone"
-    assert seen == [(), ({"text": "x"},)]
+    # The recipe names the adapter it serves; the text proposer writes for it when no agent host says otherwise.
+    assert AgentProposer(adapter="dsh")(NODES, (), models, entries=ENTRIES).id == "tone"
+    assert seen == [((), "pi"), (({"text": "x"},), "pi"), ((), "dsh")]
 
 
 @pytest.mark.unit

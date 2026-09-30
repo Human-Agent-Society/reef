@@ -27,6 +27,7 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.step_result import design_sections
 from reef.recipe.cordis import CordisRecipe
 from reef.service.app import create_app
 from reef.service.page_chrome import status_label
@@ -781,6 +782,23 @@ def test_the_page_shows_the_proposers_design_and_review_and_escapes_them(review_
     assert _sections(usage_page)[:3] == ["Why", "Design", "How to use"]
     assert '<p class="text">Add /away.</p>' in _section(usage_page, "Design")
     assert '<p class="text">/away on</p>' in _section(usage_page, "How to use")
+    # The heading may also lead its own line's text, as a model often writes it.
+    inline = dict(row, metrics={**row["metrics"], "proposal_notes": {"design": "Add /away.\n\nHow to use: /away on"}})
+    inline_page = build_release_page(1, [creation, inline])
+    assert '<p class="text">/away on</p>' in _section(inline_page, "How to use")
+    assert '<p class="text">Add /away.</p>' in _section(inline_page, "Design")
+    # A design in Chinese writes a full width colon, a one line design puts the heading after its last sentence, and
+    # a bold heading is common; each is found, while a sentence that says how to use something is no heading.
+    for text, expected in (
+        ("\u8bbe\u8ba1\u3002\n\nHow to use\uff1a\u8f93\u5165 /chat", ("\u8bbe\u8ba1\u3002", "\u8f93\u5165 /chat")),
+        ("A chat mode. How to use: type /chat, then /chat off.", ("A chat mode.", "Type /chat, then /chat off.")),
+        ("Add /away.\n\n**How to use:** /away on", ("Add /away.", "/away on")),
+        (
+            "It says how to use the tool. How to use the mode is simple.",
+            ("It says how to use the tool. How to use the mode is simple.", ""),
+        ),
+    ):
+        assert design_sections({"design": text}) == expected, text
     review = _section(page, "Review")
     assert 'The proposer\'s review of its entries against the request: <span class="partial">Partial</span>' in review
     assert (

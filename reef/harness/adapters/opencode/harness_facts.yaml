@@ -1,0 +1,39 @@
+# What reef's reefine proposer is told about opencode: see reef.harness.adapters.harness_facts.
+title: opencode
+command: >-
+  A person types an agent_command as /<id>. Its text is an opencode command file: YAML frontmatter with
+  description, and agent: <name> to run that command's own turn with that agent, then the prompt, where $ARGUMENTS
+  stands for what the person typed after /<id>. The session keeps its selected agent for the turns after the
+  command, except that a new session's first message sets it. Quote a frontmatter value that holds ': '
+  (description: "Chat: web search only").
+tools: >-
+  bash, read, edit, write, glob, grep, task, todowrite, skill, question, webfetch (reads one URL) and websearch
+  (searches the web; no key needed)
+mode: >-
+  A mode is an agent. A config entry defines it in opencode.json with a permission map, which limits the tools the
+  model may call and so enforces the mode for the model, and a prompt, which replaces opencode's own system prompt
+  while the agent runs. The person enters the mode by selecting the agent: with /agents (or Tab), or by typing an
+  agent_command with agent: <name> in its frontmatter as the first message of a new session, which starts the
+  session in that agent; the same command typed later in a session runs only its own turn with the agent, and the
+  next message is back in the selected one. The person leaves with /agents, choosing build (Tab from the mode's
+  agent reaches plan first, since Tab cycles build and then the other primary agents by name), together with a
+  leave command, an agent_command with agent: build whose text says the mode has ended and every tool is back, in
+  either order: opencode tells the model nothing when the agent changes, so without that turn the build model
+  keeps refusing from the history. The leave command alone runs one build turn and leaves the chat agent selected,
+  so its text, How to use and the chat agent's prompt never say it switches the session back: they name /agents,
+  build as the switch. The permission map limits only the model's tool calls: a skill the person types as /<name>,
+  a file the person attaches with @ and a !command the person runs still run in any agent, so the agent's prompt
+  declines skill text a person's message carries (a SKILL.md after the line 'Base directory for this skill:') and
+  the review lists those person paths under limits. Write the agent, its entering command and its leave command in
+  the same reply. The restriction's wording lives only in that agent's own prompt, never in rules or in a
+  command's text: a command's text stays in the conversation as the person's message, so the entering command
+  states no restriction, and it says the session stays in the mode only when the command opened the session (typed
+  later, the person selects the agent with /agents). That note about a command typed after other messages belongs
+  in that command's own reply alone, never in the agent's prompt or in rules, which would repeat it under every
+  later reply; and the agent's prompt reads the turns another agent answered in the history as that agent's, not
+  its own. Say how to enter and leave in the command's reply and in How to use.
+config_keys: [agent]
+config_example: >-
+  {"target": "primary", "data": {"agent": {"chat": {"mode": "primary", "description": "Chat, web search only",
+  "prompt": "<how the agent behaves>", "permission": {"*": "deny", "websearch": "allow"}}}}} is an agent whose
+  only tool is websearch

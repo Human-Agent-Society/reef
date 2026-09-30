@@ -1,14 +1,15 @@
 Write a harness method
 ======================
 
-A harness method is the part you write: what edit to try, and how an episode
-scored. Reef runs the loop around it: snapshot, apply, run the paired episodes,
-record, publish or revert.
+A harness method decides what change to try and how to score an evaluation
+episode. Reef applies the change to a candidate harness, runs the evaluation,
+records the result, and follows the selection and publication policies.
 
-`Evolve your harness <../user-guide/evolve-your-harness.rst>`__ is the mechanism this plugs
-into, and the runnable example.
+See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ for the
+evolution workflow and a runnable example.
 
-A method fills three slots:
+A method provides ``propose`` and ``evaluate``. A custom selection plugin is
+optional:
 
 .. code:: python
 
@@ -17,94 +18,107 @@ A method fills three slots:
    class SelectionFactory(CandidatePluginFactory):  # optional
        def build(self, candidate_backend) -> CandidateEvaluationPlugin: ...
 
-``propose`` sees the tree as ``(kind, config)`` pairs, the batch of
-ATIF ``TrajectoryItem`` values, and
-``models``, its only path to a model. ``models.served`` is the model under
-test, ``models["teacher"]`` comes from ``evolution.models``. Read the trajectory
-from ``item.trajectory``, reward/feedback from ``item.metadata``, and original
-provider exchanges through ``reef.core.trajectories.recorded_payloads``.
-Call each binding
-as ``binding.chat(messages, *, timeout_s=None, **params) -> str``. The
-``messages`` are OpenAI-shaped regardless of the endpoint's dialect, and the
-binding returns the assistant text. ``propose`` returns one ``Mutation``
-(``create``, ``update``, or
-``remove`` on one root-level entry), a sequence applied as one composite
-proposal under one result, or ``None`` to skip. It may also return a
-``StepProposal(mutations, notes)``: the same mutations plus ``notes``, a JSON
-mapping (a plan, a review result, what the method could not honor) that the
-step records under the commit metrics key ``proposal_notes`` and never reads;
-empty mutations skip the step as ``None`` does. An optional keyword-only
-``manifest`` argument receives the previous step's ``FailureManifest``, and an
-optional keyword-only ``rejected`` argument receives the recent rejected
-proposals, oldest first, each a mapping of ``step``, ``mutations`` (each with
-its ``op``, ``id`` and the ``options`` it carried, ``None`` for a remove), and
-the result's ``reason``; a method uses it to stop re-proposing what the evaluation
-already refused, and can read the refused content rather than only its id.
-An optional keyword-only ``entries`` argument receives the tree as entry
-options, ``{"id", "name", "config"}`` mappings in tree order, so an ``update``
-or ``remove`` can name the entry it targets instead of creating a second one.
-An optional keyword-only ``agent_host`` argument receives an ``AgentHost``
-when the deployment configured ``evolution.proposer_agent``, else ``None``:
-the adapter descriptor and its installed binary, the executor built for the
-agent (its isolation, not the episodes'), the step's record directory, the
-two timeouts, and ``calls``, the step's model-call budget and record
-(``spend()`` and ``record(entry)``) for traffic the agent's own process makes
-outside ``models``. ``reef.recipe.reefine.agent`` is the reference user.
+Propose a change
+~~~~~~~~~~~~~~~~
 
-An optional keyword-only ``requests`` argument carries a training request in
-``training_mode`` ``manual`` and ``hybrid`` (see `Manual training
-<../reference/http-api.rst#manual-training>`__ for the route that queues
-one). It holds exactly one request mapping, with ``id``, ``text``,
-``session``, ``release_id``, ``requires`` and ``untrusted=True``. The parameter
-must be declared by name; a ``**kwargs`` catch-all does not count, so a
-method never takes a request without being written for it. A deployment in
-either mode whose ``propose`` declares no such parameter fails at startup
-with ``RecipeConfigError``, so a failure-only method must grow a
-``requests`` branch before it runs there.
-``samples`` is empty in ``manual``; in ``hybrid`` it carries what an
-automatic batch would take next, up to ``batch_size`` and possibly none
-(scored traces, or records under ``data.batch_policy: records``), so the
-method can answer the request with the failures beside it. A request's
-mutations pass through the same evaluation and ``evolution.publish`` policy
-as any other step's, and pending agent proposals and periodic rollback
-rechecks cannot take the step a request owns.
+``propose`` receives three positional arguments:
 
-Reef passes each keyword only to a signature that names it.
+- ``nodes``: the current tree as ``(kind, config)`` pairs in tree order.
+- ``samples``: a batch of ATIF ``TrajectoryItem`` values. Read the trajectory
+  from ``item.trajectory``, reward and feedback from ``item.metadata``, and
+  original provider exchanges through ``reef.core.trajectories.recorded_payloads``.
+- ``models``: bindings for models the method can call. ``models.served`` is
+  the model under test; named bindings such as ``models["teacher"]`` come from
+  ``evolution.models``. Call a binding with
+  ``binding.chat(messages, *, timeout_s=None, **params) -> str``. The messages
+  use the OpenAI shape regardless of the endpoint's dialect, and the call
+  returns the assistant text.
 
-``evaluate`` grades one finished episode. Reef calls it for both sides of every
-pair. ``result`` carries the exit code, stdout, stderr, and the parsed ``trajectory``. Episodes
-that could not run never reach it.
+Return one ``Mutation`` to ``create``, ``update``, or ``remove`` a root-level
+entry. A sequence of mutations forms one proposal with one evaluation result.
+Return ``None`` to skip the step. ``StepProposal(mutations, notes)`` also
+records a JSON mapping of notes under the commit metric ``proposal_notes``;
+Reef does not read the notes to make a decision. Empty mutations skip the
+step, just as ``None`` does.
 
-``promote`` is an optional ``Promoter`` subclass or instance and only matters
-with ``evolution.promote_failures``. Its ``__call__(samples, *, manifest=None)``
-receives the step's trace samples and ``FailureManifest``, and returns the prompts to add to the evaluation as
-permanent tasks. Reef dedupes, screens for credentials, and caps what it
-returns. Without it every failing trace's user prompt is promoted.
+Declare optional keyword arguments when the method needs more context:
 
-``selection`` defaults to ``score_comparison``: select when the candidate wins
-more task comparisons than it loses, by more than ``evolution.min_win_margin``
-when that is set. ``floor`` runs the candidate alone and selects it when every
-evaluation task scores at least ``evolution.floor_score`` (default ``1.0``; an
-episode that could not run missed the floor): a floor is absolute, not a
-comparison, so the current release is not run and ``current_scores`` is empty.
+- ``manifest`` is the previous step's ``FailureManifest``, if there is one.
+- ``rejected`` lists recent rejected proposals, oldest first. Each record
+  contains ``step``, ``reason``, and ``mutations``. Each mutation includes its
+  ``op``, ``id``, and original ``options`` (``None`` for a remove). Use these
+  records to inspect a refusal before proposing the same change again.
+- ``entries`` contains the tree as ``{"id", "name", "config"}`` mappings in
+  tree order. Use an entry's id to update or remove it.
+- ``agent_host`` is an ``AgentHost`` when ``evolution.proposer_agent`` is
+  configured; otherwise it is ``None``. It provides the agent's adapter,
+  installed binary, executor, record directory, timeouts, and ``calls``
+  budget and record. The agent executor is separate from episode execution.
+  See ``reef.recipe.reefine.agent`` for a use of this argument.
+
+For model calls the agent process makes outside ``models``, use
+``agent_host.calls.spend()`` and ``agent_host.calls.record(entry)``. Declare
+``agent_host`` by name to receive it; ``**kwargs`` does not activate it.
+
+Manual requests
+~~~~~~~~~~~~~~~
+
+In ``manual`` or ``hybrid`` training mode, ``propose`` must explicitly declare
+the ``requests`` keyword argument; ``**kwargs`` does not count. Otherwise the
+recipe fails at startup with ``RecipeConfigError``. See `Manual training
+<../reference/http-api.rst#manual-training>`__ for the request route.
+
+``requests`` contains one mapping with ``id``, ``text``, ``session``,
+``release_id``, ``requires``, and ``untrusted=True``. In ``manual`` mode,
+``samples`` is empty. In ``hybrid`` mode, it contains up to ``batch_size``
+samples from the next automatic batch, and may be empty. These can be scored
+traces or records under ``data.batch_policy: records``.
+
+Reef evaluates request mutations and applies the same ``evolution.publish``
+policy as for other steps. Pending agent proposals and periodic rollback
+rechecks cannot take over the step assigned to a request.
+
+Score an episode
+~~~~~~~~~~~~~~~~
+
+``evaluate`` scores one completed episode. Reef calls it for each side the
+selection policy evaluates; ``floor`` evaluates only the candidate. The
+``result`` contains the exit code, stdout, stderr, and parsed ``trajectory``.
+Episodes that could not run do not reach ``evaluate``.
+
+Other method options
+~~~~~~~~~~~~~~~~~~~~
+
+``promote`` matters only with ``evolution.promote_failures``. This optional
+``Promoter`` subclass or instance receives the step's samples and
+``FailureManifest`` through ``__call__(samples, *, manifest=None)``. It
+returns prompts to add as permanent evaluation tasks. Reef deduplicates and
+screens the prompts for credentials, then caps how many it adds. Without a
+custom promoter, it uses the user prompt from each failing trace.
+
+``selection`` defaults to ``score_comparison``. It selects a candidate when
+the number of task comparisons it wins exceeds the number it loses by more
+than ``evolution.min_win_margin``, if a margin is set. ``floor`` runs only the
+candidate and selects it when every task reaches ``evolution.floor_score``
+(default ``1.0``). An episode that could not run misses the floor. The
+current release does not run under ``floor``, so ``current_scores`` is empty.
 ``always`` selects every applied mutation.
 
 .. warning::
 
-   The tree refuses credentials outright. A config node holding a literal
-   credential (``apiKey``, ``token``, plural and list forms) fails admission at
-   seed boot, at every proposal, and when recovered state loads. Tree state
-   persists into the commit log, the snapshot metadata, and the published
-   artifact. If a workdir from before this admission check already holds a key, resuming
-   fails and names the field: rotate the key, then edit the entry out of the
-   stored state.
+   Do not put credentials in tree entries. Reef rejects literal credential
+   fields (including ``apiKey``, ``token``, and their plural or list forms)
+   when loading a seed, applying a proposal, or recovering stored state.
+   Tree state is stored in the commit log, snapshot metadata, and published
+   artifact. If older stored state contains a credential, recovery fails and
+   names the field. Rotate the key and remove it from the stored entry.
 
-A complete method
-~~~~~~~~~~~~~~~~~
+A small method example
+~~~~~~~~~~~~~~~~~~~~~~
 
-Each task string starts with a tag, such as ``[fib]`` in the config below, and
-``evaluate`` uses it to look up that task's expected answer. The tag convention
-is the method's own; Reef passes the task string through unchanged.
+This example uses a ``[fib]`` prefix to look up the expected answer in
+``evaluate``. The prefix is a convention of this method; Reef passes the
+task string through unchanged.
 
 This method adds a rules node the first time a batch contains a failure:
 
@@ -141,15 +155,14 @@ This method adds a rules node the first time a batch contains a failure:
 Two batching modes
 ~~~~~~~~~~~~~~~~~~
 
-Evolution batches in one of two modes, selected by ``data.batch_policy``.
-The default, ``reports``, batches every valid explicitly scored report;
-use it whenever the deployment has an outcome signal (a
-grader, a test result, a user action), because a measured result beats
-model self judgment. ``records`` batches recorded inference traffic alone,
-every ``batch_size`` requests, so a deployment that only serves still
-evolves. Samples batched this way carry ``score=None``, and ``propose``
-must handle unscored samples; the SkillClaw night backfills its own
-judgment over them and is the worked instance.
+``data.batch_policy`` selects the source of each batch:
+
+- ``reports`` (the default) batches valid reports with explicit scores. Use
+  it when a grader, test, or user action supplies an outcome.
+- ``records`` batches recorded inference requests, without requiring
+  reports. It starts a step every ``batch_size`` requests. These samples
+  have ``score=None``, which ``propose`` must handle. The SkillClaw night
+  example judges its own unscored samples later.
 
 Configure it
 ~~~~~~~~~~~~
@@ -183,15 +196,15 @@ The recipe config names the callables, the tasks, and the first-boot tree:
    inference:
      upstream-model: qwen3-8b
 
-Preset YAML is read as-is: ``${VAR}`` is **not** interpolated in a preset, only
-in a deployment config. Write literal values.
+The YAML above is a standalone recipe preset. Save it as
+``recipes/<name>.yaml`` and set ``REEF_RECIPE_CONFIG_DIR`` to that directory;
+there is no default directory. Presets are read as-is, so write literal
+values instead of ``${VAR}``. Variable interpolation applies to deployment
+configs.
 
-That standalone preset describes the method and model; it does not assemble
-the serving processes. Save it as
-``recipes/<name>.yaml`` and ``export REEF_RECIPE_CONFIG_DIR=$PWD/recipes``;
-there is no default directory. The deployment config is the file ``reef serve
--c`` reads, and ``tutorials/evolve-your-harness/configs/serve.yaml`` is
-the one to copy:
+A preset describes the method and model but does not start the serving
+processes. ``reef serve -c`` reads a deployment config. The one in
+``tutorials/evolve-your-harness/configs/serve.yaml`` is a working example:
 
 .. code:: yaml
 
@@ -206,23 +219,23 @@ the one to copy:
      upstream-api-key: ${REEF_UPSTREAM_API_KEY}
      upstream-model: ${REEF_MODEL}
 
-See `Recipe configuration <../reference/configuration.rst#recipe-configuration>`__.
 The tutorial selects the dotted class directly and keeps its recipe settings
-in the same versioned deployment file.
+in the same versioned deployment file. See `Recipe configuration
+<../reference/configuration.rst#recipe-configuration>`__ for both forms.
 
-Keep the ``tasks`` list short because it sets each step's cost. Start Reef where the method
-package is importable, and give ``-c`` an absolute path: Reef resolves a
-relative ``-c`` against your working directory. Recovered
-tree state always wins over ``seed``. The full field list is in `Harness
-evolution keys <../reference/configuration.rst#harness-evolution-keys>`__.
+Keep the ``tasks`` list short: Reef runs them in each evaluation step. Start
+Reef where it can import the method package. Give ``-c`` an absolute path,
+or Reef resolves it against the working directory. On restart, recovered
+tree state takes precedence over ``seed``. See `Harness evolution keys
+<../reference/configuration.rst#harness-evolution-keys>`__ for every field.
 
 Selection policies
 ~~~~~~~~~~~~~~~~~~
 
-A policy reads ``EvaluationResult.metrics``, where the mechanism guarantees
-``candidate_scores`` and ``current_scores``: per-task score lists in task order,
-``None`` marking a could-not-run episode. This one selects only when no task
-regressed and at least one improved.
+A policy reads ``EvaluationResult.metrics``. It contains per-task score lists
+in task order: ``candidate_scores`` and ``current_scores``. A score is
+``None`` when an episode could not run. The policy below selects a candidate
+only when at least one task improves and none regresses.
 
 .. code:: python
 
@@ -258,20 +271,20 @@ regressed and at least one improved.
        def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
            return ParetoPlugin(candidate_backend)
 
-Name it ``selection: my_pkg.policies:ParetoFactory``. Reef constructs the
-factory without arguments, then calls ``build`` for each scenario's candidate
-backend. A factory instance can also be supplied directly from Python. The
-plugin explicitly inherits both evaluation and selection through
-``CandidateEvaluationPlugin``; a selector-only object is not a complete plugin.
-Publishing outside candidate selection breaks revert.
+Set ``selection: my_pkg.policies:ParetoFactory`` to use this policy. Reef
+constructs the factory without arguments and calls ``build`` for each
+scenario's candidate backend. Python callers can also supply a factory
+instance. A ``CandidateEvaluationPlugin`` must both evaluate and select;
+a selector alone is insufficient. Keep publication in the candidate
+selection flow so Reef can revert a rejected change.
 
 Untrusted input
 ~~~~~~~~~~~~~~~
 
-Every sample is client text. It enters the proposer's model prompt, and with
-``promote_failures`` it is re-run as an evaluation task, so a method treats it as
-data: fence it before it reaches a prompt, and read ``sources`` when a
-decision depends on who sent it.
+Treat samples as client-controlled data. If a method includes sample text in
+a model prompt, fence it first. With ``promote_failures``, a failing sample's
+user prompt may also become an evaluation task. Read ``sources`` when a
+decision depends on who supplied a sample.
 
 .. code:: python
 
@@ -286,21 +299,24 @@ decision depends on who sent it.
        reply = models.served.chat([{"role": "user", "content": f"Failing requests:\n{shown}\n\nPropose one skill."}])
        ...
 
-``untrusted_text`` wraps text in a block whose delimiters carry a fresh random
-token, so nothing inside the block can close it and speak as the prompt's
-author. ``sources`` is one mapping per sample, in sample order: ``record``
-(the agent record id), ``client`` (the ``x-reef-tag-client`` header's value,
-else the session tag, else ``untagged``) and ``untrusted`` (always true). A
-tag is set by the client, so it names a client only where a gateway sets it.
+``untrusted_text`` places text inside a block with random delimiters. Text
+inside cannot close the block and pose as the prompt's author.
 
-Reef screens what the method promotes. A prompt that carries a credential or
-an instruction override (``ignore the previous instructions``, a forged ``new
-system prompt:``, a chat-template control token) is skipped and counted in
-the step's ``screened_tasks`` metric; one tagged client holds at most
-``evolution.max_promoted_per_client`` promoted tasks, with at most
-``evolution.max_promoted_tasks`` promoted tasks in total. A code-bearing mutation
-(``code_extension``, ``native_tool``, ``native_hook``) proposed from client
-text belongs behind ``evolution.review_kinds``, so a person reads it before
-it publishes. A ``native_graph`` carries no code, so a loop change can
-publish on the evaluation alone; list the kind in ``review_kinds`` when a person
-should read every loop change.
+``sources`` contains one mapping per sample, in the same order. Each mapping
+has ``record`` (the agent record id), ``client`` (the ``x-reef-tag-client``
+header value, falling back to the session tag, then ``untagged``), and
+``untrusted=True``. A client can set its own tag; trust it as an identity
+only if a gateway sets it.
+
+Reef screens prompts before adding them as evaluation tasks. It skips prompts
+containing credentials or instruction overrides, such as ``ignore the
+previous instructions``, a forged ``new system prompt:``, or a chat-template
+control token. The step counts these under ``screened_tasks``. Promotion is
+capped by ``evolution.max_promoted_per_client`` for each tagged client and
+``evolution.max_promoted_tasks`` overall.
+
+Put code-bearing mutations derived from client text (``code_extension``,
+``native_tool``, and ``native_hook``) behind ``evolution.review_kinds`` so a
+person reviews them before publication. A ``native_graph`` has no code and
+can publish based on evaluation alone. Add it to ``review_kinds`` if every
+loop change should receive human review.

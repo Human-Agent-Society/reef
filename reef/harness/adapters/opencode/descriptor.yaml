@@ -2,11 +2,14 @@
 #
 # OPENCODE_CONFIG_DIR points config discovery at the rendered directory and
 # suppresses global config seeding; the XDG overrides relocate data, cache,
-# and state so sessions land inside the episode root. Permissions
-# auto-reject in `opencode run` without --auto, so --auto is part of the
-# canonical invocation. The config defaults pin the benchmarking traps:
-# autoupdate off, sharing off, permissions allowed (episodes are isolated
-# roots).
+# and state so sessions land inside the episode root, and npm_config_cache
+# moves the npm cache of opencode's boot install from the root's .npm into
+# the relocated cache. Permissions auto-reject in `opencode run` without
+# --auto, so --auto is part of the canonical invocation. The config defaults
+# pin the benchmarking traps: autoupdate off, sharing off, permissions
+# allowed (episodes are isolated roots), and only provider reef, the model
+# binding's, so a model choice the render check misses cannot reach
+# opencode's own zen provider.
 name: opencode
 binary: opencode
 # The vendor's install channel at the pinned version; consumed by the
@@ -23,6 +26,15 @@ env:
   XDG_DATA_HOME: "{root}/xdg-data"
   XDG_CACHE_HOME: "{root}/xdg-cache"
   XDG_STATE_HOME: "{root}/xdg-state"
+  npm_config_cache: "{root}/xdg-cache/npm"
+# An interactive run through reef-opencode. opencode registers its websearch
+# tool (Exa, no key needed) only for its own provider or with this switch, and
+# no config key turns it on, so a session on provider reef has no websearch
+# without it. Episodes stay without it: a benchmark episode does not search
+# the web (codex keeps web_search disabled for the same reason), since results
+# change between runs and a task's answer could be looked up.
+client_env:
+  OPENCODE_ENABLE_EXA: "1"
 files:
   config:
     primary:
@@ -30,15 +42,17 @@ files:
       defaults:
         autoupdate: false
         share: "disabled"
+        enabled_providers: ["reef"]
         permission:
           "*": "allow"
   rules: "opencode/AGENTS.md"
   agent_command: "opencode/command/{name}.md"
   skill: "opencode/skill/{name}/SKILL.md"
   code_extension: "opencode/plugin/{name}.ts"
+# opencode keeps its sessions in opencode.db in its data directory.
 trajectory:
-  format: opencode-storage-json
-  path: "xdg-data/opencode/storage"
+  format: opencode-session-sqlite
+  path: "xdg-data/opencode"
 cleanup_whitelist:
   - "xdg-data/**"
   - "xdg-cache/**"

@@ -24,8 +24,19 @@ from __future__ import annotations
 import time
 from collections.abc import Mapping, Sequence
 
+from reef.core.requirements import required_by
+from reef.harness.step_result import design_sections, floor_tasks_note, next_action, reef_installs, rejection_text
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
-from reef.service.release_page import design_sections, mutations_of, result_of, served_step, step_href
+from reef.service.release_page import (
+    DECLINED_WORDS,
+    declined,
+    failed_words,
+    kept_answer,
+    mutations_of,
+    result_of,
+    served_step,
+    step_href,
+)
 from reef.train.cordis_backend.contracts import StepProgress
 
 #: Seconds between the page's own reloads while the request is not settled.
@@ -60,7 +71,7 @@ line-height:1.7;letter-spacing:-.3px;margin:0 0 30px;padding-left:20px;border-le
 .version-link{display:flex;align-items:center;justify-content:space-between;margin-top:22px;border-radius:7px;
 padding:11px 14px;background:var(--ink);color:var(--card);font-size:12px;font-weight:550;gap:12px}
 .next-action{margin-top:24px;padding-top:22px;border-top:1px solid var(--line)}
-.next-action h3{margin-bottom:10px}.next-action code{display:block;background:var(--code);border:1px solid var(--line);
+.next-action h3{margin-bottom:10px}.next-action code+code{margin-top:6px}.next-action code{display:block;background:var(--code);border:1px solid var(--line);
 border-radius:7px;padding:12px;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.7 ui-monospace,SFMono-Regular,Menlo,monospace}
 .next-action p{font-size:12px;color:var(--mute);margin:10px 0 0}
 .version-link:hover{opacity:.88;text-decoration:none}
@@ -218,10 +229,14 @@ def progress_html(record: Mapping[str, object], state: str, progress: StepProgre
     )
 
 
-def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[str, object]) -> str:
+def meaning(
+    selection_result: str, row: Mapping[str, object], metrics: Mapping[str, object], adapter: str = "pi"
+) -> str:
     """What the result means for the person who asked, with the next action; the words the session prints."""
     release = str(row.get("release_id") or "-")[:8]
     if selection_result == "selected":
+        if not reef_installs(adapter):
+            return f"Published as release {release}. GET /reef/harness serves it from now on."
         return f"Published as release {release}. Your current session keeps its installed harness until you choose to update."
     if selection_result == "pending":
         return (
@@ -231,50 +246,53 @@ def meaning(selection_result: str, row: Mapping[str, object], metrics: Mapping[s
     if selection_result.startswith("promoted"):
         return f"passed the checks and was {selection_result}; the release that step published serves it"
     if selection_result == "rejected":
-        selection = metrics.get("selection")
-        reason = selection.get("reason") if isinstance(selection, Mapping) else None
-        return f"did not pass the checks ({reason or 'the checks failed'}); nothing changed: rephrase or split the request"
+        return rejection_text(metrics)
+    if selection_result == "skipped" and declined(metrics):
+        return DECLINED_WORDS
     if selection_result == "skipped":
         return f"produced no change ({metrics.get('skipped')}); nothing changed"
     if selection_result == "failed":
-        return "The step failed before evaluation. Nothing was published; see the error below before retrying."
+        return failed_words(metrics)
     return f"the step ended as {selection_result}"
 
 
-def result_html(step: int, rows: Sequence[Mapping[str, object]], link_query: Mapping[str, str] | None) -> str:
+def result_html(
+    step: int,
+    rows: Sequence[Mapping[str, object]],
+    link_query: Mapping[str, str] | None,
+    adapter: str = "pi",
+    record_id: str = "",
+) -> str:
     row = rows[step]
     metrics = row.get("metrics")
     metrics = metrics if isinstance(metrics, Mapping) else {}
     selection_result = result_of(row, rows)
     parts = [
         f'<div class="outcome-summary"><div class="status">{status_span(selection_result)}</div>'
-        f"<p>{escape(meaning(selection_result, row, metrics))}</p></div>",
+        f"<p>{escape(meaning(selection_result, row, metrics, adapter))}</p></div>",
         '<dl class="fact-list">',
         f"<div><dt>Version</dt><dd>v{step}</dd></div>",
         f'<div><dt>Release</dt><dd class="id">{escape(row.get("release_id"))}</dd></div>',
         "</dl>",
     ]
+    note = floor_tasks_note(metrics)
+    if note is not None:
+        parts.append(f'<p class="live-note">{escape(note)}</p>')
     if metrics.get("error"):
         parts.append(f'<div class="failure"><h3>Error</h3><p>{escape(metrics["error"])}</p></div>')
     notes = metrics.get("proposal_notes")
     failure = notes.get("failure") if isinstance(notes, Mapping) else None
     if isinstance(failure, str) and failure.strip():
         parts.append(f'<div class="failure"><h3>Proposer failure</h3><p>{escape(failure)}</p></div>')
-    # Carry the scenario and authentication to the version page without displaying the token.
+    # Carry the scenario and the page key to the version page.
     href = step_href(step, link_query)
-    if selection_result == "pending":
-        command = f"/versions v{step} install"
-        action = "Read this page, then install"
-    elif selection_result == "selected":
-        command = f"/versions v{step} install"
-        action = "Install when ready"
-    else:
-        command = ""
-        action = ""
-    if command:
+    release_id = row.get("release_id")
+    requires = [item["name"] for item in required_by(rows, release_id if isinstance(release_id, str) else None)]
+    action = next_action(adapter, step, selection_result, record_id, requires)
+    if action is not None:
+        commands = "".join(f"<code>{escape(command)}</code>" for command in action.commands)
         parts.append(
-            f'<div class="next-action"><h3>{action}</h3><code>{command}</code>'
-            "<p>Run this in your reef-pi session. You can keep chatting until you are ready.</p></div>"
+            f'<div class="next-action"><h3>{escape(action.heading)}</h3>{commands}<p>{escape(action.place)}</p></div>'
         )
     parts.append(
         f'<a class="version-link" href="{escape(href)}">View v{step}<span aria-hidden="true">&#8599;</span></a>'
@@ -300,27 +318,58 @@ def what_changed(metrics: Mapping[str, object]) -> str:
     return '<ul class="mutations">' + "".join(items) + "</ul>"
 
 
-def review_html(metrics: Mapping[str, object]) -> str:
+def review_html(metrics: Mapping[str, object], rejected: bool = False) -> str:
     """The Review section: the result and what the entries left uncovered, or, when the review call failed, the
     reason it did not run, so a step never quietly publishes with nothing checking that it delivers the request."""
     notes = metrics.get("proposal_notes")
     notes = notes if isinstance(notes, Mapping) else {}
     review = notes.get("review")
+    reasons = notes.get("dropped_attempts")
+    dropped = [item for item in reasons if isinstance(item, str)] if isinstance(reasons, list) else []
+    # Answers the proposer wrote again because their form slipped (broken JSON, refused entries), so the page says
+    # what the kept one replaced.
+    again = (
+        "<h3>Answers written again</h3><ul>" + "".join(f"<li>{escape(item)}</li>" for item in dropped) + "</ul>\n"
+        if dropped
+        else ""
+    )
     if not isinstance(review, Mapping):
         failure = notes.get("review_failure")
         if not isinstance(failure, str) or not failure.strip():
-            return ""
+            return f'<section class="card review-card">\n<h2>Review</h2>\n{again}</section>\n' if again else ""
         return (
             f'<section class="card review-card">\n<h2>Review</h2>\n<p>The review of the entries against your '
-            f"request did not run, so nothing checked whether they deliver it: {escape(failure)}</p>\n</section>\n"
+            f"request did not run, so nothing checked whether they deliver it: {escape(failure)}</p>\n{again}"
+            "</section>\n"
         )
     uncovered = review.get("uncovered")
     items = [item for item in uncovered if isinstance(item, str)] if isinstance(uncovered, Sequence) else []
     listed = "<ul>" + "".join(f"<li>{escape(item)}</li>" for item in items) + "</ul>" if items else ""
+    limits = review.get("limits")
+    reach = [item for item in limits if isinstance(item, str)] if isinstance(limits, Sequence) else []
+    # What the harness's notes say no answer can deliver there: not a gap in this change.
+    out_of_reach = (
+        "<h3>Out of reach on this harness</h3><ul>" + "".join(f"<li>{escape(item)}</li>" for item in reach) + "</ul>\n"
+        if reach
+        else ""
+    )
+    kept = kept_answer(notes)
     return (
         f'<section class="card review-card">\n<h2>Review</h2>\n<p>Coverage of the request: '
         f'{status_span(str(review.get("result", review.get("verdict")) or "unknown"))}</p>\n'
-        + (f"<h3>Still uncovered</h3>{listed}\n" if items else '<p class="empty">Nothing left uncovered.</p>\n')
+        + ("" if kept is None else f"<p>{escape(kept)}; the others are in the step record.</p>\n")
+        + (
+            (
+                "<h3>Review notes</h3><p>The checks decided this result; these are the review's notes on the change."
+                f"</p>{listed}\n"
+                if rejected
+                else f"<h3>Still uncovered</h3>{listed}\n"
+            )
+            if items
+            else '<p class="empty">Nothing left uncovered.</p>\n'
+        )
+        + out_of_reach
+        + again
         + "</section>\n"
     )
 
@@ -346,6 +395,7 @@ def build_request_page(
     consumed: bool = False,
     link_query: Mapping[str, str] | None = None,
     now: float | None = None,
+    adapter: str = "pi",
 ) -> str:
     """The page for the request stored as ``record``, against the catalog ``rows`` oldest first.
 
@@ -355,7 +405,7 @@ def build_request_page(
     running step, counted only when it names this request; ``consumed`` says
     whether the trainer's reserved batch carries the request. ``link_query``
     is carried to the version page link. ``now`` is the clock the elapsed
-    times are read against.
+    times are read against. ``adapter`` names the wrapper the next action runs.
     """
     record_id = str(record["agent_record_id"])
     now = time.time() if now is None else now
@@ -375,9 +425,9 @@ def build_request_page(
         metrics = metrics if isinstance(metrics, Mapping) else {}
         change_label = "Proposed changes" if state in ("pending", "rejected", "skipped", "failed") else "What changed"
         body = (
-            f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query)}</section>\n'
+            f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query, adapter, record_id)}</section>\n'
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
-            f"{review_html(metrics)}{design_html(metrics)}"
+            f"{review_html(metrics, rejected=state == 'rejected')}{design_html(metrics)}"
         )
         subtitle = "Your request has a result. Review the outcome below."
         current_stage = 3

@@ -248,7 +248,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             else:
                 delattr(updater, "update_weights")
 
-    def save_model(self, rollout_id: int, force_sync: bool = False) -> None:
+    def save_model(self, rollout_id: int, force_sync: bool = False, *, scenario_step: int) -> None:
         # Not ``@timer``: Slime's own ``save_model`` carries that decorator, and
         # its Timer is a singleton that refuses a second start under the same
         # name ("Timer save_model already started"). Delegating under the
@@ -259,9 +259,9 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             super().save_model(rollout_id, force_sync=force_sync)
             return
         with Timer().context("save_model"):
-            self._save_lora_model(rollout_id, force_sync=force_sync)
+            self._save_lora_model(rollout_id, force_sync=force_sync, scenario_step=scenario_step)
 
-    def _save_lora_model(self, rollout_id: int, force_sync: bool = False) -> None:
+    def _save_lora_model(self, rollout_id: int, force_sync: bool = False, *, scenario_step: int) -> None:
         if self.args.debug_rollout_only:
             return
 
@@ -289,7 +289,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                         output_dir,
                         self.weight_updater.export_lora_adapter_tensors(),
                         scenario=None if slots is None else slots.active,
-                        scenario_step=rollout_id,
+                        scenario_step=scenario_step,
                     )
             if slots is not None and slots.active is not None:
                 # The Megatron checkpoint above holds only the active slot;
