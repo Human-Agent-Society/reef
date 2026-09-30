@@ -1,7 +1,9 @@
 """Team stages of the native loop: the members of one stage run at once, each on its own thread, host and budget.
 
 A ``subagent`` stage with ``mode: parallel`` starts the workers its caller queued with the built-in ``team_assign``
-tool, each named ``<agent>.<k>`` and told the task it was assigned. A member is one agent turn in its own session
+tool, each told the task it was assigned; ``mode: team`` starts every agent the stage lists, each handed the
+caller's last text as a sequential subagent is. A member is named ``<agent>.<k>``, ``k`` counting from 1 per agent
+in one stage run. A member is one agent turn in its own session
 file, as a sequential subagent is, but it reads its own ``NativeHost`` (its own mount directory, so hook module
 state is per member) and runs on its agent's step budget, not on the caller's remaining steps. The caller waits for
 every member and then reads one message that names each member's outcome and text. The episode's token budget and
@@ -30,7 +32,7 @@ from typing import Any
 
 from reef.harness.runners.native import LoadError, Session, ToolModule, ToolRunner
 from reef.harness.runners.native.enforce import ToolFailed
-from reef.harness.runners.native.graph import Graph, GraphError, Run, _Stop, _walk, narrow_allow
+from reef.harness.runners.native.graph import Graph, GraphError, Run, _last_assistant_text, _Stop, _walk, narrow_allow
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.inbox import Assignment, Inbox, TeamMember
 from reef.harness.runners.native.workspaces import MergeResult, TeamWorkspaceError
@@ -441,20 +443,27 @@ def attach_team_tools(run: Run, graph: Graph) -> None:
 
 
 def run_team_stage(caller: Run, stage: Mapping[str, Any], stage_name: str) -> tuple[str, dict[str, object]]:
-    """One parallel stage of the caller's graph: the workers it queued for the agents the stage runs start together.
+    """One team stage of the caller's graph: its members start together, and the stage ends when every one ended.
 
-    With none queued the stage ends ``completed`` and starts nobody; the assignments for other agents stay queued."""
+    A parallel stage runs the workers the caller queued for the agents it lists; with none queued it ends
+    ``completed`` and starts nobody, and the assignments for other agents stay queued. A team stage runs every
+    agent it lists on the caller's last text, or the task when the caller has said nothing yet."""
     mode, agents = str(stage["mode"]), [str(agent) for agent in stage["agents"]]
-    taken = [assignment for assignment in caller.assignments if assignment.agent in agents]
-    caller.assignments = [assignment for assignment in caller.assignments if assignment.agent not in agents]
-    if not taken:
-        source = {"kind": "team", "stage": stage_name, "mode": mode, "outcome": "completed"}
-        caller.say(f"no work was assigned to {', '.join(agents)}", source)
-        return "completed", {"mode": mode, "agents": [], "outcomes": {}, "steps": 0}
     counts: dict[str, int] = {}
-    members = []
-    for assignment in taken:
-        counts[assignment.agent] = counts.get(assignment.agent, 0) + 1
-        instance = f"{assignment.agent}.{counts[assignment.agent]}"
-        members.append(MemberStart(instance, assignment.agent, assignment.task, assignment.rules))
+
+    def instance_of(agent: str) -> str:
+        counts[agent] = counts.get(agent, 0) + 1
+        return f"{agent}.{counts[agent]}"
+
+    if mode == "parallel":
+        taken = [assignment for assignment in caller.assignments if assignment.agent in agents]
+        caller.assignments = [assignment for assignment in caller.assignments if assignment.agent not in agents]
+        if not taken:
+            source = {"kind": "team", "stage": stage_name, "mode": mode, "outcome": "completed"}
+            caller.say(f"no work was assigned to {', '.join(agents)}", source)
+            return "completed", {"mode": mode, "agents": [], "outcomes": {}, "steps": 0}
+        members = [MemberStart(instance_of(a.agent), a.agent, a.task, a.rules) for a in taken]
+    else:
+        text = _last_assistant_text(caller.messages) or caller.prompt
+        members = [MemberStart(instance_of(agent), agent, text) for agent in agents]
     return TeamStageRun(caller, stage_name, mode, str(stage.get("workspace", "own")), members).run()

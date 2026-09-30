@@ -80,8 +80,8 @@ NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 }
 #: How a subagent stage runs its agents: one after another (``agent`` and its ``then``), or the ``agents`` of a
 #: team stage at once, each on its own thread and budget (``parallel``: the workers the caller assigned with
-#: ``team_assign``).
-NATIVE_TEAM_MODES = ("parallel",)
+#: ``team_assign``; ``team``: every listed agent, a name listed twice run twice, each handed the caller's text).
+NATIVE_TEAM_MODES = ("parallel", "team")
 NATIVE_SUBAGENT_MODES = ("sequential", *NATIVE_TEAM_MODES)
 #: Where a team stage's members work: a git worktree each, merged back when the stage ends, or the caller's workdir.
 NATIVE_TEAM_WORKSPACES = ("own", "shared")

@@ -965,19 +965,23 @@ def test_a_team_stage_takes_agents_and_a_workspace_and_a_sequential_stage_takes_
         {"mode": "sequential", "agent": "checker"},
         {"mode": "parallel", "agents": ["worker", "critic"]},
         {"mode": "parallel", "agents": ["worker"], "workspace": "shared"},
+        {"mode": "team", "agents": ["peer", "peer", "critic"]},
+        {"mode": "team", "agents": ["peer", "peer"], "workspace": "shared"},
     ):
         NODE_KINDS["native_graph"](None, crew(**keys))
     bad = [
-        ({"mode": "wide", "agents": ["worker"]}, "'mode' must be one of sequential, parallel"),
+        ({"mode": "wide", "agents": ["worker"]}, "'mode' must be one of sequential, parallel, team"),
+        ({"mode": "team", "agents": [f"p{i}" for i in range(9)]}, "'agents' must be a list of 1 to 8 agent names"),
         ({"mode": "parallel", "agents": [f"w{i}" for i in range(9)]}, "'agents' must be a list of 1 to 8 agent names"),
         ({"mode": "parallel", "agents": []}, "'agents' must be a list of 1 to 8 agent names"),
         ({"mode": "parallel", "agents": ["../x"]}, "'agents' must be a list of 1 to 8 agent names"),
         ({"mode": "parallel", "agents": ["worker", "worker"]}, "'agents' must be distinct with mode parallel"),
         ({"mode": "parallel", "agents": ["a..b"]}, "'agents' cannot name a..b: a member's name is part of a git"),
         ({"mode": "parallel", "agent": "worker"}, "with mode parallel names its agents in 'agents', not 'agent'"),
-        ({"agent": "checker", "agents": ["worker"]}, "stage 'crew' takes agents only with mode parallel"),
-        ({"agent": "checker", "workspace": "own"}, "stage 'crew' takes workspace only with mode parallel"),
-        ({"mode": "parallel", "agents": ["worker"], "workspace": "mine"}, "'workspace' must be one of own, shared"),
+        ({"mode": "team", "agent": "peer"}, "with mode team names its agents in 'agents', not 'agent'"),
+        ({"agent": "checker", "agents": ["worker"]}, "stage 'crew' takes agents only with mode parallel or team"),
+        ({"agent": "checker", "workspace": "own"}, "stage 'crew' takes workspace only with mode parallel or team"),
+        ({"mode": "team", "agents": ["peer"], "workspace": "mine"}, "'workspace' must be one of own, shared"),
         ({"mode": "parallel", "agents": ["worker"], "then": ["x"]}, r"stage 'crew' \(subagent\) does not take then"),
     ]
     for keys, message in bad:

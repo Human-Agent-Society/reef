@@ -1184,3 +1184,96 @@ def test_render_refuses_unknown_members_a_cycle_through_them_nested_team_stages_
         render_composition([*seed, ("native_agent", {**WORKER[1], "then": ["critic"]}), CRITIC, crew], descriptor)
     with pytest.raises(RenderError, match="does not render native_graph"):
         render_composition([crew], get_adapter("pi"))
+
+
+# -- mode team: peers start together on the caller's text ---------------------------------------------------------
+
+
+class PeersModel(ChattingModel):
+    """The root hands over a plan and answers once it has read the team; the members follow their plans."""
+
+    def reply(self, instance: str, body: dict) -> dict:
+        if instance == "root":
+            is_read = "ended with" in body["messages"][-1]["content"]
+            return _reply(content="the team is done" if is_read else "plan: a parser and a printer")
+        return super().reply(instance, body)
+
+
+def test_peers_start_together_on_the_callers_text_trade_one_message_each_and_end_the_stage_last(
+    tmp_path: Path,
+) -> None:
+    plans = {
+        "peer.1": [("team_send", {"to": "peer.2", "text": "I take the parser"})],
+        "peer.2": [("team_send", {"to": "peer.1", "text": "I take the printer"})],
+    }
+    model = PeersModel(plans, listeners=("peer.1", "peer.2"))
+    crew = crew_graph(mode="team", agents=["peer", "peer", "critic"], workspace="shared")
+    try:
+        code, sessions = run_turn(tmp_path, model, [*TEAM_NODES, ("native_graph", crew)])
+    finally:
+        stop(model)
+    assert sorted(path.name for path in (sessions / "agents").glob("*.jsonl")) == [
+        "002-peer.1.jsonl",
+        "003-peer.2.jsonl",
+        "004-critic.1.jsonl",
+    ]
+    files = member_files(sessions)
+    headers = {instance: found[0]["data"] for instance, found in files.items()}
+    assert {instance: header["role"] for instance, header in headers.items()} == {
+        "peer.1": "peer",
+        "peer.2": "peer",
+        "critic.1": "critic",
+    }
+    # Every member is handed the caller's last text, and nobody holds team_assign.
+    assert {header["task"] for header in headers.values()} == {"plan: a parser and a printer"}
+    assert not any("team_assign" in header["tools"] for header in headers.values())
+    for sender, receiver in (("peer.1", "peer.2"), ("peer.2", "peer.1")):
+        (sent,) = [e["data"] for e in files[sender] if e["type"] == "team/send"]
+        (heard,) = message_events(files[receiver])
+        assert sent["delivered"] == [receiver] and heard["data"]["source"]["from"] == sender
+    # The stage ended once the last member had: the critic answered at once, the peers after their messages.
+    (team_end,) = [e for e in events(sessions / "session.jsonl") if e["type"] == "team/end"]
+    assert team_end["time"] >= max(found[-1]["time"] for found in files.values())
+    (stage_exit,) = [e for e in root_typed(sessions, "stage/exit") if e["stage"] == "delegate"]
+    assert (stage_exit["outcome"], stage_exit["mode"], stage_exit["agents"]) == (
+        "completed",
+        "team",
+        ["peer.1", "peer.2", "critic.1"],
+    )
+    (said,) = root_typed(sessions, "user/message")
+    assert said["content"].split("\n\n") == [
+        "peer.1 (peer) ended with completed: peer.1 heard: Message from peer.2: I take the printer",
+        "peer.2 (peer) ended with completed: peer.2 heard: Message from peer.1: I take the parser",
+        "critic.1 (critic) ended with completed: critic.1 is done",
+    ]
+    assert code == 0 and model.requests[-1]["messages"][-1]["content"] == said["content"]
+    assert root_typed(sessions, "turn/end")[-1]["reason"] == {"kind": "completed"}
+
+
+class SpendingModel(MemberModel):
+    """Every call reports 300 tokens; the root hands over a plan, and the members read until something stops them."""
+
+    def reply(self, instance: str, body: dict) -> dict:
+        reply = _reply(content="plan: read everything") if instance == "root" else READ
+        return {**reply, "usage": USAGE}
+
+
+def test_a_team_on_the_episode_budget_ends_every_member_on_it_and_the_stage_on_budget(tmp_path: Path) -> None:
+    model = SpendingModel()
+    control = EpisodeControl(TeamBudget(2000))
+    crew = crew_graph(mode="team", agents=["peer", "peer"], workspace="shared")
+    try:
+        code, sessions = run_turn(tmp_path, model, [*TEAM_NODES, ("native_graph", crew)], control=control)
+    finally:
+        stop(model)
+    files = member_files(sessions)
+    assert sorted(files) == ["peer.1", "peer.2"]
+    for found in files.values():
+        reason = found[-1]["data"]["reason"]
+        assert (reason["kind"], reason["tokens"]) == ("max-tokens", 2000)
+    (stage_exit,) = [e for e in root_typed(sessions, "stage/exit") if e["stage"] == "delegate"]
+    assert (stage_exit["outcome"], stage_exit["to"]) == ("budget", "quit")
+    assert stage_exit["outcomes"] == {"peer.1": "budget", "peer.2": "budget"}
+    # The spend passed the budget by at most the one call each member had in flight.
+    assert 2000 <= control.budget.spent_tokens <= 2000 + 300 * 2
+    assert code == 0 and root_typed(sessions, "turn/end")[-1]["reason"] == {"kind": "gave_up"}

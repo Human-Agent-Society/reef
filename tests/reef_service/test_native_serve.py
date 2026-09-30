@@ -852,7 +852,7 @@ def test_a_group_wrapped_entry_is_neither_tried_nor_mounted_nor_booted(tmp_path:
         Server(_tree(tmp_path / "boot", reef, "r2"), scenario=SCENARIO).start()
 
 
-@pytest.mark.parametrize("mode", ["parallel"])
+@pytest.mark.parametrize("mode", ["parallel", "team"])
 def test_a_graph_with_a_team_stage_is_neither_tried_nor_mounted_nor_booted(
     tmp_path: Path, reef: _FakeReef, mode: str
 ) -> None:
