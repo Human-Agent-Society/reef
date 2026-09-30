@@ -13,11 +13,11 @@ from numbers import Real
 from typing import Any
 
 from reef.train.adaptive_kl import (
-    AdaptiveKLConfig,
     CONTROLLER_VERSION,
+    DEFAULT_LOSS_FAMILY,
     DEFAULT_VERL_ERROR_CLIP,
     DEFAULT_VERL_HORIZON,
-    DEFAULT_LOSS_FAMILY,
+    AdaptiveKLConfig,
 )
 
 DEFAULT_TARGET_KL = 0.1

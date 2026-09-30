@@ -48,9 +48,7 @@ def test_adapter_accepts_standard_ppo_telemetry_and_reuses_fixed_beta() -> None:
 def test_adapter_accepts_wired_reward_mode() -> None:
     from reef.train.slime_backend.reef_adapters.adaptive_kl import validate_adaptive_kl_args
 
-    config = validate_adaptive_kl_args(
-        ppo_args(adaptive_kl_mode="reward"), loss_family="ppo_rlhf_reference_reward"
-    )
+    config = validate_adaptive_kl_args(ppo_args(adaptive_kl_mode="reward"), loss_family="ppo_rlhf_reference_reward")
     assert config is not None and config.mode == "reward"
 
 
