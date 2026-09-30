@@ -259,10 +259,13 @@ DSH_REFUSED = [
 ]
 
 
+@pytest.mark.parametrize("target", ["primary", "web"])
 @pytest.mark.parametrize(("data", "bound"), DSH_REFUSED)
-def test_dsh_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
+def test_dsh_refuses_a_setting_that_chooses_the_route_in_either_profile(
+    data: dict[str, Any], bound: bool, target: str
+) -> None:
     with pytest.raises(RenderError, match=r"Reef's model binding|keeps its own package"):
-        render("dsh", [config(data)], bound=bound)
+        render("dsh", [config(data, target)], bound=bound)
 
 
 @pytest.mark.parametrize("api", ["openai", "anthropic"])
