@@ -16,6 +16,7 @@ from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule
 from reef.train.slime_backend.loss_families import resolve_loss_family
+from reef.train.slime_backend.score_centering import sampler_topk_columns
 from reef.train.types import TrainingBatch, TrajectoryItem, trajectories
 
 
@@ -24,11 +25,14 @@ def prepare_slime_step(
     objective_id: str,
     algorithm_state: Mapping[str, Any],
     scheduling: StepScheduling,
+    *,
+    sampler_topk: bool = False,
 ) -> PreparedTrainingStep:
     """Resolve a training objective and produce its complete Slime training payload.
 
     ``scheduling`` is the recipe's step schedule; the objective rejects one its
-    loss cannot train before any payload is built.
+    loss cannot train before any payload is built. ``sampler_topk`` adds each
+    row's recorded sampler top-K, which score centering reads.
     """
     objective = resolve_objective(objective_id)
     objective.validate_scheduling(scheduling)
@@ -40,7 +44,7 @@ def prepare_slime_step(
             metrics=signal.metrics,
         )
     schedule = _materialize(batch, scheduling)
-    payload = _build_payload(batch, objective.loss_family, signal.advantages, scheduling)
+    payload = _build_payload(batch, objective.loss_family, signal.advantages, scheduling, sampler_topk=sampler_topk)
     metrics = dict(signal.metrics)
     if schedule.epochs > 1:
         metrics.setdefault("epochs", schedule.epochs)
@@ -81,6 +85,8 @@ def _build_payload(
     loss_family: str,
     advantages: tuple[float, ...] | None,
     scheduling: StepScheduling,
+    *,
+    sampler_topk: bool = False,
 ) -> dict[str, Any]:
     """Materialize Slime's wire rows in the order ``scheduling`` trains them.
 
@@ -107,6 +113,8 @@ def _build_payload(
     }
     if advantages is not None:
         payload["advantages"] = [advantages[row] for row in schedule.row_indices]
+    if sampler_topk:
+        payload.update(sampler_topk_columns(samples, schedule.row_indices))
     if schedule.step_sizes is not None:
         payload["external_step_sizes"] = list(schedule.step_sizes)
     else:

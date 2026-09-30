@@ -22,6 +22,14 @@ so LoRA training (`--megatron-lora-rank`) works on any weight-training recipe
 without a separate image. Override the revision with
 `--build-arg SGLANG_COMMIT=<sha>`.
 
+The image also replaces the base's FlashInfer with 0.7.0. Earlier releases
+can compute wrong attention in SGLang's default `flashinfer` backend (upstream
+FlashInfer issue #2896), so rollout log-probs drift from the trained policy.
+If you serve from another environment with FlashInfer older than 0.7.0, set
+`attention-backend: triton` under `inference.options`. Slime's policy loss
+reports the gap as `train/train_rollout_logprob_abs_diff` when it trains on
+rollout log-probs: it should stay near 1e-5, not 1e-3.
+
 TTT-Discover's Qwen3-8B LoRA experiment uses the optional `tttd` target. It
 adds only the Erdős evaluator's solver dependencies for generated programs,
 alongside a qualified Slime digest:

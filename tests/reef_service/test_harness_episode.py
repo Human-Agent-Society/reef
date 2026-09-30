@@ -6,7 +6,10 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
+import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -20,7 +23,7 @@ from reef.harness.episodes.trajectory import (
     read_codex_session,
     read_deepseek_session,
     read_hermes_session,
-    read_opencode_storage,
+    read_opencode_session,
     read_pi_session,
     reader_for,
 )
@@ -40,7 +43,12 @@ session_dir = Path(os.environ["PI_CODING_AGENT_SESSION_DIR"])
 session_dir.mkdir(parents=True, exist_ok=True)
 rules_path = agent_dir / "AGENTS.md"
 events = [
-    {"type": "session", "root": str(agent_dir.parent), "offline": os.environ.get("PI_OFFLINE")},
+    {
+        "type": "session",
+        "root": str(agent_dir.parent),
+        "offline": os.environ.get("PI_OFFLINE"),
+        "docker_host": os.environ.get("DOCKER_HOST"),
+    },
     {"type": "agent_end", "prompt": prompt, "rules": rules_path.read_text() if rules_path.exists() else ""},
 ]
 (session_dir / "session.jsonl").write_text("".join(json.dumps(event) + "\\n" for event in events))
@@ -49,9 +57,30 @@ print(json.dumps({"type": "agent_end"}))
 sys.exit(3 if prompt == "fail" else 0)
 """
 
+#: The two tables of opencode 1.18.18's session store the reader reads, as the pinned binary creates them.
+OPENCODE_TABLES = """\
+CREATE TABLE `message` (
+  `id` text PRIMARY KEY,
+  `session_id` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL,
+  CONSTRAINT `fk_message_session_id_session_id_fk` FOREIGN KEY (`session_id`) REFERENCES `session`(`id`) ON DELETE CASCADE
+);
+CREATE TABLE `part` (
+  `id` text PRIMARY KEY,
+  `message_id` text NOT NULL,
+  `session_id` text NOT NULL,
+  `time_created` integer NOT NULL,
+  `time_updated` integer NOT NULL,
+  `data` text NOT NULL,
+  CONSTRAINT `fk_part_message_id_message_id_fk` FOREIGN KEY (`message_id`) REFERENCES `message`(`id`) ON DELETE CASCADE
+);
+"""
+
 OPENCODE_FAKE = """\
 #!/usr/bin/env python3
-import json, os, sys
+import json, os, sqlite3, sys
 from pathlib import Path
 
 args = sys.argv[1:]
@@ -59,18 +88,49 @@ assert args[:3] == ["run", "--format", "json"] and "--auto" in args, args
 config_dir = Path(os.environ["OPENCODE_CONFIG_DIR"])
 config = json.loads((config_dir / "opencode.json").read_text())
 assert config["autoupdate"] is False and config["share"] == "disabled", config
-storage = Path(os.environ["XDG_DATA_HOME"]) / "opencode" / "storage" / "session" / "message" / "s1"
-storage.mkdir(parents=True)
-(storage / "msg_001.json").write_text(json.dumps({"role": "user", "text": args[-1]}))
-(storage / "msg_002.json").write_text(json.dumps({"role": "assistant", "text": "done"}))
-# Boot mutations of the rendered config dir, whitelisted by the quirks.
+# The session as opencode 1.18.18 stores it: a message row per turn, its pieces as part rows, and the JSON data
+# columns without the ids the other columns hold. A shell call and its answer take two assistant turns.
+data_dir = Path(os.environ["XDG_DATA_HOME"]) / "opencode"
+data_dir.mkdir(parents=True)
+database = sqlite3.connect(data_dir / "opencode.db")
+database.execute("PRAGMA journal_mode=WAL")
+database.executescript(OPENCODE_TABLES)
+shell = {"status": "completed", "input": {"command": "echo reef-ok"}, "output": "reef-ok\\n"}
+turns = [
+    ("msg_01", {"role": "user", "agent": "build"}, [{"type": "text", "text": args[-1]}]),
+    (
+        "msg_02",
+        {"parentID": "msg_01", "role": "assistant", "agent": "build", "finish": "tool-calls"},
+        [{"type": "step-start"}, {"type": "tool", "tool": "bash", "callID": "c1", "state": shell},
+         {"type": "step-finish", "reason": "tool-calls"}],
+    ),
+    (
+        "msg_03",
+        {"parentID": "msg_01", "role": "assistant", "agent": "build", "finish": "stop"},
+        [{"type": "step-start"}, {"type": "text", "text": "reef-ok"}, {"type": "step-finish", "reason": "stop"}],
+    ),
+]
+for turn, (message_id, message, parts) in enumerate(turns):
+    database.execute("INSERT INTO message VALUES (?, 'ses_01', ?, ?, ?)", (message_id, turn, turn, json.dumps(message)))
+    for index, part in enumerate(parts):
+        row = (f"prt_{turn}{index}", message_id, "ses_01", turn, turn, json.dumps(part))
+        database.execute("INSERT INTO part VALUES (?, ?, ?, ?, ?, ?)", row)
+database.commit()
+database.close()
+# Boot mutations of the rendered config dir, whitelisted by the quirks, and the npm cache of the boot install,
+# which npm keeps in npm_config_cache when it is set and in ~/.npm otherwise.
 (config_dir / ".gitignore").write_text("node_modules\\n")
 (config_dir / "node_modules").mkdir()
 (config_dir / "node_modules" / "dep.js").write_text("module.exports = {}\\n")
+npm_cache = Path(os.environ.get("npm_config_cache", Path.home() / ".npm"))
+(npm_cache / "_cacache").mkdir(parents=True)
+(npm_cache / "_cacache" / "index").write_text("entry\\n")
 # A file nothing declared: the residue scan must report it.
 (config_dir.parent / "stray.txt").write_text("leak\\n")
-print(json.dumps({"type": "done"}))
-"""
+print(json.dumps({"type": "text", "sessionID": "ses_01", "part": {"messageID": "msg_03", "type": "text", "text": "reef-ok"}}))
+""".replace(
+    "OPENCODE_TABLES", repr(OPENCODE_TABLES)
+)
 
 CODEX_FAKE = """\
 #!/usr/bin/env python3
@@ -78,14 +138,16 @@ import json, os, sys
 from pathlib import Path
 
 args = sys.argv[1:]
-assert args[:6] == [
-    "exec", "--json", "--strict-config", "--sandbox", "workspace-write", "--skip-git-repo-check",
+assert args[:10] == [
+    "exec", "--json", "--strict-config", "--config", 'approval_policy="never"', "--config", 'web_search="disabled"',
+    "--sandbox", "workspace-write", "--skip-git-repo-check",
 ], args
-prompt = args[6]
+prompt = args[10]
 codex_home = Path(os.environ["CODEX_HOME"])
 assert Path(os.environ["HOME"]) == codex_home.parent
 config = (codex_home / "config.toml").read_text()
-assert 'approval_policy = "never"' in config and 'web_search = "disabled"' in config
+# The argv pins approvals off; config.toml leaves them to Codex's default for a person's reef-codex session.
+assert "approval_policy" not in config and 'web_search = "disabled"' in config
 rollout = codex_home / "sessions" / "2026" / "09" / "02" / "rollout.jsonl"
 rollout.parent.mkdir(parents=True)
 events = [
@@ -149,6 +211,18 @@ def test_episode_root_is_removed_after_the_run(tmp_path: Path) -> None:
     assert not root.exists()
 
 
+def test_an_adapter_without_host_env_keeps_no_service_variable_and_roots_in_the_temp_directory(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """Only terminus declares host_env and is_root_bind_mounted; every other episode stays hermetic, on macOS too."""
+    monkeypatch.setattr(sys, "platform", "darwin")
+    monkeypatch.setenv("DOCKER_HOST", "unix:///var/run/docker.sock")
+    result = run_episode(get_adapter("pi"), pi_files(), "list files", binary=fake_binary(tmp_path, PI_FAKE))
+    session = result.trajectory[0]
+    assert session["docker_host"] is None
+    assert Path(session["root"]).parent == Path(tempfile.gettempdir())
+
+
 def test_episode_cleanup_repairs_permissions(tmp_path: Path) -> None:
     root = tmp_path / "root"
     locked = root / "locked"
@@ -184,8 +258,17 @@ def test_opencode_episode_whitelists_boot_mutations_and_reports_residue(tmp_path
     files = render_composition([("rules", {"text": "Answer briefly."})], get_adapter("opencode"))
     result = run_episode(get_adapter("opencode"), files, "list files", binary=fake_binary(tmp_path, OPENCODE_FAKE))
     assert result.exit_code == 0
-    assert [event["role"] for event in result.trajectory] == ["user", "assistant"]
-    assert result.residue == ("stray.txt",)  # boot mutations tolerated, the stray file is a finding
+    assert [event["role"] for event in result.trajectory] == ["user", "assistant", "assistant"]
+    assert result.trajectory[0]["content"] == [{"id": "prt_00", "type": "text", "text": "list files"}]
+    assert result.residue == ("stray.txt",)  # boot mutations and the npm cache tolerated, the stray file is a finding
+
+
+def test_opencode_episode_grades_the_final_answer_of_its_session(tmp_path: Path) -> None:
+    """The reader joins each message to its parts, so the grader finds the text of the last assistant turn."""
+    files = render_composition([], get_adapter("opencode"))
+    result = run_episode(get_adapter("opencode"), files, "Run it.", binary=fake_binary(tmp_path, OPENCODE_FAKE))
+    assert final_assistant_text(result.trajectory) == "reef-ok"
+    assert evaluate("[health] Run the shell command `echo reef-ok`.", result) == 1.0
 
 
 def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_path: Path) -> None:
@@ -194,6 +277,39 @@ def test_codex_episode_collects_nested_rollout_and_whitelists_boot_state(tmp_pat
     assert result.exit_code == 0
     assert json.loads(result.stdout)["item"]["text"] == "done"
     assert [event["type"] for event in result.trajectory] == ["session_meta", "event_msg"]
+    assert result.residue == ()
+
+
+HERMES_FAKE = """\
+#!/usr/bin/env python3
+import json, os, sys
+from pathlib import Path
+
+home = Path(os.environ["HERMES_HOME"])
+snapshot = {"session_id": "s1", "model": "m", "messages": [{"role": "user", "content": sys.argv[-1]}]}
+(home / "sessions").mkdir()
+(home / "sessions" / "session_s1.json").write_text(json.dumps(snapshot))
+# Against an OpenRouter endpoint, hermes records the key it finds in its environment in the credential pool.
+(home / "auth.lock").write_text("")
+pool = {"openai-api": [{"source": "env:OPENAI_API_KEY", "secret_fingerprint": "sha256:0123456789abcdef"}]}
+(home / "auth.json").write_text(json.dumps({"version": 1, "providers": {}, "credential_pool": pool}))
+(home / "logs").mkdir()
+(home / "logs" / "agent.log").write_text("started\\n")
+if not (home / "SOUL.md").exists():
+    (home / "SOUL.md").write_text("You are Hermes Agent.\\n")  # the default rules file, for a tree with no rules
+# A skill_view of a tree skill counts the load in the usage file beside the skills, under a lock file.
+(home / "skills" / ".usage.json.lock").write_text("")
+(home / "skills" / ".usage.json").write_text(json.dumps({"notes": {"view_count": 1, "use_count": 1}}))
+print("done")
+"""
+
+
+def test_hermes_episode_whitelists_what_hermes_writes_at_boot_and_on_a_skill_load(tmp_path: Path) -> None:
+    files = render_composition([("skill", {"name": "notes", "text": "Keep notes."})], get_adapter("hermes"))
+    result = run_episode(get_adapter("hermes"), files, "list files", binary=fake_binary(tmp_path, HERMES_FAKE))
+    assert result.exit_code == 0
+    assert [event["type"] for event in result.trajectory] == ["session", "message"]
+    # The credential pool, its lock, the default rules file, the log and the skill usage counts with their lock.
     assert result.residue == ()
 
 
@@ -402,6 +518,16 @@ def test_colliding_render_paths_raise_episode_error(tmp_path: Path) -> None:
 
 
 def test_opencode_reader_rejects_a_non_object_document(tmp_path: Path) -> None:
-    (tmp_path / "part.json").write_text("[1, 2, 3]")
-    with pytest.raises(TrajectoryError, match="not an event object"):
-        read_opencode_storage(tmp_path)
+    assert read_opencode_session(tmp_path) == ()  # no session database yet
+    (tmp_path / "opencode.db").write_text("not a database")
+    with pytest.raises(TrajectoryError, match="cannot be read"):
+        read_opencode_session(tmp_path)
+    (tmp_path / "opencode.db").unlink()
+    database = sqlite3.connect(tmp_path / "opencode.db")
+    database.executescript(OPENCODE_TABLES)
+    database.execute("INSERT INTO message VALUES ('msg_01', 'ses_01', 0, 0, '{\"role\": \"user\"}')")
+    database.execute("INSERT INTO part VALUES ('prt_01', 'msg_01', 'ses_01', 0, 0, '[1, 2, 3]')")
+    database.commit()
+    database.close()
+    with pytest.raises(TrajectoryError, match=r"part prt_01 .* is not an object"):
+        read_opencode_session(tmp_path)

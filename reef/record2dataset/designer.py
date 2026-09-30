@@ -29,7 +29,7 @@ DESIGNER_TIMEOUT_S = 1800.0
 CHAT_PATH = "/v1/chat/completions"
 SKILL_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,40}$")
 JSON_BLOCK = re.compile(r"^[ \t]*```[^\n{]*(?:\r?\n)?[ \t]*(\{.*?\})[ \t]*(?:\r?\n)?[ \t]*```", re.S | re.M)
-HARBOR_FILE_PATTERN = re.compile(r"^\.?[A-Za-z0-9][A-Za-z0-9._-]{0,99}(/\.?[A-Za-z0-9][A-Za-z0-9._-]{0,99}){0,3}$")
+HARBOR_FILE_PATTERN = re.compile(r"^\.?[A-Za-z0-9_][A-Za-z0-9._-]{0,99}(/\.?[A-Za-z0-9_][A-Za-z0-9._-]{0,99}){0,3}$")
 
 SYSTEM_PROMPT = (
     "You are an expert programmer and environment designer. You write executable environments that train "

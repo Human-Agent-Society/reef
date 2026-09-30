@@ -315,7 +315,10 @@ rollout log probabilities and the weight version that produced each token.
 streaming request with the completed turn as one burst of protocol frames.
 Both accept ``tool_call_parser`` (the engine's parser name), ``capture_topk``,
 ``sampling_defaults`` and ``force_reasoning``; per-request sampling extras pass
-through ``sglang_sampling_params`` or ``vllm_sampling_params``. A vLLM engine
+through ``sglang_sampling_params`` or ``vllm_sampling_params``. A positive
+``capture_topk`` also records the sampler's top-K ids and log-probs for every
+response token. Score centering (``training.options.score-centering``) needs
+at least ``score-centering-top-k`` of them (see the loss families guide). A vLLM engine
 serving a training stack also needs Reef's connector, which stamps every
 sampled token with the weight version that produced it::
 

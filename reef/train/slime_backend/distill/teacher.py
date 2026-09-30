@@ -44,7 +44,7 @@ import torch
 import torch.distributed as dist
 
 from reef.train.slime_backend.distill.algorithm import DistillSettings, settings_from_args
-from reef.train.slime_backend.distill.objective import gather_log_probs_at_ids, global_log_sum_exp, native_topk_ids
+from reef.train.slime_backend.vocab_parallel import gather_log_probs_at_ids, global_log_sum_exp, native_topk_ids
 
 #: The actor's backup tags: Slime's own copy of the training weights, and the teacher's.
 ACTOR_TAG = "actor"

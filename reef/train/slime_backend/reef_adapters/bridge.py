@@ -52,6 +52,7 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
     RetentionConfig,
     critic_checkpoint_due,
 )
+from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 
 # One training step (train + checkpoint + publish) legitimately takes hours;
 # this bounds a single Ray RPC from the bridge to its workers.
@@ -127,8 +128,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         loss_family_config: object | None = None,
         loss_runtime: SlimeAlgorithm | None = None,
         adaptive_kl_config=None,
+        score_centering: ScoreCenteringSettings | None = None,
     ) -> None:
         self._worker_failure: ExecutorFailure | None = None
+        self._score_centering = score_centering
         self._group = actor_group
         self._critic_group = critic_group
         self._critic_save_root = critic_save_root if critic_group is not None else None
@@ -238,6 +241,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
             raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
         rollout_data = to_slime_rollout_data(dict(payload))
+        if self._score_centering is not None:
+            # Torch, like the tensorization that follows; loaded only when the term is on.
+            from reef.train.slime_backend.score_centering.heads import attach_sampler_heads
+
+            attach_sampler_heads(rollout_data, payload, self._score_centering)
         rollout_versions = rollout_data.get("producing_runtime_load_ids")
         if (
             max_staleness > 0
@@ -529,7 +537,9 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
         """Prepare a framework-neutral Reef batch with Slime-owned logic."""
-        prepared = prepare_slime_step(batch, objective, algorithm_state, scheduling)
+        prepared = prepare_slime_step(
+            batch, objective, algorithm_state, scheduling, sampler_topk=self._score_centering is not None
+        )
         if prepared.payload is not None:
             self._algo.validate_payload(prepared.payload)
         return prepared
@@ -640,4 +650,5 @@ def create_training_backend(
         loss_family=preparation.loss_family,
         loss_family_config=loss_family_config,
         adaptive_kl_config=adaptive_kl_config_from_args(args),
+        score_centering=settings_from_args(args),
     )
