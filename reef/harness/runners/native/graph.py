@@ -285,6 +285,13 @@ class Run:
         self.session.write("user/message", {"step": self.step, "source": dict(source), "content": content})
         self.messages.append({"role": "user", "content": content})
 
+    def charge(self, sent: list[dict[str, Any]], reply: dict[str, Any], usage: Mapping[str, int] | None) -> None:
+        """Spend one model call on the episode budget: the tokens the endpoint reported, else an estimate of both."""
+        if usage:
+            self.loop.control.budget.spend(usage["input_tokens"], usage["output_tokens"])
+        else:
+            self.loop.control.budget.spend(_tokens(sent), _tokens([reply]))
+
     def close_step(self) -> None:
         if self.step_open:
             self.session.write("step/end", {"turn": self.turn, "step": self.step})
@@ -335,6 +342,7 @@ class Run:
         message, usage = loop._request(self.session, self.binding, self.hooks["request_error"], body, step)
         if message is None:
             raise _Stop(1)
+        self.charge(self.messages, message, usage)
         calls = list(message.get("tool_calls") or [])
         self.messages.append(message)
         self.last = message
@@ -491,6 +499,7 @@ class Run:
             # The span stays as it was: a summary that did not arrive drops nothing the model saw.
             self.session.write("context/compacted", {**record, "fired": False, "error": failure})
             return "done", {"fired": False, "tokens": before, "error": str((failure or {}).get("code", ""))}
+        self.charge(body["messages"], message, usage)
         summary = str(message.get("content") or "").strip()
         note = {"role": "user", "content": f"Summary of the earlier steps:\n{summary}"}
         self.messages = [*head, note, *tail]

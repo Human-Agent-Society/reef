@@ -127,6 +127,7 @@ def run_episode(
     timeout: float = 600.0,
     executor: EpisodeExecutor | None = None,
     keep_dir: Path | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> EpisodeResult:
     """Run one headless episode of ``descriptor``'s harness over ``files``.
 
@@ -142,8 +143,15 @@ def run_episode(
     or failure; ``keep_dir`` receives a copy of the trajectory directory
     first, so a step record can hold what the root held, and a copy that
     fails raises ``TrajectoryKeepError`` rather than an ``EpisodeError``.
+    ``env`` adds variables to the process environment; it cannot set one
+    the descriptor's ``env`` or ``host_env`` names, or ``HOME``, so a caller
+    cannot move what the episode relocates.
     """
     executor = executor or LocalExecutor()
+    extra_env = dict(env or {})
+    for key in sorted(extra_env):
+        if key in descriptor.env or key in descriptor.host_env or key == "HOME":
+            raise EpisodeError(f"episode env sets {key}, which the {descriptor.name} episode sets itself")
     # Adapters can validate a conditional boundary (for example, remote task
     # containers with a sandboxed runner). Otherwise keep the default refusal
     # to nest an adapter's local container inside bubblewrap.
@@ -191,25 +199,26 @@ def run_episode(
                 path.mkdir(parents=True, exist_ok=True)
         except OSError as exc:
             raise EpisodeError(f"cannot prepare writable episode state: {exc}") from exc
-        env = {key: value.replace("{root}", str(root)) for key, value in descriptor.env.items()}
+        launch_env = {key: value.replace("{root}", str(root)) for key, value in descriptor.env.items()}
         # Point HOME at the root unless the descriptor relocates it itself:
         # config discovery that ignores the relocation vars still lands inside
         # the episode instead of in the operator's real home.
-        env.setdefault("HOME", str(root))
+        launch_env.setdefault("HOME", str(root))
         if isinstance(executor, LocalExecutor):
             # Host tools the relocated HOME would hide keep the service's own settings; a sandbox forwards only
             # its explicit env_from.
             for key, default in descriptor.host_env.items():
                 value = os.environ.get(key) or default.replace("{home}", str(Path.home()))
                 if value:
-                    env[key] = value
+                    launch_env[key] = value
+        launch_env.update(extra_env)
         argv = [binary or descriptor.binary, *(token.replace("{prompt}", prompt) for token in descriptor.argv)]
         try:
             outcome = executor.launch(
                 argv,
                 root=root,
                 workspace=workspace,
-                env=env,
+                env=launch_env,
                 timeout=timeout,
                 writable_paths=writable_paths,
                 readonly_paths=tuple(root / PurePosixPath(relative) for relative in written),

@@ -33,6 +33,7 @@ from types import ModuleType
 from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, usage_of
+from reef.harness.runners.native.control import EpisodeControl, TeamBudget, episode_token_limit
 from reef.harness.runners.native.enforce import (
     Enforcer,
     InProcessEnforcer,
@@ -648,8 +649,19 @@ def _judged(result: dict[str, Any], verdict: Mapping[str, Any]) -> dict[str, Any
     return result
 
 
-def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
-    """One turn: the tree's loop as code when it carries one, else its graph (or the seed graph) walked stage by stage."""
+def run_loop(
+    prompt: str,
+    root: Path,
+    session_dir: Path,
+    workdir: Path,
+    *,
+    enforcer: Enforcer | None = None,
+    control: EpisodeControl | None = None,
+) -> int:
+    """One turn: the tree's loop as code when it carries one, else its graph (or the seed graph) walked stage by stage.
+
+    ``enforcer`` runs the tool calls (default: the one ``REEF_NATIVE_ENFORCE`` selects); ``control`` carries what
+    the episode's caller set (default: no token budget)."""
     from reef.harness.runners.native import graph as graphs  # late: graph.py imports this module
     from reef.harness.runners.native.host import NativeHost
 
@@ -667,7 +679,7 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
     try:
         try:
             # The enforcer is chosen before any module of the tree runs in this process, so the tree cannot choose it.
-            enforcer = select_enforcer(os.environ)
+            enforcer = enforcer or select_enforcer(os.environ)
             header["enforcement"] = enforcer.mode
             # The session directory is the one writable path under the sandbox, so a tree boot mounts there.
             # One directory per process, cleared on the way out: the wrapper reuses the sessions directory
@@ -697,7 +709,7 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             },
         )
         session.write("turn/start", {"turn": 1})
-        loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
+        loop = _Loop(session, root, session_dir, header, enforcer=enforcer, control=control)
         run = graphs.Run(loop, prompt, binding, host, workdir)
         try:
             if module is not None:
@@ -823,12 +835,14 @@ class _Loop:
         session_dir: Path,
         header: Mapping[str, Any] = {},
         enforcer: Enforcer | None = None,
+        control: EpisodeControl | None = None,
     ) -> None:
         self.session = session
         self.root = root
         self.session_dir = session_dir
         self.header = dict(header)
         self.enforcer = enforcer or InProcessEnforcer()
+        self.control = control or EpisodeControl()
         self.turns = 1
         self.open: list[Session] = []
 
@@ -840,7 +854,10 @@ class _Loop:
         return session, self.turns
 
     def before_step(self, run: Any) -> None:
-        """Called at the top of every model stage; the episode form has nothing to land between steps."""
+        """Called at the top of every model stage: a spent episode budget ends the turn there, before the call."""
+        budget = self.control.budget
+        if budget.is_spent:
+            run.end_turn({"kind": "max-tokens", "tokens": budget.token_limit, "spent": budget.spent_tokens}, "budget")
 
     _decide = staticmethod(_decide)
     _complete = staticmethod(_complete)
@@ -864,6 +881,10 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not args.prompt:
         parser.error("-p/--prompt is required")
+    try:
+        token_limit = episode_token_limit(os.environ)
+    except ValueError as exc:
+        parser.error(str(exc))
     root = Path(os.environ.get("REEF_NATIVE_DIR") or "native")
     session_dir = Path(os.environ.get("REEF_NATIVE_SESSION_DIR") or root / "sessions")
-    return run_loop(args.prompt, root, session_dir, Path.cwd())
+    return run_loop(args.prompt, root, session_dir, Path.cwd(), control=EpisodeControl(TeamBudget(token_limit)))

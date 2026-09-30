@@ -29,6 +29,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
 from reef.harness.episodes.executor import (
+    EPISODE_TOKENS_ENV,
     EpisodeExecutor,
     LocalExecutor,
     SandboxExecutor,
@@ -282,6 +283,7 @@ class CordisRecipe(Recipe):
     adapter: str = "pi"
     binary: str | None = None
     episode_timeout_s: float = 600.0
+    episode_tokens: int | None = None
     episode_repeats: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
@@ -358,6 +360,8 @@ class CordisRecipe(Recipe):
             raise ValueError("batch_policy must be 'reports' or 'records'")
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
+        if self.episode_tokens is not None and self.episode_tokens < 1:
+            raise ValueError("episode_tokens must be at least 1 when set")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
         if self.on_stale not in STALE_RESULT_POLICIES:
@@ -442,6 +446,13 @@ class CordisRecipe(Recipe):
         timeout = evolution.get("episode_timeout_s", 600.0)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise RecipeConfigError("evolution.episode_timeout_s must be a positive number")
+        episode_tokens = evolution.get("episode_tokens")
+        if episode_tokens is not None:
+            if isinstance(episode_tokens, bool) or not isinstance(episode_tokens, int) or episode_tokens <= 0:
+                raise RecipeConfigError("evolution.episode_tokens must be a positive integer of tokens")
+            # Only Reef's own loop reads the budget; any other harness would run unlimited under it.
+            if evolution.get("adapter", "pi") != "native":
+                raise RecipeConfigError("evolution.episode_tokens is enforced only by the native adapter")
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
@@ -638,6 +649,7 @@ class CordisRecipe(Recipe):
             "adapter": adapter,
             "binary": binary,
             "episode_timeout_s": float(timeout),
+            "episode_tokens": episode_tokens,
             "episode_repeats": repeats,
             "on_stale": on_stale,
             "forbid_residue": forbid_residue,
@@ -790,6 +802,7 @@ class CordisRecipe(Recipe):
             "on_stale": self.on_stale,
             "binary": self.binary,
             "episode_timeout_s": self.episode_timeout_s,
+            "episode_env": {EPISODE_TOKENS_ENV: str(self.episode_tokens)} if self.episode_tokens else {},
             "episode_repeats": self.episode_repeats,
             "forbid_residue": self.forbid_residue,
             "executor": self.executor,

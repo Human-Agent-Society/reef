@@ -96,6 +96,7 @@ class EpisodeEvaluationWorker:
     forbid_residue: bool
     owner_lease: bool = False
     transfer_records: bool = False
+    episode_env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.executor.preflight()
@@ -139,6 +140,7 @@ class EpisodeEvaluationWorker:
                 timeout=self.timeout,
                 executor=self.executor,
                 keep_dir=keep_dir,
+                env=dict(self.episode_env),
             )
         except EpisodeError as error:
             scored = _ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
@@ -682,6 +684,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     state's ``entries``, carried by ``initial_state`` and loaded once at
     construction so an invalid seed refuses boot. A recovered state brings
     its own entries and therefore always wins over the seed.
+
+    ``episode_env`` adds variables to every episode's environment, such as
+    the recipe's token budget; the tree under evaluation cannot set them.
     """
 
     def __init__(
@@ -720,9 +725,13 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
         on_stale: StaleResultPolicy = "merge",
+        episode_env: Mapping[str, str] | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
+        episode_env = dict(episode_env or {})
+        if not all(isinstance(key, str) and key and isinstance(value, str) for key, value in episode_env.items()):
+            raise ValueError("episode_env must map variable names to strings")
         if step_record_dir is not None and not str(step_record_dir):
             raise ValueError("step_record_dir must be a non-empty path when set")
         if isinstance(models, ModelBinding):
@@ -863,6 +872,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                     forbid_residue,
                     self._worker_selection.settings.backend != "uni",
                     self._worker_selection.settings.backend not in ("uni", "mp"),
+                    episode_env,
                 ),
             ),
         )
