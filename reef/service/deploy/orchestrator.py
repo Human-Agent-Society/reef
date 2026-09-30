@@ -26,6 +26,7 @@ from typing import Any
 
 import yaml
 
+from reef.harness.adapters import get_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
 from reef.runtime.deployment import RuntimeConfigError
@@ -368,11 +369,12 @@ def install_hint(config: Mapping[str, Any]) -> str | None:
     takes it from ``REEF_TOKEN``, read the same value: a script run without it
     would install a harness every call of which answers 401. The script
     installs under ``~/reef-harness/<scenario>`` by default, outside the
-    project the agent works in."""
+    project the agent works in. An adapter Reef installs nothing for
+    (terminus) gets no line."""
     # A schema-version 2 file (the shipped profiles) resolves the recipe's evolution section under reef; an
     # unversioned file keeps it at the top level.
     adapter = config_value(config, "reef", "evolution", "adapter") or config_value(config, "evolution", "adapter")
-    if not isinstance(adapter, str) or not adapter:
+    if not isinstance(adapter, str) or not adapter or get_adapter(adapter).install is None:
         return None
     host = str(config_value(config, "reef", "host", default="127.0.0.1"))
     if host in ("0.0.0.0", "::", ""):

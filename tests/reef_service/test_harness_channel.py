@@ -1061,7 +1061,10 @@ vendor_install() {
 }
 installed=""
 if [ -x "$BINARY" ]; then
-    installed="$(PI_OFFLINE='1' PI_SKIP_VERSION_CHECK='1' "$BINARY" --version 2>/dev/null || true)"
+    PROBE_ROOT="$(mktemp -d)"
+    mkdir -p "$PROBE_ROOT"'/pi-agent' "$PROBE_ROOT"'/sessions'
+    installed="$(PI_CODING_AGENT_DIR="$PROBE_ROOT"'/pi-agent' PI_CODING_AGENT_SESSION_DIR="$PROBE_ROOT"'/sessions' PI_OFFLINE='1' PI_SKIP_VERSION_CHECK='1' "$BINARY" --version 2>/dev/null || true)"
+    rm -rf "$PROBE_ROOT"
 fi
 case " $installed " in
     *" 0.84.2 "*)
@@ -1301,6 +1304,30 @@ echo "harness: $DEST"
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("adapter", "usage"),
+    [
+        ("pi", 'reef-pi -p "fix the bug"'),
+        ("claude", 'reef-claude -p "fix the bug"'),
+        ("codex", 'reef-codex exec "fix the bug"'),
+        ("opencode", 'reef-opencode run "fix the bug"'),
+        ("hermes", 'reef-hermes chat --oneshot -q "fix the bug"'),
+        ("dsh", 'reef-dsh --profile headless -- -- "fix the bug"'),
+    ],
+)
+def test_the_wrapper_header_shows_the_one_shot_run_each_binary_takes(adapter: str, usage: str) -> None:
+    """Codex refuses pi's -p (its profile flag): each wrapper's usage line names the binary's own one task form."""
+    script = render_install_script(
+        descriptor=get_adapter(adapter),
+        files={"AGENTS.md": "hello\n"},
+        release_id="v1",
+        content_id="content-v1",
+        scenario="code-repair",
+    )
+    assert f"# Usage: {usage}     # run the agent (receipts captured)" in script
+
+
+@pytest.mark.unit
 def test_install_script_skips_the_vendor_install_and_lands_hostile_content_byte_exact(tmp_path) -> None:
     """Pinned binary present: npm never runs, every file lands byte exact,
     the release file matches the client pull's shape, and a rerun is a no-op."""
@@ -1358,6 +1385,28 @@ def test_install_script_version_probe_disables_network_and_updates(tmp_path) -> 
     assert result.returncode == 0, result.stderr
     assert "0.84.2 already installed" in result.stdout
     assert not npm_log.exists()
+
+
+@pytest.mark.unit
+def test_install_script_version_probe_writes_nothing_in_the_home_directory(tmp_path) -> None:
+    """hermes writes a home skeleton on --version: the probe runs with the descriptor's directories on a scratch
+    root, which the script removes, so the person's home stays as it was."""
+    npm_log = tmp_path / "npm.log"
+    script, dest, prefix, env = _install_fixture(
+        tmp_path, binary_version="0.84.2", npm=f'#!/bin/sh\nprintf called > "{npm_log}"\nexit 1\n'
+    )
+    _write_executable(
+        prefix / "node_modules/.bin/pi",
+        '#!/bin/sh\nstate="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n',
+    )
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    env["TMPDIR"] = str(scratch)
+    result = _run_install(script, dest, prefix, env)
+    assert result.returncode == 0, result.stderr
+    assert "0.84.2 already installed" in result.stdout and not npm_log.exists()
+    assert not (tmp_path / "home" / ".pi").exists()
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.unit
@@ -2573,7 +2622,8 @@ def test_install_route_refuses_an_unknown_adapter_with_a_404_naming_it(tmp_path)
 @pytest.mark.unit
 def test_install_route_answers_400_when_the_adapter_declares_no_install_section(tmp_path, monkeypatch) -> None:
     """A known adapter whose descriptor has no install section is a caller
-    error, not a lookup miss: HTTP 400 naming the adapter."""
+    error, not a lookup miss: HTTP 400 naming the adapter and the routes that
+    still serve it."""
     from dataclasses import replace
 
     monkeypatch.setattr(
@@ -2594,6 +2644,7 @@ def test_install_route_answers_400_when_the_adapter_declares_no_install_section(
             text = await response.text()
             assert "'pi'" in text
             assert "no install section" in text
+            assert "GET /reef/harness serves its tree" in text and "POST /reef/train" in text
         finally:
             await client.close()
 

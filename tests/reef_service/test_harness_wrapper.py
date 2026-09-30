@@ -517,6 +517,168 @@ def test_hermes_state_database_outlives_the_run_so_a_later_run_can_resume_it(tmp
 
 
 @pytest.mark.unit
+def test_hermes_session_snapshots_and_logs_outlive_the_run(tmp_path) -> None:
+    """hermes writes a session snapshot under sessions/ and its log under logs/ in the home, which a run points at
+    a temp copy; a second run sees what the first wrote, and both stay in the installed tree."""
+    compose = tmp_path / "compose"
+    compose.mkdir()
+    (compose / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
+    )
+    binary = tmp_path / "fake-hermes"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import os, sys
+            from pathlib import Path
+            home = Path(os.environ["HERMES_HOME"])
+            found = sorted(p.name for p in (home / "sessions").glob("*.json"))
+            logged = (home / "logs" / "agent.log").read_text().split() if (home / "logs" / "agent.log").exists() else []
+            open({str(seen)!r}, "a").write(f"{{found}} {{logged}}\\n")
+            (home / "sessions").mkdir(exist_ok=True)
+            (home / "sessions" / f"session_{{sys.argv[-1]}}.json").write_text("{{}}")
+            (home / "logs").mkdir(exist_ok=True)
+            with open(home / "logs" / "agent.log", "a") as log:
+                log.write(sys.argv[-1] + "\\n")
+            """
+        )
+    )
+    binary.chmod(0o755)
+
+    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["-q", prompt])
+
+    assert seen.read_text().splitlines() == ["[] []", "['session_first.json'] ['first']"]
+    assert sorted(p.name for p in (compose / "sessions").iterdir()) == ["session_first.json", "session_second.json"]
+    assert (compose / "logs" / "agent.log").read_text().split() == ["first", "second"]
+
+
+@pytest.mark.unit
+def test_after_a_hermes_session_the_wrapper_names_the_resume_command_that_works(tmp_path, capsys) -> None:
+    """hermes ends by naming `hermes --resume <id>`, which runs outside this install; the wrapper then names
+    `reef-hermes --resume <id>` for the one session this run wrote, and nothing when the run wrote none."""
+    compose = tmp_path / "compose"
+    (compose / "sessions").mkdir(parents=True)
+    (compose / "config.yaml").write_text(
+        yaml.safe_dump({"model": {"provider": "custom", "base_url": "http://127.0.0.1:1/v1", "api_key": "dummy"}})
+    )
+    (compose / "sessions" / "session_20260924_000000_older.json").write_text("{}")
+    binary = tmp_path / "fake-hermes"
+    binary.write_text(
+        textwrap.dedent(
+            """\
+            #!/usr/bin/env python3
+            import os, sys
+            from pathlib import Path
+            if sys.argv[-1] != "none":
+                (Path(os.environ["HERMES_HOME"]) / "sessions" / f"session_{sys.argv[-1]}.json").write_text("{}")
+            """
+        )
+    )
+    binary.chmod(0o755)
+    with patch.dict(os.environ, {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}):
+        with contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["20260924_183446_468762"])
+        assert "reef-hermes: resume this session with: reef-hermes --resume 20260924_183446_468762" in (
+            capsys.readouterr().err
+        )
+        with contextlib.suppress(SystemExit):
+            run_agent(str(binary), str(compose), "test-scenario", "hermes", "HERMES_HOME", ["none"])
+        assert "resume this session" not in capsys.readouterr().err
+
+
+@pytest.mark.unit
+def test_hermes_finds_the_agent_commands_in_a_session_and_in_an_episode(tmp_path) -> None:
+    """A reef-hermes session's home is a temp copy, so HERMES_HOME/.. is not the install root; the commands
+    root is still found there, through REEF_HARNESS_DEST, and an episode home still finds it beside itself."""
+    import subprocess
+
+    from reef.harness.adapters import get_adapter
+    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.tree.render import render_composition
+
+    descriptor = get_adapter("hermes")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy")
+    command = ("agent_command", {"name": "summarize", "text": "Summarize the request."})
+    root = tmp_path / "reef-harness"
+    for relative, text in render_composition([command, *binding.compose_nodes(descriptor)], descriptor).items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    home = root / "hermes"
+    script = tmp_path / "fake-hermes.py"
+    seen = tmp_path / "seen.txt"
+    # hermes's own lookup of skills.external_dirs: expand variables, resolve against the home, keep directories.
+    script.write_text(
+        textwrap.dedent(
+            f"""\
+            import os, yaml
+            from pathlib import Path
+            home = Path(os.environ["HERMES_HOME"])
+            found = []
+            for entry in yaml.safe_load((home / "config.yaml").read_text())["skills"]["external_dirs"]:
+                path = Path(os.path.expanduser(os.path.expandvars(entry)))
+                path = (path if path.is_absolute() else home / path).resolve()
+                if path.is_dir():
+                    found += sorted(child.name for child in path.iterdir())
+            open({str(seen)!r}, "a").write(f"{{home.resolve() == Path({str(home)!r}).resolve()}} {{found}}\\n")
+            """
+        )
+    )
+
+    env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    env.pop("REEF_HARNESS_DEST", None)
+    with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+        run_agent(sys.executable, str(home), "test-scenario", "hermes", "HERMES_HOME", [str(script)])
+    subprocess.run([sys.executable, str(script)], env={**env, "HERMES_HOME": str(home)}, check=True)
+
+    # The session ran in the temp copy and the episode in the home itself; both found the command.
+    assert seen.read_text().splitlines() == ["False ['summarize']", "True ['summarize']"]
+
+
+@pytest.mark.unit
+def test_capture_proxy_prints_no_traceback_when_a_client_resets_a_kept_alive_connection(capsys) -> None:
+    """hermes drops a kept alive connection with a reset after its calls; the proxy ends it quietly, and any other
+    error still prints its traceback."""
+    import socket
+    import struct
+    import threading
+
+    from reef.harness.client.wrapper import CaptureProxy
+
+    proxy = CaptureProxy("http://127.0.0.1:9", "reset-scenario", None)
+    proxy.start()
+    try:
+        server = proxy._server
+        ended = threading.Event()
+        shutdown_request = server.shutdown_request
+
+        def shutdown_and_note(request) -> None:
+            shutdown_request(request)
+            ended.set()
+
+        with patch.object(server, "shutdown_request", side_effect=shutdown_and_note):
+            client = socket.create_connection(("127.0.0.1", proxy.port), timeout=5)
+            client.sendall(b"GET /_captures HTTP/1.1\r\nHost: proxy\r\n\r\n")
+            assert client.recv(65536).startswith(b"HTTP/1.1 200")
+            # The handler now waits for the next request on the connection; a zero linger closes it with a reset.
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+            assert ended.wait(5)
+        assert capsys.readouterr().err == ""
+        try:
+            raise ValueError("a real failure")
+        except ValueError:
+            server.handle_error(None, ("127.0.0.1", 1))
+        assert "ValueError: a real failure" in capsys.readouterr().err
+    finally:
+        proxy.stop()
+
+
+@pytest.mark.unit
 def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
     """A kept file the binary creates, or renames a new file over, is copied back with its mode after the run;
     a later run reads it through the link."""
@@ -553,6 +715,61 @@ def test_claude_settings_file_outlives_the_run_with_its_mode(tmp_path) -> None:
     assert json.loads(kept.read_text()) == {"numStartups": 2}
     assert kept.stat().st_mode & 0o777 == 0o600
     assert sorted(path.name for path in compose.iterdir()) == [".claude.json", "projects", "settings.json"]
+
+
+@pytest.mark.unit
+def test_codex_folder_trust_outlives_the_run_outside_the_tree_and_only_for_the_sessions_folder(
+    tmp_path, monkeypatch
+) -> None:
+    """Codex writes the answer to its trust prompt into the temp config.toml the wrapper removes. The wrapper keeps
+    the answer for the session's folder in ~/.reef/trust, readable by the person alone, and adds it to the next
+    session's copy; trust a command wrote for another folder is dropped, and the installed config.toml never
+    changes."""
+    from reef.harness.adapters import get_adapter
+    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.tree.render import render_composition
+
+    descriptor = get_adapter("codex")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m", api_key="dummy", api="responses")
+    compose = tmp_path / "tree" / "codex"
+    for relative, text in render_composition(binding.compose_nodes(descriptor), descriptor).items():
+        (tmp_path / "tree" / relative).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / "tree" / relative).write_text(text, encoding="utf-8")
+    installed = (compose / "config.toml").read_bytes()
+    project = tmp_path / "project"
+    project.mkdir()
+    binary = tmp_path / "fake-codex"
+    seen = tmp_path / "seen.txt"
+    binary.write_text(
+        textwrap.dedent(
+            f"""\
+            #!/usr/bin/env python3
+            import json, os, tomllib
+            from pathlib import Path
+            config = Path(os.environ["CODEX_HOME"]) / "config.toml"
+            projects = tomllib.loads(config.read_text()).get("projects", {{}})
+            open({str(seen)!r}, "a").write(json.dumps(projects, sort_keys=True) + "\\n")
+            with config.open("a") as handle:
+                handle.write('\\n[projects."' + os.getcwd() + '"]\\ntrust_level = "trusted"\\n')
+                handle.write('\\n[projects."/elsewhere"]\\ntrust_level = "trusted"\\n')
+            """
+        )
+    )
+    binary.chmod(0o755)
+    monkeypatch.chdir(project)
+    with patch.dict(
+        os.environ, {**os.environ, "HOME": str(tmp_path / "home"), "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
+    ):
+        for prompt in ("first", "second"):
+            with contextlib.suppress(SystemExit):
+                run_agent(str(binary), str(compose), "test-scenario", "codex", "CODEX_HOME", ["exec", prompt])
+
+    folder = str(project.resolve())
+    assert [json.loads(line) for line in seen.read_text().splitlines()] == [{}, {folder: {"trust_level": "trusted"}}]
+    (store,) = (tmp_path / "home" / ".reef" / "trust").iterdir()
+    assert json.loads(store.read_text())["projects"] == {folder: "trusted"}
+    assert store.stat().st_mode & 0o777 == 0o600
+    assert (compose / "config.toml").read_bytes() == installed
 
 
 @pytest.mark.unit
@@ -844,7 +1061,8 @@ def test_native_run_agent_drives_the_real_loop_through_the_proxy_and_reports(tmp
 @pytest.mark.parametrize("adapter", ["pi", "opencode", "claude", "codex", "dsh", "hermes", "native"])
 def test_wrapper_reads_and_rewrites_every_adapters_binding_from_its_descriptor(tmp_path, adapter) -> None:
     """The descriptor names where the binding renders Reef's address; the wrapper reads it back from the
-    installed tree and the temp copy equals a fresh render at the proxy, byte for byte, with the tree untouched."""
+    installed tree and the temp copy equals a fresh render at the proxy, byte for byte, with the tree untouched,
+    in every dialect the tree may be installed with (pi and dsh bind anthropic without the /v1 openai adds)."""
     from pathlib import PurePosixPath
 
     from reef.harness.adapters import get_adapter
@@ -853,26 +1071,26 @@ def test_wrapper_reads_and_rewrites_every_adapters_binding_from_its_descriptor(t
     from reef.harness.tree.render import render_composition
 
     descriptor = get_adapter(adapter)
-    api = next(iter(descriptor.model_binding))
-    reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key="dummy", api=api)
-    files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
-    root = tmp_path / "tree"
-    for relative, text in files.items():
-        (root / relative).parent.mkdir(parents=True, exist_ok=True)
-        (root / relative).write_text(text, encoding="utf-8")
-    _, subdir = descriptor.compose_relocation()
-    compose = root / subdir
+    for api in descriptor.model_binding:
+        reef = ModelBinding(base_url="http://127.0.0.1:8900", model="qwen3-8b", api_key="dummy", api=api)
+        files = render_composition([("rules", {"text": "Be brief."}), *reef.compose_nodes(descriptor)], descriptor)
+        root = tmp_path / api
+        for relative, text in files.items():
+            (root / relative).parent.mkdir(parents=True, exist_ok=True)
+            (root / relative).write_text(text, encoding="utf-8")
+        _, subdir = descriptor.compose_relocation()
+        compose = root / subdir
 
-    assert _extract_reef_url(adapter, compose) == "http://127.0.0.1:8900"
-    temp = Path(_create_temp_composition(adapter, str(compose), 41234))
-    proxied = ModelBinding(base_url="http://127.0.0.1:41234", model="qwen3-8b", api_key="dummy", api=api)
-    expected = render_composition([("rules", {"text": "Be brief."}), *proxied.compose_nodes(descriptor)], descriptor)
-    for relative, text in expected.items():
-        assert (temp / PurePosixPath(relative).relative_to(subdir)).read_text(encoding="utf-8") == text
-    # The installed tree keeps Reef's address: only the temp copy was rewritten.
-    for relative, text in files.items():
-        assert (root / relative).read_text(encoding="utf-8") == text
-    shutil.rmtree(temp)
+        assert _extract_reef_url(adapter, compose) == "http://127.0.0.1:8900"
+        temp = Path(_create_temp_composition(adapter, str(compose), 41234))
+        proxied = ModelBinding(base_url="http://127.0.0.1:41234", model="qwen3-8b", api_key="dummy", api=api)
+        nodes = [("rules", {"text": "Be brief."}), *proxied.compose_nodes(descriptor)]
+        for relative, text in render_composition(nodes, descriptor).items():
+            assert (temp / PurePosixPath(relative).relative_to(subdir)).read_text(encoding="utf-8") == text, api
+        # The installed tree keeps Reef's address: only the temp copy was rewritten.
+        for relative, text in files.items():
+            assert (root / relative).read_text(encoding="utf-8") == text
+        shutil.rmtree(temp)
 
 
 # -- the binding lookup follows the descriptor's key path, not the first URL in the file ------
@@ -940,7 +1158,8 @@ def test_wrapper_picks_the_reef_provider_among_several_by_the_parent_key(tmp_pat
 
 @pytest.mark.unit
 def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) -> None:
-    """A bare origin in the tree still sends the agent to /v1 at the proxy, and a Reef behind a path prefix keeps it."""
+    """A bare origin in the tree still sends the agent to /v1 at the proxy, and a Reef behind a path prefix keeps it;
+    an entry that speaks anthropic keeps the bare origin, as that dialect's template writes it."""
     from reef.harness.client.wrapper import _create_temp_composition, _extract_reef_url
 
     compose = _pi_tree(tmp_path, {"providers": {"reef": {"baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}}})
@@ -952,6 +1171,35 @@ def test_wrapper_normalizes_the_rewritten_url_to_the_templates_suffix(tmp_path) 
     shutil.rmtree(temp)
     compose = _pi_tree(tmp_path / "prefix", {"providers": {"reef": {"baseUrl": "http://gw.example/reef/v1"}}})
     assert _extract_reef_url("pi", Path(compose)) == "http://gw.example/reef"
+    # The entry's API names the dialect the tree was installed with: anthropic keeps the bare origin and openai
+    # still gets /v1. Only the Reef entry names it: a second provider speaking anthropic changes nothing, whether
+    # it sorts before or after Reef or sits at Reef's own address, and neither does a mapping under another key
+    # named reef that holds no URL.
+    other = {"api": "anthropic-messages", "apiKey": "x"}
+    for api, rewritten in (
+        ("anthropic-messages", "http://127.0.0.1:41234"),
+        ("openai-completions", "http://127.0.0.1:41234/v1"),
+    ):
+        reef = {"api": api, "baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}
+        for case, models in (
+            ("before", {"providers": {"anthropic": {**other, "baseUrl": "https://api.anthropic.com"}, "reef": reef}}),
+            ("after", {"providers": {"reef": reef, "zed": {**other, "baseUrl": "https://api.anthropic.com"}}}),
+            ("same-url", {"providers": {"reef": reef, "zed": {**other, "baseUrl": reef["baseUrl"]}}}),
+            ("no-url", {"providers": {"reef": reef}, "zed": {"reef": other}}),
+        ):
+            compose = _pi_tree(tmp_path / api / case, models)
+            assert _extract_reef_url("pi", Path(compose)) == "http://127.0.0.1:8900", case
+            temp = Path(_create_temp_composition("pi", compose, 41234))
+            assert json.loads((temp / "models.json").read_text())["providers"]["reef"]["baseUrl"] == rewritten, case
+            shutil.rmtree(temp)
+    # Quirks that emit the entry inside a list keep it under the list's key, so it is still the Reef entry.
+    reef = {"api": "anthropic-messages", "baseUrl": "http://127.0.0.1:8900", "apiKey": "d"}
+    compose = _pi_tree(tmp_path / "listed", {"providers": {"reef": [reef]}})
+    temp = Path(_create_temp_composition("pi", compose, 41234))
+    assert (
+        json.loads((temp / "models.json").read_text())["providers"]["reef"][0]["baseUrl"] == "http://127.0.0.1:41234"
+    )
+    shutil.rmtree(temp)
 
 
 @pytest.mark.unit
@@ -3293,6 +3541,100 @@ def test_run_agent_sets_the_env_files_variables_under_the_shells_and_exports_the
     reef.close()
 
 
+def dsh_install(tmp_path: Path) -> Path:
+    """An installed dsh tree with one agent_command, bound to a Reef that is never called."""
+    from reef.harness.adapters import get_adapter
+    from reef.harness.episodes.model_binding import ModelBinding
+    from reef.harness.tree.render import render_composition
+
+    descriptor = get_adapter("dsh")
+    binding = ModelBinding(base_url="http://127.0.0.1:1", model="m1", api_key="dummy")
+    nodes = [("agent_command", {"name": "reefine", "text": "File the request."}), *binding.compose_nodes(descriptor)]
+    root = tmp_path / "install"
+    for relative, text in render_composition(nodes, descriptor).items():
+        (root / relative).parent.mkdir(parents=True, exist_ok=True)
+        (root / relative).write_text(text, encoding="utf-8")
+    return root
+
+
+@pytest.mark.unit
+def test_dsh_run_reads_the_trees_commands_from_the_install_root(tmp_path) -> None:
+    """reef-dsh points DSH_HOME at the temp copy and DSH_AGENTS_HOME, a ``{root}`` value of ``client_env``, at the
+    installed tree's command root, where the rendered agent_commands are; a shell that sets its own keeps it."""
+    root = dsh_install(tmp_path)
+    compose = str(root / "dsh")
+    binary = _make_env_dump_binary(tmp_path)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    env = _ask_env(captures, compose)
+    env.pop("DSH_AGENTS_HOME", None)
+    with patch.dict(os.environ, env, clear=True), contextlib.suppress(SystemExit):
+        run_agent(str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", ["web"])
+    seen = json.loads((tmp_path / "env.json").read_text())
+    assert seen["DSH_AGENTS_HOME"] == str(root.resolve() / "dsh-agents")
+    assert (Path(seen["DSH_AGENTS_HOME"]) / "skills" / "reefine" / "SKILL.md").is_file()
+    assert Path(seen["DSH_HOME"]).name.startswith("reef-harness-")
+    with (
+        patch.dict(os.environ, {**env, "DSH_AGENTS_HOME": "/elsewhere/agents"}, clear=True),
+        contextlib.suppress(SystemExit),
+    ):
+        run_agent(str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", ["web"])
+    assert json.loads((tmp_path / "env.json").read_text())["DSH_AGENTS_HOME"] == "/elsewhere/agents"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(("on_interrupt", "status"), [("default", 130), ("exit", 0)])
+def test_run_agent_ends_quietly_on_ctrl_c(tmp_path, on_interrupt, status) -> None:
+    """Ctrl-C reaches the wrapper and the agent at once, as a terminal sends it to both (reef-dsh web runs
+    until then): the wrapper waits for the agent, prints no traceback, removes the temp copy, and exits with the
+    agent's status, 130 when the signal ended the agent."""
+    import signal
+    import subprocess
+    import time
+
+    compose = str(dsh_install(tmp_path) / "dsh")
+    binary = tmp_path / "fake-dsh"
+    binary.write_text(
+        f"#!{sys.executable}\n"
+        + textwrap.dedent(
+            """\
+            import json, os, signal, sys, time
+            from pathlib import Path
+            if sys.argv[1] == "exit":
+                signal.signal(signal.SIGINT, lambda *args: sys.exit(0))
+            else:
+                signal.signal(signal.SIGINT, signal.SIG_DFL)
+            Path(__file__).with_name("started.json").write_text(json.dumps({"home": os.environ["DSH_HOME"]}))
+            time.sleep(60)
+            """
+        )
+    )
+    binary.chmod(0o755)
+    captures = tmp_path / "captures"
+    captures.mkdir()
+    root = str(Path(__file__).resolve().parents[2])
+    code = f"import sys; sys.path.insert(0, {root!r}); from reef.harness.client.wrapper import run_agent; "
+    code += "run_agent(*sys.argv[1:6], sys.argv[6:])"
+    # A session of its own, so the signal reaches the wrapper and its agent and not the test runner.
+    wrapper = subprocess.Popen(
+        [sys.executable, "-c", code, str(binary), compose, "dsh-scenario", "dsh", "DSH_HOME", on_interrupt],
+        env=_ask_env(captures, compose),
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    started = tmp_path / "started.json"
+    deadline = time.monotonic() + 30
+    while not started.exists() and wrapper.poll() is None and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert started.exists(), wrapper.communicate(timeout=10)[1]
+    os.killpg(wrapper.pid, signal.SIGINT)
+    _, stderr = wrapper.communicate(timeout=30)
+    assert "Traceback" not in stderr and "KeyboardInterrupt" not in stderr, stderr
+    assert wrapper.returncode == status
+    assert not Path(json.loads(started.read_text())["home"]).exists()
+
+
 @pytest.mark.unit
 def test_a_start_on_a_tree_no_install_recorded_says_its_files_were_not_checked(tmp_path, capsys) -> None:
     """An install made before Reef kept the record has none, so its sessions start unchecked; each such start says
@@ -3547,6 +3889,29 @@ def test_doctor_reports_every_line_and_exits_by_the_worst_of_them(tmp_path, caps
     assert doctor("doc-scenario", "pi", compose, str(binary)) == 1
     out = capsys.readouterr().out
     assert "!!  service" in out and "401" in out
+    reef.close()
+
+
+@pytest.mark.unit
+def test_doctor_version_probe_writes_nothing_in_the_home_directory(tmp_path, capsys, monkeypatch) -> None:
+    """The binary row runs --version with the descriptor's directories on a scratch root, never the person's home."""
+    from reef.harness.client.wrapper import doctor
+
+    reef = _DoctorReef(token="dummy", head="rel-3")
+    compose, _ = _ask_tree(tmp_path, reef.port)
+    binary = tmp_path / "fake-pi"
+    binary.write_text(
+        '#!/bin/sh\nstate="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n'
+    )
+    binary.chmod(0o755)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr("tempfile.tempdir", str(scratch))
+    doctor("doc-scenario", "pi", compose, str(binary))
+    assert any(line.startswith("ok  binary") and "0.84.2" in line for line in capsys.readouterr().out.splitlines())
+    assert not (tmp_path / "home" / ".pi").exists()
+    assert list(scratch.iterdir()) == []
     reef.close()
 
 

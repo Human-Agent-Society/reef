@@ -13,7 +13,7 @@ from typing import Any
 
 from recipes.sao.slime.utils.data_builder import build_sao_rollout_data, sao_sample_row
 from recipes.sao.slime.utils.schedule import DEFAULT_CRITIC_STEPS_PER_ACTOR, SaoSchedule
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult, register_loss_family
+from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm, TrainResult, register_loss_family
 
 _logger = logging.getLogger(__name__)
 
@@ -80,6 +80,11 @@ class SaoAlgorithm(SlimeAlgorithm):
         # supplies values, then the registered skip-observation GAE hook
         # constructs the actor advantages in the backend.
         args.compute_advantages_and_returns = True
+
+    def policy_gradient_weight(self, args: Namespace) -> PolicyGradientWeight:
+        # compute_sao_loss: -sg(f(r)) * A * log p with r against the rollout
+        # log-probs and f(r) = r strictly inside (1 - eps_clip, 1 + eps_clip_high).
+        return PolicyGradientWeight("masked", lower=1.0 - args.eps_clip, upper=1.0 + args.eps_clip_high)
 
     def validate_specific_args(self, args: Namespace, source: str) -> None:
         if not getattr(args, "use_critic", False):
