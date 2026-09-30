@@ -5,6 +5,10 @@ A member is one agent turn in its own session file, as a sequential subagent is,
 not on the caller's remaining steps. The caller waits for every member and then reads one message that names each
 member's outcome and text. The episode's token budget and stop flag are shared: once either is set, every member
 ends its turn at its next step.
+
+With ``workspace: own`` each member works in a git worktree of its own (``reef.harness.runners.native.workspaces``),
+and its branch is merged into the caller's workdir when the stage ends; with ``shared`` every member works in the
+caller's workdir and nothing is merged.
 """
 
 from __future__ import annotations
@@ -21,6 +25,7 @@ from pathlib import Path
 from reef.harness.runners.native import LoadError, Session
 from reef.harness.runners.native.graph import GraphError, Run, _Stop, _walk, narrow_allow
 from reef.harness.runners.native.host import NativeHost
+from reef.harness.runners.native.workspaces import MergeResult, TeamWorkspaceError
 
 #: Characters of one member's final text that the caller's message carries.
 TEAM_RESULT_CHARS = 4000
@@ -92,13 +97,39 @@ class TeamStageRun:
                 "members": [{"agent": start.instance, "role": start.role} for start in self.members],
             },
         )
-        # Turns are numbered in member order here, before any thread starts, so the file names do not depend on
-        # which thread runs first.
-        turns = [loop.open_turn(start.instance) for start in self.members]
-        results = self.run_members(turns, [caller.workdir for _ in self.members])
+        results: list[MemberResult] = []
+        merges: list[MergeResult] = []
+        failures: list[str] = []
+        try:
+            workdirs = self.member_workdirs(stage_run)
+        except TeamWorkspaceError as exc:
+            failures.append(f"the team did not start: {exc}")
+        else:
+            # Turns are numbered in member order here, before any thread starts, so the file names do not depend on
+            # which thread runs first.
+            turns = [loop.open_turn(start.instance) for start in self.members]
+            results = self.run_members(turns, workdirs)
+            if self.workspace == "own":
+                try:
+                    merges = loop.workspaces.merge(stage_run, [result.instance for result in results])
+                except TeamWorkspaceError as exc:
+                    failures.append(f"the merge did not finish: {exc}")
+        for merge in merges:
+            caller.session.write(
+                "team/merge",
+                {
+                    "step": caller.step,
+                    "stage": self.stage_name,
+                    "agent": merge.agent,
+                    "branch": merge.branch,
+                    "result": merge.result,
+                    "files": list(merge.files),
+                },
+            )
         control = loop.control
         outcome = team_outcome(
-            [result.outcome for result in results], is_budget_ended=control.budget.is_spent or control.stop.is_set
+            [*(result.outcome for result in results), *("gave_up" for _ in failures)],
+            is_budget_ended=control.budget.is_spent or control.stop.is_set,
         )
         caller.session.write(
             "team/end",
@@ -117,15 +148,39 @@ class TeamStageRun:
             text = result.text if len(result.text) <= TEAM_RESULT_CHARS else result.text[:TEAM_RESULT_CHARS] + " ..."
             ended = f"{result.instance} ({result.role}) ended with {result.outcome}"
             lines.append(f"{ended}: {text}" if text else ended)
+        for merge in merges:
+            if merge.result == "conflict":
+                kept = loop.workspaces.member_path(stage_run, merge.agent)
+                lines.append(
+                    f"{merge.agent}: not merged, it conflicts in {', '.join(merge.files)}; its changes stay in {kept} "
+                    f"on branch {merge.branch}"
+                )
+            else:
+                lines.append(f"{merge.agent}: {'merged' if merge.result == 'merged' else 'changed no file'}")
+        lines.extend(failures)
         caller.say(
             "\n\n".join(lines), {"kind": "team", "stage": self.stage_name, "mode": self.mode, "outcome": outcome}
         )
-        return outcome, {
+        detail: dict[str, object] = {
             "mode": self.mode,
             "agents": [result.instance for result in results],
             "outcomes": {result.instance: result.outcome for result in results},
             "steps": sum(result.steps for result in results),
         }
+        if self.workspace == "own":
+            detail["merges"] = {merge.agent: merge.result for merge in merges}
+        return outcome, detail
+
+    def member_workdirs(self, stage_run: int) -> list[Path]:
+        """Each member's workdir: for ``own`` a new worktree of the caller's workdir as it stands, else that one."""
+        workdir = self.caller.workdir
+        if self.workspace != "own":
+            return [workdir for _ in self.members]
+        workspaces = self.caller.loop.workspaces
+        if not workspaces.is_git_available():
+            raise TeamWorkspaceError("git is not installed where the tools run")
+        base = workspaces.start(stage_run)
+        return [Path(str(workspaces.add_member(stage_run, start.instance, base))) for start in self.members]
 
     def run_members(self, turns: Sequence[tuple[Session, int]], workdirs: Sequence[Path]) -> list[MemberResult]:
         """Every member on its own thread, joined in member order; an error that is not a turn's end is raised here."""

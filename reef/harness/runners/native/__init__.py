@@ -29,7 +29,7 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
@@ -44,6 +44,7 @@ from reef.harness.runners.native.enforce import (
     select_enforcer,
 )
 from reef.harness.runners.native.graph import TurnLoop
+from reef.harness.runners.native.workspaces import TeamWorkspaces
 from reef.harness.tree.nodes import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
@@ -53,6 +54,8 @@ MAX_RESULT_CHARS = 20_000
 #: marker naming the file, and this many characters of tail.
 TOOL_OUTPUT_DIR = ".reef/tool-output"
 TOOL_OUTPUT_TAIL_CHARS = 2_000
+#: Where team stages keep Reef's git directory and the member worktrees on the host, under the workspace.
+TEAM_DIR = ".reef/team"
 #: Tokens one model call may generate; a local single slot server stalls every other caller behind an unbounded one.
 MAX_COMPLETION_TOKENS = 4096
 #: Provider attempts one step may spend and the longest wait between them, whatever a request_error hook asks.
@@ -664,10 +667,17 @@ def run_loop(
     """One turn: the tree's loop as code when it carries one, else its graph (or the seed graph) walked stage by stage.
 
     ``enforcer`` runs the tool calls (default: the one ``REEF_NATIVE_ENFORCE`` selects); ``control`` carries what
-    the episode's caller set (default: no token budget)."""
+    the episode's caller set (default: no token budget, team git on this host)."""
     from reef.harness.runners.native import graph as graphs  # late: graph.py imports this module
     from reef.harness.runners.native.host import NativeHost
 
+    control = control or EpisodeControl()
+    main_path = PurePosixPath(workdir)
+    workspaces = TeamWorkspaces(
+        control.command_runner,
+        main_path=main_path,
+        team_path=main_path / TEAM_DIR if control.team_path is None else control.team_path,
+    )
     binding = binding_from(root / "models.json")
     session = Session(session_dir / "session.jsonl")
     header = {
@@ -712,7 +722,7 @@ def run_loop(
             },
         )
         session.write("turn/start", {"turn": 1})
-        loop = _Loop(session, root, session_dir, header, enforcer=enforcer, control=control)
+        loop = _Loop(session, root, session_dir, header, enforcer=enforcer, control=control, workspaces=workspaces)
         run = graphs.Run(loop, prompt, binding, host, workdir)
         try:
             if module is not None:
@@ -720,6 +730,7 @@ def run_loop(
             return graphs.run_graph(run, graph)
         finally:
             host.dispose()
+            workspaces.close()
     finally:
         session.close()
 
@@ -839,6 +850,7 @@ class _Loop:
         header: Mapping[str, Any] = {},
         enforcer: Enforcer | None = None,
         control: EpisodeControl | None = None,
+        workspaces: TeamWorkspaces | None = None,
     ) -> None:
         self.session = session
         self.root = root
@@ -846,6 +858,8 @@ class _Loop:
         self.header = dict(header)
         self.enforcer = enforcer or InProcessEnforcer()
         self.control = control or EpisodeControl()
+        #: The git state of ``workspace: own`` stage runs; only the episode form keeps one.
+        self.workspaces = workspaces
         self.turns = 1
         self.open: list[Session] = []
         # Team members run on threads of this process, so the turn and stage run counters are taken under a lock.

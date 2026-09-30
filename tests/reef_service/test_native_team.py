@@ -11,7 +11,7 @@ import json
 import os
 import re
 import threading
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 from reef_service.test_native_harness import (
@@ -30,13 +30,14 @@ from reef.harness.episodes.executor import EPISODE_TOKENS_ENV
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import run_episode
 from reef.harness.episodes.trajectory import reader_for
-from reef.harness.runners.native import Session, ToolModule, ToolRunner, _Loop, run_loop
+from reef.harness.runners.native import TEAM_DIR, Session, ToolModule, ToolRunner, _Loop, run_loop
 from reef.harness.runners.native.control import EpisodeControl, EpisodeStop, TeamBudget, episode_token_limit
 from reef.harness.runners.native.enforce import InProcessEnforcer
 from reef.harness.runners.native.graph import Run, _tokens, run_graph
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.seed import SEED_TOOLS
 from reef.harness.runners.native.team import MemberStart, TeamStageRun, team_outcome
+from reef.harness.runners.native.workspaces import CommandOutcome, HostCommandRunner, TeamWorkspaces
 from reef.harness.tree.render import render_composition
 from reef.train.cordis_backend.backend import _agent_work, _stage_path, tree_files
 
@@ -290,8 +291,18 @@ class TeamTurn:
         self.host = NativeHost.from_root(self.root, self.sessions / "mounts" / f"boot-{os.getpid()}")
         session.write("session", {**header, "agent": "root", "turn": 1, "agents": sorted(self.host.agents)})
         session.write("turn/start", {"turn": 1})
+        main_path = PurePosixPath(self.work)
+        self.workspaces = TeamWorkspaces(
+            self.control.command_runner, main_path=main_path, team_path=main_path / TEAM_DIR
+        )
         self.loop = _Loop(
-            session, self.root, self.sessions, header, enforcer=InProcessEnforcer(), control=self.control
+            session,
+            self.root,
+            self.sessions,
+            header,
+            enforcer=InProcessEnforcer(),
+            control=self.control,
+            workspaces=self.workspaces,
         )
         self.run = Run(self.loop, "split the work", binding, self.host, self.work)
 
@@ -299,8 +310,9 @@ class TeamTurn:
         return TeamStageRun(self.run, "crew", mode, workspace, members).run()
 
     def close(self) -> list[dict]:
-        """The episode's trajectory once the root's session and host are closed."""
+        """The episode's trajectory once the root's session, host and team workspaces are closed."""
         self.host.dispose()
+        self.workspaces.close()
         self.loop.session.close()
         return list(reader_for("native-jsonl")(self.sessions))
 
@@ -520,3 +532,161 @@ def test_the_stage_outcome_puts_budget_before_ask_before_gave_up_before_complete
     assert team_outcome(["ask", "gave_up"], is_budget_ended=False) == "ask"
     assert team_outcome(["gave_up", "completed"], is_budget_ended=False) == "gave_up"
     assert team_outcome(["completed", "completed"], is_budget_ended=False) == "completed"
+
+
+# -- workspace: own, a git worktree per member ---------------------------------------------------------------------
+
+
+class WritingModel(MemberModel):
+    """Each member writes its planned files, one per step, then answers; the plan is keyed by instance."""
+
+    def __init__(self, writes: dict[str, list[tuple[str, str]]]) -> None:
+        super().__init__()
+        self.writes = writes
+
+    def reply(self, instance: str, body: dict) -> dict:
+        done = sum(1 for message in body["messages"] if message.get("role") == "tool")
+        planned = self.writes.get(instance, [])
+        if done < len(planned):
+            path, content = planned[done]
+            return _reply(tool_calls=[_call("write_file", {"path": path, "content": content}, f"w{done}")])
+        return _reply(content=f"{instance} wrote {len(planned)} files")
+
+
+def git_status(turn: TeamTurn) -> str:
+    return turn.workspaces.git("status", "--porcelain", cwd=turn.workspaces.main_path).stdout
+
+
+def root_events(turn: TeamTurn, type_: str) -> list[dict]:
+    return [e["data"] for e in events(turn.sessions / "session.jsonl") if e["type"] == type_]
+
+
+def test_members_in_their_own_worktrees_merge_into_the_workdir_and_leave_no_git_there(tmp_path: Path) -> None:
+    model = WritingModel(
+        {
+            "peer.1": [("a.txt", "from one\n"), (".reef/tool-output/x.txt", "scratch")],
+            "peer.2": [("b.txt", "from two\n")],
+        }
+    )
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        outcome, detail = turn.stage(peers(2), workspace="own")
+        team_path = turn.work / TEAM_DIR
+        worktrees = sorted(path.name for path in team_path.iterdir())
+        status = git_status(turn)
+        turn.finish()
+    finally:
+        stop(model)
+    assert outcome == "completed" and detail["merges"] == {"peer.1": "merged", "peer.2": "merged"}
+    assert (turn.work / "a.txt").read_text() == "from one\n" and (turn.work / "b.txt").read_text() == "from two\n"
+    # Tool output under .reef/ never merges, and the merged worktrees are gone; only the git directory is left.
+    assert not (turn.work / ".reef" / "tool-output").exists() and worktrees == ["git"] and status == ""
+    assert [(m["agent"], m["branch"], m["result"], m["files"]) for m in root_events(turn, "team/merge")] == [
+        ("peer.1", "reef/s1/peer.1", "merged", []),
+        ("peer.2", "reef/s1/peer.2", "merged", []),
+    ]
+    headers = {instance: found[0]["data"] for instance, found in member_files(turn.sessions).items()}
+    assert headers["peer.2"]["workdir"] == str(team_path / "s1-peer.2") and headers["peer.2"]["workspace"] == "own"
+    (said,) = root_events(turn, "user/message")
+    assert said["content"].endswith("peer.1: merged\n\npeer.2: merged")
+    # The main worktree never gets a .git, and closing removes Reef's git directory with every worktree.
+    assert not (turn.work / ".git").exists() and not team_path.exists()
+
+
+def test_a_conflict_is_named_and_leaves_the_workdir_clean_with_the_members_changes_kept(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("same.txt", "one\n")], "peer.2": [("same.txt", "two\n")]})
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        (turn.work / "same.txt").write_text("base\n")
+        outcome, detail = turn.stage(peers(2), workspace="own")
+        kept = turn.work / TEAM_DIR / "s1-peer.2"
+        kept_text, status = (kept / "same.txt").read_text(), git_status(turn)
+        turn.finish()
+    finally:
+        stop(model)
+    # A conflict is the caller's to resolve, not a failure of the team.
+    assert outcome == "completed" and detail["merges"] == {"peer.1": "merged", "peer.2": "conflict"}
+    assert (turn.work / "same.txt").read_text() == "one\n" and status == "" and kept_text == "two\n"
+    assert root_events(turn, "team/merge")[1]["files"] == ["same.txt"]
+    (said,) = root_events(turn, "user/message")
+    assert said["content"].endswith(
+        f"peer.2: not merged, it conflicts in same.txt; its changes stay in {kept} on branch reef/s1/peer.2"
+    )
+    assert not kept.exists()
+
+
+def test_a_second_stage_run_branches_from_the_workdir_as_the_caller_left_it(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("a.txt", "one\n")]})
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        turn.stage(peers(1), workspace="own")
+        (turn.work / "a.txt").write_text("changed by the caller\n")
+        outcome, detail = turn.stage(peers(1), workspace="own")
+        turn.finish()
+    finally:
+        stop(model)
+    # The second run starts from the caller's edit, so writing the first text again is a change, and it merges.
+    assert (outcome, detail["merges"]) == ("completed", {"peer.1": "merged"})
+    assert [m["branch"] for m in root_events(turn, "team/merge")] == ["reef/s1/peer.1", "reef/s2/peer.1"]
+    assert [e["stage_run"] for e in root_events(turn, "team/start")] == [1, 2]
+    headers = [events(path)[0]["data"] for path in sorted((turn.sessions / "agents").glob("*.jsonl"))]
+    assert [Path(header["workdir"]).name for header in headers] == ["s1-peer.1", "s2-peer.1"]
+    assert (turn.work / "a.txt").read_text() == "one\n"
+
+
+def test_a_member_that_changes_nothing_merges_nothing_and_a_tasks_own_git_is_left_alone(tmp_path: Path) -> None:
+    model = WritingModel({})
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        (turn.work / ".git").mkdir()
+        (turn.work / ".git" / "HEAD").write_text("the task's own repository\n")
+        outcome, detail = turn.stage(peers(1), workspace="own")
+        turn.finish()
+    finally:
+        stop(model)
+    assert (outcome, detail["merges"]) == ("completed", {"peer.1": "empty"})
+    assert (turn.work / ".git" / "HEAD").read_text() == "the task's own repository\n"
+    (said,) = root_events(turn, "user/message")
+    assert said["content"].endswith("peer.1: changed no file")
+
+
+def test_shared_members_write_into_the_callers_workdir_and_no_git_runs(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("a.txt", "one\n")], "peer.2": [("b.txt", "two\n")]})
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        outcome, detail = turn.stage(peers(2), workspace="shared")
+        turn.finish()
+    finally:
+        stop(model)
+    assert outcome == "completed" and "merges" not in detail and not root_events(turn, "team/merge")
+    assert sorted(path.name for path in turn.work.iterdir()) == ["a.txt", "b.txt"]
+
+
+class NoGitRunner(HostCommandRunner):
+    def run(self, argv, *, cwd, timeout_seconds):
+        if "--version" in argv:
+            return CommandOutcome(127, "", "git: command not found")
+        return super().run(argv, cwd=cwd, timeout_seconds=timeout_seconds)
+
+
+def test_an_own_stage_without_git_ends_gave_up_before_any_member_starts(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("a.txt", "one\n")]})
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES, control=EpisodeControl(command_runner=NoGitRunner()))
+        outcome, detail = turn.stage(peers(2), workspace="own")
+        turn.finish()
+    finally:
+        stop(model)
+    assert (outcome, detail["agents"], detail["merges"]) == ("gave_up", [], {}) and not model.requests
+    assert not (turn.sessions / "agents").exists()
+    (said,) = root_events(turn, "user/message")
+    assert said["content"] == "the team did not start: git is not installed where the tools run"
+
+
+def test_the_host_command_runner_reports_a_missing_command_and_a_timeout_as_outcomes(tmp_path: Path) -> None:
+    runner = HostCommandRunner()
+    assert runner.run(["reef-no-such-command"], cwd=str(tmp_path), timeout_seconds=5).return_code == 127
+    slow = runner.run(["sleep", "5"], cwd=str(tmp_path), timeout_seconds=0.2)
+    assert slow.return_code == 124 and "did not finish in 0.2 s" in slow.stderr
+    done = runner.run(["sh", "-c", "echo hi; exit 3"], cwd=str(tmp_path), timeout_seconds=5)
+    assert done == CommandOutcome(3, "hi\n", "")

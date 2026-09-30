@@ -1,8 +1,8 @@
-"""What the process that starts a native episode sets and the tree cannot: the token budget and the stop flag.
+"""What the process that starts a native episode sets and the tree cannot: the budget, the stop, where team git runs.
 
 ``run_episode`` passes the budget as ``REEF_EPISODE_TOKENS`` from ``evolution.episode_tokens``; no node renders it,
-so a candidate tree cannot raise the budget it is judged under. Both are shared by every agent turn of the
-episode, the members of a team stage included, and read before each step.
+so a candidate tree cannot raise the budget it is judged under. The budget and the stop flag are shared by every
+agent turn of the episode, the members of a team stage included, and read before each step.
 """
 
 from __future__ import annotations
@@ -10,8 +10,10 @@ from __future__ import annotations
 import threading
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from pathlib import PurePosixPath
 
 from reef.harness.episodes.executor import EPISODE_TOKENS_ENV
+from reef.harness.runners.native.workspaces import CommandRunner, HostCommandRunner
 
 
 def episode_token_limit(environ: Mapping[str, str]) -> int | None:
@@ -73,3 +75,7 @@ class EpisodeControl:
 
     budget: TeamBudget = field(default_factory=lambda: TeamBudget(None))
     stop: EpisodeStop = field(default_factory=EpisodeStop)
+    #: Where team stages run git, and where their git directory and member worktrees live; None is ``.reef/team``
+    #: under the main worktree, which git never tracks.
+    command_runner: CommandRunner = field(default_factory=HostCommandRunner)
+    team_path: PurePosixPath | None = None

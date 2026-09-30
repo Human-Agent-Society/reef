@@ -14,6 +14,7 @@ from reef.harness.runners.native.host import TreeOrder
 from reef.harness.runners.native.release_client import EventWriter, ReleaseUpdateListener
 from reef.harness.runners.native.selftools import ServeState
 from reef.harness.runners.native.serve import EventSink
+from reef.harness.runners.native.workspaces import CommandRunner
 
 
 @pytest.mark.parametrize(
@@ -36,6 +37,7 @@ from reef.harness.runners.native.serve import EventSink
         ReleaseUpdateListener,
         ServeState,
         EventSink,
+        CommandRunner,
     ],
 )
 def test_incomplete_harness_integration_cannot_be_constructed(interface):
