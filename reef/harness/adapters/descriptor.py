@@ -23,8 +23,9 @@ everything the shared engines need to drive one harness binary:
   pinned version, consumed by the served install script; reef never hosts
   or proxies binary bytes.
 - ``client_env`` and ``client_args`` (optional): the variables and the leading
-  arguments a ``reef-<adapter>`` run adds when a person runs the binary;
-  ``client_version_args`` names the version flags that get no leading
+  arguments a ``reef-<adapter>`` run adds when a person runs the binary, which
+  an episode never gets (``{root}`` in a ``client_env`` value is the install
+  root); ``client_version_args`` names the version flags that get no leading
   arguments.
 - ``client_state`` (optional): the sessions and settings a ``reef-<adapter>`` run
   keeps in the installed tree, so a later run finds them; the check of the
@@ -210,7 +211,8 @@ class AdapterDescriptor:
     #: Environment the ``reef-<adapter>`` wrapper adds when a person runs the
     #: binary: what an interactive run needs that an episode's ``env`` (offline,
     #: hermetic) must not carry, such as silencing the binary's self-updater
-    #: while reef pins its version.
+    #: while reef pins its version. ``{root}`` in a value is the install root,
+    #: for a directory of the installed tree outside the relocated composition.
     client_env: Mapping[str, str] = field(default_factory=dict)
     #: Arguments the ``reef-<adapter>`` wrapper puts ahead of the person's own when
     #: it runs the binary: a setting the rendered tree must not be able to undo.
