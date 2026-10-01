@@ -1179,9 +1179,12 @@ task to Harbor through reef-eval with the Harbor agent
   result over 20,000 characters is saved in the container, and the agent
   removes ``.reef/tool-output`` from the workdir before the verifier runs.
 - The git commands of a ``workspace: own`` stage run in the container too,
-  with the git directory and the member worktrees under ``/reef/team``,
-  outside the workdir the verifier reads. ``/reef/team`` is removed when the
-  turn ends.
+  with the git directory and the member clones under ``/reef/team``,
+  outside the workdir the verifier reads.
+- Before the verifier runs, the agent removes ``.reef/tool-output`` and
+  ``/reef/team``, and empties Harbor's verifier directory
+  (``/logs/verifier``), so the reward and any infrastructure marker there
+  are what the verifier itself wrote.
 
 The task image needs ``python3``; setup fails with "the task image has no
 python3, which native_harbor tools need" without it. A ``workspace: own``
@@ -1233,8 +1236,11 @@ the tree:
   episode's stop flag: a model call in flight finishes, the rest of its
   tool calls end ``STOPPED``, every turn ends ``stopped`` at its next step,
   and a team stage still merges. The agent waits up to 120 seconds for
-  that, then Harbor runs the verifier, as it does after any agent timeout.
-  The agent reports the episode's token counts to Harbor's
+  that. A turn still running then starts no command in the container: its
+  commands fail, so a stage's merge fails instead of changing the workdir
+  under the verifier, while a command already running ends on its own, as
+  for any Harbor agent. Harbor then runs the verifier, as it does after any
+  agent timeout. The agent reports the episode's token counts to Harbor's
   ``AgentContext``.
 
 The runner process imports every hook and runs any ``native_loop``, and

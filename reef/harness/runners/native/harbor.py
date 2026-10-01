@@ -4,8 +4,10 @@ Harbor builds the task container and calls ``setup`` and ``run`` on the trial's 
 ``run`` walks the tree on a worker thread (a team's members on threads of their own), and the model calls stay on
 this host. Every tool call and every team git command goes to the container through ``HarborTaskEnvironment``,
 which schedules Harbor's coroutines on the trial's event loop and waits for them. When Harbor cancels ``run`` at the
-task's agent timeout, the episode's stop flag is set and ``run`` waits for the turn to end, so the members stop, a
-stage merges and the team's git state is removed before the verifier sees the workdir.
+task's agent timeout, the episode's stop flag is set and ``run`` waits up to ``CANCEL_GRACE_SECONDS`` for the turn
+to end, so the members stop and a stage merges. However ``run`` returns, the bridge then closes, so a turn still
+running starts no command in the container, and the saved tool output, the team's git state and anything already
+in Harbor's verifier directory are removed: the verifier sees the workdir as it stands and writes its output afresh.
 
 Only Harbor imports this module, so the rest of the native runner never needs Harbor.
 """
@@ -16,6 +18,7 @@ import asyncio
 import contextlib
 import math
 import shlex
+import threading
 import uuid
 from collections.abc import Coroutine
 from pathlib import Path, PurePosixPath
@@ -25,6 +28,7 @@ from harbor.agents.base import BaseAgent
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.environments.base import BaseEnvironment
 from harbor.models.agent.context import AgentContext
+from harbor.models.trial.paths import EnvironmentPaths
 
 from reef.core.version import __version__
 from reef.harness.runners.native import run_loop
@@ -54,11 +58,14 @@ class HarborTaskEnvironment(TaskEnvironment):
     """A Harbor environment for worker threads: each call runs on the trial's event loop while the thread waits.
 
     Harbor's Docker exec returns a command's stderr inside its stdout, so every command's stderr goes to a file in
-    the container and comes back after a marker line; the tool child's reply is then stdout alone."""
+    the container and comes back after a marker line; the tool child's reply is then stdout alone. Once ``close``
+    is called, every call fails at once."""
 
     def __init__(self, environment: BaseEnvironment, loop: asyncio.AbstractEventLoop) -> None:
         self.environment = environment
         self.loop = loop
+        self.close_lock = threading.Lock()
+        self.is_closed = False
 
     def exec(self, command: str, *, cwd: str | None, timeout_seconds: float) -> CommandOutcome:
         marker = f"reef-stderr-{uuid.uuid4().hex}"
@@ -79,11 +86,15 @@ class HarborTaskEnvironment(TaskEnvironment):
 
     def wait(self, call: Coroutine[object, object, ResultT], timeout_seconds: float) -> ResultT:
         """``call``'s result from the trial's event loop, or a TaskEnvironmentError naming what went wrong."""
-        try:
-            future = asyncio.run_coroutine_threadsafe(call, self.loop)
-        except RuntimeError as exc:  # the trial's event loop has closed
-            call.close()
-            raise TaskEnvironmentError(f"the Harbor environment is gone: {exc}") from exc
+        with self.close_lock:
+            if self.is_closed:
+                call.close()
+                raise TaskEnvironmentError("the agent's run has ended; the Harbor environment takes no more commands")
+            try:
+                future = asyncio.run_coroutine_threadsafe(call, self.loop)
+            except RuntimeError as exc:  # the trial's event loop has closed
+                call.close()
+                raise TaskEnvironmentError(f"the Harbor environment is gone: {exc}") from exc
         try:
             return future.result(timeout=timeout_seconds + EXEC_GRACE_SECONDS)
         except Exception as exc:
@@ -92,13 +103,20 @@ class HarborTaskEnvironment(TaskEnvironment):
             future.cancel()
             raise TaskEnvironmentError(f"{type(exc).__name__}: {exc}") from exc
 
+    def close(self) -> None:
+        """Refuse every later call, so no command of the episode starts after this; one in flight runs to its end,
+        as a command of any Harbor agent does at its timeout."""
+        with self.close_lock:
+            self.is_closed = True
+
 
 class NativeTeamAgent(BaseAgent):
     """Reef's native loop, with any team its tree runs, as a Harbor agent.
 
     Harbor passes the trial config's agent ``kwargs``: where the rendered tree and its sessions are on this host, the
     reply budget of a model call from the binding, and the episode's token budget. The model and its key come from
-    the tree's ``models.json``, so no credential goes into the trial config."""
+    the tree's ``models.json``, so no credential goes into the trial config. ``verifier_path`` is where Harbor's
+    verifier writes in the container."""
 
     SUPPORTS_ATIF = False
 
@@ -112,6 +130,7 @@ class NativeTeamAgent(BaseAgent):
         max_completion_tokens: int,
         token_limit: int | None = None,
         support_path: str = str(SUPPORT_PATH),
+        verifier_path: str = str(EnvironmentPaths.verifier_dir),
         **harbor_options: object,
     ) -> None:
         super().__init__(logs_dir, model_name, **harbor_options)
@@ -120,6 +139,7 @@ class NativeTeamAgent(BaseAgent):
         self.max_completion_tokens = max_completion_tokens
         self.token_limit = token_limit
         self.support_path = PurePosixPath(support_path)
+        self.verifier_path = PurePosixPath(verifier_path)
 
     @staticmethod
     def name() -> str:
@@ -185,12 +205,18 @@ class NativeTeamAgent(BaseAgent):
                     await asyncio.wait_for(asyncio.shield(turn), CANCEL_GRACE_SECONDS)
                 raise
         finally:
+            # A turn still running past the grace starts no command in the container.
+            bridge.close()
             context.n_input_tokens = control.budget.input_tokens
             context.n_output_tokens = control.budget.output_tokens
-            # The verifier sees the task's own files: the full results the loop saved there go.
+            # The verifier sees the task's own files and writes its own output: the full results the loop saved in
+            # the workdir, a team's git state left behind, and whatever a tool wrote where the verifier writes go.
             reef_path = shlex.quote(str(workdir / ".reef"))
+            team_path = shlex.quote(str(self.support_path / "team"))
+            verifier_path = shlex.quote(str(self.verifier_path))
             await environment.exec(
-                f"rm -rf {reef_path}/tool-output; rmdir {reef_path} 2>/dev/null; true",
+                f"rm -rf {reef_path}/tool-output {team_path}; rmdir {reef_path} 2>/dev/null; "
+                f"rm -rf {verifier_path}/* {verifier_path}/.[!.]* {verifier_path}/..?* 2>/dev/null; true",
                 user="root",
                 timeout_sec=AGENT_COMMAND_TIMEOUT_SECONDS,
             )

@@ -20,7 +20,7 @@ from types import SimpleNamespace
 import pytest
 from reef_service.test_harness_render import NATIVE_HOOK, NATIVE_TOOL, NODES, golden_tree
 from reef_service.test_native_harness import _call, _FakeModel, _reply, _seed_nodes
-from reef_service.test_native_team import TEAM_NODES, WritingModel, crew_graph, member_files
+from reef_service.test_native_team import TEAM_NODES, MemberModel, WritingModel, crew_graph, member_files
 
 import reef.harness.runners.native as native
 from reef.harness.adapters import available_adapters, get_adapter
@@ -93,8 +93,10 @@ class FakeEnvironment:
     def __init__(self, tmp_path: Path, *, is_python_installed: bool = True) -> None:
         self.workspace_path = tmp_path / "workspace"
         self.support_path = tmp_path / "reef"
+        self.verifier_path = tmp_path / "verifier"
         self.bin_path = tmp_path / "bin"
         self.workspace_path.mkdir()
+        self.verifier_path.mkdir()
         self.bin_path.mkdir()
         for name in COMMANDS:
             (self.bin_path / name).symlink_to(shutil.which(name))
@@ -148,6 +150,7 @@ def make_agent(tmp_path: Path, root: Path, environment: FakeEnvironment, **optio
         session_path=str(root / "sessions"),
         max_completion_tokens=options.pop("max_completion_tokens", 32000),
         support_path=str(environment.support_path),
+        verifier_path=str(environment.verifier_path),
         **options,
     )
 
@@ -501,6 +504,110 @@ def test_a_team_works_in_worktrees_in_the_container_and_only_merged_files_reach_
     assert not team_path.exists()
     # Every git command ran in the environment, through the commands Harbor's exec ran.
     assert any(" git " in command and "--git-dir=" in command for _, command in environment.commands)
+
+
+SLOW_WRITE_TOOL = (
+    "native_tool",
+    {
+        "name": "slow_write",
+        "description": "Sleeps two seconds, then writes late.txt.",
+        "parameters": {"type": "object", "properties": {}},
+        "code": (
+            "import time\nfrom pathlib import Path\n\n\ndef run(args, workdir):\n"
+            "    time.sleep(2)\n    Path(workdir, 'late.txt').write_text('late')\n    return 'wrote late.txt'\n"
+        ),
+    },
+)
+
+
+class SlowMemberModel(MemberModel):
+    """The root hands the task on; each member runs the slow write once, then answers."""
+
+    def reply(self, instance: str, body: dict) -> dict:
+        if instance == "root":
+            return _reply(content="go")
+        if not any(message.get("role") == "tool" for message in body["messages"]):
+            return _reply(tool_calls=[_call("slow_write", {}, "s1")])
+        return _reply(content="wrote late.txt")
+
+
+def test_past_the_cancel_grace_no_command_of_the_episode_reaches_the_container(tmp_path: Path, monkeypatch) -> None:
+    harbor_agent_class()
+    import reef.harness.runners.native.harbor as harbor_module
+
+    monkeypatch.setattr(harbor_module, "CANCEL_GRACE_SECONDS", 0.3)
+    model = SlowMemberModel()
+    environment = FakeEnvironment(tmp_path)
+    crew = crew_graph(mode="team", agents=["peer"], workspace="own")
+
+    async def cancelled_then_later() -> tuple[list[str], bool, list[str]]:
+        from harbor.models.agent.context import AgentContext
+
+        agent = make_agent(tmp_path, root, environment)
+        await agent.setup(environment)
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(agent.run("put hello in notes.txt", environment, AgentContext()), 1.0)
+        # Harbor would start the verifier here; the member's tool call was still running.
+        at_verifier = sorted(path.name for path in environment.workspace_path.iterdir())
+        is_team_gone = not (environment.support_path / "team").exists()
+        await asyncio.sleep(3)
+        return at_verifier, is_team_gone, sorted(path.name for path in environment.workspace_path.iterdir())
+
+    try:
+        root = render_tree(tmp_path, model, [*TEAM_NODES, SLOW_WRITE_TOOL, ("native_graph", crew)])
+        at_verifier, is_team_gone, later = asyncio.run(cancelled_then_later())
+    finally:
+        stop(model)
+    assert at_verifier == later == [] and is_team_gone
+    (merge,) = typed(events(root / "sessions" / "session.jsonl"), "team/merge")
+    assert merge["result"] == "failed" and "takes no more commands" in merge["error"]
+
+
+PLANT_TOOL = (
+    "native_tool",
+    {
+        "name": "plant",
+        "description": "Writes text at an absolute path.",
+        "parameters": {
+            "type": "object",
+            "properties": {"path": {"type": "string"}, "text": {"type": "string"}},
+            "required": ["path", "text"],
+        },
+        "code": (
+            "from pathlib import Path\n\n\ndef run(args, workdir):\n"
+            "    Path(args['path']).write_text(args['text'])\n    return 'planted'\n"
+        ),
+    },
+)
+
+
+class PlantingModel(_FakeModel):
+    """Writes a reward and a marker file where Harbor's verifier writes, then answers."""
+
+    verifier_path: Path
+
+    def script(self, body: dict) -> dict:
+        if any(message.get("role") == "tool" for message in body["messages"]):
+            return _reply(content="done")
+        calls = [
+            _call("plant", {"path": str(self.verifier_path / "reward.txt"), "text": "1"}, "c1"),
+            _call("plant", {"path": str(self.verifier_path / ".m.json"), "text": "{}"}, "c2"),
+        ]
+        return _reply(tool_calls=calls)
+
+
+def test_what_a_tool_wrote_where_the_verifier_writes_is_gone_before_the_verifier(tmp_path: Path) -> None:
+    model = PlantingModel()
+    environment = FakeEnvironment(tmp_path)
+    model.verifier_path = environment.verifier_path
+    try:
+        root = render_tree(tmp_path, model, [PLANT_TOOL])
+        asyncio.run(play(make_agent(tmp_path, root, environment), environment))
+    finally:
+        stop(model)
+    results = typed(events(root / "sessions" / "session.jsonl"), "tool/result")
+    assert [result["content"] for result in results] == ["planted", "planted"]
+    assert list(environment.verifier_path.iterdir()) == []
 
 
 class FakeLab:
