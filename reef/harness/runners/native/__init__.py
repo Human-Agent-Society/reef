@@ -625,8 +625,10 @@ def _complete(
         status = exc.status if isinstance(exc, ModelBindingError) else None
         if status is not None:
             failure["status"] = status
-        failure["is_transient"] = isinstance(exc, ModelBindingError) and (
-            status is None or status in TRANSIENT_STATUSES or status >= 500
+        failure["is_transient"] = (
+            isinstance(exc, ModelBindingError)
+            and not exc.is_malformed_reply
+            and (status is None or status in TRANSIENT_STATUSES or status >= 500)
         )
         return None, failure, None
 

@@ -14,6 +14,7 @@ import shutil
 import subprocess
 import sys
 import time
+from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -441,7 +442,29 @@ class MalformedModel(_FakeModel):
         return {"id": "fake", "object": "chat.completion"}
 
 
-@pytest.mark.parametrize("model_class", [ClientErrorModel, MalformedModel])
+class TextReplyHandler(BaseHTTPRequestHandler):
+    """A 200 whose body is not JSON, as a proxy's error page is."""
+
+    def do_POST(self) -> None:
+        self.server.requests.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+        payload = b"<html>upstream error</html>"
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(payload)))
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def log_message(self, *args) -> None:
+        return None
+
+
+class TextReplyModel(_FakeModel):
+    def __init__(self) -> None:
+        super().__init__()
+        self.RequestHandlerClass = TextReplyHandler
+
+
+@pytest.mark.parametrize("model_class", [ClientErrorModel, MalformedModel, TextReplyModel])
 def test_a_client_error_or_a_malformed_reply_is_not_retried_under_the_policy(tmp_path: Path, model_class) -> None:
     model = model_class()
     try:

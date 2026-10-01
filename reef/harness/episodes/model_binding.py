@@ -53,12 +53,16 @@ ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
 
 
 class ModelBindingError(ReefError):
-    """A model call failed; ``status`` carries the HTTP status when there was one."""
+    """A model call failed; ``status`` carries the HTTP status when there was one, and ``is_malformed_reply`` says
+    the endpoint answered with a body that is not a reply."""
 
-    def __init__(self, message: str, *, status: int | None = None, detail: str = "") -> None:
+    def __init__(
+        self, message: str, *, status: int | None = None, detail: str = "", is_malformed_reply: bool = False
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.detail = detail
+        self.is_malformed_reply = is_malformed_reply
 
 
 def usage_of(response: Any) -> dict[str, int] | None:
@@ -343,8 +347,10 @@ class ModelBinding:
                 status=exc.code,
                 detail=detail,
             ) from exc
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, OSError) as exc:
             raise ModelBindingError(f"model endpoint unreachable: {exc}") from exc
+        except ValueError as exc:
+            raise ModelBindingError(f"model endpoint sent a malformed reply: {exc}", is_malformed_reply=True) from exc
 
     # -- Episode-side rendering ----------------------------------------------
 
