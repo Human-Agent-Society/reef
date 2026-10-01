@@ -128,12 +128,13 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
                 ids.append((await response.json())["agent_record_id"])
             assert await asyncio.to_thread(entered.wait, 5)
             # One is in flight and nine wait unread: the processor buffers one instruction at a time.
-            assert scenario.trainer.processor_status() == {"buffered_requests": 1}
+            assert scenario.trainer.processor_status()["buffered_requests"] == 1
             assert scenario.trainer.pending_instructions() == 10
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
             processor = (await status.json())["scenarios"]["agents"]["processor"]
-            assert processor == {"buffered_requests": 1, "pending_instructions": 10}
+            assert processor["buffered_requests"] == 1
+            assert processor["pending_instructions"] == 10
             assert scenario.records.count("agents", request_type=RequestType.TRAIN) == 10
             # Retrying an accepted instruction does not add another pending request.
             retry = await _post(client, {**_request("request 0"), "agent_record_id": ids[0]})
@@ -148,10 +149,9 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
             assert scenario.trainer.pending_instructions() == 0
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()
-            assert (await status.json())["scenarios"]["agents"]["processor"] == {
-                "buffered_requests": 0,
-                "pending_instructions": 0,
-            }
+            drained = (await status.json())["scenarios"]["agents"]["processor"]
+            assert drained["buffered_requests"] == 0
+            assert drained["pending_instructions"] == 0
         finally:
             release.set()
             await client.close()

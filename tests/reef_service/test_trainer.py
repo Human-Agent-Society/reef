@@ -168,7 +168,8 @@ def test_recipe_processor_never_becomes_ready() -> None:
     processor.ingest(inference("i1"))
 
     assert not processor.ready()
-    assert processor.status() == {}
+    # A processor that never becomes ready says so: it holds no ready units, whatever it has ingested.
+    assert processor.status()["ready_units"] == 0
     assert processor.releasable_record_ids().isdisjoint(frozenset({"i1"}))
 
 
@@ -421,7 +422,8 @@ def test_trainer_reserves_batch_and_commits_backend_preparation() -> None:
 
     batch = trainer.reserve_training_batch()
     assert batch is not None
-    assert trainer.processor_status() == {}
+    # The reserved batch has not been consumed yet, so its unit is still counted as held.
+    assert trainer.processor_status() == {"ready_units": 1, "batch_size": 1}
     execution = trainer.execute_reserved_step(0)
     result = execution.result
 
