@@ -576,10 +576,11 @@ its committed outputs are a full local run on ollama with no GPU.
 
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is
-graded, and every result is reported against its receipt. Only failures enter
-the window, so the first failing report triggers one evolve step. In this
-example the served model is its own proposer, and it answers with one skill
-mutation.
+graded, and every result is reported against its receipt. Every valid scored
+report batches, a passing one included, and ``batch_size: 1`` makes each
+report its own batch, so every report this run submits triggers one evolve
+step. In this example the served model is its own proposer, and it answers
+with one skill mutation.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
@@ -606,13 +607,12 @@ service then requires that token, and every ``curl`` on this page needs
 ``-H "Authorization: Bearer $REEF_TOKEN"``.
 
 One step is six episodes, three tasks on each of the two trees, and the
-reference run finished in 63 s on Qwen3-8B: one failing task entered the
-window, the served model proposed a new skill beside the starter, and the evaluation
+reference run finished in 63 s on Qwen3-8B: one reported trace filled the
+batch, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
 notebook run, on ollama ``qwen2.5:7b`` with no GPU, records one step whose candidate
 tied the current tree on every task and lost the gate. The run has succeeded when one
-task fails, the failing report opens the window, one evolve step runs, and
-``GET /reef/harness`` serves a release other than the seed.
+step wins its gate and ``GET /reef/harness`` serves a release other than the seed.
 ``/reef/harness/releases`` then shows that step's training row with
 ``published: true`` in its metrics.
 
@@ -629,10 +629,13 @@ still answering plain requests. A missing model server does not produce
 this symptom: the record phase raises on its first call and ``run.py``
 exits with the upstream error before any evolve step runs.
 
-A model that answers all three tasks correctly also leaves the route at 404,
-because nothing fails, so nothing batches and no step runs. ``run.py`` prints
-``every task passed: nothing batched, no evolve step runs`` when that
-happens.
+A model that answers all three tasks correctly still batches one step per
+report. Evaluation runs the tasks again on the current and candidate trees,
+so passing the initial tasks does not determine whether a candidate will
+win, tie, or lose. A step publishes only when its candidate wins; rejected
+or skipped steps leave the served tree unchanged. ``run.py`` counts all
+submitted reports, waits for the steps they triggered up to its deadline,
+and prints how many reports it batched and how many of them failed.
 
 Install the published tree
 --------------------------
