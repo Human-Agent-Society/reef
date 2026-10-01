@@ -20,6 +20,7 @@ from types import SimpleNamespace
 import pytest
 from reef_service.test_harness_render import NATIVE_HOOK, NATIVE_TOOL, NODES, golden_tree
 from reef_service.test_native_harness import _call, _FakeModel, _reply, _seed_nodes
+from reef_service.test_native_team import TEAM_NODES, WritingModel, crew_graph, member_files
 
 import reef.harness.runners.native as native
 from reef.harness.adapters import available_adapters, get_adapter
@@ -472,6 +473,34 @@ def test_a_cancel_stops_the_turn_before_its_next_call_and_before_its_next_tool(t
     assert result["error"]["code"] == "STOPPED"
     assert typed(found, "turn/end")[-1]["reason"] == {"kind": "stopped", "reason": "cancelled"}
     assert not (environment.workspace_path / "notes.txt").exists()
+
+
+def test_a_team_works_in_worktrees_in_the_container_and_only_merged_files_reach_the_workdir(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("a.txt", "from one\n")], "peer.2": [("b.txt", "from two\n")]})
+    environment = FakeEnvironment(tmp_path)
+    crew = crew_graph(mode="team", agents=["peer", "peer"], workspace="own")
+    try:
+        root = render_tree(tmp_path, model, [*TEAM_NODES, ("native_graph", crew)])
+        asyncio.run(play(make_agent(tmp_path, root, environment), environment))
+    finally:
+        stop(model)
+    sessions = root / "sessions"
+    team_path = environment.support_path / "team"
+    headers = {instance: found[0]["data"] for instance, found in member_files(sessions).items()}
+    # Each member worked in a worktree under the support directory, outside the task's workdir.
+    assert {instance: header["workdir"] for instance, header in headers.items()} == {
+        "peer.1": str(team_path / "s1-peer.1"),
+        "peer.2": str(team_path / "s1-peer.2"),
+    }
+    merges = typed(events(sessions / "session.jsonl"), "team/merge")
+    assert [(merge["agent"], merge["result"]) for merge in merges] == [("peer.1", "merged"), ("peer.2", "merged")]
+    # The verifier finds the merged files in the workdir, no git state there, and no team state anywhere.
+    assert (environment.workspace_path / "a.txt").read_text() == "from one\n"
+    assert (environment.workspace_path / "b.txt").read_text() == "from two\n"
+    assert sorted(path.name for path in environment.workspace_path.iterdir()) == ["a.txt", "b.txt"]
+    assert not team_path.exists()
+    # Every git command ran in the environment, through the commands Harbor's exec ran.
+    assert any(" git " in command and "--git-dir=" in command for _, command in environment.commands)
 
 
 class FakeLab:
