@@ -66,6 +66,20 @@ def mount_error(error: str, trials_dir: Path) -> str:
     )
 
 
+def check_reef_eval(runner_name: str) -> None:
+    """A HarborTrialError naming ``runner_name`` when reef-eval cannot be imported here.
+
+    reef-eval pulls Harbor's dependency tree, which the render path and its tests must never need. Harbor requires
+    Python 3.12, above Reef's own floor, so the extra carries that marker and can be absent on a supported
+    interpreter; say so rather than raising a bare ImportError."""
+    try:
+        import reef_eval  # noqa: F401
+    except ImportError as exc:
+        raise HarborTrialError(
+            f"the {runner_name} runner needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
+        ) from exc
+
+
 def run_trial(
     task: str,
     agent: Mapping[str, object],
@@ -77,16 +91,8 @@ def run_trial(
 ) -> TrialResult:
     """Run ``task`` with the Harbor ``agent`` spec in a ``docker`` or ``e2b`` environment, its trial under the
     existing ``trials_path``. ``runner_name`` names the runner in the error a missing reef-eval raises."""
-    # Lazy: reef-eval pulls Harbor's dependency tree, which the render path
-    # and its tests must never need. Harbor requires Python 3.12, above Reef's
-    # own floor, so the extra carries that marker and can be absent on a
-    # supported interpreter; say so rather than raising a bare ImportError.
-    try:
-        from reef_eval import Lab
-    except ImportError as exc:
-        raise HarborTrialError(
-            f"the {runner_name} runner needs reef-eval, a dependency of reef-infra; reinstall reef-infra"
-        ) from exc
+    check_reef_eval(runner_name)
+    from reef_eval import Lab  # late: see check_reef_eval
 
     names_before_run = {path.name for path in trials_path.iterdir()}
     row = asyncio.run(

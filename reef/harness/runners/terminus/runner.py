@@ -31,7 +31,7 @@ from typing import Any
 
 from reef.harness.episodes.executor import ISOLATION_ENV
 from reef.harness.episodes.trajectory import primary_reward
-from reef.harness.runners.harbor_trial import HarborTrialError, mount_error, own_trial, run_trial
+from reef.harness.runners.harbor_trial import HarborTrialError, check_reef_eval, mount_error, own_trial, run_trial
 from reef.harness.runners.terminus.tree import (
     ENVIRONMENT_ENV,
     TerminusTreeError,
@@ -169,6 +169,10 @@ def run(task: str) -> int:
     Non-zero when the verifier produced no reward: the episode then reports a
     failed run rather than a scoreless success.
     """
+    try:
+        check_reef_eval("terminus")
+    except HarborTrialError as exc:
+        raise TerminusTreeError(str(exc)) from exc
     trial_slug(task)  # refuse a task that cannot name its own trial file
     root = _required_env(TREE_DIR_ENV)
     tree = load_tree(root)

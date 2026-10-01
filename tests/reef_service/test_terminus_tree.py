@@ -265,6 +265,14 @@ def test_a_run_records_only_its_own_trials_steps_in_a_reused_trials_dir(
 
 
 @pytest.mark.unit
+def test_a_missing_reef_eval_is_named_before_the_runner_reads_its_environment(monkeypatch) -> None:
+    monkeypatch.setitem(sys.modules, "reef_eval", None)
+    monkeypatch.delenv(runner.TREE_DIR_ENV, raising=False)
+    with pytest.raises(TerminusTreeError, match="the terminus runner needs reef-eval"):
+        runner.run("hello-world")
+
+
+@pytest.mark.unit
 def test_a_trial_record_carries_the_verifier_rewards(tmp_path: Path) -> None:
     record = runner.trial_record("hello-world", {"accuracy": 1.0}, tmp_path)
     assert record["reward"] == 1.0 and record["failed"] is False
