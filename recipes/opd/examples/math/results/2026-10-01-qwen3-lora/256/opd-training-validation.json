@@ -1,0 +1,13 @@
+{
+  "opd_updates": 32,
+  "steps_contiguous": true,
+  "all_losses_gradients_finite": true,
+  "base_trainable_zero": true,
+  "adapter_tensors": 144,
+  "all_tensors_finite": true,
+  "tensors_changed_from_sft": 144,
+  "sft_sha256": "1443de12c7665a572796eeaaadc52789ad6bd80f386dcff2fcf51064b4701744",
+  "final_sha256": "60661bab831d1e4d2681b70a0e831cab4a8280cbecc1aa96d04f51136fb365dc",
+  "max_mean_hf_sglang_logprob_error": 0.07343890517950058,
+  "evaluation_status": "running; no final accuracy yet"
+}

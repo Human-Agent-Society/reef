@@ -1,0 +1,13 @@
+{
+  "sft_updates": 16,
+  "all_losses_gradients_finite": true,
+  "adapter_tensors": 144,
+  "adapter_all_finite": true,
+  "adapter_sha256": "1443de12c7665a572796eeaaadc52789ad6bd80f386dcff2fcf51064b4701744",
+  "first_to_last_update_seconds": 144.29488921165466,
+  "mean_step_loss": 0.9437304984312505,
+  "parameters": {
+    "trainable": 10911744,
+    "base_trainable": 0
+  }
+}

@@ -1,0 +1,63 @@
+{
+  "student": "Qwen/Qwen3-4B-Base",
+  "teacher": "Qwen/Qwen3-8B",
+  "backend": "standalone Transformers/PEFT training + SGLang inference; independent frozen teacher; not Reef Slime integration",
+  "physical_gpus": [
+    2,
+    3,
+    4,
+    5
+  ],
+  "seed": 0,
+  "sft_examples": 256,
+  "sft_steps": 16,
+  "sft_batch": 16,
+  "sft_lr": 0.0001,
+  "sft_max_tokens": 8192,
+  "lora_rank": 16,
+  "lora_alpha": 16,
+  "lora_targets": [
+    "down_proj",
+    "o_proj"
+  ],
+  "opd_steps": 32,
+  "opd_batch": 16,
+  "responses_per_prompt": 1,
+  "opd_max_new_tokens": 2048,
+  "opd_lr": 5e-05,
+  "evaluation_models": [
+    "base",
+    "sft",
+    "opd-final",
+    "teacher"
+  ],
+  "aime_questions": 30,
+  "eval_seeds": [
+    0,
+    1,
+    2,
+    3
+  ],
+  "eval_max_new_tokens": 32768,
+  "temperature": 1.0,
+  "top_p": 1.0,
+  "eval_only_final": true,
+  "positive_target": "any positive point estimate, with paired question-bootstrap 95% CI; no guarantee",
+  "original_experiment": "completed negative result; do not restart",
+  "stop_token_ids": [
+    151643,
+    151645
+  ],
+  "sft_length_limit": 8192,
+  "context_length": 32768,
+  "eval_effective_max_new_tokens": "min(32768,32768-prompt_tokens), identical for all four models; stay within Qwen3-4B native context",
+  "sft_epochs": 1,
+  "evaluation_order": [
+    "opd-final",
+    "sft",
+    "teacher"
+  ],
+  "base_evaluation_reused_from": "/work/qwen3-4b-opd-20260930/eval-base.jsonl",
+  "parent_run": "/work/qwen3-4b-opd-20260930",
+  "selection": "seed0 random.sample of 256 from previously fixed 1024 complete length-filtered shard-subset rows; no score-based selection; not globally uniform"
+}

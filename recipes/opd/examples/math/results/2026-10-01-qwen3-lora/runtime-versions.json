@@ -1,0 +1,9 @@
+{
+  "torch": "2.11.0+cu129",
+  "transformers": "5.12.1",
+  "peft": "0.21.0",
+  "sglang": "0.5.15.post1",
+  "flash-attn": "2.8.3",
+  "numpy": "1.26.4",
+  "safetensors": "0.8.0"
+}

@@ -1,0 +1,77 @@
+{
+  "results": {
+    "base": {
+      "correct": 3,
+      "samples": 120,
+      "accuracy": 0.025,
+      "source": "/work/qwen3-4b-opd-512-20260930/eval-base.jsonl",
+      "sha256": "4034078d0b04f87c084616c69224c8c89d48efe8837b6a8eaab068e91f31f847"
+    },
+    "sft256": {
+      "correct": 2,
+      "samples": 120,
+      "accuracy": 0.016666666666666666,
+      "source": "/work/qwen3-4b-opd-256-20260930/eval-sft.jsonl",
+      "sha256": "c33beca96595ca8c5a3aeb6b13ec96941824c87a660bdac997ad9140443640fe"
+    },
+    "opd256": {
+      "correct": 5,
+      "samples": 120,
+      "accuracy": 0.041666666666666664,
+      "source": "/work/qwen3-4b-opd-256-20260930/eval-opd-final.jsonl",
+      "sha256": "dde4da37c197f1caba95a7857e322df3a42dcde0cb0037de1458bf85f2beb40a"
+    },
+    "sft512": {
+      "correct": 2,
+      "samples": 120,
+      "accuracy": 0.016666666666666666,
+      "source": "/work/qwen3-4b-opd-512-20260930/eval-sft.jsonl",
+      "sha256": "55036c0926d4b5f95b8c2a16413b9b24ce87c7d80c10dd3c19e04ee309fbb3b5"
+    },
+    "opd512": {
+      "correct": 11,
+      "samples": 120,
+      "accuracy": 0.09166666666666666,
+      "source": "/work/qwen3-4b-opd-512-20260930/eval-opd-final.jsonl",
+      "sha256": "b5d27f48279bb248a84dfe21cf2741607f8207d384a40843d904f3936a7a6f7d"
+    },
+    "teacher": {
+      "correct": 87,
+      "samples": 120,
+      "accuracy": 0.725,
+      "source": "/work/qwen3-4b-opd-512-20260930/eval-teacher.jsonl",
+      "sha256": "cbd70949466c6db0014af4f2decf05132a8d95c03043532ae94cb82ba4ea4465"
+    }
+  },
+  "comparisons": {
+    "opd256 minus sft256": {
+      "absolute_change": 0.025,
+      "paired_question_bootstrap_95_interval": [
+        -0.016666666666666666,
+        0.06666666666666667
+      ]
+    },
+    "opd512 minus sft512": {
+      "absolute_change": 0.075,
+      "paired_question_bootstrap_95_interval": [
+        0.016666666666666666,
+        0.15
+      ]
+    },
+    "sft512 minus sft256": {
+      "absolute_change": 0.0,
+      "paired_question_bootstrap_95_interval": [
+        -0.025,
+        0.025
+      ]
+    },
+    "opd512 minus opd256": {
+      "absolute_change": 0.05,
+      "paired_question_bootstrap_95_interval": [
+        -0.016666666666666666,
+        0.125
+      ]
+    }
+  },
+  "notes": "Single training seed per arm; nested SFT samples, one epoch each (16 vs32 updates); common Base and Teacher results reused. No checkpoint selection. Question bootstrap does not capture training-seed variability."
+}

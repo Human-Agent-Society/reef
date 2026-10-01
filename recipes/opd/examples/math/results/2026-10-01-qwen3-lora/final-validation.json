@@ -1,0 +1,11 @@
+{
+  "both_pipeline_exit_zero": true,
+  "both_pipeline_pids_exited": true,
+  "both_adapters_finite": true,
+  "changed_adapter_tensors_per_arm": 144,
+  "all_training_metrics_finite": true,
+  "all_six_conditions_120_unique_matched_pairs_rescored": true,
+  "combined_analysis_reproduced_exactly": true,
+  "combined_sha256": "09c326e582df4dd0e056e692046b90220cfda630afcd936cce7fdd60786f2afc",
+  "gpu_release": "Physical GPUs2-5 each at4MiB and0percent utilization after process exit; no GPU cleanup needed."
+}
