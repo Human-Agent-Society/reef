@@ -46,6 +46,14 @@ class EpisodeError(ReefError):
     """The episode could not be launched or torn down."""
 
 
+class EpisodeTimeoutError(EpisodeError):
+    """The episode ran past its timeout."""
+
+
+class EpisodeRenderError(EpisodeError):
+    """The tree's rendered files cannot be laid out, or cannot run under the executor."""
+
+
 class TrajectoryKeepError(ReefError):
     """The episode ran but its trajectory could not be kept, so the step has no record of it."""
 
@@ -151,7 +159,7 @@ def run_episode(
         try:
             descriptor.validate_execution(files, executor)
         except EpisodeLaunchError as exc:
-            raise EpisodeError(str(exc)) from exc
+            raise EpisodeRenderError(str(exc)) from exc
     elif descriptor.self_isolating and isinstance(executor, SandboxExecutor):
         raise EpisodeError(
             f"adapter {descriptor.name!r} isolates episodes in its own container and cannot run under "
@@ -175,13 +183,13 @@ def run_episode(
         for relative, text in files.items():
             relative_path = PurePosixPath(relative)
             if relative_path.is_absolute() or ".." in relative_path.parts:
-                raise EpisodeError(f"render path {relative!r} escapes the episode root")
+                raise EpisodeRenderError(f"render path {relative!r} escapes the episode root")
             target = root / relative_path
             try:
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_text(text, encoding="utf-8")
             except (OSError, UnicodeEncodeError) as exc:
-                raise EpisodeError(f"cannot write render path {relative!r}: {exc}") from exc
+                raise EpisodeRenderError(f"cannot write render path {relative!r}: {exc}") from exc
             written.add(str(relative_path))
         workspace = root / "workspace"
         workspace.mkdir()
@@ -217,7 +225,7 @@ def run_episode(
         except EpisodeLaunchError as exc:
             raise EpisodeError(str(exc)) from exc
         except EpisodeTimeout as exc:
-            raise EpisodeError(str(exc)) from exc
+            raise EpisodeTimeoutError(str(exc)) from exc
         trajectory = reader(root / descriptor.trajectory_path)
         residue = tuple(
             sorted(

@@ -18,7 +18,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
@@ -33,6 +33,7 @@ from reef.core.evaluation import (
     UpdateCandidate,
 )
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
+from reef.core.tasks.split import task_groups
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.compose import Context
@@ -40,7 +41,14 @@ from reef.harness.compose.loader import EntryOptions, Loader
 from reef.harness.episodes.e2b import E2BExecutor
 from reef.harness.episodes.executor import EPISODE_OWNER_LEASE, EpisodeExecutor, LocalExecutor, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, usage_of
-from reef.harness.episodes.run import EpisodeError, EpisodeResult, TrajectoryKeepError, run_episode
+from reef.harness.episodes.run import (
+    EpisodeError,
+    EpisodeRenderError,
+    EpisodeResult,
+    EpisodeTimeoutError,
+    TrajectoryKeepError,
+    run_episode,
+)
 from reef.harness.episodes.trajectory import TrajectoryError, final_assistant_text
 from reef.harness.episodes.vendor_install import install_prefix, resolve_binary
 from reef.harness.tree.mutations import (
@@ -76,11 +84,13 @@ from reef.train.cordis_backend.strategies import (
     Promoter,
     Proposer,
     ProposerCalls,
+    ScoreUnavailable,
     StepProposal,
     accepts_keyword,
     accepts_manifest,
 )
 from reef.train.evaluation.evaluators import BackendEvaluateMixin, CandidatePluginFactory
+from reef.train.evaluation.paired import EpisodeFault, EpisodeLabel, PairedConfidenceMixin, PairedConfidenceSettings
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
 
 
@@ -119,8 +129,9 @@ class EpisodeEvaluationWorker:
         self, files: Mapping[str, str], task: str, keep_dir: Path | None, models: ModelBindings | None
     ) -> _ScoredEpisode:
         """Score one side's episode; a ``None`` score marks an episode that
-        could not run. The observation keeps what the exception handling
-        would otherwise discard: the failure's stage and cause. A native turn
+        could not run or that its scorer found no score for, and its fault
+        says whose failure it is. The observation keeps what the exception
+        handling would otherwise discard: the failure's stage and cause. A native turn
         that ended on an error could not run either; any other nonzero exit
         still scores, as before, and is observed alongside the score.
         The residue counts files the episode left outside the cleanup
@@ -141,11 +152,26 @@ class EpisodeEvaluationWorker:
                 keep_dir=keep_dir,
             )
         except EpisodeError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="launch", cause=str(error)))
+            # A timeout, or a render the tree's own files broke, is the harness's failure, so a rerun cannot give it
+            # more tries; any other launch failure is the host's.
+            fault: EpisodeFault = (
+                "harness" if isinstance(error, (EpisodeTimeoutError, EpisodeRenderError)) else "infrastructure"
+            )
+            scored = _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage="launch", cause=str(error)),
+                fault=fault,
+                label="execution_error",
+            )
             _write_episode_record(keep_dir, task, None, scored)
             return scored
         except TrajectoryError as error:
-            scored = _ScoredEpisode(None, FailureObservation(task=task, stage="trajectory", cause=str(error)))
+            scored = _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage="trajectory", cause=str(error)),
+                fault="harness",
+                label="execution_error",
+            )
             _write_episode_record(keep_dir, task, None, scored)
             return scored
         finally:
@@ -162,14 +188,26 @@ class EpisodeEvaluationWorker:
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="residue", cause=cause), residue, agents, path
+                None,
+                FailureObservation(task=task, stage="residue", cause=cause),
+                residue,
+                agents,
+                path,
+                fault="harness",
+                label="execution_error",
             )
         trial_error = _failed_trial_error(result.trajectory)
         if trial_error:
             # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
             # start): no answer was given, so it ranks below every real score instead of tying a zero.
             return _ScoredEpisode(
-                None, FailureObservation(task=task, stage="trial", cause=trial_error), residue, agents, path
+                None,
+                FailureObservation(task=task, stage="trial", cause=trial_error),
+                residue,
+                agents,
+                path,
+                fault="infrastructure",
+                label="execution_error",
             )
         if path.get("error") is not None:
             # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
@@ -181,13 +219,48 @@ class EpisodeEvaluationWorker:
                 cause = f"agent {path['errored_agent']}: {cause}"
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
-            return _ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
-        score = float(
-            self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
-        )
+            return _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage=stage, cause=cause),
+                residue,
+                agents,
+                path,
+                fault="harness",
+                label="execution_error",
+            )
+        reply = final_assistant_text(result.trajectory)
+        try:
+            score = float(
+                self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
+            )
+        except ScoreUnavailable as error:
+            if result.exit_code != 0 and not result.trajectory:
+                # The harness exited on an error before it wrote anything to score (a terminus tree that cannot
+                # load): its own failure, not a score the scorer could not find.
+                stderr_lines = result.stderr.strip().splitlines()
+                cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
+                return _ScoredEpisode(
+                    None,
+                    FailureObservation(task=task, stage="exit", cause=cause),
+                    residue,
+                    agents,
+                    path,
+                    fault="harness",
+                    label="execution_error",
+                )
+            # The episode ran and its scorer found no score: invalid, never an ordinary zero.
+            return _ScoredEpisode(
+                None,
+                FailureObservation(task=task, stage="score", cause=str(error)),
+                residue,
+                agents,
+                path,
+                reply,
+                fault="infrastructure",
+                label="invalid",
+            )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
-        reply = final_assistant_text(result.trajectory)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
@@ -229,6 +302,38 @@ class HarnessCandidate(UpdateCandidate):
 
     def __post_init__(self) -> None:
         super().__post_init__()
+
+
+@dataclass(frozen=True)
+class EvalSplitTask:
+    """A task of a task manifest's eval split: its name and the source records it was made from."""
+
+    name: str
+    source_record_ids: frozenset[str] = frozenset()
+
+
+def named_tasks(samples: Sequence[TrajectoryItem]) -> set[str]:
+    """The names of the tasks the samples' reports named; the processor keeps a report's task on its sample."""
+    names: set[str] = set()
+    for sample in samples:
+        task = sample.metadata.get("task")
+        if isinstance(task, Mapping) and isinstance(task.get("name"), str):
+            names.add(task["name"])
+    return names
+
+
+def exposed_eval_tasks(
+    eval_split_tasks: Mapping[str, EvalSplitTask], consumed_task_names: Collection[str], consumed_record_ids: set[str]
+) -> set[str]:
+    """The eval split tasks a consumed batch named, by name or by one of their source records, and every eval task
+    that shares a source record with one of them: a reworded sibling of a task the proposer saw is not held out."""
+    named = {
+        path
+        for path, task in eval_split_tasks.items()
+        if task.name in consumed_task_names or not task.source_record_ids.isdisjoint(consumed_record_ids)
+    }
+    groups = task_groups({path: task.source_record_ids for path, task in eval_split_tasks.items()})
+    return {path for group in groups if not named.isdisjoint(group) for path in group}
 
 
 #: Characters kept per text in the step record; a longer text ends in a clip marker.
@@ -274,9 +379,11 @@ def _mutation_record(mutation: Mutation) -> dict[str, Any]:
     return {"op": mutation.op, "id": mutation.id, "options": options}
 
 
-def _episode_name(side: str, task_index: int, repeat: int) -> str:
-    """The record directory of one evaluation episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``."""
-    return f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
+def _episode_name(side: str, task_index: int, repeat: int, attempt: int = 0) -> str:
+    """The record directory of one evaluation episode: ``<side>-<task index>``, a repeat adding ``-<repeat>``
+    and a rerun ``-rerun-<attempt>``."""
+    name = f"{side}-{task_index}" if repeat == 0 else f"{side}-{task_index}-{repeat}"
+    return name if attempt == 0 else f"{name}-rerun-{attempt}"
 
 
 def _prompt_of(sample: TrajectoryItem) -> str | None:
@@ -644,6 +751,41 @@ class FloorPluginFactory(CandidatePluginFactory):
         return FloorPlugin(candidate_backend, floor_score=self.floor_score)
 
 
+class PairedConfidencePlugin(PairedConfidenceMixin):
+    """Evaluate the candidate and the current tree as pairs, rerunning the current side's infrastructure faults up
+    to ``infra_reruns`` rounds, and decide by the paired confidence rule."""
+
+    def __init__(
+        self, candidate_backend: CordisBackend, settings: PairedConfidenceSettings, *, infra_reruns: int = 0
+    ) -> None:
+        super().__init__(settings)
+        self.candidate_backend = candidate_backend
+        self.infra_reruns = infra_reruns
+
+    def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
+        return self.candidate_backend.evaluate(candidate, infra_reruns=self.infra_reruns)
+
+
+@dataclass(frozen=True)
+class PairedConfidencePluginFactory(CandidatePluginFactory):
+    """Bind a scenario's paired confidence policy with its settings and its infrastructure rerun rounds."""
+
+    settings: PairedConfidenceSettings = field(default_factory=PairedConfidenceSettings)
+    infra_reruns: int = 0
+
+    def __post_init__(self) -> None:
+        if isinstance(self.infra_reruns, bool) or not isinstance(self.infra_reruns, int) or self.infra_reruns < 0:
+            raise ValueError("infra_reruns must be an integer of at least 0")
+
+    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
+        if not isinstance(candidate_backend, CordisBackend):
+            raise TypeError(
+                "the paired confidence selection evaluates through a CordisBackend, "
+                f"not {type(candidate_backend).__name__}"
+            )
+        return PairedConfidencePlugin(candidate_backend, self.settings, infra_reruns=self.infra_reruns)
+
+
 def _score_vectors(
     evaluation: EvaluationResult,
 ) -> tuple[tuple[float | None, ...], tuple[float | None, ...]]:
@@ -720,9 +862,17 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_timeout_s: float = 1800.0,
         agent_trial_timeout_s: float = 300.0,
         on_stale: StaleResultPolicy = "merge",
+        eval_split_tasks: Mapping[str, EvalSplitTask] | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
+        if eval_split_tasks is not None and set(eval_split_tasks) != set(tasks):
+            raise ValueError("eval_split_tasks must name exactly the evaluation tasks")
+        # A task manifest's eval split: a task a consumed batch named is skipped, and eval failures stay out of the
+        # proposer's failure manifest. None for prompt tasks.
+        self.eval_split_tasks = None if eval_split_tasks is None else dict(eval_split_tasks)
+        # Every record a commit of the scenario consumed, the trainer's recovery included, for the eval split.
+        self.consumed_record_ids: set[str] = set()
         if step_record_dir is not None and not str(step_record_dir):
             raise ValueError("step_record_dir must be a non-empty path when set")
         if isinstance(models, ModelBinding):
@@ -1036,8 +1186,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
 
         # The previous step's manifest threads through every state this step
         # can return; the key is written only when present, so its absence
-        # stays "unknown", never an empty manifest (the consumed_ids rule).
-        previous_manifest = state.get("failure_manifest")
+        # stays "unknown", never an empty manifest (the consumed_ids rule). Eval split failures never reach the
+        # proposer, so a task manifest keeps none.
+        previous_manifest = state.get("failure_manifest") if self.eval_split_tasks is None else None
         carried: dict[str, Any] = {} if previous_manifest is None else {"failure_manifest": previous_manifest}
         # Carried through skips so a budget or streak skip keeps the grown suite.
         promoted = list(state.get("promoted_tasks", ()))
@@ -1055,6 +1206,17 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         rejected = list(state.get("rejected_proposals", ()))
         if rejected:
             carried["rejected_proposals"] = rejected
+        # Every state this step returns carries the tasks consumed batches named, skips included: a skip consumes
+        # its batch too. A task named before it joined the eval split is exposed once it does.
+        exposed: set[str] = set()
+        if self.eval_split_tasks is not None:
+            consumed_task_names = set(state.get("consumed_task_names", ())) | named_tasks(samples)
+            if consumed_task_names:
+                carried["consumed_task_names"] = sorted(consumed_task_names)
+            batch_record_ids = {record_id for sample in samples for record_id in sample.source_agent_record_ids}
+            exposed = exposed_eval_tasks(
+                self.eval_split_tasks, consumed_task_names, self.consumed_record_ids | batch_record_ids
+            )
 
         metrics: dict[str, Any] = {"steps": steps, "traces": len(samples)}
         # The budgets stop a runaway automatic loop; a skip consumes its batch, so an instruction runs instead.
@@ -1103,6 +1265,17 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         if self._promote_failures:
             metrics["evaluation_task_count"] = len(evaluation_tasks)
             metrics["promoted_tasks"] = len(evaluation_tasks) - len(self._tasks)
+        if self.eval_split_tasks is not None:
+            # An eval task a consumed batch named is no longer held out, so the evaluation does not run it.
+            unexposed = tuple(task for task in evaluation_tasks if task not in exposed)
+            if len(unexposed) < len(evaluation_tasks):
+                metrics["not_run_tasks"] = len(evaluation_tasks) - len(unexposed)
+            if not unexposed:
+                return PreparedStep.skipped(
+                    state={"steps": steps, "entries": self._entries(), **carried},
+                    metrics={**metrics, "skipped": "every evaluation task is exposed"},
+                )
+            evaluation_tasks = unexposed
         step_dir = self._claim_step_dir(steps)
         self._current_step_record = step_dir
         if step_dir is not None:
@@ -1246,18 +1419,29 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics=metrics,
         )
 
-    def evaluate(self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES) -> EvaluationResult:
+    def evaluate(
+        self, candidate: UpdateCandidate, *, sides: Sequence[str] = EVALUATION_SIDES, infra_reruns: int = 0
+    ) -> EvaluationResult:
         """Run the evaluation episodes of the named ``sides`` and return their scores.
 
         The default runs the candidate and the current tree as pairs. A policy
         that evaluates the candidate alone (a floor) passes ``("candidate",)``: no
         current episode runs, ``current_scores`` is empty and the other
         ``current_*`` keys are absent, and ``evaluation_sides`` records the choice.
+        A paired evaluation also carries each episode's label and fault. With
+        ``infra_reruns``, both sides of a pair whose current episode had an
+        infrastructure fault run again, up to that many rounds, and the last
+        runs are the result. A candidate episode's fault reruns nothing: the
+        candidate could have caused it after seeing that it was losing.
         """
         candidate = self._require_harness_candidate(candidate)
         sides = tuple(sides)
         if not sides or any(side not in EVALUATION_SIDES for side in sides):
             raise ValueError(f"sides must name one or both of {EVALUATION_SIDES}, got {sides!r}")
+        if isinstance(infra_reruns, bool) or not isinstance(infra_reruns, int) or infra_reruns < 0:
+            raise ValueError("infra_reruns must be an integer of at least 0")
+        if infra_reruns and sides != EVALUATION_SIDES:
+            raise ValueError("infra_reruns reruns pairs, so it needs both sides")
         # Episodes run against the tree plus the model binding. The binding
         # is appended at render time and never enters the candidate's files,
         # so the published artifact carries no endpoint or credential.
@@ -1286,8 +1470,29 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # The evaluation's size for the page; the pool answers all at once, so no per-episode count is kept.
             self._step_progress = replace(progress, phase="evaluating", episodes_total=len(pairings))
         scored = self._evaluate_pairings(pairings)
-        runs = {side: scored[offset :: len(sides)] for offset, side in enumerate(sides)}
+        runs = {side: list(scored[offset :: len(sides)]) for offset, side in enumerate(sides)}
         tasks = {side: [pairing[1] for pairing in pairings][offset :: len(sides)] for offset, side in enumerate(sides)}
+        rerun_rounds = rerun_pairs = 0
+        for attempt in range(1, infra_reruns + 1):
+            # Only the current episode's fault reruns a pair; a candidate that could redraw the pairs it faulted
+            # would fault on the ones it was losing. Both sides run again, so they run under the same conditions; a
+            # rerun writes its own record directory and is a new submission, so the pool never replays failed work.
+            faulted = [index for index, run in enumerate(runs["current"]) if run.fault == "infrastructure"]
+            if not faulted:
+                break
+            reruns: list[tuple[Mapping[str, str], str, Path | None]] = []
+            for index in faulted:
+                task_index, repeat = divmod(index, self._episode_repeats)
+                for side in sides:
+                    name = _episode_name(side, task_index, repeat, attempt)
+                    keep_dir = None if episodes_dir is None else episodes_dir / name
+                    reruns.append((files[side], tasks[side][index], keep_dir))
+            rescored = self._evaluate_pairings(reruns)
+            for position, index in enumerate(faulted):
+                for offset, side in enumerate(sides):
+                    runs[side][index] = rescored[position * len(sides) + offset]
+            rerun_rounds += 1
+            rerun_pairs += len(faulted)
         scores = {side: tuple(run.score for run in runs[side]) for side in sides}
         metrics: dict[str, Any] = {
             "candidate_scores": scores.get("candidate", ()),
@@ -1320,8 +1525,16 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                 }
                 for task, run in list(zip(tasks["candidate"], runs["candidate"], strict=True))[:EPISODE_SUMMARIES]
             ]
-        if sides != EVALUATION_SIDES:
+        if sides == EVALUATION_SIDES:
+            # Index aligned with the score vectors, for a policy that tells a harness fault from the host's.
+            for side in sides:
+                metrics[f"{side}_labels"] = tuple(run.label for run in runs[side])
+                metrics[f"{side}_faults"] = tuple(run.fault for run in runs[side])
+        else:
             metrics["evaluation_sides"] = list(sides)
+        if infra_reruns:
+            metrics["rerun_rounds"] = rerun_rounds
+            metrics["rerun_pairs"] = rerun_pairs
         return EvaluationResult(evaluator="harness_episode_pairs", evaluator_version="1", metrics=metrics)
 
     def settle_step(
@@ -1340,8 +1553,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # comparison metrics, while this backend keeps the stable episode
         # totals at the top level of the commit metrics.
         evaluation_metrics = dict(decision.evaluation.metrics)
-        evaluation_metrics.pop("candidate_scores", None)
-        evaluation_metrics.pop("current_scores", None)
+        for key in (
+            "candidate_scores",
+            "current_scores",
+            "candidate_labels",
+            "current_labels",
+            "candidate_faults",
+            "current_faults",
+        ):
+            evaluation_metrics.pop(key, None)
         candidate_failures = evaluation_metrics.pop("candidate_failures", ())
         current_failures = evaluation_metrics.pop("current_failures", ())
 
@@ -1352,8 +1572,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         previous_state = prepared.state.get("failure_manifest")
         previous = None if previous_state is None else FailureManifest.from_state(previous_state)
         # A side the evaluation did not run showed nothing, so its manifest carries over untouched, as through a skip.
+        # Eval split failures stay in the evaluation record: a proposer that read them would learn the eval tasks.
         manifest = None
-        if committed_side in evaluation_metrics.get(
+        if self.eval_split_tasks is None and committed_side in evaluation_metrics.get(
             "evaluation_sides", evaluation_metrics.get("gate_sides", EVALUATION_SIDES)
         ):
             manifest = advance(
@@ -1457,6 +1678,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         """Episodes compare candidate and current under one set of weights, so a result survives a weights change
         as the recipe's ``on_stale`` says: merged by default."""
         return self.on_stale
+
+    def observe_consumed_records(self, record_ids: frozenset[str]) -> None:
+        # Only an eval split needs them: a consumed source record exposes the eval task made from it.
+        if self.eval_split_tasks is not None:
+            self.consumed_record_ids.update(record_ids)
 
     def commit_applied(self, state: Mapping[str, Any]) -> None:
         """Discard this backend's render source after its commit is durable."""
@@ -1733,6 +1959,9 @@ class _ScoredEpisode:
     reply: str | None = None
     #: Whether the reader found a session log; a scored episode without one left a text grader nothing to read.
     transcript_read: bool = True
+    #: Whose failure an episode without a score is; ``None`` for a scored episode.
+    fault: EpisodeFault | None = None
+    label: EpisodeLabel = "valid"
     #: Remote workers return the kept trajectory; the driver owns its durable path.
     record_archive: bytes | None = field(default=None, repr=False)
 
@@ -1759,6 +1988,8 @@ def _write_episode_record(
         "task": _clip(task),
         "score": scored.score,
         "failure": None if scored.failure is None else scored.failure.to_dict(),
+        "label": scored.label,
+        "fault": scored.fault,
         "path": scored.path,
         "exit_code": None if result is None else result.exit_code,
         "stdout": None if result is None else _clip(result.stdout),

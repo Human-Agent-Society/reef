@@ -13,7 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.tasks import HarborTask, read_split_manifest, split_by_source, write_harbor_task, write_split_manifest
+from reef.core.tasks import (
+    HarborTask,
+    TaskSplit,
+    read_split_manifest,
+    split_by_source,
+    write_harbor_task,
+    write_split_manifest,
+)
 from reef.harness.client.tasks import (
     DEFAULT_AGENT,
     EpisodeRow,
@@ -434,6 +441,27 @@ def test_main_plays_one_side_of_a_manifest_and_prints_a_line_per_task(
     assert reef.inferences[0]["headers"]["authorization"] == "Bearer env-token"
     assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == {"arm": "plain"}
     assert [call["task_path"] for call in lab.calls] == [root / name for name in train_names]
+
+
+def test_main_plays_the_test_split_and_reports_nothing(reef: StandInReef, tmp_path: Path, capsys) -> None:
+    root = tmp_path / "tasks"
+    for name, record in (("t1", "r1"), ("t2", "r2"), ("t3", "r3")):
+        written_task(root, name, record)
+    manifest = tmp_path / "manifest.json"
+    write_split_manifest(manifest, TaskSplit(("t1",), ("t2",), 0, 0.3, test=("t3",), test_fraction=0.3))
+    assert json.loads(manifest.read_text())["version"] == 2
+    lab = StandInLab({"reward": 0.0})
+    arguments = ["--manifest", str(manifest), "--tasks-root", str(root), "--side", "test", "--reef-url", reef.url]
+    status = main([*arguments, "--scenario", "guess", "--model", "m", "--work-dir", str(tmp_path / "work")], lab=lab)
+    assert status == 0, "a scored test task is complete without a report"
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines == [{"task": "t3", "reward": 0.0, "receipts": 2, "failed_calls": 0, "reports": [], "error": ""}]
+    assert [call["task_path"] for call in lab.calls] == [root / "t3"]
+    assert len(reef.inferences) == 2 and reef.reports == []
+
+    unscored = StandInLab({}, error="no verifier")
+    status = main([*arguments, "--scenario", "guess", "--model", "m", "--work-dir", str(tmp_path / "w")], lab=unscored)
+    assert status == 1, "an unscored test task is not complete"
 
 
 def test_main_returns_one_when_a_task_was_not_reported(reef: StandInReef, tmp_path: Path, capsys) -> None:

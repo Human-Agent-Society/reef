@@ -628,6 +628,8 @@ class Trainer:
             self._state = dict(prepared.algorithm_state)
             self.consumed_record_ids.update(prepared.consumed_ids)
             self.skipped_record_ids.difference_update(prepared.consumed_ids)
+            if self._candidate_backend is not None:
+                self._candidate_backend.observe_consumed_records(prepared.consumed_ids)
             held = self._pending.result
             self.recorded_results = (*self._pending.earlier_results, *(() if held is None else (held,)))
             self._pending = None
@@ -678,6 +680,8 @@ class Trainer:
                 metadata=metadata,
             )
             self.consumed_record_ids.update(consumed | released)
+            if self._candidate_backend is not None:
+                self._candidate_backend.observe_consumed_records(frozenset(consumed | released))
             self._processor.release_records(released)
             self._pending = None
 
@@ -721,6 +725,8 @@ class Trainer:
             raise ValueError("up_to_sequence must be non-negative")
         with self._lock:
             self.consumed_record_ids.update(consumed_ids)
+            if self._candidate_backend is not None:
+                self._candidate_backend.observe_consumed_records(consumed_ids)
             sequence = 0
             while True:
                 items = self._records.replay_page(

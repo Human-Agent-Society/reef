@@ -464,6 +464,45 @@ def test_trainer_tells_the_processor_a_dropped_batch_before_acknowledging_it() -
 
 
 @pytest.mark.unit
+def test_trainer_tells_its_backend_the_consumed_records_at_commit_drop_and_recovery() -> None:
+    """A backend that holds eval tasks out learns what every commit consumed, the ones before a restart included."""
+    observed: list[frozenset[str]] = []
+
+    class ObservingBackend(_PreparingBackend):
+        def observe_consumed_records(self, record_ids: frozenset[str]) -> None:
+            observed.append(record_ids)
+
+    records = SQLiteRecordStore()
+    for item in (inference("i1"), report("r1", "i1", 1.0), inference("i2"), report("r2", "i2", 0.5)):
+        records.append(item)
+
+    def build(**options: object) -> Trainer:
+        return Trainer.build(
+            "math",
+            records,
+            processor_factory=lambda context: ThresholdProcessor(
+                ProcessorContext(context.scenario, {"batch_size": 1})
+            ),
+            candidate_backend=ObservingBackend(),
+            **options,
+        )
+
+    first = build()
+    assert first.reserve_training_batch() is not None
+    result = first.execute_reserved_step(0).result
+    assert result is not None
+    prepared = first.prepare_commit(result)
+    first.commit(prepared)
+    assert observed == [prepared.consumed_ids] and {"i1", "r1"} <= prepared.consumed_ids
+    assert first.reserve_training_batch() is not None
+    first.reject_pending({"reason": "stale"})
+    assert len(observed) == 2 and {"i2", "r2"} <= observed[1]
+    second = build(algorithm_state=first.algorithm_state_dict())
+    second.reingest(up_to_sequence=prepared.high_water_sequence, consumed_ids=prepared.consumed_ids | observed[1])
+    assert observed[2] == prepared.consumed_ids | observed[1]
+
+
+@pytest.mark.unit
 def test_trainer_executes_candidate_policy_between_evaluation_and_settlement() -> None:
     calls = []
 

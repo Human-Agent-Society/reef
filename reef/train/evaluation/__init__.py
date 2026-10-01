@@ -31,6 +31,12 @@ from reef.train.evaluation.evaluators import (
     CandidatePluginFactory,
     RegressionCheckMixin,
 )
+from reef.train.evaluation.paired import (
+    PairedComparison,
+    PairedConfidenceMixin,
+    PairedConfidenceSettings,
+    compare_pairs,
+)
 
 # Compatibility aliases for existing imports.
 RegressionGateMixin = RegressionCheckMixin
@@ -48,9 +54,13 @@ __all__ = [
     "CandidatePluginFactory",
     "CandidateSelector",
     "EvaluationResult",
+    "PairedComparison",
+    "PairedConfidenceMixin",
+    "PairedConfidenceSettings",
     "RegressionCheckMixin",
     "RegressionGateMixin",
     "SelectionDecision",
     "UpdateCandidate",
     "build_candidate_evaluation",
+    "compare_pairs",
 ]

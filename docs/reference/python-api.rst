@@ -772,6 +772,35 @@ Generation and validation must run outside the synchronous trainer-lock path.
 See `Processors <../developer-guide/processors.rst#task-generation-contract>`__
 for lifecycle requirements.
 
+``reef.core.tasks`` also splits and imports tasks:
+
+- ``HarborTask.parents`` lists the digests of the tasks a Designer prompt
+  showed, or of the benchmark item a task came from. It is written only when
+  set, so existing digests hold.
+- ``import_harbor_task(source_path, root, *, parents=())`` copies a Harbor
+  task that reef did not write under ``root``, keeping every ``task.toml`` key
+  the pinned Harbor reads, and stamps its digest. It copies the files of
+  Harbor's layout (``task.toml``, ``instruction.md``, ``tests/``,
+  ``environment/`` and ``solution/``) and refuses any other entry and any
+  file that is not UTF-8 text. ``read_harbor_task`` refuses a directory
+  without the stamp.
+- ``assign_splits(tasks, *, seed, eval_fraction, test_fraction=0.0,
+  pinned=None)`` returns a ``TaskSplit``. A task that ``pinned`` lists keeps
+  its split. Another task takes the split of the tasks it shares a source
+  record with and of its eval or test parents, is left out of every split
+  when these disagree or when a parent is not among ``tasks``, and otherwise
+  goes where a keyed hash of the seed and its name puts it. So a task that
+  shares no source record has its split known before play, and a task a
+  manifest lists keeps its split as tasks come and go; a task not yet listed
+  can move when a task sharing its records arrives. ``split_by_source`` still
+  splits a closed set once.
+- ``write_split_manifest`` writes version 2, which adds the ``test`` split,
+  only when the split has test tasks or a test fraction, and version 1
+  otherwise; ``read_split_manifest`` reads both, and a version 1 manifest
+  has no test split. ``manifest_task_paths(manifest_path, root, "test")``
+  lists the test split; Cordis reads only the eval split, and the task
+  player plays the test split without reporting it.
+
 Batch
 -----
 

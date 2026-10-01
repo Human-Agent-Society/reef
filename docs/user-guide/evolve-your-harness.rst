@@ -201,7 +201,8 @@ In ``auto`` mode, two settings determine when Reef should start a step:
   earlier batches are dropped.
 - ``records``: every inference counts as one unit. The report requirement is
   dropped entirely: recorded traffic alone batches, unscored, for methods
-  that judge for themselves.
+  that judge for themselves. A records batch names no task, so this policy
+  cannot take ``evolution.task_manifest``.
 
 Under ``auto`` mode, training requests are rejected.
 
@@ -338,13 +339,40 @@ Evaluating the result
 Two settings shape the evaluation result:
 
 - ``evolution.min_win_margin: M`` (0 by default) is a noise floor on the
-  result: the candidate must win more than ``M`` task pairings beyond its
-  losses, so on a stochastic episode a single lucky flip does not publish.
+  default ``score_comparison`` result: the candidate must win more than ``M``
+  task pairings beyond its losses, so on a stochastic episode a single lucky
+  flip does not publish.
 - ``evolution.max_rejected_history: N`` (25 by default, 0 off) keeps the
   last ``N`` rejected proposals in the scenario state, each with its step,
   its mutations with the options they carried, and the result's reason; a
   ``propose`` whose signature names ``rejected`` receives them and can stop
   re-proposing what the evaluation already refused.
+
+``evolution.selection: paired_confidence`` selects a candidate only when its
+gain is larger than chance explains. It averages the pairings of each task
+(``episode_repeats`` of them) into one difference, candidate minus current,
+and selects when two checks pass: an exact one sided sign test over the
+tasks that differ gives a p value of at most one minus ``confidence_level``,
+and the bootstrap lower bound of the mean difference at that level is above
+``min_effect``. At a confidence level of 0.95, a candidate needs at least
+five task wins to pass.
+Four ``evolution`` keys configure it; every other selection refuses them:
+
+- ``min_valid_pairs`` (1): with fewer valid pairings, the step is rejected as
+  ``invalid_evaluation``.
+- ``min_effect`` (0, in score units) and ``confidence_level`` (0.95): a gain
+  that does not clear them is rejected as ``insufficient_confidence``.
+- ``infra_reruns`` (0): how many times a pairing whose current episode an
+  infrastructure fault hit runs again, on both sides, before it becomes void
+  (see `Edge cases`_).
+
+The decision records ``valid_pairs`` and ``void_pairs``,
+``sign_test_p_value``, ``interval_lower`` and ``interval_upper`` (the one
+sided bootstrap bounds at ``confidence_level``), and the ``wins``, ``losses``
+and ``ties`` counted per task. On Harbor tasks, set
+``evolution.evaluate`` to
+``reef.train.cordis_backend.strategies:required_verifier_reward``, so that a
+verifier that wrote no reward gives an invalid episode, not a score of 0.
 
 By default a successful evaluation is served at once.
 ``evolution.publish: review`` holds every win as a pending release instead,
@@ -499,12 +527,31 @@ Edge cases in the loop are resolved conservatively, so a step never
 publishes accidentally.
 
 - A ``None`` proposal skips the step.
-- An episode that could not run ranks below every real score, so a
-  candidate cannot win on a crash.
-- When both sides fail, the step is a tie.
+- Under ``score_comparison``, an episode that could not run ranks below every
+  real score, so a candidate cannot win on a crash, and when both sides fail,
+  the step is a tie.
+- Under ``paired_confidence``, an episode that failed through the harness
+  ranks below every real score of the evaluation: a timeout, a render its own
+  files broke, an unreadable trajectory, residue, a native turn that ended on
+  an error, or a runner that exited on an error before it wrote anything to
+  score. An episode that failed through the infrastructure (the binary or the
+  sandbox could not start, a Harbor trial that never ran, a scorer that raised
+  ``ScoreUnavailable``) voids its pairing, and a void pairing counts as a
+  candidate loss. When the fault is on the current side, both sides first run
+  again, up to ``infra_reruns`` times. A fault on the candidate side is never
+  rerun, so a fault that a candidate forges on its own side never wins its
+  pairing.
 - A native episode whose turn ended on an error (a tree that cannot load, a
   graph that cannot run) counts as one that could not run, whatever its
   text.
+- With ``evolution.task_manifest``, eval failures stay in the evaluation
+  record and never reach the proposer's failure manifest. An eval task is
+  exposed once a consumed batch names it or holds one of its source records,
+  batches committed before a restart included. An eval task that shares a
+  source record with an exposed one is exposed too. An exposed task is not
+  run again, and the step records the
+  count as ``not_run_tasks``. When every eval task is exposed, each step
+  skips until a new manifest and a restart bring fresh eval tasks.
 - When the result is a rejection, Reef restores the snapshot it took before
   the mutation.
 
