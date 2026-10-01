@@ -1,9 +1,10 @@
 """``python -m reef.harness.runners.native`` and the ``reef-native`` console script.
 
 ``reef-native -p PROMPT`` is the episode form, one process and one turn, and
-is unchanged. ``serve``, ``turn``, ``mount`` and ``status`` are the serve
-form: a resident process on an installed tree and the commands that talk to
-it over its socket.
+is unchanged. ``reef-native task --task DIR`` is the native_harbor episode
+form: the same loop on a Harbor task (``reef.harness.runners.native.task``).
+``serve``, ``turn``, ``mount`` and ``status`` are the serve form: a resident
+process on an installed tree and the commands that talk to it over its socket.
 """
 
 from __future__ import annotations
@@ -14,8 +15,9 @@ import sys
 from pathlib import Path
 
 from reef.harness.runners.native import main as episode_main
+from reef.harness.runners.native.task import main as task_main
 
-SUBCOMMANDS = ("serve", "turn", "mount", "status")
+SUBCOMMANDS = ("serve", "turn", "mount", "status", "task")
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -68,6 +70,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
     if not argv or argv[0] not in SUBCOMMANDS:
         return episode_main(argv)
+    if argv[0] == "task":
+        return task_main(argv[1:])
     args = _parser().parse_args(argv)
     from reef.harness.runners.native.serve import (
         run_command,  # late: the serve form pulls in the training package's loader

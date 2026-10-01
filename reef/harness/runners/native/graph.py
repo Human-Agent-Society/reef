@@ -352,7 +352,7 @@ class Run:
             )
         for content in loop._texts(entry.get("messages")):
             self.say(content, {"kind": "hook", "event": "pre_step"})
-        body: dict[str, Any] = {"messages": self.messages, "max_tokens": loop.MAX_COMPLETION_TOKENS}
+        body: dict[str, Any] = {"messages": self.messages, "max_tokens": loop.max_completion_tokens}
         if self.declarations:
             body["tools"] = self.declarations
         message, usage = loop._request(self.session, self.binding, self.hooks["request_error"], body, step)
@@ -519,7 +519,7 @@ class Run:
                 {"role": "system", "content": SUMMARY_PROMPT},
                 {"role": "user", "content": _transcript(older)},
             ],
-            "max_tokens": loop.MAX_COMPLETION_TOKENS,
+            "max_tokens": loop.max_completion_tokens,
         }
         message, failure, usage = loop._complete(self.binding, body)
         record: dict[str, Any] = {"step": self.step, "stage": name, "policy": policy, "tokens_before": before}

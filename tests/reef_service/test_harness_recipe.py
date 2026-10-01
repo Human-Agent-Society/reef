@@ -1360,7 +1360,7 @@ def test_backend_rejects_invalid_gate_knobs(tmp_path: Path) -> None:
         build(forbid_residue="no")
 
 
-def test_recipe_parses_episode_tokens_for_the_native_adapter_only(tmp_path: Path, monkeypatch) -> None:
+def test_recipe_parses_episode_tokens_for_the_native_adapters_only(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_episode_tokens.py"
     module.write_text(
         "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
@@ -1381,11 +1381,17 @@ def test_recipe_parses_episode_tokens_for_the_native_adapter_only(tmp_path: Path
         with pytest.raises(RecipeConfigError, match=r"evolution\.episode_tokens must be a positive integer of tokens"):
             CordisRecipe.from_environment({}, config=config(adapter="native", episode_tokens=bad))
     # No other harness reads the budget, so under pi it would be a limit nothing enforces.
-    with pytest.raises(RecipeConfigError, match=r"evolution\.episode_tokens is enforced only by the native adapter"):
+    with pytest.raises(
+        RecipeConfigError, match=r"evolution\.episode_tokens is enforced only by the native and native_harbor adapters"
+    ):
         CordisRecipe.from_environment({}, config=config(episode_tokens=5000))
     built = CordisRecipe.from_environment({}, config=config(adapter="native", episode_tokens=5000), runtime=runtime())
     assert built.episode_tokens == 5000
     assert built._backend_kwargs()["episode_env"] == {"REEF_EPISODE_TOKENS": "5000"}
+    on_harbor = CordisRecipe.from_environment(
+        {}, config=config(adapter="native_harbor", episode_tokens=5000), runtime=runtime()
+    )
+    assert on_harbor._backend_kwargs()["episode_env"] == {"REEF_EPISODE_TOKENS": "5000"}
     unset = CordisRecipe.from_environment({}, config=config(adapter="native"), runtime=runtime())
     assert unset.episode_tokens is None and unset._backend_kwargs()["episode_env"] == {}
 

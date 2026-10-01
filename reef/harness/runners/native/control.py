@@ -2,7 +2,8 @@
 
 ``run_episode`` passes the budget as ``REEF_EPISODE_TOKENS`` from ``evolution.episode_tokens``; no node renders it,
 so a candidate tree cannot raise the budget it is judged under. The budget and the stop flag are shared by every
-agent turn of the episode, the members of a team stage included, and read before each step.
+agent turn of the episode, the members of a team stage included, and read before each step. The Harbor agent
+(``reef.harness.runners.native.harbor``) also sets the reply budget of a model call and the retry policy.
 """
 
 from __future__ import annotations
@@ -68,6 +69,19 @@ class EpisodeStop:
     def is_set(self) -> bool:
         return self.stop_event.is_set()
 
+    def wait(self, timeout_seconds: float) -> bool:
+        """Wait up to ``timeout_seconds``; whether the flag is set, so a wait between retries ends at the stop."""
+        return self.stop_event.wait(timeout_seconds)
+
+
+@dataclass(frozen=True)
+class RequestPolicy:
+    """How a model stage treats a failed call; the default leaves it to the tree's request_error hooks."""
+
+    #: Retry a transient failure (no answer, or 408, 425, 429, 5xx) until the stop flag is set, whatever the hooks
+    #: say: a long Harbor task outlives an endpoint outage, and the stop is the episode's own end.
+    is_retry_until_stopped: bool = False
+
 
 @dataclass(frozen=True)
 class EpisodeControl:
@@ -79,3 +93,6 @@ class EpisodeControl:
     #: under the main worktree, which git never tracks.
     command_runner: CommandRunner = field(default_factory=HostCommandRunner)
     team_path: PurePosixPath | None = None
+    request_policy: RequestPolicy = field(default_factory=RequestPolicy)
+    #: Tokens one model call may generate; None is the loop's own cap, ``MAX_COMPLETION_TOKENS``.
+    max_completion_tokens: int | None = None

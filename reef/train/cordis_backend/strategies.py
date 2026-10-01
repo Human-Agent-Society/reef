@@ -332,8 +332,8 @@ def resolve_proposer(value: object) -> Proposer:
 def verifier_reward(task: str, result: EpisodeResult) -> float:
     """The Harbor verifier's reward for a task directory episode; ``evaluate`` for a gate fed by a task manifest.
 
-    The terminus runner writes one ``verifier`` row per episode with the task it played and the rewards
-    its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
+    The terminus and native_harbor runners write one ``verifier`` row per episode with the task it played
+    and the rewards its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
     episode or a verifier that wrote nothing scores 0 (the gate has already set aside an episode whose
     trial never ran); an episode that exited without a row scores 0; a row for another task, several
     rewards without a ``reward`` entry, or a reward that is not a finite number is an error.

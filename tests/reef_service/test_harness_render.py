@@ -1155,12 +1155,14 @@ def test_descriptor_host_env_and_root_placement_are_validated(tmp_path, field: s
         load_descriptor(target)
 
 
-def test_only_terminus_keeps_host_environment_or_has_a_bind_mounted_root() -> None:
+def test_only_the_harbor_adapters_keep_host_environment_or_have_a_bind_mounted_root() -> None:
     """Every other bundled adapter's episode stays hermetic: no service variable beyond PATH and TMPDIR."""
-    terminus = get_adapter("terminus")
-    assert terminus.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}
-    assert terminus.is_root_bind_mounted
-    for name in sorted(set(available_adapters()) - {"terminus"}):
+    harbor_adapters = {"terminus", "native_harbor"}
+    for name in sorted(harbor_adapters):
+        harbor = get_adapter(name)
+        assert harbor.host_env == {"DOCKER_HOST": "", "DOCKER_CONTEXT": "", "DOCKER_CONFIG": "{home}/.docker"}, name
+        assert harbor.is_root_bind_mounted, name
+    for name in sorted(set(available_adapters()) - harbor_adapters):
         descriptor = get_adapter(name)
         assert descriptor.host_env == {} and not descriptor.is_root_bind_mounted, name
 

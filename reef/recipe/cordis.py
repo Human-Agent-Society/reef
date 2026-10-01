@@ -419,7 +419,7 @@ class CordisRecipe(Recipe):
             if not descriptor.is_prompt_task_directory:
                 raise RecipeConfigError(
                     f"evolution.task_manifest needs an adapter that takes a task directory, not a prompt; "
-                    f"{adapter_name!r} takes a prompt (terminus takes a task directory)"
+                    f"{adapter_name!r} takes a prompt (terminus and native_harbor take a task directory)"
                 )
             if evolution.get("promote_failures", False):
                 raise RecipeConfigError(
@@ -451,8 +451,10 @@ class CordisRecipe(Recipe):
             if isinstance(episode_tokens, bool) or not isinstance(episode_tokens, int) or episode_tokens <= 0:
                 raise RecipeConfigError("evolution.episode_tokens must be a positive integer of tokens")
             # Only Reef's own loop reads the budget; any other harness would run unlimited under it.
-            if evolution.get("adapter", "pi") != "native":
-                raise RecipeConfigError("evolution.episode_tokens is enforced only by the native adapter")
+            if evolution.get("adapter", "pi") not in ("native", "native_harbor"):
+                raise RecipeConfigError(
+                    "evolution.episode_tokens is enforced only by the native and native_harbor adapters"
+                )
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")

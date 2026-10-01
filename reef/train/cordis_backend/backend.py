@@ -174,8 +174,9 @@ class EpisodeEvaluationWorker:
             )
         trial_error = _failed_trial_error(result.trajectory)
         if trial_error:
-            # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
-            # start): no answer was given, so it ranks below every real score instead of tying a zero.
+            # A Harbor runner (terminus, native_harbor) recorded a trial that never ran (the image did not build,
+            # the agent could not start): no answer was given, so it ranks below every real score instead of tying a
+            # zero.
             return _ScoredEpisode(
                 None,
                 FailureObservation(task=task, stage="trial", cause=trial_error),
@@ -223,7 +224,7 @@ class EpisodeEvaluationWorker:
 
 
 def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
-    """The error of a terminus trial that never ran (a failed ``verifier`` row with an error), else empty."""
+    """The error of a Harbor trial that never ran (a failed ``verifier`` row with an error), else empty."""
     for event in trajectory:
         if event.get("type") == "verifier" and event.get("failed") and event.get("error"):
             return str(event["error"])

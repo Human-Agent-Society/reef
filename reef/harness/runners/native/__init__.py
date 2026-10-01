@@ -61,6 +61,10 @@ MAX_COMPLETION_TOKENS = 4096
 #: Provider attempts one step may spend and the longest wait between them, whatever a request_error hook asks.
 MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
+#: Under a policy that retries until stopped, the wait after a transient failure doubles from one second to this.
+TRANSIENT_RETRY_MAX_DELAY_SECONDS = 60
+#: HTTP statuses a model call is retried on under that policy, besides every 5xx and a call that got no answer.
+TRANSIENT_STATUSES = (408, 425, 429)
 DEFAULT_SYSTEM_PROMPT = "You are a coding agent. Use the tools to complete the task, then answer."
 SESSION_VERSION = 1
 #: The entries list beside the rendered files (``files.tree`` of the native descriptor), relative to the root.
@@ -472,6 +476,15 @@ def binding_from(models_path: Path) -> ModelBinding:
     )
 
 
+def output_token_limit_from(models_path: Path) -> int:
+    """``max_output_tokens`` in models.json, which the native_harbor binding writes; a LoadError when it is not a
+    positive integer. The native adapter never reads it: its calls ask for ``MAX_COMPLETION_TOKENS``."""
+    value = json.loads(models_path.read_text(encoding="utf-8")).get("max_output_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise LoadError(f"{models_path.name} max_output_tokens must be a positive integer of tokens, not {value!r}")
+    return value
+
+
 def context_window_from(models_path: Path) -> int:
     """``context_window`` in models.json (a config node with target ``models`` sets it), else the default."""
     from reef.harness.runners.native.graph import DEFAULT_CONTEXT_WINDOW  # late: graph.py imports this module
@@ -600,37 +613,58 @@ def _texts(value: Any) -> list[str]:
 def _complete(
     binding: ModelBinding, body: Mapping[str, Any]
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, int] | None]:
-    """One provider attempt: the assistant message and the usage it reported, or the closed MODEL_ERROR failure."""
+    """One provider attempt: the assistant message and the usage it reported, or the closed MODEL_ERROR failure.
+
+    ``is_transient`` says whether a later attempt may succeed: the endpoint gave no answer, or answered a status in
+    ``TRANSIENT_STATUSES`` or a 5xx; a malformed reply and any other status are not."""
     try:
         response = binding.complete(dict(body))
         return dict(response["choices"][0]["message"]), None, usage_of(response)
     except (ModelBindingError, KeyError, IndexError, TypeError) as exc:
         failure: dict[str, Any] = {"code": "MODEL_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600]}
-        if isinstance(exc, ModelBindingError) and exc.status is not None:
-            failure["status"] = exc.status
+        status = exc.status if isinstance(exc, ModelBindingError) else None
+        if status is not None:
+            failure["status"] = status
+        failure["is_transient"] = isinstance(exc, ModelBindingError) and (
+            status is None or status in TRANSIENT_STATUSES or status >= 500
+        )
         return None, failure, None
 
 
 def _request(
-    session: Session, binding: ModelBinding, hooks: Sequence[HookModule], body: Mapping[str, Any], step: int
+    session: Session,
+    binding: ModelBinding,
+    hooks: Sequence[HookModule],
+    body: Mapping[str, Any],
+    step: int,
+    control: EpisodeControl,
 ) -> tuple[dict[str, Any] | None, dict[str, int] | None]:
     """The step's model call and the usage it reported, retried while a request_error hook says so;
-    ``(None, None)`` once the turn ended in error."""
-    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+    ``(None, None)`` once the turn ended in error.
+
+    Under a policy that retries until stopped, a transient failure is retried whatever the hooks say, until the
+    episode's stop flag is set; the turn then ends in error with the last failure, since the model never answered.
+    Every wait between attempts ends early at the stop."""
+    attempt = 0
+    while True:
+        attempt += 1
         message, failure, usage = _complete(binding, body)
         if failure is None:
             return message, usage
         session.write("request/error", {"step": step, "attempt": attempt, "error": failure})
-        action = _decide(session, hooks, "request_error", step, {"step": step, "attempt": attempt, "error": failure})
-        if action.get("kind") == "retry" and attempt < MAX_REQUEST_ATTEMPTS:
+        if control.request_policy.is_retry_until_stopped and failure["is_transient"]:
+            if not control.stop.wait(min(2 ** (attempt - 1), TRANSIENT_RETRY_MAX_DELAY_SECONDS)):
+                continue
+        else:
+            payload = {"step": step, "attempt": attempt, "error": failure}
+            action = _decide(session, hooks, "request_error", step, payload)
             delay = action.get("delay_ms")
-            time.sleep(
-                min(float(delay) if isinstance(delay, (int, float)) and delay > 0 else 0.0, MAX_RETRY_DELAY_MS) / 1000
-            )
-            continue
+            delay_ms = min(float(delay) if isinstance(delay, (int, float)) and delay > 0 else 0.0, MAX_RETRY_DELAY_MS)
+            is_retried = action.get("kind") == "retry" and attempt < MAX_REQUEST_ATTEMPTS
+            if is_retried and not control.stop.wait(delay_ms / 1000):
+                continue
         _abort(session, failure, attempts=attempt)
         return None, None
-    return None, None
 
 
 def _abort(session: Session, failure: Mapping[str, Any], turn: int = 1, **detail: Any) -> int:
@@ -741,14 +775,15 @@ def run_loop(
         session.close()
 
 
-def _clip(text: str, workdir: Path, full_output_path: Path | None) -> tuple[str, dict[str, Any]]:
-    """What the model reads of a result over the cap: with ``full_output_path``, the whole text lands there and the model gets the head, a marker naming the file, and the tail; without it, the head alone."""
+def _clip(text: str, workdir: Path, full_output_path: Path | None, writer: Enforcer) -> tuple[str, dict[str, Any]]:
+    """What the model reads of a result over the cap: with ``full_output_path``, ``writer`` saves the whole text
+    there, where the calls run, and the model gets the head, a marker naming the file, and the tail; without it, the
+    head alone."""
     if len(text) <= MAX_RESULT_CHARS:
         return text, {"truncated": False}
     if full_output_path is None:
         return text[:MAX_RESULT_CHARS], {"truncated": True}
-    full_output_path.parent.mkdir(parents=True, exist_ok=True)
-    full_output_path.write_text(text, encoding="utf-8")
+    writer.write_output(full_output_path, text)
     relative = full_output_path.relative_to(workdir).as_posix()
     tail = text[-TOOL_OUTPUT_TAIL_CHARS:]
     marker = f"\n... [{len(text) - MAX_RESULT_CHARS} characters omitted; the full result is in {relative}] ...\n"
@@ -833,7 +868,11 @@ def _invoke(
     except Exception as exc:
         return _error("TOOL_FAILED", f"{type(exc).__name__}: {exc}", arguments)
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-    content, clipped = _clip(text, workdir, full_output_path)
+    try:
+        # The environment's enforcer, not the tool's: a built-in tool's output lands in the same workdir.
+        content, clipped = _clip(text, workdir, full_output_path, enforcer or InProcessEnforcer())
+    except SandboxFailed as exc:
+        return _error("SANDBOX_FAILED", str(exc), arguments)
     return {
         "content": content,
         "is_error": False,
@@ -846,7 +885,6 @@ class _Loop:
     """What the stage handlers reach of this module: the session, the root, and the loop's own helpers."""
 
     TOOL_OUTPUT_DIR = TOOL_OUTPUT_DIR
-    MAX_COMPLETION_TOKENS = MAX_COMPLETION_TOKENS
 
     def __init__(
         self,
@@ -864,6 +902,9 @@ class _Loop:
         self.header = dict(header)
         self.enforcer = enforcer or InProcessEnforcer()
         self.control = control or EpisodeControl()
+        limit = self.control.max_completion_tokens
+        #: The reply budget of every model call: the caller's when it set one (native_harbor), else the loop's cap.
+        self.max_completion_tokens = MAX_COMPLETION_TOKENS if limit is None else limit
         #: The git state of ``workspace: own`` stage runs; only the episode form keeps one.
         self.workspaces = workspaces
         self.turns = 1
@@ -894,9 +935,19 @@ class _Loop:
         if budget.is_spent:
             run.end_turn({"kind": "max-tokens", "tokens": budget.token_limit, "spent": budget.spent_tokens}, "budget")
 
+    def _request(
+        self,
+        session: Session,
+        binding: ModelBinding,
+        hooks: Sequence[HookModule],
+        body: Mapping[str, Any],
+        step: int,
+    ) -> tuple[dict[str, Any] | None, dict[str, int] | None]:
+        """The step's model call under the episode's request policy and stop flag."""
+        return _request(session, binding, hooks, body, step, self.control)
+
     _decide = staticmethod(_decide)
     _complete = staticmethod(_complete)
-    _request = staticmethod(_request)
     _invoke = staticmethod(_invoke)
     tool_error = staticmethod(_error)
     enforcer_for = staticmethod(enforcer_for)
