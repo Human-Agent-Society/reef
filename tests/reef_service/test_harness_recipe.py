@@ -1396,6 +1396,39 @@ def test_recipe_parses_episode_tokens_for_the_native_adapters_only(tmp_path: Pat
     assert unset.episode_tokens is None and unset._backend_kwargs()["episode_env"] == {}
 
 
+def test_recipe_passes_infrastructure_markers_to_native_harbor_episodes_only(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_markers.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    markers = [{"file_name": "programbench_eval.json", "key": "test_branch_errors", "values": ["__infra__"]}]
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_markers:propose",
+                "evaluate": "demo_markers:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    with pytest.raises(
+        RecipeConfigError, match=r"evolution\.infrastructure_markers is read only by the native_harbor"
+    ):
+        CordisRecipe.from_environment({}, config=config(adapter="native", infrastructure_markers=markers))
+    for bad in ({"file_name": "m.json"}, [{"file_name": "a/m.json", "key": "k", "values": ["v"]}]):
+        with pytest.raises(RecipeConfigError, match=r"evolution\.infrastructure_markers must be a JSON list"):
+            CordisRecipe.from_environment({}, config=config(adapter="native_harbor", infrastructure_markers=bad))
+    built = CordisRecipe.from_environment(
+        {}, config=config(adapter="native_harbor", infrastructure_markers=markers), runtime=runtime()
+    )
+    (text,) = built._backend_kwargs()["episode_env"].values()
+    assert built._backend_kwargs()["episode_env"] == {"REEF_HARBOR_INFRASTRUCTURE_MARKERS": text}
+    assert json.loads(text) == markers
+
+
 def test_the_backend_passes_its_episode_env_to_every_episode(tmp_path: Path, monkeypatch) -> None:
     envs: list[dict[str, str]] = []
     original = reef_cordis_backend.run_episode

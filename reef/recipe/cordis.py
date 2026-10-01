@@ -39,6 +39,13 @@ from reef.harness.episodes.executor import (
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.runners.harbor_trial import (
+    INFRASTRUCTURE_MARKERS_ENV,
+    HarborTrialError,
+    InfrastructureMarker,
+    markers_from,
+    markers_text,
+)
 from reef.harness.tree.render import render_composition
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -284,6 +291,7 @@ class CordisRecipe(Recipe):
     binary: str | None = None
     episode_timeout_s: float = 600.0
     episode_tokens: int | None = None
+    infrastructure_markers: tuple[InfrastructureMarker, ...] = ()
     episode_repeats: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
@@ -455,6 +463,15 @@ class CordisRecipe(Recipe):
                 raise RecipeConfigError(
                     "evolution.episode_tokens is enforced only by the native and native_harbor adapters"
                 )
+        markers: tuple[InfrastructureMarker, ...] = ()
+        if evolution.get("infrastructure_markers") is not None:
+            # Only the native_harbor runner reads them, after its trial; terminus records every trial as it ran.
+            if evolution.get("adapter", "pi") != "native_harbor":
+                raise RecipeConfigError("evolution.infrastructure_markers is read only by the native_harbor adapter")
+            try:
+                markers = markers_from(evolution["infrastructure_markers"], "evolution.infrastructure_markers")
+            except HarborTrialError as exc:
+                raise RecipeConfigError(str(exc)) from exc
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
@@ -652,6 +669,7 @@ class CordisRecipe(Recipe):
             "binary": binary,
             "episode_timeout_s": float(timeout),
             "episode_tokens": episode_tokens,
+            "infrastructure_markers": markers,
             "episode_repeats": repeats,
             "on_stale": on_stale,
             "forbid_residue": forbid_residue,
@@ -804,7 +822,14 @@ class CordisRecipe(Recipe):
             "on_stale": self.on_stale,
             "binary": self.binary,
             "episode_timeout_s": self.episode_timeout_s,
-            "episode_env": {EPISODE_TOKENS_ENV: str(self.episode_tokens)} if self.episode_tokens else {},
+            "episode_env": {
+                **({EPISODE_TOKENS_ENV: str(self.episode_tokens)} if self.episode_tokens else {}),
+                **(
+                    {INFRASTRUCTURE_MARKERS_ENV: markers_text(self.infrastructure_markers)}
+                    if self.infrastructure_markers
+                    else {}
+                ),
+            },
             "episode_repeats": self.episode_repeats,
             "forbid_residue": self.forbid_residue,
             "executor": self.executor,

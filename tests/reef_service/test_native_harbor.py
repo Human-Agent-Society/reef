@@ -710,6 +710,41 @@ def test_an_infrastructure_marker_fails_the_row_and_keeps_the_rewards(runner_env
     assert score(runner_env, 1).score is None
 
 
+def test_a_marker_is_read_only_from_the_verifier_directory(runner_env: Path, monkeypatch) -> None:
+    infra = json.dumps({"errors": {"__infra__": "planted by the agent"}})
+    FakeLab.trial_files = {"agent/m.json": infra, "artifacts/m.json": infra}
+    markers = [{"file_name": "m.json", "key": "errors", "values": ["__infra__"]}]
+    monkeypatch.setenv(INFRASTRUCTURE_MARKERS_ENV, json.dumps(markers))
+    assert native_main(["task", "--task", TASK]) == 0
+    (row,) = events(runner_env / "verifier.jsonl")
+    assert not row["failed"] and score(runner_env, 0).score == 1.0
+
+
+def write_root_error(sessions: Path, code: str) -> None:
+    """A root turn that ended in error, as ``run_loop`` writes it, and the verifier row Harbor still gave it."""
+    sessions.mkdir(parents=True, exist_ok=True)
+    error = {"code": code, "message": "the model call failed"}
+    lines = [
+        {"type": "session", "seq": 0, "time": 0, "data": {"agent": "root", "turn": 1, "tools": []}},
+        {"type": "turn/start", "seq": 1, "time": 0, "data": {"turn": 1}},
+        {"type": "turn/end", "seq": 2, "time": 0, "data": {"turn": 1, "reason": {"kind": "error", "error": error}}},
+    ]
+    (sessions / "session.jsonl").write_text("".join(json.dumps(line) + "\n" for line in lines))
+    row = {"type": "verifier", "task": TASK, "rewards": {"reward": 1.0}, "reward": 1.0, "failed": False, "error": ""}
+    (sessions / "verifier.jsonl").write_text(json.dumps(row) + "\n")
+
+
+def test_a_root_error_after_the_turn_ran_keeps_the_verifier_reward_and_a_tree_that_never_loaded_scores_none(
+    tmp_path: Path,
+) -> None:
+    write_root_error(tmp_path / "model", "MODEL_ERROR")
+    scored = score(tmp_path / "model", 0)
+    assert scored.score == 1.0 and scored.failure.stage == "graph"
+    assert scored.failure.cause == "MODEL_ERROR: the model call failed"
+    write_root_error(tmp_path / "load", "LOAD_ERROR")
+    assert score(tmp_path / "load", 0).score is None
+
+
 def test_without_markers_the_reward_stands_and_a_malformed_list_is_a_failed_row(runner_env: Path, monkeypatch) -> None:
     FakeLab.trial_files = {"verifier/m.json": json.dumps({"errors": {"__infra__": "the evaluator crashed"}})}
     assert native_main(["task", "--task", TASK]) == 0

@@ -4,9 +4,10 @@ reef-eval is imported only inside ``run_trial`` and nothing on the render path i
 registry stays cheap and a deployment without Harbor can still load every descriptor.
 
 A verifier can reward a task 0 when its own machinery failed rather than the agent.
-``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` names such failures declaratively, as a file the trial writes and the values
-one of its keys holds then; the caller of ``run_episode`` sets it, never the tree, and a runner that finds one records
-the trial as one that never ran.
+``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` names such failures declaratively, as a file the verifier writes and the
+values one of its keys holds then; the caller of ``run_episode`` sets it (``evolution.infrastructure_markers``),
+never the tree, and a runner that finds one records the trial as one that never ran. Only the trial's ``verifier``
+directory is read: the agent's directories are the task container's to write.
 """
 
 from __future__ import annotations
@@ -112,19 +113,12 @@ class InfrastructureMarker:
     values: tuple[str, ...]
 
 
-def infrastructure_markers(environ: Mapping[str, str]) -> tuple[InfrastructureMarker, ...]:
-    """The markers ``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` lists as ``[{"file_name", "key", "values"}]``; none when it
-    is unset, and a HarborTrialError naming the variable when it is not that list."""
-    text = environ.get(INFRASTRUCTURE_MARKERS_ENV)
-    if not text:
-        return ()
+def markers_from(entries: object, source: str) -> tuple[InfrastructureMarker, ...]:
+    """``entries`` as markers; a HarborTrialError naming ``source`` when it is not ``[{"file_name", "key",
+    "values"}]`` with a plain file name, a key, and a non-empty list of names."""
     shape = 'a JSON list of {"file_name": name, "key": key, "values": [names]}'
-    try:
-        entries = json.loads(text)
-    except json.JSONDecodeError as exc:
-        raise HarborTrialError(f"{INFRASTRUCTURE_MARKERS_ENV} must be {shape}: {exc}") from exc
     if not isinstance(entries, list):
-        raise HarborTrialError(f"{INFRASTRUCTURE_MARKERS_ENV} must be {shape}")
+        raise HarborTrialError(f"{source} must be {shape}")
     markers = []
     for entry in entries:
         file_name = entry.get("file_name") if isinstance(entry, dict) else None
@@ -140,21 +134,40 @@ def infrastructure_markers(environ: Mapping[str, str]) -> tuple[InfrastructureMa
             or not values
             or not all(isinstance(value, str) and value for value in values)
         ):
-            raise HarborTrialError(f"{INFRASTRUCTURE_MARKERS_ENV} must be {shape}, not {entry!r}")
+            raise HarborTrialError(f"{source} must be {shape}, not {entry!r}")
         markers.append(InfrastructureMarker(file_name, key, tuple(values)))
     return tuple(markers)
 
 
-def infrastructure_error(trial_path: Path | None, markers: Sequence[InfrastructureMarker]) -> str | None:
-    """The first marker the trial hits, as the error its row records; None when there is none.
+def infrastructure_markers(environ: Mapping[str, str]) -> tuple[InfrastructureMarker, ...]:
+    """The markers ``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` lists as ``[{"file_name", "key", "values"}]``; none when it
+    is unset, and a HarborTrialError naming the variable when it is not that list."""
+    text = environ.get(INFRASTRUCTURE_MARKERS_ENV)
+    if not text:
+        return ()
+    try:
+        entries = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise HarborTrialError(f"{INFRASTRUCTURE_MARKERS_ENV} must be a JSON list: {exc}") from exc
+    return markers_from(entries, INFRASTRUCTURE_MARKERS_ENV)
 
-    Each marker reads the first file under the trial directory named its ``file_name``; the value at its ``key`` hits
+
+def markers_text(markers: Sequence[InfrastructureMarker]) -> str:
+    """``markers`` as the ``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` value ``infrastructure_markers`` reads back."""
+    entries = [{"file_name": marker.file_name, "key": marker.key, "values": list(marker.values)} for marker in markers]
+    return json.dumps(entries)
+
+
+def infrastructure_error(verifier_path: Path | None, markers: Sequence[InfrastructureMarker]) -> str | None:
+    """The first marker the trial's verifier directory hits, as the error its row records; None when there is none.
+
+    Each marker reads the first file under ``verifier_path`` named its ``file_name``; the value at its ``key`` hits
     when it is a mapping with one of the ``values`` as a key, a list holding one, or one of them as a string. A file
     that is missing or not JSON (a torn write) is no hit."""
-    if trial_path is None:
+    if verifier_path is None:
         return None
     for marker in markers:
-        found = sorted(trial_path.rglob(marker.file_name))
+        found = sorted(verifier_path.rglob(marker.file_name))
         if not found:
             continue
         try:

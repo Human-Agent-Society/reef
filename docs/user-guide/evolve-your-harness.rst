@@ -1278,7 +1278,11 @@ stage keys, the messages, and the merges.
 
 Each episode's score is the task verifier's reward. An episode whose trial
 never ran (the image did not build, the agent could not start) scores as
-one that could not run, not as a zero. The evaluation results carry
+one that could not run, not as a zero. When a verifier reports its own
+failure as a reward of 0, ``evolution.infrastructure_markers`` lists the
+file the verifier writes and the values that name such a failure, so the
+episode scores as one that could not run (`Native on Harbor tasks
+<../developer-guide/harness-adapters.rst#native-on-harbor-tasks>`__). The evaluation results carry
 ``candidate_agents`` and ``current_agents`` per member (``root``,
 ``worker.1``, ``worker.2``), and ``candidate_messages`` and
 ``current_messages`` when the members sent messages.

@@ -52,40 +52,42 @@ def write_verifier_row(session_path: Path, row: Mapping[str, object]) -> None:
 
 def run_task(task: str) -> int:
     """Run one task and write its verifier row; 1 when the trial or the runner failed, else 0."""
-    root = Path(os.environ.get("REEF_NATIVE_DIR") or "native").absolute()
-    sessions = Path(os.environ.get("REEF_NATIVE_SESSION_DIR") or root / "sessions").absolute()
+    tree_path = Path(os.environ.get("REEF_NATIVE_DIR") or "native").absolute()
+    session_path = Path(os.environ.get("REEF_NATIVE_SESSION_DIR") or tree_path / "sessions").absolute()
     try:
         trials_text = os.environ.get(TRIALS_DIR_ENV)
         if not trials_text:
             raise HarborTrialError(f"{TRIALS_DIR_ENV} must name the directory Harbor writes its trials in")
-        trials = Path(trials_text)
-        trials.mkdir(parents=True, exist_ok=True)
+        trials_path = Path(trials_text)
+        trials_path.mkdir(parents=True, exist_ok=True)
         environment = os.environ.get(ENVIRONMENT_ENV, "docker")
         if environment not in ("docker", "e2b"):
             raise HarborTrialError(f"{ENVIRONMENT_ENV}={environment!r} names no Harbor environment; use docker or e2b")
         markers = infrastructure_markers(os.environ)
-        max_completion_tokens = output_token_limit_from(root / "models.json")
-        binding = binding_from(root / "models.json")
+        max_completion_tokens = output_token_limit_from(tree_path / "models.json")
+        binding = binding_from(tree_path / "models.json")
         agent = {
             "import_path": AGENT_IMPORT_PATH,
             "model_name": binding.model,
             # Harbor writes these into the trial config; the key stays in models.json, which the agent reads.
             "kwargs": {
-                "tree_path": str(root),
-                "session_path": str(sessions),
+                "tree_path": str(tree_path),
+                "session_path": str(session_path),
                 "max_completion_tokens": max_completion_tokens,
                 "token_limit": episode_token_limit(os.environ),
             },
         }
-        result = run_trial(task, agent, trials_path=trials, environment=environment, runner_name="native_harbor")
-        marker_error = infrastructure_error(result.trial_path, markers)
+        result = run_trial(task, agent, trials_path=trials_path, environment=environment, runner_name="native_harbor")
+        # The trial's verifier directory alone: the task container writes the agent's.
+        verifier_path = None if result.trial_path is None else result.trial_path / "verifier"
+        marker_error = infrastructure_error(verifier_path, markers)
     except (ReefError, LoadError, OSError, ValueError) as exc:
         print(f"[reef-native] {exc}", file=sys.stderr)
-        write_verifier_row(sessions, verifier_row(task, {}, is_failed=True, error=str(exc)))
+        write_verifier_row(session_path, verifier_row(task, {}, is_failed=True, error=str(exc)))
         return 1
     is_failed = not result.rewards or marker_error is not None
     write_verifier_row(
-        sessions, verifier_row(task, result.rewards, is_failed=is_failed, error=marker_error or result.error)
+        session_path, verifier_row(task, result.rewards, is_failed=is_failed, error=marker_error or result.error)
     )
     return 1 if is_failed else 0
 

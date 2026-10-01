@@ -1215,8 +1215,10 @@ could not run, not as a zero. The runner exits 1 for a failed row.
 
 ``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` names failures of a verifier's own
 machinery that a verifier reports as a reward of 0. It is a JSON list of
-``{"file_name", "key", "values"}``. The runner reads the first file named
-``file_name`` in the trial directory; when the JSON value at ``key`` holds
+``{"file_name", "key", "values"}``, set from
+``evolution.infrastructure_markers``. The runner reads the first file named
+``file_name`` under the trial's ``verifier`` directory, never the agent's
+directories the task container writes; when the JSON value at ``key`` holds
 one of ``values`` (as a key, a list item, or the string itself), the row is
 failed with ``infrastructure failure: <file_name> <key> names <value>``,
 and the rewards stay in the row. A file that is missing or not JSON is no
