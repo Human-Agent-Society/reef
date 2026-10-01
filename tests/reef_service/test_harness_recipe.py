@@ -1402,7 +1402,7 @@ def test_recipe_passes_infrastructure_markers_to_native_harbor_episodes_only(tmp
         "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
-    markers = [{"file_name": "programbench_eval.json", "key": "test_branch_errors", "values": ["__infra__"]}]
+    markers = [{"file_name": "suite_eval.json", "key": "test_branch_errors", "values": ["__infra__"]}]
 
     def config(**evolution):
         return {

@@ -1082,14 +1082,25 @@ def test_team_wait_returns_on_a_message_the_stop_flag_or_when_it_is_alone_and_ne
 
 
 class WaitingModel(MemberModel):
-    """Every member waits once for a message nobody sends, then answers; ``spender`` instead spends the budget."""
+    """Every member waits once for a message nobody sends, then answers; ``spender`` instead spends the budget, once
+    every member in ``waiters`` has entered its wait, so the spent budget is what ends each of those waits."""
 
-    def __init__(self, spender: str = "") -> None:
+    def __init__(self, spender: str = "", waiters: tuple[str, ...] = ()) -> None:
         super().__init__()
         self.spender = spender
+        self.waiters = set(waiters)
+        self.entered: set[str] = set()
+        self.entered_condition = threading.Condition()
+
+    def enter_wait(self, member: str) -> None:
+        with self.entered_condition:
+            self.entered.add(member)
+            self.entered_condition.notify_all()
 
     def reply(self, instance: str, body: dict) -> dict:
         if instance == self.spender:
+            with self.entered_condition:
+                self.entered_condition.wait_for(lambda: self.waiters <= self.entered, timeout=10)
             return {**READ, "usage": {"prompt_tokens": 5000, "completion_tokens": 0}}
         if not any(message.get("role") == "tool" for message in body["messages"]):
             return _reply(tool_calls=[_call("team_wait", {"seconds": 30}, "w1")])
@@ -1105,7 +1116,9 @@ def wait_results(sessions: Path) -> dict[str, list[str]]:
     }
 
 
-def test_members_that_all_wait_are_released_at_once_and_a_spent_budget_ends_a_wait(tmp_path: Path) -> None:
+def test_members_that_all_wait_are_released_at_once_and_a_spent_budget_ends_a_wait(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     model = WaitingModel()
     try:
         turn = TeamTurn(tmp_path / "both", model, TEAM_NODES)
@@ -1119,7 +1132,14 @@ def test_members_that_all_wait_are_released_at_once_and_a_spent_budget_ends_a_wa
     assert outcome == "completed" and elapsed < 20
     assert wait_results(turn.sessions) == {"peer.1": released, "peer.2": released}
 
-    model = WaitingModel(spender="peer.3")
+    model = WaitingModel(spender="peer.3", waiters=("peer.1", "peer.2"))
+    original_wait = Inbox.wait
+
+    def recorded_wait(inbox: Inbox, member: str, timeout_seconds: float) -> int:
+        model.enter_wait(member)
+        return original_wait(inbox, member, timeout_seconds)
+
+    monkeypatch.setattr(Inbox, "wait", recorded_wait)
     control = EpisodeControl(TeamBudget(1000))
     try:
         turn = TeamTurn(tmp_path / "budget", model, TEAM_NODES, control=control)
