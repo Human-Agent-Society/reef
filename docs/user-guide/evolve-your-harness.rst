@@ -505,7 +505,9 @@ publishes accidentally.
 - When both sides fail, the step is a tie.
 - A native episode whose turn ended on an error (a tree that cannot load, a
   graph that cannot run) counts as one that could not run, whatever its
-  text.
+  text. Under ``native_harbor`` the verifier grades the workdir after a
+  turn that ran and then failed, so its reward stands; a tree that cannot
+  load still counts as one that could not run.
 - When the result is a rejection, Reef restores the snapshot it took before
   the mutation.
 

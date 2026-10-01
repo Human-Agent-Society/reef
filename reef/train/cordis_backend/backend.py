@@ -185,25 +185,29 @@ class EpisodeEvaluationWorker:
                 path,
                 messages=messages,
             )
+        turn_failure: FailureObservation | None = None
         if path.get("error") is not None:
-            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
-            # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
-            # score instead of tying a zero.
             error = path["error"]
             cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
             if path.get("errored_agent"):
                 cause = f"agent {path['errored_agent']}: {cause}"
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
-            return _ScoredEpisode(
-                None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path, messages=messages
-            )
+            turn_failure = FailureObservation(task=task, stage=stage, cause=cause)
+            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
+            # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
+            # score instead of tying a zero. A Harbor verifier grades the workdir after a turn that ran and then
+            # failed (a model error, a stop during retries), so its reward stands then.
+            if error.get("code") == "LOAD_ERROR" or not is_graded_trial(result.trajectory):
+                return _ScoredEpisode(None, turn_failure, residue, agents, path, messages=messages)
         score = float(
             self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
         )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
         reply = final_assistant_text(result.trajectory)
+        if turn_failure is not None:
+            return _ScoredEpisode(score, turn_failure, residue, agents, path, reply, messages=messages)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
@@ -221,6 +225,11 @@ class EpisodeEvaluationWorker:
         return _ScoredEpisode(
             score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory), messages=messages
         )
+
+
+def is_graded_trial(trajectory: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a Harbor runner recorded a ``verifier`` row that is not failed: the verifier graded the trial."""
+    return any(event.get("type") == "verifier" and not event.get("failed") for event in trajectory)
 
 
 def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:

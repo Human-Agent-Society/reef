@@ -1232,6 +1232,7 @@ the tree:
   ``request_error`` hooks say. Other failures follow the hooks and the
   four-attempt limit. When the episode stops during the retries, the turn
   ends in error with the last failure, since the model never answered.
+  Harbor still runs the verifier, and its reward is the episode's score.
 - At the task's agent timeout Harbor cancels the agent. The agent sets the
   episode's stop flag: a model call in flight finishes, the rest of its
   tool calls end ``STOPPED``, every turn ends ``stopped`` at its next step,
