@@ -116,10 +116,23 @@ names the kind, and ``harness_try`` refuses to mount one on a serving process:
 the model proposes a loop, a person serves it.
 
 Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
-``skill``. Codex rejects ``code_extension`` because lifecycle hooks run outside
-its command sandbox. Terminus accepts one Python module defining
-``Agent(Terminus2)`` when Reef's sandbox isolates the runner and Harbor uses
-remote E2B tasks. See the adapter guide for the required deployment settings.
+``skill``. A Codex ``agent_command`` is a skill invoked as ``$name``.
+Codex rejects ``code_extension`` because lifecycle hooks run outside its
+command sandbox. See `Run a Codex session`_ for approvals and network access.
+
+Terminus accepts one Python module defining ``Agent(Terminus2)`` when Reef's
+sandbox isolates the runner and Harbor uses remote E2B tasks. See the adapter
+guide for the required deployment settings.
+
+A tree does not choose where model calls go. Reef's model binding writes the
+endpoint, the key and the model when it renders an episode or an install,
+and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
+adapters, render refuses a ``config`` entry, a command or a skill that sets
+them or names another provider, a transport, a proxy, a credential helper,
+a fallback or another model, also inside a request body the tree passes to
+the endpoint. These checks read the config the tree renders, not the
+requests a run sends, so a request that a tool or a plugin builds itself can
+still name another model. The adapter guide lists the keys for each adapter.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
@@ -263,6 +276,55 @@ local executor enforces none of this.
 to forward, and missing variables fail configuration. This keeps remote sandbox
 credentials out of candidate compositions. ``egress_hosts`` currently enables
 network access; it does not enforce a hostname firewall.
+
+On macOS or a host without Linux namespaces, select ``e2b`` to run ordinary
+evaluation episodes in disposable cloud sandboxes. Cordis evaluations and GEPA
+minibatches use the same episode runner and trajectory readers::
+
+    evolution:
+      adapter: pi
+      executor: e2b
+      episode_timeout_s: 600
+      sandbox:
+        e2b_api_key_env: E2B_API_KEY
+        # Only needed for a model listening on this evaluation worker's localhost:
+        forward_ports: [8000]
+
+Install ``reef-infra[e2b]`` and supply the E2B key in the named environment
+variable. ``e2b_api_key`` can also supply it explicitly. Only variables named
+in ``env_from`` are forwarded; the E2B key is used by Reef, not passed to the
+agent. Public model endpoints need no forwarded port. Each configured port
+forwards the evaluation worker's ``127.0.0.1`` endpoint to the same port inside
+the VM. With workers on other machines, localhost names that worker, not the
+Reef HTTP host; use a reachable model URL or run the evaluation on the model's
+host. Forwarding is deployment configuration, never inferred from candidate
+files. The ordinary model binding still renders the upstream credential into
+the episode; general credential isolation remains tracked in issue #204.
+
+For an npm-installed adapter, Reef builds a pinned Node 22 template containing
+the agent and bubblewrap. Its name ends in ``-episodes-v1`` so older templates
+without the isolation dependency are not reused. ``e2b_template`` selects a
+custom template; non-npm adapters require one with their binary and bubblewrap
+already installed. ``evolution.binary`` names a binary in that template, not a
+path on the Reef host. Startup checks provider access, the template, the
+binary and namespace support using a short-lived sandbox. The host does not
+install the remote agent. Terminus retains its own Harbor hosted configuration.
+
+Every ordinary episode gets its own VM. The remote filesystem and rendered
+inputs are read-only; the workspace and the adapter's declared state directories
+are writable. Files are copied back before trajectory parsing and residue
+checks. Copy-back or cleanup failure fails the episode. Timeouts terminate the
+process and its children; the VM is destroyed when the episode finishes.
+E2B has outbound internet access and resources set by its template. Nonempty
+``egress_hosts`` or ``limits`` are rejected because these local-sandbox policies
+are not implemented by this provider. Pi and Codex have opt-in real E2B tests
+in ``tests/smoke/test_e2b_episode.py``; other adapters need their template and
+runtime-state paths validated with their own agent binaries.
+
+``evolution.proposer_agent.sandbox: e2b`` remains independent: it selects where
+the proposer and its trials run, reusing the same E2B implementation while
+keeping one VM open for that proposer run. Set ``evolution.executor: e2b`` to
+select cloud execution for the regular evaluation episodes as well.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
@@ -514,10 +576,11 @@ its committed outputs are a full local run on ollama with no GPU.
 
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is
-graded, and every result is reported against its receipt. Only failures enter
-the window, so the first failing report triggers one evolve step. In this
-example the served model is its own proposer, and it answers with one skill
-mutation.
+graded, and every result is reported against its receipt. Every valid scored
+report batches, a passing one included, and ``batch_size: 1`` makes each
+report its own batch, so every report this run submits triggers one evolve
+step. In this example the served model is its own proposer, and it answers
+with one skill mutation.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
@@ -544,13 +607,12 @@ service then requires that token, and every ``curl`` on this page needs
 ``-H "Authorization: Bearer $REEF_TOKEN"``.
 
 One step is six episodes, three tasks on each of the two trees, and the
-reference run finished in 63 s on Qwen3-8B: one failing task entered the
-window, the served model proposed a new skill beside the starter, and the evaluation
+reference run finished in 63 s on Qwen3-8B: one reported trace filled the
+batch, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
 notebook run, on ollama ``qwen2.5:7b`` with no GPU, records one step whose candidate
 tied the current tree on every task and lost the gate. The run has succeeded when one
-task fails, the failing report opens the window, one evolve step runs, and
-``GET /reef/harness`` serves a release other than the seed.
+step wins its gate and ``GET /reef/harness`` serves a release other than the seed.
 ``/reef/harness/releases`` then shows that step's training row with
 ``published: true`` in its metrics.
 
@@ -567,10 +629,13 @@ still answering plain requests. A missing model server does not produce
 this symptom: the record phase raises on its first call and ``run.py``
 exits with the upstream error before any evolve step runs.
 
-A model that answers all three tasks correctly also leaves the route at 404,
-because nothing fails, so nothing batches and no step runs. ``run.py`` prints
-``every task passed: nothing batched, no evolve step runs`` when that
-happens.
+A model that answers all three tasks correctly still batches one step per
+report. Evaluation runs the tasks again on the current and candidate trees,
+so passing the initial tasks does not determine whether a candidate will
+win, tie, or lose. A step publishes only when its candidate wins; rejected
+or skipped steps leave the served tree unchanged. ``run.py`` counts all
+submitted reports, waits for the steps they triggered up to its deadline,
+and prints how many reports it batched and how many of them failed.
 
 Install the published tree
 --------------------------
@@ -965,6 +1030,50 @@ deployment listens on port 8901.
    curl -sS -X POST -H "Content-Type: application/json" \
      -d '{"release_id": "<the pending release id>"}' \
      http://127.0.0.1:8901/reef/scenarios/<scenario>/promote
+
+Run a Codex session
+-------------------
+
+Install a Codex harness with ``adapter=codex`` and run ``reef-codex`` from
+its project directory. Codex 0.153.4 exposes commands as skills: type
+``$reefine`` or another ``$name`` in the session, rather than ``/name``.
+
+.. list-table::
+   :header-rows: 1
+
+   * - Run mode
+     - Shell access to Reef
+     - Web search
+   * - Interactive ``reef-codex``
+     - The shell has no network by default. A wrapper command that calls Reef
+       needs an escalation request and your approval.
+     - The tree may enable it through ``web_search``.
+   * - ``reef-codex exec``
+     - Approval is ``never``, so the shell cannot call Reef.
+     - Controlled by the installed tree and command-line options.
+   * - Evaluation episode
+     - No approval prompts; the shell cannot call Reef.
+     - Always disabled by the episode arguments.
+
+For a single wrapper call, choose "Yes, proceed". "Yes, and don't ask again"
+saves an execution rule; later matching calls need no new approval. An approved
+call runs the wrapper as it is at that moment. The install writes it in
+``~/.reef/installs``, outside the project, where a command inside the Codex
+sandbox cannot rewrite it.
+
+Trust and saved approvals
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Codex asks whether you trust the project folder. ``reef-codex`` keeps that
+answer for the folder, or its repository, in ``~/.reef/trust``, readable by
+you alone and outside the install root. It does not change the installed
+``codex/config.toml``. Delete the corresponding trust file to be asked again.
+
+Execution rules normally last only until the temporary session copy is removed.
+If the installed tree contains ``codex/rules``, the session links that directory
+and rules persist there. The adapter guide's `Codex CLI
+<../developer-guide/harness-adapters.rst#codex-cli>`__ section describes how
+command text and ``prefix_rule`` determine which calls a saved rule allows.
 
 Serve the harness as a resident process
 ---------------------------------------
