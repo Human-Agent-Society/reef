@@ -141,7 +141,7 @@ class Host(ABC):
     def system_prompt(self, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str: ...
 
 
-class _Stop(BaseException):
+class GraphStop(BaseException):
     """The run ended inside a stage; carries the exit status and, for an agent's turn, its outcome.
 
     A BaseException: the end of a turn crosses a ``native_loop``'s own code,
@@ -161,7 +161,7 @@ class _Escalate(Exception):
         self.reason = reason
 
 
-def _last_assistant_text(messages: list[dict[str, Any]]) -> str:
+def last_assistant_text(messages: list[dict[str, Any]]) -> str:
     for message in reversed(messages):
         if message.get("role") == "assistant" and isinstance(message.get("content"), str):
             return message["content"]
@@ -309,7 +309,7 @@ class Run:
 
     def end_turn(self, reason: Mapping[str, Any], outcome: str) -> NoReturn:
         self.end_turn_quietly(reason)
-        raise _Stop(0, outcome)
+        raise GraphStop(0, outcome)
 
     def end_turn_quietly(self, reason: Mapping[str, Any]) -> None:
         self.close_step()
@@ -357,7 +357,7 @@ class Run:
             body["tools"] = self.declarations
         message, usage = loop.request(self.session, self.binding, self.hooks["request_error"], body, step)
         if message is None:
-            raise _Stop(1)
+            raise GraphStop(1)
         self.charge(self.messages, message, usage)
         calls = list(message.get("tool_calls") or [])
         self.messages.append(message)
@@ -462,7 +462,7 @@ class Run:
         return "done"
 
     def verify(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
-        text = _last_assistant_text(self.messages)
+        text = last_assistant_text(self.messages)
         line = _last_line(text)
         check = stage["check"]
         hit: bool | str = False
@@ -486,7 +486,7 @@ class Run:
 
     def branch(self, graph: Graph, stage: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         """The first case that holds names the outcome; none, ``else``."""
-        text = _last_assistant_text(self.messages)
+        text = last_assistant_text(self.messages)
         misses: dict[str, str] = {}
         for case in stage["cases"]:
             when, value = str(case["when"]), case["value"]
@@ -555,7 +555,7 @@ class Run:
 
             return run_team_stage(self, stage, name)
         first = str(stage["agent"])
-        text = _last_assistant_text(self.messages) or self.prompt
+        text = last_assistant_text(self.messages) or self.prompt
         outcome = "completed"
         ran: list[str] = []
         queue = [first]
@@ -617,7 +617,7 @@ class Run:
         )
         session.write("turn/start", {"turn": turn, "parent": self.agent})
         try:
-            outcome, text = _walk(child, graph)
+            outcome, text = walk_graph(child, graph)
         finally:
             # Steps are drawn from the episode total, so the parent's budget shrinks by what the child spent.
             self.step += child.step
@@ -625,11 +625,11 @@ class Run:
         return outcome, text, child.step
 
 
-def _walk(run: Run, graph: Graph) -> tuple[str, str]:
+def walk_graph(run: Run, graph: Graph) -> tuple[str, str]:
     """Walk the graph from its start to an end stage or a budget stop; (outcome, the last assistant text).
 
     A failure (a model call that ended in error, a graph that exceeded its
-    transition bound) raises ``_Stop`` with a nonzero exit status, which the
+    transition bound) raises ``GraphStop`` with a nonzero exit status, which the
     root turns into the episode's exit and an agent's turn propagates."""
     session = run.session
     name = graph.start
@@ -660,24 +660,24 @@ def _walk(run: Run, graph: Graph) -> tuple[str, str]:
             target = graph.edges[(name, outcome)]
             session.write("stage/exit", {"step": run.step, "stage": name, "outcome": outcome, "to": target, **detail})
             name = target
-    except _Stop as stop:
+    except GraphStop as stop:
         if stop.exit_code != 0:
             raise
-        return stop.outcome, _last_assistant_text(run.messages)
+        return stop.outcome, last_assistant_text(run.messages)
     except _Escalate as ask:
         run.end_turn_quietly({"kind": "ask", "reason": ask.reason})
         return "ask", ask.reason
     run.close_step()
     failure = {"code": "GRAPH_ERROR", "message": f"graph {graph.name!r} took more than {limit} transitions"}
     run.loop._abort(session, failure, turn=run.turn)
-    raise _Stop(1)
+    raise GraphStop(1)
 
 
 def run_graph(run: Run, graph: Graph) -> int:
     """The root turn: walk the graph and map its end to the episode's exit status."""
     try:
-        _walk(run, graph)
-    except _Stop as stop:
+        walk_graph(run, graph)
+    except GraphStop as stop:
         return stop.exit_code
     finally:
         for session in run.loop.open:
@@ -780,7 +780,7 @@ class LoopContext:
     def _ended(self) -> None:
         """After the turn's end, a call that acts gets the end again: loop code that caught it cannot act past it."""
         if self._frame.exited:
-            raise _Stop(self._frame.exit_code)
+            raise GraphStop(self._frame.exit_code)
 
     def _transition(self) -> None:
         """One call into the run; past the cap the turn aborts with ``LOOP_ERROR`` as a graph's does with ``GRAPH_ERROR``."""
@@ -794,7 +794,7 @@ class LoopContext:
                 "message": f"loop {self._name!r} took more than {self._limit} transitions",
             }
             run.loop._abort(run.session, failure, turn=run.turn)
-            raise _Stop(1)
+            raise GraphStop(1)
 
     def model(self) -> str:
         """One model step; ``"tool_calls"`` or ``"text"``. The step budget ends the turn with ``max-steps`` as a graph does."""
@@ -807,7 +807,7 @@ class LoopContext:
         self._run.tools_stage(self._budget, {"kind": "tools", "allow": None if allow is None else list(allow)})
 
     def text(self) -> str:
-        return _last_assistant_text(self._run.messages)
+        return last_assistant_text(self._run.messages)
 
     def say(self, text: str) -> None:
         """A user message from the loop; a transition, so the cap bounds a loop that only talks."""
@@ -820,10 +820,10 @@ class LoopContext:
         run = self._run
         if name not in run.agents:
             raise ValueError(f"agent {name!r} is not in the tree")
-        prompt = text if text is not None else (_last_assistant_text(run.messages) or run.prompt)
+        prompt = text if text is not None else (last_assistant_text(run.messages) or run.prompt)
         try:
             outcome, result, _ = run.run_agent(name, prompt)
-        except _Stop as stop:
+        except GraphStop as stop:
             # An agent's abort ends the run without a root turn/end, as under a graph; the frame records it as the end.
             self._frame.exited = True
             self._frame.exit_code = stop.exit_code
@@ -869,7 +869,7 @@ def run_loop_module(run: Run, module: TurnLoop) -> int:
     try:
         try:
             module.run_turn(LoopContext(run, module, frame))
-        except (_Stop, KeyboardInterrupt):
+        except (GraphStop, KeyboardInterrupt):
             raise
         except BaseException as exc:
             if frame.exited:
@@ -885,7 +885,7 @@ def run_loop_module(run: Run, module: TurnLoop) -> int:
         if frame.exited:
             return frame.exit_code
         run.end_turn_quietly({"kind": "completed"})
-    except _Stop as stop:
+    except GraphStop as stop:
         return frame.exit_code if frame.exited else stop.exit_code
     finally:
         run.session = session

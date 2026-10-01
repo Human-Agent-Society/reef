@@ -32,7 +32,15 @@ from typing import Any
 
 from reef.harness.runners.native import LoadError, Session, ToolModule, ToolRunner
 from reef.harness.runners.native.enforce import ToolFailed
-from reef.harness.runners.native.graph import Graph, GraphError, Run, _last_assistant_text, _Stop, _walk, narrow_allow
+from reef.harness.runners.native.graph import (
+    Graph,
+    GraphError,
+    GraphStop,
+    Run,
+    last_assistant_text,
+    narrow_allow,
+    walk_graph,
+)
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.inbox import Assignment, Inbox, TeamMember
 from reef.harness.runners.native.workspaces import MergeResult, TeamWorkspaceError, TeamWorkspaces
@@ -416,8 +424,8 @@ class TeamStageRun:
             )
             session.write("turn/start", {"turn": turn, "parent": caller.agent})
             try:
-                outcome, text = _walk(child, graph)
-            except _Stop:
+                outcome, text = walk_graph(child, graph)
+            except GraphStop:
                 # A model error or a graph past its transition bound: the member's file holds the error end, and the
                 # team goes on without it.
                 outcome, text = "gave_up", ""
@@ -485,6 +493,6 @@ def run_team_stage(caller: Run, stage: Mapping[str, Any], stage_name: str) -> tu
             return "completed", {"mode": mode, "agents": [], "outcomes": {}, "steps": 0}
         members = [MemberStart(instance_of(a.agent), a.agent, a.task, a.rules) for a in taken]
     else:
-        text = _last_assistant_text(caller.messages) or caller.prompt
+        text = last_assistant_text(caller.messages) or caller.prompt
         members = [MemberStart(instance_of(agent), agent, text) for agent in agents]
     return TeamStageRun(caller, stage_name, mode, str(stage.get("workspace", "own")), members).run()
