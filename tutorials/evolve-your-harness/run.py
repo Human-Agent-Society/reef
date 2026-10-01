@@ -22,9 +22,9 @@ that is already running:
     turns  - ``python3 run.py native`` sends each task to the process as one
              turn, grades the reply, and reports the score through the
              wrapper's ``report`` command, which claims the turn's receipts
-    mount  - the failing report batches and triggers the evolve step; the
-             winning tree publishes and the process mounts it while it runs,
-             which its log shows as ``harness/mount``
+    mount  - every reported score batches, so each report triggers one
+             evolve step; a winning tree publishes and the process mounts it
+             while it runs, which its log shows as ``harness/mount``
     again  - the first task goes to the same process once more, and the
              new session shows the stages of the mounted graph
 
@@ -72,6 +72,7 @@ def main():
 
     before = _steps_before(client)
     # record + report: the traffic the evolve steps learn from.
+    batched = 0
     failures = 0
     for index, task in enumerate(tasks, start=1):
         body, receipt = client.inference_with_record(
@@ -87,19 +88,22 @@ def main():
             {"agent_record_id": f"harness-evolve-{index}", "score": score, "feedback": prefix},
             references=[receipt],
         )
+        # The recipe batches valid scored reports, passing ones included (data.batch_policy: reports), and
+        # batch_size: 1 makes each report its own batch: one submitted report is one step this run triggers.
+        batched += 1
         if score == 0.0:
             failures += 1
         print(f"task {index} {prefix}: score {score} (receipt {receipt})")
 
-    if failures == 0:
-        print("every task passed: nothing batched, no evolve step runs")
-        return
-    print(f"{failures} failing report(s) batched; each triggers one gated evolve step (episodes take minutes)")
+    print(
+        f"{batched} report(s) batched ({failures} of them failing); "
+        "each triggers one gated evolve step (episodes take minutes)"
+    )
 
     # The seed tree is served from the start, so the manifest alone never says whether a step
     # published: wait for the step verdicts in the catalog, then read the head a win left behind.
     deadline = time.monotonic() + PULL_TIMEOUT_S
-    steps = _wait_for_steps(client, before, failures, deadline)
+    steps = _wait_for_steps(client, before, batched, deadline)
     if not any((row.get("metrics") or {}).get("published") for row in steps):
         print(f"no skill mutation won a gate within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh for another attempt")
         return
@@ -116,7 +120,8 @@ def main():
         if any(segment in path for segment in ("/skills/", "/tools/", "/hooks/", "/graphs/", "/agents/")):
             print(f"--- {path} ---")
             print(text)
-    _wait_for_steps(client, before, failures, deadline)
+    # Every step this run triggered already has its verdict from the wait above, so there is nothing left to
+    # wait for: the head this run pulled is the one a win left behind.
 
 
 def _training_rows(client):
@@ -269,55 +274,52 @@ def _mount_events(release_id):
 def native_main():
     tasks = json.loads(TASKS_FILE.read_text())
     client = ReefClient(SERVICE_URL, token=TOKEN, timeout_s=300.0)
+    # The pulled tree is the seed: the head moves off it only when a step publishes.
     seed = json.loads((TREE_DIR / RELEASE_FILE).read_text())["release_id"]
 
     before = _steps_before(client)
     # turns + report: each task is one turn on the resident process; the score goes against the turn's receipts.
+    batched = 0
     failures = 0
     for index, task in enumerate(tasks, start=1):
         _, result = turn(task)
         prefix = task.split(maxsplit=1)[0]
         score = evolution.grade_text(task, result["text"])
         report(score, prefix)
+        # The recipe batches valid scored reports, passing ones included (data.batch_policy: reports), and
+        # batch_size: 1 makes each report its own batch: one submitted report is one step this run triggers.
+        batched += 1
         if score == 0.0:
             failures += 1
         print(f"task {index} {prefix}: score {score} (session {result['session']}, exit {result['exit']})")
 
-    if failures == 0:
-        print("every task passed: nothing batched, no evolve step runs")
-        return
-    print(f"{failures} failing report(s) batched; each triggers one gated evolve step (episodes take minutes)")
+    print(
+        f"{batched} report(s) batched ({failures} of them failing); "
+        "each triggers one gated evolve step (episodes take minutes)"
+    )
 
-    # The head moves when a winning step publishes; until then the seed release is served.
-    manifest = None
+    # Only a win moves the head off the seed release, and a step that is rejected or skipped never does: wait for
+    # every verdict this run triggered, so an all-passing run that publishes nothing ends here instead of sitting
+    # out the whole publication deadline, then read the head a win left behind.
     deadline = time.monotonic() + PULL_TIMEOUT_S
-    while manifest is None and time.monotonic() < deadline:
-        try:
-            current = _manifest(client)
-        except (ReefClientError, TimeoutError, OSError) as exc:
-            if isinstance(exc, ReefClientError) and exc.status != 404:
-                raise
-            time.sleep(2.0)
-            continue
-        if current["release_id"] != seed:
-            manifest = current
-            continue
+    steps = _wait_for_steps(client, before, batched, deadline)
+    if not any((row.get("metrics") or {}).get("published") for row in steps):
         if error := client.get("/reef/status").get("error"):
             raise SystemExit(f"evolve step failed: {error}; check work/reef.log")
-        time.sleep(2.0)
-    if manifest is None:
         print(f"no mutation won a gate within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh native for another attempt")
         return
+    manifest = _manifest(client)
     release = manifest["release_id"]
+    if release == seed:
+        # A verdict said published, but the head still serves the seed: nothing this run can mount.
+        print(f"no mutation won a gate within {PULL_TIMEOUT_S:.0f}s; rerun ./run.sh native for another attempt")
+        return
     print(f"published: artifact {release} (parent {manifest['parent_release_id']})")
     print("gate metrics (the evolve step that published this artifact):")
     print(json.dumps(manifest["evaluation"], indent=2, sort_keys=True))
 
-    # The other batched steps run back to back and hold the catalog and the manifest while they do; the process
-    # mounts once they are over, so wait for their verdicts first.
-    _wait_for_steps(client, before, failures, deadline)
-
-    # The process follows the head: no reinstall, no restart, one harness/mount line in its log.
+    # The process follows the head: no reinstall, no restart, one harness/mount line in its log. Every step this
+    # run triggered already has its verdict, so nothing holds the catalog or the manifest now.
     deadline = time.monotonic() + MOUNT_TIMEOUT_S
     while not _mount_events(release) and time.monotonic() < deadline:
         time.sleep(1.0)
