@@ -31,6 +31,23 @@ VLLM_GENERATE_PATH = "/inference/v1/generate"
 TOKEN_ID_PREFIX = "token_id:"
 
 
+def require_full_distribution_sampling(sampling: Mapping[str, Any]) -> None:
+    """Reject top-p, top-k and min-p: vLLM reports log-probs after them, the trainer recomputes without them."""
+    top_p = sampling.get("top_p")
+    top_k = sampling.get("top_k")
+    min_p = sampling.get("min_p")
+    truncated = (
+        (isinstance(top_p, (int, float)) and top_p < 1)
+        or (isinstance(top_k, (int, float)) and top_k > 0)
+        or (isinstance(min_p, (int, float)) and min_p > 0)
+    )
+    if truncated:
+        raise ValueError(
+            "vLLM reports log-probs after top-p, top-k and min-p, which the trainer cannot reproduce; "
+            f"send top_p=1, top_k<=0 and min_p=0 (got top_p={top_p}, top_k={top_k}, min_p={min_p})"
+        )
+
+
 class VLLMGenerateClient(NativeGenerateClient):
     """Request and response shapes of vLLM ``/inference/v1/generate``."""
 
@@ -64,6 +81,7 @@ class VLLMGenerateClient(NativeGenerateClient):
             if not isinstance(extra, Mapping):
                 raise ValueError("vllm_sampling_params must be an object")
             sampling.update(extra)
+        require_full_distribution_sampling(sampling)
         return sampling
 
     def payload(

@@ -40,6 +40,7 @@ import shlex
 import shutil
 import socket
 import tarfile
+import tempfile
 import threading
 import time
 from collections.abc import Mapping, Sequence
@@ -49,7 +50,9 @@ from typing import Any
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError, ClientSession, ClientTimeout
 
+from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import (
+    ISOLATION_ENV,
     EpisodeExecutor,
     EpisodeLaunchError,
     EpisodeTimeout,
@@ -85,8 +88,8 @@ HOP_BY_HOP = frozenset(
 
 
 def template_alias(adapter: str, version: str) -> str:
-    """The template Reef builds for one adapter at one pinned version: ``reef-pi-0-84-2``."""
-    return f"reef-{adapter}-{version}".replace(".", "-").lower()
+    """The pinned agent template, versioned separately for its episode isolation dependencies."""
+    return f"reef-{adapter}-{version}-episodes-v1".replace(".", "-").lower()
 
 
 def deployment_owner(anchor: Path) -> str:
@@ -100,11 +103,63 @@ def remote_root(root: Path) -> str:
 
 def remote_command(argv: Sequence[str], env: Mapping[str, str], root: Path) -> tuple[str, dict[str, str]]:
     """The command line and environment for the sandbox: the root's local path becomes its sandbox path, the
-    binary is found on the template's ``PATH`` by name, and the host's ``PATH`` stays behind."""
+    binary is resolved in the template, and the host's ``PATH`` stays behind."""
     local, remote = str(root), remote_root(root)
-    args = [Path(argv[0]).name, *(arg.replace(local, remote) for arg in argv[1:])]
+    args = [arg.replace(local, remote) for arg in argv]
     envs = {name: value.replace(local, remote) for name, value in env.items() if name != "PATH"}
     return shlex.join(args), envs
+
+
+def protected_command(
+    command: str,
+    env: Mapping[str, str],
+    root: Path,
+    workspace: Path,
+    writable_paths: Sequence[Path],
+    readonly_paths: Sequence[Path],
+) -> str:
+    """Keep the VM filesystem read-only except the episode's declared output directories.
+
+    The PID namespace retires tool children when the command is stopped. Bubblewrap
+    also prevents privilege escalation, so sudo cannot undo the read-only mounts.
+    """
+    arguments = [
+        "bwrap",
+        "--unshare-user",
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--die-with-parent",
+        "--new-session",
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+        "--clearenv",
+    ]
+    remote = remote_root(root)
+    for path in (workspace, *writable_paths):
+        target = f"{remote}/{path.relative_to(root).as_posix()}"
+        arguments.extend(("--bind", target, target))
+    for path in readonly_paths:
+        target = f"{remote}/{path.relative_to(root).as_posix()}"
+        arguments.extend(("--ro-bind", target, target))
+    for name, value in {
+        "PATH": "/usr/local/bin:/usr/bin:/bin",
+        **env,
+        ISOLATION_ENV: "bwrap",
+        "REEF_NATIVE_ENFORCE": "bwrap",
+    }.items():
+        arguments.extend(("--setenv", name, value))
+    arguments.extend(
+        ("--chdir", f"{remote}/{workspace.relative_to(root).as_posix()}", "--", "/bin/sh", "-c", f"exec {command}")
+    )
+    return f"exec {shlex.join(arguments)}"
 
 
 def pack(directory: Path) -> bytes:
@@ -129,11 +184,15 @@ def keep_safe(member: tarfile.TarInfo, path: str) -> tarfile.TarInfo | None:
 def unpack(data: bytes, directory: Path) -> None:
     """Replace ``directory``'s contents with the archive's; a member that would land outside it, or link there,
     is left out."""
-    if directory.exists():
-        shutil.rmtree(directory)
-    directory.mkdir(parents=True)
-    with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
-        archive.extractall(directory, filter=keep_safe)
+    directory.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="reef-copy-", dir=directory.parent) as temporary:
+        staged = Path(temporary) / "root"
+        staged.mkdir()
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            archive.extractall(staged, filter=keep_safe)
+        if directory.exists():
+            shutil.rmtree(directory)
+        staged.replace(directory)
 
 
 def ensure_template(alias: str, npm_package: str, api_key: str) -> None:
@@ -146,7 +205,7 @@ def ensure_template(alias: str, npm_package: str, api_key: str) -> None:
         "building the E2B template %s with %s; the first run takes about a minute longer", alias, npm_package
     )
     Template.build(
-        Template().from_node_image("22").npm_install(npm_package, g=True),
+        Template().from_node_image("22").apt_install("bubblewrap").npm_install(npm_package, g=True),
         alias=alias,
         cpu_count=2,
         memory_mb=2048,
@@ -171,6 +230,78 @@ class E2BExecutor(EpisodeExecutor):
     timeout_s: float = 3600.0
     forward_ports: tuple[int, ...] = ()
     owner: str = ""
+    binary: str = ""
+    env: Mapping[str, str] = field(default_factory=dict, repr=False)
+    validated: bool = field(default=False, init=False, compare=False, repr=False)
+
+    @classmethod
+    def from_config(cls, section: Mapping[str, object], environ: Mapping[str, str]) -> E2BExecutor:
+        """Parse shared E2B settings without copying the host environment into the VM."""
+        allowed = {
+            "e2b_api_key",
+            "e2b_api_key_env",
+            "e2b_template",
+            "forward_ports",
+            "env_from",
+            "egress_hosts",
+            "limits",
+        }
+        unknown = set(section) - allowed
+        if unknown:
+            raise SandboxUnavailable(f"unknown E2B sandbox options: {', '.join(sorted(unknown))}")
+        if section.get("egress_hosts") or section.get("limits"):
+            raise SandboxUnavailable(
+                "E2B does not implement sandbox.egress_hosts or sandbox.limits; "
+                "it uses template resources and permits outbound internet"
+            )
+        key_name = section.get("e2b_api_key_env", "E2B_API_KEY")
+        if not isinstance(key_name, str) or not key_name.isidentifier():
+            raise SandboxUnavailable("e2b_api_key_env must name an environment variable")
+        api_key = section.get("e2b_api_key") or environ.get(key_name, "")
+        template = section.get("e2b_template", "")
+        if not isinstance(api_key, str) or not isinstance(template, str):
+            raise SandboxUnavailable("e2b_api_key and e2b_template must be strings")
+        ports = section.get("forward_ports", [])
+        if not isinstance(ports, (list, tuple)) or any(
+            isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535 for port in ports
+        ):
+            raise SandboxUnavailable("sandbox.forward_ports must list TCP ports between 1 and 65535")
+        names = section.get("env_from", [])
+        if not isinstance(names, (list, tuple)) or not all(
+            isinstance(name, str) and name.isidentifier() for name in names
+        ):
+            raise SandboxUnavailable("sandbox.env_from must list environment variable names")
+        env = {}
+        for name in names:
+            if not environ.get(name):
+                raise SandboxUnavailable(f"sandbox.env_from requires environment variable {name!r}")
+            env[name] = environ[name]
+        return cls(
+            api_key=api_key.strip(), template=template.strip(), forward_ports=tuple(dict.fromkeys(ports)), env=env
+        )
+
+    def for_adapter(self, descriptor: AdapterDescriptor, *, binary: str | None = None) -> E2BExecutor:
+        """Resolve the agent in its remote template, without installing it on the Reef host."""
+        if descriptor.self_isolating:
+            raise SandboxUnavailable(
+                f"adapter {descriptor.name!r} manages its own containers; use its hosted configuration"
+            )
+        remote_binary = binary or self.binary or descriptor.binary
+        if self.template:
+            if remote_binary == self.binary:
+                return self
+            return replace(self, binary=remote_binary)
+        install = descriptor.install
+        if install is None or install.kind != "npm":
+            raise SandboxUnavailable(
+                f"E2B adapter {descriptor.name!r} requires an explicit e2b_template containing its binary and bubblewrap"
+            )
+        return replace(
+            self,
+            template=template_alias(descriptor.name, install.version),
+            npm_package=f"{install.package}@{install.version}",
+            binary=remote_binary,
+        )
 
     def labels(self) -> dict[str, str]:
         """The metadata every sandbox this executor starts carries."""
@@ -212,12 +343,32 @@ class E2BExecutor(EpisodeExecutor):
     def preflight(self) -> None:
         if not self.api_key:
             raise SandboxUnavailable(
-                "an E2B sandbox needs an API key: set E2B_API_KEY or evolution.proposer_agent.e2b_api_key"
+                "an E2B sandbox needs an API key: set E2B_API_KEY or the selected sandbox's e2b_api_key"
             )
         try:
-            import e2b  # noqa: F401
+            import e2b
         except ImportError as exc:
             raise SandboxUnavailable("an E2B sandbox needs the e2b package: pip install 'reef-infra[e2b]'") from exc
+        if not self.template or self.validated:
+            return
+        # Probing must not reap a running deployment's sandboxes or require its HTTP server to be listening yet.
+        session = None
+        try:
+            session = replace(self, owner="", forward_ports=(), timeout_s=60).open()
+            jail = "bwrap --unshare-user --unshare-pid --ro-bind / / --proc /proc --dev /dev --"
+            command = f"{jail} {jail} /bin/true"
+            if self.binary:
+                command += f" && command -v {shlex.quote(self.binary)} >/dev/null"
+            session.sandbox.commands.run(command, timeout=30)
+        except (e2b.SandboxException, EpisodeLaunchError) as exc:
+            raise SandboxUnavailable(f"E2B startup check failed: {exc}") from exc
+        finally:
+            if session is not None:
+                try:
+                    session.close()
+                except EpisodeLaunchError as exc:
+                    raise SandboxUnavailable("E2B startup probe could not be cleaned up") from exc
+        object.__setattr__(self, "validated", True)
 
     def launch(
         self,
@@ -232,7 +383,15 @@ class E2BExecutor(EpisodeExecutor):
     ) -> ProcessOutcome:
         session = replace(self, timeout_s=max(self.timeout_s, timeout)).open()
         try:
-            return session.launch(argv, root=root, workspace=workspace, env=env, timeout=timeout)
+            return session.launch(
+                argv,
+                root=root,
+                workspace=workspace,
+                env={**env, **self.env},
+                timeout=timeout,
+                writable_paths=writable_paths,
+                readonly_paths=readonly_paths,
+            )
         finally:
             session.close()
 
@@ -255,7 +414,7 @@ class E2BExecutor(EpisodeExecutor):
             )
         except Exception as exc:
             raise EpisodeLaunchError(f"the E2B sandbox did not start: {exc}") from exc
-        session = E2BSession(sandbox)
+        session = E2BSession(sandbox, binary=self.binary)
         try:
             for index, port in enumerate(self.forward_ports):
                 session.forward(port, TUNNEL_PORT_BASE + index)
@@ -294,8 +453,10 @@ class SandboxKeeper(threading.Thread):
 class E2BSession(EpisodeExecutor):
     """One running sandbox: launch processes in it, pull what they wrote, close it when done."""
 
-    def __init__(self, sandbox: Any) -> None:
+    def __init__(self, sandbox: Any, *, binary: str = "") -> None:
         self.sandbox = sandbox
+        self.binary = binary
+        self.closed = False
         self.pumps: list[TunnelPump] = []
         self.keeper = SandboxKeeper(sandbox)
         self.keeper.start()
@@ -341,6 +502,7 @@ class E2BSession(EpisodeExecutor):
         from e2b.sandbox_sync.commands.command_handle import CommandHandle
 
         command, envs = remote_command(argv, env, root)
+        command = protected_command(command, envs, root, workspace, writable_paths, readonly_paths)
         cwd = f"{remote_root(root)}/{workspace.relative_to(root).as_posix()}"
         process: CommandHandle | None = None
         finished = False
@@ -382,7 +544,9 @@ class E2BSession(EpisodeExecutor):
             try:
                 self.pull(root)
             except Exception as exc:
-                logger.warning("could not copy %s back from the E2B sandbox: %s", root.name, exc)
+                if finished:
+                    raise EpisodeLaunchError(f"could not copy {root.name} back from the E2B sandbox") from exc
+                logger.warning("could not copy %s back from the failed E2B process", root.name)
 
     def push(self, root: Path) -> None:
         """Copy ``root`` into the sandbox at its sandbox path."""
@@ -405,6 +569,8 @@ class E2BSession(EpisodeExecutor):
         unpack(bytes(data), root / relative if relative else root)
 
     def close(self) -> None:
+        if self.closed:
+            return
         self.keeper.stop()
         for pump in self.pumps:
             pump.stop()
@@ -412,7 +578,8 @@ class E2BSession(EpisodeExecutor):
         try:
             self.sandbox.kill()
         except Exception as exc:
-            logger.warning("could not stop the E2B sandbox: %s", exc)
+            raise EpisodeLaunchError("could not stop the E2B sandbox; its provider timeout still applies") from exc
+        self.closed = True
 
 
 class TunnelPump:
