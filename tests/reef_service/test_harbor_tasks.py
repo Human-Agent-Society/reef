@@ -679,9 +679,9 @@ def test_a_renamed_task_directory_is_refused_with_the_reason(tmp_path: Path) -> 
 
 # ----------------------------------------------------------------------------------------------- imported tasks
 
-#: Harbor's ProgramBench task template (harbor-framework/harbor#2295) filled in for one item.
-PROGRAMBENCH_TASK_TOML = """schema_version = "1.3"
-source = "ProgramBench"
+#: A task an adapter in Harbor writes, with the keys reef's own tasks refuse, filled in for one item.
+ADAPTER_TASK_TOML = """schema_version = "1.3"
+source = "ExampleSuite"
 artifacts = [
   "/logs/verifier/reward.json",
   "/logs/verifier/reward.txt",
@@ -689,13 +689,13 @@ artifacts = [
 ]
 
 [task]
-name = "programbench/jq-1"
-description = "ProgramBench cleanroom reconstruction task for jqlang/jq"
+name = "examplesuite/cli-1"
+description = "Example suite task for a command line tool"
 authors = [{ name = "Ada Example" }, { name = "Grace Example" }]
-keywords = ["programbench", "cleanroom", "c"]
+keywords = ["example", "cli", "c"]
 
 [metadata]
-source = "ProgramBench"
+source = "ExampleSuite"
 instance_id = "jqlang__jq.1"
 test_count = 12
 
@@ -710,7 +710,7 @@ user = "root"
 environment_mode = "separate"
 
 [verifier.env]
-PROGRAMBENCH_SCRIPT_PTY = "1"
+EXAMPLE_SCRIPT_PTY = "1"
 
 [verifier.environment]
 build_timeout_sec = 1800
@@ -721,7 +721,7 @@ gpus = 0
 workdir = "/workspace"
 
 [environment]
-docker_image = "programbench/jqlang__jq.1:task_cleanroom_v6"
+docker_image = "examplesuite/cli.1:task_v1"
 network_mode = "allowlist"
 allowed_hosts = ["api.anthropic.com", "api.openai.com"]
 build_timeout_sec = 1800
@@ -733,15 +733,15 @@ workdir = "/workspace"
 """
 
 
-def programbench_task(root: Path, task_toml: str = PROGRAMBENCH_TASK_TOML) -> Path:
+def adapter_task(root: Path, task_toml: str = ADAPTER_TASK_TOML) -> Path:
     source_path = root / "jq-1"
     files = {
         "task.toml": task_toml,
         "instruction.md": "Rebuild /workspace/executable from its behavior alone.\n",
-        "environment/Dockerfile": "FROM programbench/jqlang__jq.1:task_cleanroom_v6\n",
-        "tests/test.sh": "#!/bin/bash\npython3 /tests/programbench_evaluator.py\n",
-        "tests/Dockerfile": "FROM programbench/jqlang__jq.1:task_cleanroom_v6\nRUN rm -rf /workspace\n",
-        "tests/programbench_evaluator.py": "print('evaluated')\n",
+        "environment/Dockerfile": "FROM examplesuite/cli.1:task_v1\n",
+        "tests/test.sh": "#!/bin/bash\npython3 /tests/suite_evaluator.py\n",
+        "tests/Dockerfile": "FROM examplesuite/cli.1:task_v1\nRUN rm -rf /workspace\n",
+        "tests/suite_evaluator.py": "print('evaluated')\n",
         "solution/solve.sh": "#!/bin/bash\ncp /reference/executable /workspace/executable\n",
     }
     for relative, text in files.items():
@@ -750,8 +750,8 @@ def programbench_task(root: Path, task_toml: str = PROGRAMBENCH_TASK_TOML) -> Pa
     return source_path
 
 
-def test_a_programbench_task_imports_with_every_file_and_every_key_harbor_reads(tmp_path: Path) -> None:
-    source_path = programbench_task(tmp_path / "harbor")
+def test_an_adapter_task_imports_with_every_file_and_every_key_harbor_reads(tmp_path: Path) -> None:
+    source_path = adapter_task(tmp_path / "harbor")
     path = import_harbor_task(source_path, tmp_path / "tasks", parents=(task().digest,))
     assert path == tmp_path / "tasks" / "jq-1"
     assert files_of(path) == files_of(source_path)
@@ -775,14 +775,14 @@ def test_a_programbench_task_imports_with_every_file_and_every_key_harbor_reads(
 
 def test_harbor_itself_loads_an_imported_task_with_its_separate_verifier(tmp_path: Path) -> None:
     config_module = pytest.importorskip("harbor.models.task.config")
-    path = import_harbor_task(programbench_task(tmp_path / "harbor"), tmp_path / "tasks")
+    path = import_harbor_task(adapter_task(tmp_path / "harbor"), tmp_path / "tasks")
     config = config_module.TaskConfig.model_validate_toml((path / "task.toml").read_text())
     assert config.verifier.environment_mode.value == "separate"
     assert config.verifier.environment.workdir == "/workspace"
-    assert config.verifier.env == {"PROGRAMBENCH_SCRIPT_PTY": "1"}
+    assert config.verifier.env == {"EXAMPLE_SCRIPT_PTY": "1"}
     assert config.agent.network_mode.value == "allowlist"
     assert config.agent.allowed_hosts == ["api.anthropic.com", "api.openai.com"]
-    assert config.source == "ProgramBench" and config.task.name == "programbench/jq-1"
+    assert config.source == "ExampleSuite" and config.task.name == "examplesuite/cli-1"
     assert config.artifacts[-1].source == "/workspace" and config.artifacts[-1].exclude == ["executable"]
     assert config.metadata["reef"]["digest"] == read_harbor_task(path).digest
 
@@ -790,13 +790,13 @@ def test_harbor_itself_loads_an_imported_task_with_its_separate_verifier(tmp_pat
 @pytest.mark.parametrize(
     ("relative", "old", "new"),
     [
-        ("tests/programbench_evaluator.py", "evaluated", "passed"),
+        ("tests/suite_evaluator.py", "evaluated", "passed"),
         ("task.toml", 'environment_mode = "separate"', 'environment_mode = "shared"'),
         ("task.toml", '{ source = "/workspace", exclude = [', '{ source = "/workspace", exclude = [ "keep",'),
     ],
 )
 def test_an_edited_import_is_refused(tmp_path: Path, relative: str, old: str, new: str) -> None:
-    path = import_harbor_task(programbench_task(tmp_path / "harbor"), tmp_path / "tasks")
+    path = import_harbor_task(adapter_task(tmp_path / "harbor"), tmp_path / "tasks")
     text = (path / relative).read_text()
     assert old in text
     (path / relative).write_text(text.replace(old, new))
@@ -825,7 +825,7 @@ storage = "10G"
 
 
 def test_a_terminal_bench_task_with_the_older_size_keys_imports_as_harbor_reads_it(tmp_path: Path) -> None:
-    source_path = programbench_task(tmp_path / "harbor", TERMINAL_BENCH_TASK_TOML)
+    source_path = adapter_task(tmp_path / "harbor", TERMINAL_BENCH_TASK_TOML)
     path = import_harbor_task(source_path, tmp_path / "tasks")
     copied = tomllib.loads((path / "task.toml").read_text())
     assert copied["environment"]["memory"] == "2G" and copied["environment"]["storage"] == "10G"
@@ -839,13 +839,13 @@ def test_a_terminal_bench_task_with_the_older_size_keys_imports_as_harbor_reads_
 
 @pytest.mark.parametrize("size", ['"2 gigs"', '"G"', '"nanG"', "2048", '"-1G"'])
 def test_an_older_size_harbor_cannot_read_is_refused(tmp_path: Path, size: str) -> None:
-    source_path = programbench_task(tmp_path / "harbor", TERMINAL_BENCH_TASK_TOML.replace('"2G"', size))
+    source_path = adapter_task(tmp_path / "harbor", TERMINAL_BENCH_TASK_TOML.replace('"2G"', size))
     with pytest.raises(HarborTaskError, match=r"environment\.memory must be a size Harbor reads"):
         import_harbor_task(source_path, tmp_path / "tasks")
 
 
 def test_an_entry_outside_harbors_layout_is_refused_by_the_import(tmp_path: Path) -> None:
-    source_path = programbench_task(tmp_path / "harbor")
+    source_path = adapter_task(tmp_path / "harbor")
     (source_path / "LICENSE").write_text("MIT\n")
     with pytest.raises(HarborTaskError, match="holds entries reef did not write: LICENSE"):
         import_harbor_task(source_path, tmp_path / "tasks")
@@ -853,7 +853,7 @@ def test_an_entry_outside_harbors_layout_is_refused_by_the_import(tmp_path: Path
 
 def test_a_harbor_task_reef_did_not_write_is_refused_naming_the_importer(tmp_path: Path) -> None:
     with pytest.raises(HarborTaskError, match=r"no \[metadata\.reef\] table.*import_harbor_task"):
-        read_harbor_task(programbench_task(tmp_path))
+        read_harbor_task(adapter_task(tmp_path))
 
 
 @pytest.mark.parametrize(
@@ -872,13 +872,13 @@ def test_a_harbor_task_reef_did_not_write_is_refused_naming_the_importer(tmp_pat
         ),
         ('environment_mode = "separate"', 'environment_mode = "apart"', "must be one of shared, separate"),
         ('schema_version = "1.3"\n', 'multi_step_reward_strategy = "max"\n', "must be one of mean, final"),
-        ('source = "ProgramBench"\nartifacts', 'source = ""\nartifacts', "source must be a non-empty string"),
+        ('source = "ExampleSuite"\nartifacts', 'source = ""\nartifacts', "source must be a non-empty string"),
         ("[metadata]\n", '[metadata.reef]\ndigest = "x"\n\n[metadata]\n', "already a reef task"),
     ],
 )
 def test_an_import_harbor_would_not_read_is_refused(tmp_path: Path, old: str, new: str, message: str) -> None:
-    assert old in PROGRAMBENCH_TASK_TOML
-    source_path = programbench_task(tmp_path / "harbor", PROGRAMBENCH_TASK_TOML.replace(old, new, 1))
+    assert old in ADAPTER_TASK_TOML
+    source_path = adapter_task(tmp_path / "harbor", ADAPTER_TASK_TOML.replace(old, new, 1))
     with pytest.raises(HarborTaskError, match=message):
         import_harbor_task(source_path, tmp_path / "tasks")
     assert not (tmp_path / "tasks" / "jq-1").exists()
