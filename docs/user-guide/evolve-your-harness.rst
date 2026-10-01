@@ -55,8 +55,31 @@ fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``, ``native_tool``,
 ``native_hook``, ``native_loop``), ``config.name`` is the file name the entry
-renders to. Ten kinds are registered in
-`reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__:
+renders to. Ten node kinds are registered in
+`reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__.
+
+A node kind states what an entry contains, not where it lands. That is decided
+by an adapter, which maps each kind to a concrete file for one agent. The
+process of turning the entries into those files is called rendering, and it is
+more than a copy: ``config`` entries merge into one file and ``rules`` entries
+concatenate. See the adapter guide's `Rendering
+<../developer-guide/harness-adapters.rst#rendering>`__ section for more details
+of this process.
+
+Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
+``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
+Agent)), for ``terminus``, Terminal-Bench's Terminus 2 run through a
+Reef-owned Harbor runner, and for ``native``, Reef's own agent.
+
+An adapter need not map every kind, and a kind it leaves out is refused at
+admission and at render rather than dropped, so the adapter decides which kinds
+a tree may use. The ten node kinds fall into two groups.
+
+General node kinds
+~~~~~~~~~~~~~~~~~~
+
+These five configure an agent whose control loop its vendor owns: its
+configuration, the text it reads, and the commands and code it loads.
 
 +--------------------+----------------------------------------------------------+
 | ``name``           | Renders as                                               |
@@ -66,12 +89,45 @@ renders to. Ten kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``rules``          | text appended to the agent's rules file                  |
 +--------------------+----------------------------------------------------------+
-| ``agent_command``  | a named prompt template                                  |
-+--------------------+----------------------------------------------------------+
 | ``skill``          | a named ``SKILL.md``                                     |
++--------------------+----------------------------------------------------------+
+| ``agent_command``  | a named prompt template                                  |
 +--------------------+----------------------------------------------------------+
 | ``code_extension`` | a named code file the harness loads in process           |
 +--------------------+----------------------------------------------------------+
+
+Every bundled adapter renders ``config``, ``rules``, and ``skill``, so a
+mutation of one of those three renders under any harness. The other two are
+narrower.
+
+Every adapter except ``native`` renders ``agent_command``; a Codex
+``agent_command`` is a skill invoked as ``$name``. ``native`` renders neither
+``agent_command`` nor ``code_extension``, because the two presuppose a vendor
+binary: its loop reads no prompt directory and loads no vendor plugin. The
+other three kinds it does render.
+
+``code_extension`` is narrower still. Codex rejects it because lifecycle hooks
+run outside its command sandbox; see `Run a Codex session`_ for approvals and
+network access. Terminus accepts one Python module defining
+``Agent(Terminus2)``, and only when Reef's sandbox isolates the runner and
+Harbor uses remote E2B tasks; see the adapter guide for the required
+deployment settings.
+
+Native node kinds
+~~~~~~~~~~~~~~~~~
+
+``native`` is a loop inside the Reef tree rather than a vendor binary, so
+these five kinds are the loop itself: its tools are ``native_tool`` nodes, its
+loop events listen to ``native_hook`` nodes, its control flow is a
+``native_graph`` node, its helpers are ``native_agent`` nodes a graph can
+call, and the loop can be a ``native_loop`` node written as code. The agent
+can therefore evolve the tools it runs, how its loop reacts, the loop itself,
+and who it delegates to, not only the text around a vendor binary. No other
+adapter renders these kinds.
+
++--------------------+----------------------------------------------------------+
+| ``name``           | Renders as                                               |
++====================+==========================================================+
 | ``native_tool``    | a named tool the native harness loads (schema and code)  |
 +--------------------+----------------------------------------------------------+
 | ``native_hook``    | a named listener at one event of the native loop (code)  |
@@ -84,20 +140,6 @@ renders to. Ten kinds are registered in
 | ``native_loop``    | the native loop itself as code: ``run_turn(ctx)`` over   |
 |                    | the context API; always reviewed                         |
 +--------------------+----------------------------------------------------------+
-
-The table describes what each kind contains. Where each kind is written is
-decided by an adapter, which maps every kind to a concrete file for one agent.
-Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
-``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
-Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
-are ``native_tool`` nodes, whose loop events listen to ``native_hook``
-nodes, whose control flow is a ``native_graph`` node, whose helpers are
-``native_agent`` nodes a graph can call, and whose loop can be a
-``native_loop`` node written as code, so the agent can evolve the tools it
-runs, how its loop reacts, the loop itself, and who it delegates to, not
-only the text around a vendor binary; and ``terminus``, Terminal-Bench's
-Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
-those five kinds.
 
 A ``native_loop`` node goes one step past a graph: its ``code`` defines
 ``run_turn(ctx)``, and that function runs the root turn in place of the graph
@@ -115,24 +157,8 @@ a pending release a person promotes, whether or not ``evolution.review_kinds``
 names the kind, and ``harness_try`` refuses to mount one on a serving process:
 the model proposes a loop, a person serves it.
 
-Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
-``skill``. A Codex ``agent_command`` is a skill invoked as ``$name``.
-Codex rejects ``code_extension`` because lifecycle hooks run outside its
-command sandbox. See `Run a Codex session`_ for approvals and network access.
-
-Terminus accepts one Python module defining ``Agent(Terminus2)`` when Reef's
-sandbox isolates the runner and Harbor uses remote E2B tasks. See the adapter
-guide for the required deployment settings.
-
-A tree does not choose where model calls go. Reef's model binding writes the
-endpoint, the key and the model when it renders an episode or an install,
-and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
-adapters, render refuses a ``config`` entry, a command or a skill that sets
-them or names another provider, a transport, a proxy, a credential helper,
-a fallback or another model, also inside a request body the tree passes to
-the endpoint. These checks read the config the tree renders, not the
-requests a run sends, so a request that a tool or a plugin builds itself can
-still name another model. The adapter guide lists the keys for each adapter.
+Rendered paths
+~~~~~~~~~~~~~~
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
@@ -145,6 +171,21 @@ With the ``pi`` adapter, ``GET /reef/harness`` serves:
      prompts/<name>.md         <- agent_command
      skills/<name>/SKILL.md    <- skill
      extensions/<name>.ts      <- code_extension
+
+The adapter guide gives the paths each other adapter renders to.
+
+Model endpoints stay outside the tree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A tree does not choose where model calls go. Reef's model binding writes the
+endpoint, the key and the model when it renders an episode or an install,
+and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
+adapters, render refuses a ``config`` entry, a command or a skill that sets
+them or names another provider, a transport, a proxy, a credential helper,
+a fallback or another model, also inside a request body the tree passes to
+the endpoint. These checks read the config the tree renders, not the
+requests a run sends, so a request that a tool or a plugin builds itself can
+still name another model. The adapter guide lists the keys for each adapter.
 
 The loop
 --------
