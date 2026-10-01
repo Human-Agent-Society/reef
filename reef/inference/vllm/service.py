@@ -1,14 +1,13 @@
-"""SGLang inference lifecycle with borrowed GPU reservations."""
+"""vLLM inference lifecycle with borrowed GPU reservations."""
 
 from __future__ import annotations
 
 import logging
 
-
 from reef.inference.process import RayHealthProbe
-from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.inference.sglang.config import CONTROL_TIMEOUT_S, SGLangConfig
-from reef.inference.sglang.launch import engine_environment
+from reef.inference.vllm.backend import VLLMInferenceBackend
+from reef.inference.vllm.config import CONTROL_TIMEOUT_S, VLLMConfig
+from reef.inference.vllm.launch import engine_environment
 from reef.runtime.deployment import (
     ADAPTER_FILES_PROTOCOL,
     DeploymentResources,
@@ -19,18 +18,18 @@ from reef.runtime.deployment import (
 from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.ray import RayExecutor
 
-# Keep the existing wire identifier while removing its implementation dependency.
-INFERENCE_PROTOCOL = "slime-sglang-control-v2"
+#: The control RPC vocabulary of :class:`reef.inference.vllm.control.VLLMControl`.
+INFERENCE_PROTOCOL = "reef-vllm-control-v1"
 
 
-class SGLangInferenceService(InferenceService):
+class VLLMInferenceService(InferenceService):
     """Own engines and the control actor; borrow the deployment allocation."""
 
     connection_protocol = INFERENCE_PROTOCOL
     #: Engines also load PEFT adapter directories, so file-delivering trainers pair with them.
     supported_transfer_protocols = (INFERENCE_PROTOCOL, ADAPTER_FILES_PROTOCOL)
 
-    def __init__(self, config: SGLangConfig) -> None:
+    def __init__(self, config: VLLMConfig) -> None:
         self.config = config
         self._inference: RayExecutor | None = None
         self._started = False
@@ -41,14 +40,14 @@ class SGLangInferenceService(InferenceService):
         if self._started or self._closed:
             raise RuntimeError("inference service can only be started once")
         if not isinstance(resources, InferenceResources) or resources.inference_placement is None:
-            raise ValueError("SGLang inference requires its supplied model reservations")
+            raise ValueError("vLLM inference requires its supplied model reservations")
         self._started = True
         self._inference = RayExecutor(
             ExecutorConfig(
                 backend=RayExecutor,
                 workers=(
                     WorkerSpec(
-                        worker_cls="reef.inference.sglang.control:SGLangControl",
+                        worker_cls="reef.inference.vllm.control:VLLMControl",
                         args=(self.config, resources.inference_placement),
                     ),
                 ),
@@ -64,12 +63,12 @@ class SGLangInferenceService(InferenceService):
 
     def _control(self, connection: InferenceConnection) -> Executor:
         if connection.protocol != self.connection_protocol:
-            raise ValueError(f"incompatible SGLang inference connection: {connection.protocol!r}")
+            raise ValueError(f"incompatible vLLM inference connection: {connection.protocol!r}")
         return connection.control
 
-    def backend(self, connection: InferenceConnection) -> SGLangInferenceBackend:
+    def backend(self, connection: InferenceConnection) -> VLLMInferenceBackend:
         """Adapt a compatible borrowed connection for Reef's coordinator."""
-        return SGLangInferenceBackend(self._control(connection))
+        return VLLMInferenceBackend(self._control(connection))
 
     def prepare_weight_transfer(self, connection: InferenceConnection) -> None:
         """Fence engines and release shared memory before trainer allocation."""
