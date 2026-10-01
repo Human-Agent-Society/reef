@@ -238,6 +238,14 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             self.args.use_fault_tolerance = False
         try:
             if not megatron_lora_enabled(self.args):
+                if self.args.colocate and self.args.offload_train:
+                    # Slime restores process groups here, but colocated training
+                    # weights are still offloaded after init or train.
+                    self.wake_up()
+                    try:
+                        return super().update_weights()
+                    finally:
+                        self.sleep()
                 return super().update_weights()
             return self._update_lora_weights()
         finally:
