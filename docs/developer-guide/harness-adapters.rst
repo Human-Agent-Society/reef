@@ -1247,16 +1247,16 @@ the tree:
   ``AgentContext``.
 
 The runner process imports every hook and runs any ``native_loop``, and
-it writes the row the episode is scored by. Outside
-``evolution.executor: sandbox``, the adapter's ``validate_execution``
-therefore refuses an episode whose tree carries a ``native_loop`` or a
-``native_hook`` that is not byte for byte a hook in
-``reef.harness.runners.native.seed.SEED_HOOKS``, in the rendered files or
-in ``tree.json``: "native_harbor imports hook and loop code into the
-process that writes the verifier row; ... needs evolution.executor:
-sandbox with remote E2B tasks". Tools are not checked, since the runner
-never imports a tool module. Under the sandbox executor the runner is
-jailed and the task must run on E2B, as for ``terminus``: set
+it writes the row the episode is scored by. The adapter's
+``validate_execution`` therefore refuses, under every executor, an episode
+whose tree carries a ``native_loop`` or a ``native_hook`` that is not byte
+for byte a hook in ``reef.harness.runners.native.seed.SEED_HOOKS``, in the
+rendered files or in ``tree.json``: "native_harbor imports hook and loop
+code into the process that writes the verifier row; ... is not code Reef
+ships, so no executor runs it". The sandbox jails the runner from the
+host, not the row from code in the runner. Tools are not checked, since the
+runner never imports a tool module. Under the sandbox executor the task
+must run on E2B, as for ``terminus``: set
 ``REEF_NATIVE_HARBOR_ENVIRONMENT=e2b`` and ``E2B_API_KEY`` in
 ``sandbox.env_from`` and list ``egress_hosts``. The E2B episode executor
 (``evolution.executor: e2b``) does not run ``native_harbor``, which manages

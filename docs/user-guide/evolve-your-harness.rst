@@ -1292,10 +1292,9 @@ Limits:
 - Team stages run in episodes only; ``reef-native serve`` refuses a tree
   that holds one.
 - Every agent of a tree calls the one model the evaluation binds.
-- Outside ``evolution.executor: sandbox``, the tree's hooks must be the
-  shipped seed hooks and the tree may carry no ``native_loop``: both run in
-  the process that writes the score. To evolve them, run the episodes in
-  the sandbox with the tasks on E2B.
+- The tree's hooks must be the shipped seed hooks and the tree may carry no
+  ``native_loop``, under every executor: both run in the process that
+  writes the score. Evolve agents, graphs, rules, skills, and tools.
 
 Write a method
 --------------

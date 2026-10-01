@@ -2,10 +2,11 @@
 
 The native loop imports every hook module into its own process, and a ``native_loop`` module runs there as the root
 turn. Under this adapter that process is the runner that writes the ``verifier`` row the episode is scored by, so a
-tree whose hook or loop code is not what Reef ships could write its own score. Outside Reef's sandbox the episode
-is refused unless every hook is a seed hook byte for byte and the tree carries no loop. Inside the sandbox the
-runner is jailed, so the task must run in Harbor's remote E2B environment, as for terminus: local Docker cannot run
-in the jail. Tools are not checked: under this adapter a tool module is imported only in the task container.
+tree whose hook or loop code is not what Reef ships could write its own score. The episode is refused unless every
+hook is a seed hook byte for byte and the tree carries no loop, under every executor: Reef's sandbox jails the runner
+from the host, not the row from the code in the runner. In the sandbox the task must also run in Harbor's remote E2B
+environment, as for terminus: local Docker cannot run in the jail. Tools are not checked: under this adapter a tool
+module is imported only in the task container.
 """
 
 from __future__ import annotations
@@ -55,7 +56,7 @@ def unshipped_code(files: Mapping[str, str]) -> list[str]:
 
 class NativeHarborExecutionValidator(ExecutionValidator):
     def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None:
-        """Refuse tree code in the unjailed runner, and local Docker nested in Reef's jail."""
+        """Refuse tree code in the runner under every executor, and local Docker nested in Reef's jail."""
         if isinstance(executor, SandboxExecutor):
             if executor.env.get(ENVIRONMENT_ENV) != "e2b":
                 raise EpisodeLaunchError(
@@ -66,13 +67,11 @@ class NativeHarborExecutionValidator(ExecutionValidator):
                 raise EpisodeLaunchError(
                     "sandboxed native_harbor requires egress_hosts and E2B_API_KEY in sandbox.env_from"
                 )
-            return
         unshipped = unshipped_code(files)
         if unshipped:
             raise EpisodeLaunchError(
                 "native_harbor imports hook and loop code into the process that writes the verifier row; "
-                f"{', '.join(unshipped)} is not code Reef ships, so it needs evolution.executor: sandbox with remote "
-                "E2B tasks"
+                f"{', '.join(unshipped)} is not code Reef ships, so no executor runs it"
             )
 
 

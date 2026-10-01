@@ -243,14 +243,14 @@ def test_outside_the_sandbox_only_the_seed_hooks_and_no_loop_run_in_the_process_
         [*SEED_NODES, {"id": "turn", "name": "native_loop", "config": loop[1]}]
     )
     assert unshipped_code(only_listed) == ["native_loop main"]
-    with pytest.raises(EpisodeLaunchError, match="native_hook spy is not code Reef ships, so it needs evolution"):
+    with pytest.raises(EpisodeLaunchError, match="native_hook spy is not code Reef ships, so no executor runs it"):
         validate(seed_files([spy]), LocalExecutor())
     # The episode lifecycle asks the validator before it writes the root.
     with pytest.raises(EpisodeError, match="imports hook and loop code into the process that writes the verifier row"):
         run_episode(get_adapter("native_harbor"), seed_files([loop]), TASK, binary=str(tmp_path / "missing"))
 
 
-def test_in_the_sandbox_the_task_runs_on_e2b_and_tree_code_is_admitted() -> None:
+def test_in_the_sandbox_the_task_runs_on_e2b_and_tree_code_is_still_refused() -> None:
     validate = get_adapter("native_harbor").validate_execution
     spy = (
         "native_hook",
@@ -263,7 +263,10 @@ def test_in_the_sandbox_the_task_runs_on_e2b_and_tree_code_is_admitted() -> None
     with pytest.raises(EpisodeLaunchError, match="requires egress_hosts and E2B_API_KEY"):
         validate(seed_files(), SandboxExecutor(egress_hosts=("api.e2b.app",), env={ENVIRONMENT_ENV: "e2b"}))
     jailed = SandboxExecutor(egress_hosts=("api.e2b.app",), env={ENVIRONMENT_ENV: "e2b", "E2B_API_KEY": "k"})
-    validate(seed_files([spy]), jailed)
+    validate(seed_files(), jailed)
+    # The jail keeps the runner from the host, not the row from a hook in the runner: no executor admits one.
+    with pytest.raises(EpisodeLaunchError, match="native_hook spy is not code Reef ships, so no executor runs it"):
+        validate(seed_files([spy]), jailed)
     # The E2B episode executor runs the runner remotely, where Harbor would need a container of its own.
     with pytest.raises(SandboxUnavailable, match="manages its own containers"):
         E2BExecutor(api_key="test-key", template="custom").for_adapter(get_adapter("native_harbor"))
