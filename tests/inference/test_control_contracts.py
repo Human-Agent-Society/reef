@@ -9,7 +9,7 @@ from reef.runtime.interfaces import AdapterEngine, InferenceEngine, InferenceMem
 from reef.runtime.recovery import (
     EngineHealthChecks,
     EngineHealthTarget,
-    InferenceEngines,
+    InferenceEngineGroup,
     InferenceMonitor,
     WeightUpdateConnection,
 )
@@ -18,7 +18,7 @@ from reef.runtime.recovery import (
 @pytest.mark.parametrize(
     "interface",
     [
-        InferenceEngines,
+        InferenceEngineGroup,
         InferenceMonitor,
         WeightUpdateConnection,
         EngineHealthChecks,
