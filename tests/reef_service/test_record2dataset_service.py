@@ -633,7 +633,7 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
         task_from_document({**task_document(task), "tests": {}})
     assert not {"parents", "is_imported", "top_level_config"} & set(task_document(task))
     stamped = dataclasses.replace(
-        task, parents=(task.digest,), is_imported=True, top_level_config={"source": "ProgramBench"}
+        task, parents=(task.digest,), is_imported=True, top_level_config={"source": "ExampleSuite"}
     )
     assert task_from_document(json.loads(json.dumps(task_document(stamped)))) == stamped
     with pytest.raises(WireError, match="parents must be a list of strings"):
