@@ -355,7 +355,7 @@ class Run:
         body: dict[str, Any] = {"messages": self.messages, "max_tokens": loop.max_completion_tokens}
         if self.declarations:
             body["tools"] = self.declarations
-        message, usage = loop._request(self.session, self.binding, self.hooks["request_error"], body, step)
+        message, usage = loop.request(self.session, self.binding, self.hooks["request_error"], body, step)
         if message is None:
             raise _Stop(1)
         self.charge(self.messages, message, usage)

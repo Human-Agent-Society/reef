@@ -937,7 +937,7 @@ class _Loop:
         if budget.is_spent:
             run.end_turn({"kind": "max-tokens", "tokens": budget.token_limit, "spent": budget.spent_tokens}, "budget")
 
-    def _request(
+    def request(
         self,
         session: Session,
         binding: ModelBinding,

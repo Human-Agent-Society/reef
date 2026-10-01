@@ -74,7 +74,7 @@ class TaskEnvironmentEnforcer(Enforcer):
             )
         except TaskEnvironmentError as exc:
             raise SandboxFailed(f"the task environment could not run the call: {exc}") from exc
-        reply: Any = None
+        reply: object = None
         if done.return_code == 0:
             try:
                 reply = json.loads(done.stdout)
