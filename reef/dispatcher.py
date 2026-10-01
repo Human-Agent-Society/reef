@@ -970,7 +970,9 @@ class Dispatcher:
     def _process_local_backend_step(self, scenario: str, component: str | None = None) -> bool:
         current = self._registry.get_optional(scenario)
         if current is None:
-            raise RuntimeContractError(f"local backend scenario {scenario!r} is not loaded")
+            # Deleted while a harness step was in flight: the step ends without
+            # a commit and without an error, as documented in http-api.rst.
+            return False
         if current.trainer_for(component).candidate_backend is None:
             raise RuntimeContractError(f"scenario {scenario!r} has no local backend")
         runtime = current.runtime
