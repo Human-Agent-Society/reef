@@ -9,7 +9,7 @@ service when a deployment carries a ``generator`` section, and the processor dri
   proposal an inference record with a receipt), the reply parsed into the instruction, the files and a hint.
 - ``harbor``: the reply held to the authoring rules, the task written with ``reef.core.tasks``, tasks
   deduplicated by content, Harbor's oracle and nop agents run through the ``harbor`` command line, a split
-  per generation.
+  per generation that keeps the splits earlier manifests gave.
 - ``service``: the HTTP API and its job runner; ``client``: the same steps as asynchronous calls for a
   processor; ``wire``: the JSON forms. The ``generator`` section that starts the service is parsed in
   ``reef.service.deploy.generator``, beside the process it describes.
@@ -46,6 +46,7 @@ from reef.record2dataset.harbor import (
     OracleUnavailable,
     content_hash,
     harbor_task,
+    listed_tasks,
     oracle_check,
     reply_errors,
     split_generation,
@@ -91,6 +92,7 @@ __all__ = [
     "designer_messages",
     "designer_prompt",
     "harbor_task",
+    "listed_tasks",
     "oracle_check",
     "parse_harbor_reply",
     "readiness_probes",

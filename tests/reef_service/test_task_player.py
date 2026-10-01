@@ -13,7 +13,14 @@ from pathlib import Path
 
 import pytest
 
-from reef.core.tasks import HarborTask, read_split_manifest, split_by_source, write_harbor_task, write_split_manifest
+from reef.core.tasks import (
+    HarborTask,
+    TaskSplit,
+    read_split_manifest,
+    split_by_source,
+    write_harbor_task,
+    write_split_manifest,
+)
 from reef.harness.client.tasks import (
     DEFAULT_AGENT,
     EpisodeRow,
@@ -171,6 +178,7 @@ def test_bound_agent_fills_the_placeholders_wherever_they_sit() -> None:
         ({"reward": 0.5}, 0.5),
         ({"accuracy": 1, "reward": 0.0}, 0.0),
         ({"accuracy": 1}, 1.0),
+        ({"accuracy": 1, "style": 0}, None),
         ({}, None),
         ({"reward": float("nan")}, None),
         ({"reward": True}, None),
@@ -239,6 +247,13 @@ def test_an_unscored_episode_is_kept_but_not_reported(reef: StandInReef, tmp_pat
     played = player(reef, tmp_path, StandInLab({}, error="the container died")).play(task_path)
     assert played.reward is None and played.error == "the container died"
     assert played.receipts == ("rec-1", "rec-2") and not played.is_reported and reef.reports == []
+
+
+def test_an_episode_whose_verifier_names_no_primary_reward_says_so(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    played = player(reef, tmp_path, StandInLab({"correctness": 1.0, "style": 0.0})).play(task_path)
+    assert played.reward is None and played.error == "the verifier wrote correctness, style and no reward entry"
+    assert not played.is_reported and reef.reports == []
 
 
 def test_an_episode_without_model_calls_is_not_reported(reef: StandInReef, tmp_path: Path) -> None:
@@ -426,6 +441,27 @@ def test_main_plays_one_side_of_a_manifest_and_prints_a_line_per_task(
     assert reef.inferences[0]["headers"]["authorization"] == "Bearer env-token"
     assert reef.reports[0]["body"]["metadata"]["episode"]["labels"] == {"arm": "plain"}
     assert [call["task_path"] for call in lab.calls] == [root / name for name in train_names]
+
+
+def test_main_plays_the_test_split_and_reports_nothing(reef: StandInReef, tmp_path: Path, capsys) -> None:
+    root = tmp_path / "tasks"
+    for name, record in (("t1", "r1"), ("t2", "r2"), ("t3", "r3")):
+        written_task(root, name, record)
+    manifest = tmp_path / "manifest.json"
+    write_split_manifest(manifest, TaskSplit(("t1",), ("t2",), 0, 0.3, test=("t3",), test_fraction=0.3))
+    assert json.loads(manifest.read_text())["version"] == 2
+    lab = StandInLab({"reward": 0.0})
+    arguments = ["--manifest", str(manifest), "--tasks-root", str(root), "--side", "test", "--reef-url", reef.url]
+    status = main([*arguments, "--scenario", "guess", "--model", "m", "--work-dir", str(tmp_path / "work")], lab=lab)
+    assert status == 0, "a scored test task is complete without a report"
+    lines = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert lines == [{"task": "t3", "reward": 0.0, "receipts": 2, "failed_calls": 0, "reports": [], "error": ""}]
+    assert [call["task_path"] for call in lab.calls] == [root / "t3"]
+    assert len(reef.inferences) == 2 and reef.reports == []
+
+    unscored = StandInLab({}, error="no verifier")
+    status = main([*arguments, "--scenario", "guess", "--model", "m", "--work-dir", str(tmp_path / "w")], lab=unscored)
+    assert status == 1, "an unscored test task is not complete"
 
 
 def test_main_returns_one_when_a_task_was_not_reported(reef: StandInReef, tmp_path: Path, capsys) -> None:

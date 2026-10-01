@@ -176,12 +176,18 @@ class Proposer(ABC):
         """Propose mutations for the current composition and trace batch."""
 
 
+class ScoreUnavailable(Exception):
+    """A scorer found no score to read: the episode ran, and its verifier wrote no reward."""
+
+
 class EpisodeScorer(ABC):
     """Base class for scoring one harness-evolution episode.
 
     Implement:
         ``__call__`` — given a task name and its episode result, return a
-        float score. Higher is better; non-finite values raise.
+        float score. Higher is better; non-finite values raise. Raise
+        ``ScoreUnavailable`` when the episode ran and left no score to read:
+        the evaluation labels it invalid instead of failing the step.
     """
 
     @abstractmethod
@@ -329,34 +335,49 @@ def resolve_proposer(value: object) -> Proposer:
     raise ValueError("propose must be a Proposer instance, a callable, or a dotted 'module:attribute' reference")
 
 
-def verifier_reward(task: str, result: EpisodeResult) -> float:
-    """The Harbor verifier's reward for a task directory episode; ``evaluate`` for a gate fed by a task manifest.
+def required_verifier_reward(task: str, result: EpisodeResult) -> float:
+    """The Harbor verifier's reward for a task directory episode, raising ``ScoreUnavailable`` when there is none.
 
     The terminus and native_harbor runners write one ``verifier`` row per episode with the task it played
-    and the rewards its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry. A failed
-    episode or a verifier that wrote nothing scores 0 (the gate has already set aside an episode whose
-    trial never ran); an episode that exited without a row scores 0; a row for another task, several
-    rewards without a ``reward`` entry, or a reward that is not a finite number is an error.
+    and the rewards its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry.
+    An episode that exited without a row, a failed episode and a verifier that wrote nothing have no score; a
+    row for another task, several rewards without a ``reward`` entry, or a reward that is not a finite number
+    is an error.
     """
     rows = [event for event in result.trajectory if event.get("type") == "verifier"]
     if not rows and result.exit_code:
-        return 0.0
+        raise ScoreUnavailable(f"the episode for {task!r} exited {result.exit_code} without a verifier record")
     if len(rows) != 1:
         raise ValueError(f"expected one verifier record for {task!r}, found {len(rows)}")
     row = rows[0]
     if row.get("task") != task:
         raise ValueError(f"the verifier record names {row.get('task')!r}, not {task!r}")
     if row.get("failed"):
-        return 0.0
+        raise ScoreUnavailable(f"the verifier for {task!r} failed")
     rewards = row.get("rewards")
     reward = primary_reward(rewards) if isinstance(rewards, Mapping) else row.get("reward")
     if reward is None:
         if isinstance(rewards, Mapping) and rewards:
             raise ValueError(f"the verifier for {task!r} wrote {sorted(rewards)} and no 'reward' entry")
-        return 0.0
+        raise ScoreUnavailable(f"the verifier for {task!r} wrote no reward")
     if isinstance(reward, bool) or not isinstance(reward, (int, float)) or not math.isfinite(reward):
         raise ValueError(f"the verifier reward for {task!r} must be a finite number, not {reward!r}")
     return float(reward)
+
+
+def verifier_reward(task: str, result: EpisodeResult) -> float:
+    """The Harbor verifier's reward for a task directory episode; ``evaluate`` for a gate fed by a task manifest.
+
+    Reads the reward as :func:`required_verifier_reward` does. A failed episode or a verifier that wrote
+    nothing scores 0 (the gate has already set aside an episode whose trial never ran); an episode that
+    exited without a row scores 0; a row for another task, several rewards without a ``reward`` entry, or a
+    reward that is not a finite number is an error. A recipe on the ``paired_confidence`` selection takes
+    ``required_verifier_reward`` instead, so an episode without a reward is invalid rather than a 0.
+    """
+    try:
+        return required_verifier_reward(task, result)
+    except ScoreUnavailable:
+        return 0.0
 
 
 def resolve_episode_scorer(value: object) -> EpisodeScorer:
