@@ -1,0 +1,143 @@
+schema-version: 2
+reef:
+  ready-timeout: 3600
+  host: 127.0.0.1
+  port: 8900
+  run-dir: ${OPD_RUN_DIR:?}/runtime
+  token: ${REEF_TOKEN}
+inference:
+  model-path: ${OPD_MODEL_PATH:?}
+  timeout-s: 3600
+  num-gpus: 1
+  tensor-parallel-size: 1
+  options:
+    router-port: 23000
+    context-length: 32768
+    dtype: bfloat16
+    mem-fraction-static: 0.35
+    disable-cuda-graph: true
+    enable-deterministic-inference: true
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
+    sampling_defaults:
+      top_p: 1.0
+      top_k: -1
+      repetition_penalty: 1.0
+      max_new_tokens: 2048
+recipe:
+  implementation: recipes.opd.recipe:OPDRecipe
+  config:
+    batch-size: 16
+    max-staleness: 0
+    tokenizer-path: ${inference.model-path}
+    max-teacher-tokens: 8192
+    checkpoint-every-n-versions: 1000
+training:
+  backend: slime
+  colocate: false
+  ready-timeout: 1800
+  ray-address: local
+  ray-namespace: reef-opd-engine
+  ray-actor-name: reef-opd-engine-bridge
+  timeout-s: 7200
+  config:
+    checkpoint_dir: ${OPD_RUN_DIR:?}/checkpoints
+    checkpoint_retention:
+      max_storage: 600GB
+      max_storage_fraction: 0.8
+      min_free_space: 100GB
+      policy: latest
+    global_batch_size: 16
+  options:
+    reef-checkpoint-max-storage: ${training.config.checkpoint_retention.max_storage}
+    reef-checkpoint-max-storage-fraction: ${training.config.checkpoint_retention.max_storage_fraction}
+    reef-checkpoint-min-free-space: ${training.config.checkpoint_retention.min_free_space}
+    reef-checkpoint-policy: ${training.config.checkpoint_retention.policy}
+    megatron-to-hf-mode: bridge
+    hf-checkpoint: ${inference.model-path}
+    # Qwen3-4B-Base embedding rows include padding beyond tokenizer length.
+    vocab-size: 151936
+    load: ${training.config.checkpoint_dir}/megatron
+    save: ${training.config.checkpoint_dir}/megatron
+    save-interval: 1
+    save-hf: ${training.config.checkpoint_dir}/hf/{rollout_id}
+    num-rollout: '100000000'
+    rollout-batch-size: ${training.config.global_batch_size}
+    global-batch-size: ${training.config.global_batch_size}
+    micro-batch-size: '1'
+    actor-num-nodes: '1'
+    actor-num-gpus-per-node: 1
+    num-gpus-per-node: 4
+    tensor-model-parallel-size: 1
+    pipeline-model-parallel-size: '1'
+    seq-length: 8192
+    rollout-max-response-len: 2048
+    rollout-max-context-len: 8192
+    disable-bias-linear: true
+    qk-layernorm: true
+    group-query-attention: true
+    normalization: RMSNorm
+    norm-epsilon: 1e-6
+    position-embedding-type: rope
+    rotary-percent: 1.0
+    rotary-base: 1000000
+    swiglu: true
+    recompute-granularity: full
+    recompute-method: uniform
+    recompute-num-layers: '1'
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: 8192
+    log-probs-chunk-size: '512'
+    ckpt-fully-parallel-save: true
+    attention-dropout: '0.0'
+    hidden-dropout: '0.0'
+    attention-softmax-in-fp32: true
+    accumulate-allreduce-grads-in-fp32: true
+    attention-backend: flash
+    optimizer: adam
+    lr: 5e-5
+    lr-decay-style: constant
+    weight-decay: '0.0'
+    clip-grad: '1.0'
+    adam-beta1: '0.9'
+    adam-beta2: '0.95'
+    loss-type: custom_loss
+    use-rollout-logprobs: true
+    disable-compute-advantages-and-returns: true
+    opd-teacher: separate
+    opd-teacher-update-rate: '0'
+    opd-divergence: reverse
+    opd-top-k: '1'
+    opd-importance-sampling-cap: '0'
+    n-samples-per-prompt: '1'
+    rollout-temperature: '1.0'
+    megatron-lora-rank: 16
+    megatron-lora-alpha: 16
+    megatron-lora-dropout: '0'
+    megatron-lora-target-modules:
+    - linear_fc2
+    - linear_proj
+    megatron-lora-init: ${OPD_ADAPTER_PATH:?}
+    check-lora-weight-equal: true
+    verify-lora-base-weights: true
+storage:
+  artifact-repository: ${OPD_RUN_DIR:?}/artifacts.git
+  artifact-work-dir: ${OPD_RUN_DIR:?}/artifact-work
+  artifact-cache-dir: ${OPD_RUN_DIR:?}/artifact-cache
+  agent-record-dir: ${OPD_RUN_DIR:?}/agent-record
+execution:
+  training: ray
+  rollout: ray
+observability:
+  wandb:
+    enabled: false
+teacher:
+  model-path: ${OPD_TEACHER_PATH:?}
+  num-gpus: 1
+  port: 30001
+  timeout: 300
+  options:
+    dtype: bfloat16
+    context-length: 32768
+    mem-fraction-static: 0.35
+    disable-cuda-graph: true

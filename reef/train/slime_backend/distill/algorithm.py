@@ -28,6 +28,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from numbers import Integral, Real
 from typing import Any
+from urllib.parse import urlsplit
 
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
@@ -72,6 +73,9 @@ class DistillSettings:
     top_k_distribution: str = "renormalized"
     teacher_update_rate: float = 0.01
     teacher_checkpoint: str = ""
+    teacher_url: str = ""
+    teacher_model_path: str = ""
+    teacher_timeout: float = 300.0
     importance_sampling_cap: float = 2.0
     importance_sampling_level: str = "sequence"
     skip_response_tokens: int = 0
@@ -94,7 +98,27 @@ class DistillSettings:
             raise ValueError("distill teacher_update_rate must be a number in [0, 1]")
         if not isinstance(self.teacher_checkpoint, str):
             raise ValueError("distill teacher_checkpoint must be a path string")
-        if self.teacher == "separate" and not self.teacher_checkpoint.strip():
+        if not isinstance(self.teacher_url, str) or not isinstance(self.teacher_model_path, str):
+            raise ValueError("teacher_url and teacher_model_path must be strings")
+        if not _is_finite(self.teacher_timeout) or self.teacher_timeout <= 0:
+            raise ValueError("teacher_timeout must be finite and positive")
+        if self.teacher_url:
+            address = urlsplit(self.teacher_url)
+            if address.scheme not in ("http", "https") or not address.hostname or address.query or address.fragment:
+                raise ValueError("teacher_url must be an HTTP(S) base URL")
+            if address.username or address.password:
+                raise ValueError("teacher_url must not contain credentials")
+            if self.teacher != "separate" or self.teacher_checkpoint:
+                raise ValueError("teacher_url requires teacher separate and replaces teacher_checkpoint")
+            if not self.teacher_model_path.strip():
+                raise ValueError("teacher_url requires teacher_model_path for tokenizer validation")
+            if self.top_k == 0 or self.top_k_source != "teacher":
+                raise ValueError(
+                    "engine teacher requires positive top_k and top_k_source teacher; use checkpoint mode"
+                )
+        elif self.teacher_model_path:
+            raise ValueError("teacher_model_path requires teacher_url")
+        if self.teacher == "separate" and not self.teacher_checkpoint.strip() and not self.teacher_url:
             raise ValueError("distill teacher 'separate' needs teacher_checkpoint, the teacher's Megatron checkpoint")
         if not _is_finite(self.importance_sampling_cap) or self.importance_sampling_cap < 0:
             raise ValueError(
@@ -206,13 +230,19 @@ class DistillAlgorithm(SlimeAlgorithm):
     forbidden_advantages_message = (
         "a distillation family distils its teacher's distribution; the Reef payload must omit advantages"
     )
-    rollout_data_keys = ("teacher_tokens", "distill_sample_weights")
-    rollout_tensor_dtypes: Mapping[str, str] = {"teacher_tokens": "long"}
+    rollout_data_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS[1:])
+    rollout_tensor_dtypes: Mapping[str, str] = {
+        "teacher_tokens": "long",
+        "distill_teacher_topk_ids": "long",
+        "distill_teacher_topk_log_probs": "float32",
+        "distill_teacher_sampled_log_probs": "float32",
+    }
     external_batch_keys = ("rollout_log_probs", "distill_sample_weights", *TEACHER_BATCH_KEYS)
     rollout_log_skip_keys = ("teacher_tokens", "distill_sample_weights", *TEACHER_BATCH_KEYS)
     required_objective_hooks = ("custom_loss_function_path", "reef_actor_pre_train_hook_path")
     #: The recipe's settings type, with its defaults.
     settings_type: type[DistillSettings] = DistillSettings
+    _teacher_settings: DistillSettings | None = None
 
     # --- stage 1: configure ---
 
@@ -231,6 +261,12 @@ class DistillAlgorithm(SlimeAlgorithm):
         # so dropout would let the loss compare the teacher against ids the
         # trained student never ranked highest.
         settings = settings_from_args(args)
+        if settings.teacher_url:
+            if getattr(args, "rollout_temperature", 1.0) != 1.0:
+                raise ValueError("engine teacher requires rollout_temperature=1: SGLang input logprobs are untempered")
+            from reef.train.slime_backend.distill.engine import validate_teacher_tokenizer
+
+            validate_teacher_tokenizer(args.hf_checkpoint, settings.teacher_model_path)
         student_selects = not settings.exact and settings.top_k_source == "student"
         if student_selects and (args.attention_dropout != 0 or args.hidden_dropout != 0):
             raise RuntimeError(
@@ -328,6 +364,20 @@ class DistillAlgorithm(SlimeAlgorithm):
             choices=("sequence", "token"),
             help="Average correction weights per sequence, or apply them independently at each token.",
         )
+        parser.add_argument(
+            f"{prefix}teacher-url", dest="teacher_url", help="Independent frozen SGLang teacher base URL."
+        )
+        parser.add_argument(
+            f"{prefix}teacher-model-path",
+            dest="teacher_model_path",
+            help="Teacher HF model directory for tokenizer validation.",
+        )
+        parser.add_argument(
+            f"{prefix}teacher-timeout",
+            dest="teacher_timeout",
+            type=float,
+            help="Teacher scoring HTTP timeout in seconds.",
+        )
         options, remaining = parser.parse_known_args(list(arguments))
         return self.settings_type(**vars(options)), remaining
 
@@ -341,16 +391,37 @@ class DistillAlgorithm(SlimeAlgorithm):
         args.distill_top_k_distribution = settings.top_k_distribution
         args.distill_teacher_update_rate = settings.teacher_update_rate
         args.distill_teacher_checkpoint = settings.teacher_checkpoint
+        args.distill_teacher_url = settings.teacher_url
+        args.distill_teacher_model_path = settings.teacher_model_path
+        args.distill_teacher_timeout = settings.teacher_timeout
         args.distill_importance_sampling_cap = settings.importance_sampling_cap
         args.distill_importance_sampling_level = settings.importance_sampling_level
         args.distill_skip_response_tokens = settings.skip_response_tokens
         args.distill_jsd_beta = settings.jsd_beta
 
-    def bind(self, config=None, *, critic_steps_per_actor=None, critic_only_steps=0):
-        # The settings travel on args; the bound instance stays stateless.
+    def bind(
+        self,
+        config: object | None = None,
+        *,
+        critic_steps_per_actor: int | None = None,
+        critic_only_steps: int = 0,
+    ) -> DistillAlgorithm:
+        # Checkpoint teachers travel on args; engine scoring is owned by this bridge.
         if config is not None and not isinstance(config, DistillSettings):
             raise TypeError(f"{self.loss_family} bridge algorithm config must be {self.settings_type.__name__}")
+        if isinstance(config, DistillSettings) and config.teacher_url:
+            bound = self.__class__()
+            bound._teacher_settings = config
+            return bound
         return self
+
+    def prepare_rollout(self, rollout_data: dict[str, Any]) -> dict[str, Any]:
+        """Score an independent teacher before tensorization and the training job marker."""
+        if self._teacher_settings is None:
+            return {}
+        from reef.train.slime_backend.distill.engine import EngineTeacher
+
+        return EngineTeacher(self._teacher_settings).prepare(rollout_data)
 
     # --- stage 2: shape row ---
 
@@ -373,6 +444,9 @@ def settings_from_args(args: Namespace) -> DistillSettings:
         top_k_distribution=args.distill_top_k_distribution,
         teacher_update_rate=args.distill_teacher_update_rate,
         teacher_checkpoint=args.distill_teacher_checkpoint,
+        teacher_url=getattr(args, "distill_teacher_url", ""),
+        teacher_model_path=getattr(args, "distill_teacher_model_path", ""),
+        teacher_timeout=getattr(args, "distill_teacher_timeout", 300.0),
         importance_sampling_cap=args.distill_importance_sampling_cap,
         importance_sampling_level=args.distill_importance_sampling_level,
         skip_response_tokens=args.distill_skip_response_tokens,

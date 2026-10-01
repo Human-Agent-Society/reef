@@ -45,15 +45,15 @@ class ToyActor(torch.nn.Module):
         self.decoder.layers = torch.nn.ModuleList([layer])
 
 
-@pytest.fixture
-def initial_adapter(tmp_path, monkeypatch):
+@pytest.fixture(params=["model.layers", "model.language_model.layers"])
+def initial_adapter(tmp_path, monkeypatch, request):
     from megatron.core import parallel_state
 
     monkeypatch.setattr(parallel_state, "get_pipeline_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_rank", lambda: 0)
     (tmp_path / "adapter_config.json").write_text(json.dumps({"r": 2, "lora_alpha": 2, "bias": "none"}))
-    prefix = "base_model.model.model.language_model.layers.0.mlp.down_proj"
+    prefix = f"base_model.model.{request.param}.0.mlp.down_proj"
     tensors = {f"{prefix}.lora_A.weight": torch.ones(2, 8), f"{prefix}.lora_B.weight": torch.full((4, 2), 3.0)}
     save_file(tensors, str(tmp_path / "adapter_model.safetensors"))
     return tmp_path, tensors
@@ -70,7 +70,7 @@ def test_initial_adapter_preserves_sft_function(initial_adapter) -> None:
     torch.testing.assert_close(adapter.linear_out(adapter.linear_in(inputs)), expected)
 
 
-@pytest.mark.parametrize("failure", ["missing", "extra", "nonfinite", "scale"])
+@pytest.mark.parametrize("failure", ["missing", "extra", "nonfinite", "scale", "mixed_prefix", "unknown_prefix"])
 def test_initial_adapter_rejects_bad_input_without_partial_mutation(initial_adapter, failure) -> None:
     path, tensors = initial_adapter
     if failure == "missing":
@@ -79,6 +79,16 @@ def test_initial_adapter_rejects_bad_input_without_partial_mutation(initial_adap
         tensors["unrelated.weight"] = torch.ones(1)
     elif failure == "nonfinite":
         tensors[next(k for k in tensors if "lora_B" in k)][0, 0] = float("nan")
+    elif failure == "mixed_prefix":
+        key = next(iter(tensors))
+        alternate = (
+            key.replace("model.language_model.layers", "model.layers")
+            if "language_model" in key
+            else key.replace("model.layers", "model.language_model.layers")
+        )
+        tensors[alternate] = tensors[key].clone()
+    elif failure == "unknown_prefix":
+        tensors = {key.replace("base_model.model.", "unsupported."): value for key, value in tensors.items()}
     else:
         (path / "adapter_config.json").write_text(json.dumps({"r": 2, "lora_alpha": 4}))
     save_file(tensors, str(path / "adapter_model.safetensors"))

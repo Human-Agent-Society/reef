@@ -182,6 +182,7 @@ class TrainingDeployment(ABC):
     """Lightweight integration definition; preparation never allocates model resources."""
 
     requires_local_model: bool = True
+    supports_teacher_engine: bool = False
 
     @abstractmethod
     def prepare(self, config: dict[str, Any], settings: Mapping[str, Any]) -> tuple[dict[str, Any], ...]:

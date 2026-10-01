@@ -1,4 +1,4 @@
-"""Load unfused Qwen3.5 PEFT adapters into the matching Megatron TP shards.
+"""Load unfused Qwen3 and Qwen3.5 PEFT adapters into the matching Megatron TP shards.
 
 Only row-parallel MLP down and attention output projections are supported.
 Reject fused projections rather than silently changing the adapter's rank.
@@ -47,6 +47,14 @@ def load_initial_adapter(model: torch.nn.Module, path: str, *, rank: int, alpha:
     if config.get("bias", "none") != "none" or config.get("lora_dropout", 0) != 0:
         raise ValueError("Initial adapter requires no bias and zero dropout")
     weights = load_file(str(directory / "adapter_model.safetensors"), device="cpu")
+    prefixes = [
+        prefix
+        for prefix in ("base_model.model.model.layers.", "base_model.model.model.language_model.layers.")
+        if any(key.startswith(prefix) for key in weights)
+    ]
+    if len(prefixes) != 1:
+        raise ValueError("Initial adapter must use exactly one supported Qwen layer prefix")
+    prefix = prefixes[0]
     tp_rank = parallel_state.get_tensor_model_parallel_rank()
     tp_size = parallel_state.get_tensor_model_parallel_world_size()
     pattern = re.compile(
@@ -63,7 +71,7 @@ def load_initial_adapter(model: torch.nn.Module, path: str, *, rank: int, alpha:
         layer, projection, side = match.groups()
         target = "mlp.down_proj" if projection == "mlp.linear_fc2" else "self_attn.o_proj"
         letter = "A" if side == "in" else "B"
-        key = f"base_model.model.model.language_model.layers.{layer}.{target}.lora_{letter}.weight"
+        key = f"{prefix}{layer}.{target}.lora_{letter}.weight"
         if key not in weights:
             raise ValueError(f"Initial adapter is missing {key}")
         weight = weights[key]

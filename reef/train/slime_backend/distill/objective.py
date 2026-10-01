@@ -560,6 +560,12 @@ def distill_actor_pre_train(actor: Any, rollout_data: dict[str, Any]) -> None:
     """``--reef-actor-pre-train-hook-path`` entry point: score every teacher sequence before the step."""
     if not rollout_data.get("teacher_tokens"):
         raise ValueError("every distill sample must carry teacher_tokens")
+    if getattr(actor.args, "distill_teacher_url", ""):
+        from reef.train.slime_backend.distill.engine import ENGINE_COLUMNS
+
+        if any(len(rollout_data.get(key, ())) != len(rollout_data["teacher_tokens"]) for key in ENGINE_COLUMNS):
+            raise ValueError("independent teacher columns must be prepared by the bridge before training")
+        return
     from slime.utils.timer import timer
 
     from reef.train.slime_backend.distill.teacher import compute_teacher_rows

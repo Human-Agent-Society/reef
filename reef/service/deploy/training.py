@@ -59,6 +59,8 @@ def assemble_training_services(config: dict[str, Any]) -> None:
     """Validate common inputs; integrations own process topology and connections."""
     settings = service_config_from_mapping(config)
     backend = training_deployment_for(settings.training_backend)
+    if settings.teacher_model_path and not backend.supports_teacher_engine:
+        raise DeployConfigError("selected training backend does not support an independent teacher engine")
     model = config_value(config, "reef", "model_path")
     if not isinstance(model, str) or not model:
         raise DeployConfigError("weight training requires --inference.model-path")

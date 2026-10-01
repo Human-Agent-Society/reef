@@ -267,4 +267,10 @@ def test_sdpo_settings_roundtrip_and_training_requirements() -> None:
     with pytest.raises(RuntimeError, match="calculate-per-token-loss"):
         family.validate_specific_args(args, "test")
     assert SdpoSettings().teacher_update_rate == 0.05
-    assert family.rollout_data_keys == ("teacher_tokens", "distill_sample_weights")
+    assert family.rollout_data_keys == (
+        "teacher_tokens",
+        "distill_sample_weights",
+        "distill_teacher_topk_ids",
+        "distill_teacher_topk_log_probs",
+        "distill_teacher_sampled_log_probs",
+    )
