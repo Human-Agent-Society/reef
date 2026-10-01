@@ -1,8 +1,8 @@
 """The mailboxes of one team stage run: a queue per member, and the messages sent to the agent that started the team.
 
-A message is queued when it is sent and read at the receiver's next step; a member that has ended receives nothing
-more, and a message to it is reported undelivered. The inbox lasts one stage run. The workers a run assigns for
-its parallel stages wait on that run as ``Assignment`` values.
+A message is queued when it is sent and read at the receiver's next step, at most ``TEAM_STEP_MAX_CHARS`` of them per
+step; a member that has ended receives nothing more, and a message to it is reported undelivered. The inbox lasts one
+stage run. The workers a run assigns for its parallel stages wait on that run as ``Assignment`` values.
 """
 
 from __future__ import annotations
@@ -12,12 +12,14 @@ import time
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from reef.harness.runners.native.control import EpisodeStop
+from reef.harness.runners.native.control import EpisodeStop, TeamBudget
 from reef.harness.tree.nodes import redact_secret_shaped
 
 #: Characters one message may carry, and messages one member may send in a stage run.
 TEAM_MESSAGE_MAX_CHARS = 8000
 TEAM_MAX_SENDS_PER_MEMBER = 256
+#: Characters of messages one step delivers; a message past them waits for the receiver's next step.
+TEAM_STEP_MAX_CHARS = 32_000
 #: The longest a wait sleeps before it reads the stop flag again.
 WAIT_SLICE_SECONDS = 1.0
 
@@ -32,14 +34,21 @@ class TeamMessage:
 class Inbox:
     """One stage run's mailboxes; safe to use from every member's thread."""
 
-    def __init__(self, members: Mapping[str, str], caller: str, stop: EpisodeStop) -> None:
+    def __init__(
+        self, members: Mapping[str, str], caller: str, stop: EpisodeStop, budget: TeamBudget | None = None
+    ) -> None:
         #: Each member's instance name and the role (the agent) it runs.
         self.members = dict(members)
         self.caller = caller
         self.stop = stop
-        self.condition = threading.Condition()
+        self.budget = budget or TeamBudget(None)
+        #: Reentrant: a sender holds it across the send and its own ``team/send`` event.
+        self.condition = threading.Condition(threading.RLock())
         self.queues: dict[str, list[TeamMessage]] = {member: [] for member in self.members}
         self.closed: set[str] = set()
+        #: Who waits in ``wait`` now, and who left its last wait because every open member was waiting.
+        self.waiting: set[str] = set()
+        self.deadlocked: set[str] = set()
         self.sent_counts: dict[str, int] = dict.fromkeys(self.members, 0)
         self.to_caller: list[TeamMessage] = []
 
@@ -84,27 +93,59 @@ class Inbox:
         return message, delivered, undelivered
 
     def take(self, member: str) -> list[TeamMessage]:
-        """The messages waiting for ``member``, in the order they were sent; they are no longer waiting after."""
+        """The messages waiting for ``member`` that fit one step, in the order they were sent; the first always
+        fits, and the rest wait for the next step."""
         with self.condition:
-            waiting, self.queues[member] = self.queues[member], []
-        return waiting
+            queue, size, count = self.queues[member], 0, 0
+            for message in queue:
+                if count and size + len(message.text) > TEAM_STEP_MAX_CHARS:
+                    break
+                size, count = size + len(message.text), count + 1
+            taken, self.queues[member] = queue[:count], queue[count:]
+        return taken
 
     def is_alone(self, member: str) -> bool:
         """Whether every other member has ended, so no message can come; the caller is waiting and sends none."""
         with self.condition:
             return all(other in self.closed for other in self.members if other != member)
 
+    @property
+    def is_ending(self) -> bool:
+        """Whether the episode's stop flag is set or its token budget spent, so every member ends at its next step."""
+        return self.stop.is_set or self.budget.is_spent
+
+    def is_deadlocked(self, member: str) -> bool:
+        """Whether ``member`` and every other open member wait with nothing queued, so no message can come."""
+        with self.condition:
+            others = [other for other in self.members if other != member and other not in self.closed]
+            return bool(others) and all(other in self.waiting and not self.queues[other] for other in others)
+
     def wait(self, member: str, timeout_seconds: float) -> int:
-        """Wait until a message waits for ``member``, the stop flag is set, every other member has ended, or the time
-        passes; the number of messages waiting then."""
+        """Wait until a message waits for ``member``, the episode is ending, every other member has ended or waits
+        too, or the time passes; the number of messages waiting then."""
         deadline = time.monotonic() + timeout_seconds
         with self.condition:
-            while True:
-                waiting = len(self.queues[member])
-                remaining = deadline - time.monotonic()
-                if waiting or self.stop.is_set or self.is_alone(member) or remaining <= 0:
-                    return waiting
-                self.condition.wait(min(remaining, WAIT_SLICE_SECONDS))
+            self.waiting.add(member)
+            self.deadlocked.discard(member)
+            try:
+                while True:
+                    waiting = len(self.queues[member])
+                    if not waiting and self.is_deadlocked(member):
+                        # Every waiter leaves at once, so none sleeps on after the others went on.
+                        self.deadlocked.update(self.waiting)
+                        self.condition.notify_all()
+                    remaining = deadline - time.monotonic()
+                    if (
+                        waiting
+                        or member in self.deadlocked
+                        or self.is_ending
+                        or self.is_alone(member)
+                        or remaining <= 0
+                    ):
+                        return waiting
+                    self.condition.wait(min(remaining, WAIT_SLICE_SECONDS))
+            finally:
+                self.waiting.discard(member)
 
     def close(self, member: str) -> list[TeamMessage]:
         """End ``member``'s mailbox; the messages it never read."""
@@ -117,6 +158,11 @@ class Inbox:
     def caller_messages(self) -> list[TeamMessage]:
         with self.condition:
             return list(self.to_caller)
+
+    def was_deadlocked(self, member: str) -> bool:
+        """Whether ``member``'s last wait ended because every open member was waiting."""
+        with self.condition:
+            return member in self.deadlocked
 
 
 @dataclass(frozen=True)

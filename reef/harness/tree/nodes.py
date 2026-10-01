@@ -83,7 +83,7 @@ NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
 #: ``team_assign``; ``team``: every listed agent, a name listed twice run twice, each handed the caller's text).
 NATIVE_TEAM_MODES = ("parallel", "team")
 NATIVE_SUBAGENT_MODES = ("sequential", *NATIVE_TEAM_MODES)
-#: Where a team stage's members work: a git worktree each, merged back when the stage ends, or the caller's workdir.
+#: Where a team stage's members work: a git clone each, merged back when the stage ends, or the caller's workdir.
 NATIVE_TEAM_WORKSPACES = ("own", "shared")
 #: The members one team stage lists, and the assignments one run may hold for its parallel stages.
 NATIVE_TEAM_MAX_AGENTS = 8

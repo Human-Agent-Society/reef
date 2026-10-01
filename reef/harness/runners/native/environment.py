@@ -3,7 +3,7 @@
 ``TaskEnvironmentEnforcer`` runs each tool call as the bwrap enforcer's child does, with the container's own
 ``python3``: the request goes up as a file under the support directory (``/reef``), the child ``sandboxed.py``
 imports the tool module there and replies on stdout. The container needs ``python3`` and no Reef.
-``EnvironmentCommandRunner`` runs the git commands of ``workspace: own`` stages there too, so the member worktrees
+``EnvironmentCommandRunner`` runs the git commands of ``workspace: own`` stages there too, so the member clones
 and Reef's git directory live in the container under the support directory, outside the task's workdir. Nothing
 here imports Harbor: ``reef.harness.runners.native.harbor`` implements ``TaskEnvironment`` over a Harbor environment.
 """

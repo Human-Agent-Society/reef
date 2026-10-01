@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 import threading
 import time
 from pathlib import Path, PurePosixPath
@@ -41,12 +42,14 @@ from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.inbox import (
     TEAM_MAX_SENDS_PER_MEMBER,
     TEAM_MESSAGE_MAX_CHARS,
+    TEAM_STEP_MAX_CHARS,
     Assignment,
     Inbox,
     TeamMember,
 )
 from reef.harness.runners.native.seed import SEED_TOOLS
 from reef.harness.runners.native.team import (
+    TEAM_CALLER_MESSAGES_CHARS,
     MemberStart,
     TeamAssignRunner,
     TeamStageRun,
@@ -54,7 +57,12 @@ from reef.harness.runners.native.team import (
     run_team_stage,
     team_outcome,
 )
-from reef.harness.runners.native.workspaces import CommandOutcome, HostCommandRunner, TeamWorkspaces
+from reef.harness.runners.native.workspaces import (
+    CommandOutcome,
+    HostCommandRunner,
+    TeamWorkspaceError,
+    TeamWorkspaces,
+)
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend import CordisBackend, Mutation
@@ -720,6 +728,143 @@ def test_the_host_command_runner_reports_a_missing_command_and_a_timeout_as_outc
     assert done == CommandOutcome(3, "hi\n", "")
 
 
+def test_a_member_sees_and_merges_files_the_tasks_gitignore_ignores(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("build/prog", "binary\n"), ("src.txt", "source\n")]})
+    seen: dict[str, list[str]] = {}
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        (turn.work / ".gitignore").write_text("build/\ndata.bin\n")
+        (turn.work / "data.bin").write_text("input data\n")
+        original = model.reply
+
+        def reply(instance: str, body: dict) -> dict:
+            seen.setdefault(instance, sorted(path.name for path in (turn.work / TEAM_DIR / "s1-peer.1").iterdir()))
+            return original(instance, body)
+
+        model.reply = reply
+        outcome, detail = turn.stage(peers(1), workspace="own")
+        turn.finish()
+    finally:
+        stop(model)
+    # The member got the ignored input, and its ignored output reached the workdir.
+    assert seen["peer.1"] == [".git", ".gitignore", "data.bin"]
+    assert (outcome, detail["merges"]) == ("completed", {"peer.1": "merged"})
+    assert (turn.work / "build" / "prog").read_text() == "binary\n" and (turn.work / "src.txt").exists()
+
+
+def test_a_nested_git_repository_is_refused_before_any_member_starts(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("a.txt", "one\n")]})
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        (turn.work / "vendor" / "lib" / ".git").mkdir(parents=True)
+        outcome, detail = turn.stage(peers(1), workspace="own")
+        turn.finish()
+    finally:
+        stop(model)
+    assert (outcome, detail["agents"]) == ("gave_up", []) and not model.requests
+    (said,) = root_events(turn, "user/message")
+    assert said["content"] == (
+        f"the team did not start: vendor/lib in {turn.work} is a git repository of its own, which workspace: own "
+        "cannot copy; use workspace: shared"
+    )
+
+
+class StrayModel(WritingModel):
+    """peer.1 writes ``stray.txt`` and ``b.txt`` into the caller's workdir, by absolute path, as it answers."""
+
+    work: Path
+
+    def reply(self, instance: str, body: dict) -> dict:
+        reply = super().reply(instance, body)
+        if instance == "peer.1" and reply["choices"][0]["message"].get("content"):
+            (self.work / "stray.txt").write_text("stray\n")
+            (self.work / "b.txt").write_text("stray\n")
+        return reply
+
+
+def test_changes_made_in_the_workdir_during_the_stage_stay_and_merge_like_a_members(tmp_path: Path) -> None:
+    model = StrayModel({"peer.1": [("a.txt", "one\n")], "peer.2": [("b.txt", "two\n")]})
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        model.work = turn.work
+        outcome, detail = turn.stage(peers(2), workspace="own")
+        status = git_status(turn)
+        turn.finish()
+    finally:
+        stop(model)
+    # The workdir's own change to b.txt meets peer.2's as a conflict; every other change lands.
+    assert (outcome, detail["merges"]) == ("completed", {"peer.1": "merged", "peer.2": "conflict"})
+    assert [(turn.work / name).read_text() for name in ("a.txt", "b.txt", "stray.txt")] == [
+        "one\n",
+        "stray\n",
+        "stray\n",
+    ]
+    assert status == ""
+
+
+class RefusingMergeRunner(HostCommandRunner):
+    """Writes an untracked ``a.txt`` into the workdir just before git merges peer.1's branch, so git refuses to start
+    that merge."""
+
+    def __init__(self, work: Path) -> None:
+        self.work = work
+
+    def run(self, argv, *, cwd, timeout_seconds):
+        if "merge" in argv and "reef/s1/peer.1" in argv:
+            (self.work / "a.txt").write_text("in the way\n")
+        return super().run(argv, cwd=cwd, timeout_seconds=timeout_seconds)
+
+
+def test_a_merge_git_refuses_to_start_fails_that_member_alone_and_keeps_its_changes(tmp_path: Path) -> None:
+    model = WritingModel({"peer.1": [("a.txt", "one\n")], "peer.2": [("b.txt", "two\n")]})
+    try:
+        work = tmp_path / "work"
+        turn = TeamTurn(tmp_path, model, TEAM_NODES, control=EpisodeControl(command_runner=RefusingMergeRunner(work)))
+        outcome, detail = turn.stage(peers(2), workspace="own")
+        kept = turn.work / TEAM_DIR / "s1-peer.1"
+        kept_text = (kept / "a.txt").read_text()
+        turn.finish()
+    finally:
+        stop(model)
+    assert (outcome, detail["merges"]) == ("completed", {"peer.1": "failed", "peer.2": "merged"})
+    assert (turn.work / "b.txt").read_text() == "two\n" and kept_text == "one\n"
+    failed, merged = root_events(turn, "team/merge")
+    assert "untracked working tree files would be overwritten by merge" in failed["error"] and merged["error"] == ""
+    (said,) = root_events(turn, "user/message")
+    assert "peer.1: not merged, git merge exited " in said["content"]
+    assert f"; its changes stay in {kept} on branch reef/s1/peer.1\n\npeer.2: merged" in said["content"]
+
+
+def test_each_member_clone_keeps_its_own_refs_so_a_stash_is_never_another_members(tmp_path: Path) -> None:
+    (tmp_path / "work").mkdir()
+    (tmp_path / "work" / "f.txt").write_text("base\n")
+    main_path = PurePosixPath(tmp_path / "work")
+    workspaces = TeamWorkspaces(HostCommandRunner(), main_path=main_path, team_path=main_path / TEAM_DIR)
+    base = workspaces.start(1)
+    first, second = (Path(str(workspaces.add_member(1, f"peer.{k}", base))) for k in (1, 2))
+    environment = {"PATH": os.environ["PATH"], "GIT_CONFIG_GLOBAL": "/dev/null", "GIT_CONFIG_NOSYSTEM": "1"}
+    identity = ["-c", "user.name=agent", "-c", "user.email=agent@localhost"]
+
+    def agent_git(path: Path, *args: str):
+        return subprocess.run(["git", *identity, *args], cwd=path, env=environment, capture_output=True, text=True)
+
+    (first / "f.txt").write_text("peer.1 work\n")
+    assert agent_git(first, "stash").returncode == 0
+    popped, second_text = agent_git(second, "stash", "pop"), (second / "f.txt").read_text()
+    # No remote either: a member's push has nowhere to go.
+    remotes = agent_git(first, "remote").stdout
+    workspaces.close()
+    assert popped.returncode != 0 and second_text == "base\n" and remotes == ""
+
+
+def test_a_workdir_that_holds_the_team_directory_outside_reef_is_refused(tmp_path: Path) -> None:
+    main_path = PurePosixPath(tmp_path)
+    workspaces = TeamWorkspaces(HostCommandRunner(), main_path=main_path, team_path=main_path / "reef" / "team")
+    with pytest.raises(TeamWorkspaceError, match="workspace: own needs a workdir that does not"):
+        workspaces.start(1)
+    assert not (tmp_path / "reef").exists()
+
+
 # -- team_send and team_wait -------------------------------------------------------------------------------------
 
 
@@ -934,6 +1079,144 @@ def test_team_wait_returns_on_a_message_the_stop_flag_or_when_it_is_alone_and_ne
     assert runner({"seconds": 10**6}, "") == "no message after 300 s" and recording.asked == 300
     runner({"seconds": 0}, "")
     assert recording.asked == 1
+
+
+class WaitingModel(MemberModel):
+    """Every member waits once for a message nobody sends, then answers; ``spender`` instead spends the budget."""
+
+    def __init__(self, spender: str = "") -> None:
+        super().__init__()
+        self.spender = spender
+
+    def reply(self, instance: str, body: dict) -> dict:
+        if instance == self.spender:
+            return {**READ, "usage": {"prompt_tokens": 5000, "completion_tokens": 0}}
+        if not any(message.get("role") == "tool" for message in body["messages"]):
+            return _reply(tool_calls=[_call("team_wait", {"seconds": 30}, "w1")])
+        return _reply(content=f"{instance} is done")
+
+
+def wait_results(sessions: Path) -> dict[str, list[str]]:
+    return {
+        instance: [
+            e["data"]["content"] for e in found if e["type"] == "tool/result" and e["data"]["name"] == "team_wait"
+        ]
+        for instance, found in member_files(sessions).items()
+    }
+
+
+def test_members_that_all_wait_are_released_at_once_and_a_spent_budget_ends_a_wait(tmp_path: Path) -> None:
+    model = WaitingModel()
+    try:
+        turn = TeamTurn(tmp_path / "both", model, TEAM_NODES)
+        started = time.monotonic()
+        outcome, _ = turn.stage(peers(2))
+        elapsed = time.monotonic() - started
+        turn.finish()
+    finally:
+        stop(model)
+    released = ["every other member is waiting for a message too; none will come"]
+    assert outcome == "completed" and elapsed < 20
+    assert wait_results(turn.sessions) == {"peer.1": released, "peer.2": released}
+
+    model = WaitingModel(spender="peer.3")
+    control = EpisodeControl(TeamBudget(1000))
+    try:
+        turn = TeamTurn(tmp_path / "budget", model, TEAM_NODES, control=control)
+        started = time.monotonic()
+        outcome, _ = turn.stage(peers(3))
+        elapsed = time.monotonic() - started
+        turn.finish()
+    finally:
+        stop(model)
+    spent = ["the episode's token budget is spent; no message came"]
+    assert outcome == "budget" and elapsed < 20
+    assert wait_results(turn.sessions) == {"peer.1": spent, "peer.2": spent, "peer.3": []}
+
+
+def test_the_inbox_releases_every_waiter_once_all_wait_and_reads_the_budget() -> None:
+    members = {"peer.1": "peer", "peer.2": "peer"}
+    inbox = Inbox(members, "root", EpisodeStop())
+    other = threading.Thread(target=inbox.wait, args=("peer.2", 30))
+    started = time.monotonic()
+    other.start()
+    waiting = inbox.wait("peer.1", 30)
+    other.join(10)
+    assert waiting == 0 and time.monotonic() - started < 10 and not other.is_alive()
+    assert inbox.was_deadlocked("peer.1") and inbox.was_deadlocked("peer.2")
+    # A member busy at a step is no waiter: a wait alone runs to its time.
+    assert Inbox(members, "root", EpisodeStop()).wait("peer.1", 0.3) == 0
+    budget = TeamBudget(10)
+    inbox = Inbox(members, "root", EpisodeStop(), budget)
+    threading.Timer(0.2, budget.spend, args=(10, 0)).start()
+    started = time.monotonic()
+    assert inbox.wait("peer.1", 30) == 0 and time.monotonic() - started < 5 and not inbox.was_deadlocked("peer.1")
+
+
+def test_a_step_delivers_at_most_its_share_of_messages_and_the_rest_wait_for_the_next() -> None:
+    inbox = Inbox({"peer.1": "peer", "peer.2": "peer"}, "root", EpisodeStop())
+    for index in range(5):
+        inbox.send("peer.1", "peer.2", str(index) * TEAM_MESSAGE_MAX_CHARS)
+    assert [len(inbox.take("peer.2")) for _ in range(3)] == [TEAM_STEP_MAX_CHARS // TEAM_MESSAGE_MAX_CHARS, 1, 0]
+
+
+class FloodingModel(MemberModel):
+    """peer.1 sends three full messages to the caller, then answers."""
+
+    def reply(self, instance: str, body: dict) -> dict:
+        done = sum(1 for message in body["messages"] if message.get("role") == "tool")
+        if done < 3:
+            text = str(done) * TEAM_MESSAGE_MAX_CHARS
+            return _reply(tool_calls=[_call("team_send", {"to": "root", "text": text}, f"t{done}")])
+        return _reply(content="sent")
+
+
+def test_the_callers_result_carries_a_bounded_share_of_the_messages_sent_to_it(tmp_path: Path) -> None:
+    model = FloodingModel()
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        turn.stage(peers(1))
+        turn.finish()
+    finally:
+        stop(model)
+    (said,) = root_events(turn, "user/message")
+    assert said["content"].count("Message from peer.1: ") == TEAM_CALLER_MESSAGES_CHARS // TEAM_MESSAGE_MAX_CHARS
+    assert said["content"].endswith(
+        "1 more message to root not shown; each is a team/send event in its sender's session file"
+    )
+
+
+class StoppingSummarizingModel(_SummarizingModel):
+    """The compaction script; it sets ``stop`` while it answers the first call, as a cancel in flight does."""
+
+    stop_flag: EpisodeStop
+
+    def script(self, body: dict) -> dict:
+        if len(self.requests) == 1:
+            self.stop_flag.set("cancelled")
+        return super().script(body)
+
+
+def test_a_compact_stage_makes_no_summary_call_after_the_stop_or_a_spent_budget(tmp_path: Path) -> None:
+    window = ("config", {"target": "models", "data": {"context_window": 120}})
+    nodes = [*_seed_nodes(SEED_TOOLS), ("native_graph", COMPACT_GRAPH), window]
+    model = StoppingSummarizingModel()
+    control = EpisodeControl()
+    model.stop_flag = control.stop
+    try:
+        run_turn(tmp_path / "stop", model, nodes, control=control)
+    finally:
+        stop(model)
+    assert len(model.requests) == 1
+    for limit in (10, 25, 40):
+        counted = CountedSummarizingModel()
+        budget = EpisodeControl(TeamBudget(limit))
+        try:
+            run_turn(tmp_path / f"budget-{limit}", counted, nodes, control=budget)
+        finally:
+            stop(counted)
+        # Every call reports 15 tokens; the call that crosses the limit is the last one.
+        assert len(counted.requests) == -(-limit // 15), limit
 
 
 def test_team_tool_names_are_reserved_for_built_in_tools() -> None:

@@ -9,7 +9,7 @@ state is per member) and runs on its agent's step budget, not on the caller's re
 every member and then reads one message that names each member's outcome and text. The episode's token budget and
 stop flag are shared: once either is set, every member ends its turn at its next step.
 
-With ``workspace: own`` each member works in a git worktree of its own (``reef.harness.runners.native.workspaces``),
+With ``workspace: own`` each member works in a git clone of its own (``reef.harness.runners.native.workspaces``),
 and its branch is merged into the caller's workdir when the stage ends; with ``shared`` every member works in the
 caller's workdir and nothing is merged.
 
@@ -35,11 +35,12 @@ from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import Graph, GraphError, Run, _last_assistant_text, _Stop, _walk, narrow_allow
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.inbox import Assignment, Inbox, TeamMember
-from reef.harness.runners.native.workspaces import MergeResult, TeamWorkspaceError
+from reef.harness.runners.native.workspaces import MergeResult, TeamWorkspaceError, TeamWorkspaces
 from reef.harness.tree.nodes import NATIVE_TEAM_MAX_AGENTS
 
-#: Characters of one member's final text that the caller's message carries.
+#: Characters of one member's final text that the caller's message carries, and of all the messages sent to it.
 TEAM_RESULT_CHARS = 4000
+TEAM_CALLER_MESSAGES_CHARS = 16_000
 #: What each member's system prompt ends with, so a member knows who else is in its stage run.
 TEAM_MEMBER_NOTE = (
     "You are {instance}, one {role} in a team of {roster}. {caller} started the team and reads your final answer. "
@@ -79,21 +80,23 @@ class TeamSendRunner(ToolRunner):
 
     def __call__(self, args: dict[str, Any], workdir: str, /) -> str:
         member, to = self.member, str(args["to"])
-        try:
-            message, delivered, undelivered = member.inbox.send(member.instance, to, str(args["text"]))
-        except ValueError as exc:
-            raise ToolFailed(str(exc)) from exc
-        self.run.session.write(
-            "team/send",
-            {
-                "step": self.run.step,
-                "message_id": message.message_id,
-                "to": to,
-                "delivered": delivered,
-                "undelivered": undelivered,
-                "text": message.text,
-            },
-        )
+        # Under the inbox's lock until the event is written, so no receiver logs the message before its send.
+        with member.inbox.condition:
+            try:
+                message, delivered, undelivered = member.inbox.send(member.instance, to, str(args["text"]))
+            except ValueError as exc:
+                raise ToolFailed(str(exc)) from exc
+            self.run.session.write(
+                "team/send",
+                {
+                    "step": self.run.step,
+                    "message_id": message.message_id,
+                    "to": to,
+                    "delivered": delivered,
+                    "undelivered": undelivered,
+                    "text": message.text,
+                },
+            )
         parts = [f"sent to {', '.join(delivered)}"] if delivered else []
         if undelivered:
             parts.append(f"{', '.join(undelivered)} {'has' if len(undelivered) == 1 else 'have'} ended; not delivered")
@@ -101,7 +104,8 @@ class TeamSendRunner(ToolRunner):
 
 
 class TeamWaitRunner(ToolRunner):
-    """``team_wait(seconds)``: block until a message waits, every other member has ended, or the time passes."""
+    """``team_wait(seconds)``: block until a message waits, the episode ends, every other member has ended or waits
+    too, or the time passes."""
 
     def __init__(self, member: TeamMember) -> None:
         self.member = member
@@ -114,8 +118,12 @@ class TeamWaitRunner(ToolRunner):
             return f"{waiting} message{'s' if waiting > 1 else ''} waiting; delivered at your next step"
         if member.inbox.stop.is_set:
             return "the episode is stopping; no message came"
+        if member.inbox.budget.is_spent:
+            return "the episode's token budget is spent; no message came"
         if member.inbox.is_alone(member.instance):
             return "every other member has ended; no message will come"
+        if member.inbox.was_deadlocked(member.instance):
+            return "every other member is waiting for a message too; none will come"
         return f"no message after {seconds} s"
 
 
@@ -185,8 +193,9 @@ class TeamStageRun:
         self.mode = mode
         self.workspace = workspace
         self.members = tuple(members)
+        control = caller.loop.control
         self.inbox = Inbox(
-            {start.instance: start.role for start in self.members}, caller.agent, caller.loop.control.stop
+            {start.instance: start.role for start in self.members}, caller.agent, control.stop, control.budget
         )
 
     def run(self) -> tuple[str, dict[str, object]]:
@@ -217,10 +226,7 @@ class TeamStageRun:
             turns = [loop.open_turn(start.instance) for start in self.members]
             results = self.run_members(turns, workdirs)
             if self.workspace == "own":
-                try:
-                    merges = loop.workspaces.merge(stage_run, [result.instance for result in results])
-                except TeamWorkspaceError as exc:
-                    failures.append(f"the merge did not finish: {exc}")
+                merges = self.team_workspaces().merge(stage_run, [result.instance for result in results])
         for merge in merges:
             caller.session.write(
                 "team/merge",
@@ -231,12 +237,12 @@ class TeamStageRun:
                     "branch": merge.branch,
                     "result": merge.result,
                     "files": list(merge.files),
+                    "error": merge.error,
                 },
             )
-        control = loop.control
         outcome = team_outcome(
             [*(result.outcome for result in results), *("gave_up" for _ in failures)],
-            is_budget_ended=control.budget.is_spent or control.stop.is_set,
+            is_budget_ended=self.inbox.is_ending,
         )
         caller.session.write(
             "team/end",
@@ -256,16 +262,24 @@ class TeamStageRun:
             ended = f"{result.instance} ({result.role}) ended with {result.outcome}"
             lines.append(f"{ended}: {text}" if text else ended)
         for merge in merges:
-            if merge.result == "conflict":
-                kept = loop.workspaces.member_path(stage_run, merge.agent)
-                lines.append(
-                    f"{merge.agent}: not merged, it conflicts in {', '.join(merge.files)}; its changes stay in {kept} "
-                    f"on branch {merge.branch}"
-                )
-            else:
+            if merge.result in ("merged", "empty"):
                 lines.append(f"{merge.agent}: {'merged' if merge.result == 'merged' else 'changed no file'}")
+                continue
+            kept = self.team_workspaces().member_path(stage_run, merge.agent)
+            reason = f"it conflicts in {', '.join(merge.files)}" if merge.result == "conflict" else merge.error
+            lines.append(f"{merge.agent}: not merged, {reason}; its changes stay in {kept} on branch {merge.branch}")
         lines.extend(failures)
-        lines.extend(f"Message from {message.sender}: {message.text}" for message in self.inbox.caller_messages())
+        messages, shown_chars = self.inbox.caller_messages(), 0
+        for index, message in enumerate(messages):
+            if shown_chars + len(message.text) > TEAM_CALLER_MESSAGES_CHARS:
+                hidden = len(messages) - index
+                lines.append(
+                    f"{hidden} more {'message' if hidden == 1 else 'messages'} to {caller.agent} not shown; each is a "
+                    "team/send event in its sender's session file"
+                )
+                break
+            shown_chars += len(message.text)
+            lines.append(f"Message from {message.sender}: {message.text}")
         caller.say(
             "\n\n".join(lines), {"kind": "team", "stage": self.stage_name, "mode": self.mode, "outcome": outcome}
         )
@@ -279,12 +293,19 @@ class TeamStageRun:
             detail["merges"] = {merge.agent: merge.result for merge in merges}
         return outcome, detail
 
+    def team_workspaces(self) -> TeamWorkspaces:
+        """The episode's git state for ``own`` stage runs; a loop that keeps none (the serve form) runs no such stage."""
+        workspaces: TeamWorkspaces | None = self.caller.loop.workspaces
+        if workspaces is None:
+            raise TeamWorkspaceError("this loop keeps no team git state, so workspace: own cannot run")
+        return workspaces
+
     def member_workdirs(self, stage_run: int) -> list[Path]:
-        """Each member's workdir: for ``own`` a new worktree of the caller's workdir as it stands, else that one."""
+        """Each member's workdir: for ``own`` a new clone of the caller's workdir as it stands, else that one."""
         workdir = self.caller.workdir
         if self.workspace != "own":
             return [workdir for _ in self.members]
-        workspaces = self.caller.loop.workspaces
+        workspaces = self.team_workspaces()
         if not workspaces.is_git_available():
             raise TeamWorkspaceError("git is not installed where the tools run")
         base = workspaces.start(stage_run)

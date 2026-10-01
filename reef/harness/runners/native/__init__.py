@@ -54,7 +54,7 @@ MAX_RESULT_CHARS = 20_000
 #: marker naming the file, and this many characters of tail.
 TOOL_OUTPUT_DIR = ".reef/tool-output"
 TOOL_OUTPUT_TAIL_CHARS = 2_000
-#: Where team stages keep Reef's git directory and the member worktrees on the host, under the workspace.
+#: Where team stages keep Reef's git directory and the member clones on the host, under the workspace.
 TEAM_DIR = ".reef/team"
 #: Tokens one model call may generate; a local single slot server stalls every other caller behind an unbounded one.
 MAX_COMPLETION_TOKENS = 4096

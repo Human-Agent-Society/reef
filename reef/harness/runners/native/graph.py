@@ -514,6 +514,9 @@ class Run:
         head, older, tail = _split(self.messages, policy["keep_ratio"] * self.context_window)
         if not older:
             return "done", {"fired": False, "tokens": before}
+        if loop.control.is_ending:
+            # The next model stage ends the turn, so no summary call goes out after a stop or a spent budget.
+            return "done", {"fired": False, "tokens": before, "is_ending": True}
         body = {
             "messages": [
                 {"role": "system", "content": SUMMARY_PROMPT},

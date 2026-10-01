@@ -89,10 +89,15 @@ class EpisodeControl:
 
     budget: TeamBudget = field(default_factory=lambda: TeamBudget(None))
     stop: EpisodeStop = field(default_factory=EpisodeStop)
-    #: Where team stages run git, and where their git directory and member worktrees live; None is ``.reef/team``
+    #: Where team stages run git, and where their git directory and member clones live; None is ``.reef/team``
     #: under the main worktree, which git never tracks.
     command_runner: CommandRunner = field(default_factory=HostCommandRunner)
     team_path: PurePosixPath | None = None
     request_policy: RequestPolicy = field(default_factory=RequestPolicy)
     #: Tokens one model call may generate; None is the loop's own cap, ``MAX_COMPLETION_TOKENS``.
     max_completion_tokens: int | None = None
+
+    @property
+    def is_ending(self) -> bool:
+        """Whether the stop flag is set or the budget spent, so every turn ends at its next step."""
+        return self.stop.is_set or self.budget.is_spent

@@ -47,7 +47,7 @@ from reef.train.cordis_backend.strategies import resolve_episode_scorer, verifie
 
 TASK = "tasks/sum-and-product"
 #: What the fake environment's PATH holds besides python3: what a slim task image with git has.
-COMMANDS = ("cat", "chmod", "env", "git", "mkdir", "mktemp", "rm", "rmdir", "sh")
+COMMANDS = ("cat", "chmod", "env", "find", "git", "mkdir", "mktemp", "rm", "rmdir", "sh")
 PID_TOOL = (
     "native_tool",
     {

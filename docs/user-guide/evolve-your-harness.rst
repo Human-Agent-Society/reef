@@ -1196,12 +1196,13 @@ Before you start, you need:
   macOS, episodes run under ``~/.reef/episodes``, which colima and Docker
   Desktop share with their VM by default.
 - Harbor task directories whose images have ``python3``, which every tool
-  call runs with, and ``git``, which a team with its own worktrees needs.
+  call runs with, and ``git`` and ``find``, which a team with its own clones
+  needs.
 - A proposer (`Write a method`_).
 
 This recipe config seeds a lead and its workers. The lead holds
 ``team_assign`` because its graph has a ``parallel`` stage; the workers it
-assigns start together, each in its own git worktree, and their changes are
+assigns start together, each in its own git clone, and their changes are
 merged into the task's workdir before the verifier runs:
 
 .. code:: yaml

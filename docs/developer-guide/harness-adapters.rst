@@ -808,7 +808,7 @@ The stage kinds are:
   the task, to the ``native_agent`` named by ``agent`` and then through its
   ``then`` chain. The last agent's text returns as a user message with
   ``source.kind: agent``. ``mode: parallel`` and ``mode: team`` start the
-  agents listed in ``agents`` at once, each in its own worktree or in a
+  agents listed in ``agents`` at once, each in its own git clone or in a
   shared workdir (``workspace``); see `Native teams`_. Outcomes are
   ``completed``, ``gave_up``, ``budget`` (steps, tool calls, or the
   episode's tokens exhausted), and ``ask`` (a ``pre_execute`` hook asked
@@ -898,7 +898,7 @@ and the stage ends when every member has ended. The stage takes these keys:
   ``sequential``, the stage takes ``agent`` and runs as described above.
 - ``agents``: 1 to 8 ``native_agent`` names. Under ``parallel`` the names
   are distinct; under ``team`` a name may repeat, one member per repeat.
-- ``workspace``: ``own`` (the default) gives each member a git worktree of
+- ``workspace``: ``own`` (the default) gives each member a git clone of
   the caller's workdir; ``shared`` runs every member in the caller's
   workdir and runs no git.
 
@@ -945,27 +945,46 @@ Members talk through two more built-in tools:
   ``team/send`` event name it as undelivered.
 - ``team_wait(seconds)`` waits up to ``seconds`` (1 to 300) for a message.
   It returns early when a message arrives, when every other member has
-  ended, or when the episode stops.
+  ended, when every other open member is waiting too (all of them return
+  then), or when the episode stops or spends its token budget.
 
 A message reaches the receiver at its next step, before its hooks and its
 model call, as a ``user/message`` with ``source.kind: message``, ``from``,
-and ``message_id``. Messages a member never read are listed in one
-``team/unread`` event in its file. Messages sent to the caller are added to
-the stage's result.
+and ``message_id``. One step delivers at most 32,000 characters of
+messages; the rest wait for the next step. Messages a member never read are
+listed in one ``team/unread`` event in its file. Messages sent to the
+caller are added to the stage's result, up to 16,000 characters; the
+result counts the rest, which stay in the senders' ``team/send`` events.
 
-With ``workspace: own``, Reef keeps its own git directory outside the
-caller's workdir: under ``.reef/team`` in the workdir on the host, and
-under ``/reef/team`` in the task container under ``native_harbor``. At the
-start of each stage run it commits the workdir as it stands and adds one
-worktree per member on the branch ``reef/s<run>/<member>``. When every
-member has ended, it commits each worktree and merges the branches into the
-workdir in member order. A merge that conflicts is aborted, so the workdir
-holds only clean merges; the stage's result names the conflicting files
-and the worktree that keeps the member's changes until the episode ends.
+With ``workspace: own``, Reef keeps its own git directory where git never
+tracks it: under ``.reef/team`` in the workdir on the host, and under
+``/reef/team`` in the task container under ``native_harbor``. A workdir
+that holds the team directory anywhere else, such as a task whose workdir
+is ``/``, ends the stage ``gave_up``.
+
+- At the start of each stage run, Reef commits the workdir as it stands,
+  every file included whether or not the task's ``.gitignore`` ignores it.
+  It then clones that commit once per member, on the branch
+  ``reef/s<run>/<member>``. A clone has no remote and its own refs, so one
+  member's stash or branch is never another's.
+- When every member has ended, Reef commits what changed in the workdir
+  during the stage (a file a member wrote there by absolute path), then
+  commits each clone and merges the branches into the workdir in member
+  order.
+- A merge that conflicts is aborted, so the workdir holds only clean
+  merges. A merge git cannot start, or a clone it cannot commit, fails that
+  member alone. The stage's result names each such member with the
+  conflicting files or git's error, and the clone that keeps the member's
+  changes until the episode ends.
+
 The workdir never gets a ``.git``, a task's own ``.git`` is never read or
-changed, and nothing under ``.reef/`` merges. Git reads no system or user
-configuration. When git is not installed where the tools run, the stage
-ends ``gave_up`` before any member starts.
+changed, and nothing under ``.reef/`` merges. Git does not keep empty
+directories, so a member's empty directory does not merge. A nested git
+repository would merge as a commit id without its files, so a stage refuses
+one, in the workdir before any member starts and in a member's clone at the
+merge. Git reads no system or user configuration. When git is not
+installed where the tools run, the stage ends ``gave_up`` before any member
+starts.
 
 The stage's outcome is ``budget`` when the episode's token budget is spent,
 the episode stops, or any member ended on a budget; else ``ask`` when any
@@ -973,7 +992,8 @@ member asked; else ``gave_up`` when any member gave up; else
 ``completed``. The caller's file records the run as ``team/start``
 (``stage``, ``mode``, ``workspace``, ``stage_run``, ``members``), one
 ``team/merge`` per member under ``own`` (``branch``, ``result``:
-``merged``, ``conflict`` or ``empty``, and ``files``), and ``team/end``
+``merged``, ``conflict``, ``empty`` or ``failed``, ``files``, and
+``error``), and ``team/end``
 (``outcome`` and each member's ``outcome`` and ``steps``). The caller then
 reads one ``user/message`` with ``source.kind: team`` that gives each
 member's outcome and final text, the merge results, and the messages sent
@@ -982,12 +1002,14 @@ to the caller. The ``stage/exit`` event adds ``mode``, ``agents``,
 
 One token budget covers the whole episode. ``evolution.episode_tokens``
 reaches the loop as ``REEF_EPISODE_TOKENS``, which only the process that
-starts the episode sets, so a tree cannot raise its own budget. Every
+starts the episode sets; no node renders it, so no tree configuration can
+raise it. Hooks, and tools under the in-process enforcer, run in the loop's
+process and are trusted there like the rest of the tree's code. Every
 model call of every turn, summaries included, spends the tokens the
 endpoint reported, or an estimate at four characters per token when it
 reported none. Once the budget is spent, each turn ends with
-``max-tokens`` at its next step, so a team stops within one call per live
-member. The per-agent counters in the evaluation results count reported
+``max-tokens`` at its next step and a ``compact`` stage makes no summary
+call, so a team stops within one call per live member. The per-agent counters in the evaluation results count reported
 tokens only, so they can be lower than what the budget spent.
 
 Rendering refuses an ``agents`` name the tree lacks, a cycle through
@@ -1163,7 +1185,7 @@ task to Harbor through reef-eval with the Harbor agent
 
 The task image needs ``python3``; setup fails with "the task image has no
 python3, which native_harbor tools need" without it. A ``workspace: own``
-stage also needs ``git``. Harbor runs the task in local Docker by default.
+stage also needs ``git`` and ``find``. Harbor runs the task in local Docker by default.
 For local Docker the episode keeps the service's ``DOCKER_*`` variables
 and, on macOS, makes its root under ``~/.reef/episodes``, as for
 ``terminus`` (`Evaluation directories and Docker context`_).
