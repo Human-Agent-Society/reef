@@ -144,13 +144,13 @@ harness configuration.
 
 `evolve-your-harness.ipynb` walks the same pass cell by cell and manages the service as a subprocess, so one kernel holds the whole loop. Set the endpoint, model, and key in its first code cell; the notebook loads serve.yaml, sets `inference.upstream-url` and `inference.upstream-model` to those values, writes the result to `work/serve-notebook.yaml`, and materializes the recipe config from it with `harness/materialize_recipe.py`, the step `run.sh` runs. `run.py` stays the reference implementation of the loop; the notebook mirrors it.
 
-Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks reports no failures, so no evolve step ever runs (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible on the step's row in `GET /reef/harness/releases`. The committed outputs are a full local run with no GPU, the `pi, notebook` row of the results below.
+Pick a model that fails at least one task and still writes the strict JSON mutation `propose` expects. A model that passes all three tasks still batches one step per report, but both gate sides then score every task, so the gate can only tie and nothing publishes (the DeepSeek result below); one that cannot author the JSON commits its step as `skipped: no proposal`, visible on the step's row in `GET /reef/harness/releases`. The committed outputs are a full local run with no GPU, the `pi, notebook` row of the results below.
 
 ## What one run does
 
 1. `run.sh` copies serve.yaml's recipe sections into `work/recipes/harness_evolve.yaml` and starts Reef. The recipe boots with the seed composition: one starter `answer-style` skill node. The endpoint and the model live only in serve.yaml's `inference` section (`upstream-url`, `upstream-api-key`, `upstream-model`); Reef hands them to `propose` as a model binding and renders them into each evaluation episode, so neither the method nor the published tree ever names them.
 2. `run.py` sends each of the three exact-answer coding tasks once through reef inference; reef serves the reply and records the exchange. The reply is graded the same way the evolve gate grades episodes, and the score is reported against the receipt.
-3. Every valid scored report batches, and `batch_size: 1` makes each report one evolve step: `propose` sends the failing requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win.
+3. Every valid scored report batches, passing ones included, and `batch_size: 1` makes each report one evolve step: `propose` sends the batched requests, each with its report's score and feedback, and the current skills back to the same model through `models.served.chat`, which answers with one skill mutation; the candidate and current compositions each run one episode per task; the mutation publishes only on a gate win. A passing report still gets a step, and that step can still be rejected, skipped or tie, so a passing run is not a run that batched nothing.
 4. `run.py` pulls `GET /reef/harness` and prints the gate metrics and the evolved `SKILL.md` files. Point any pi at the pulled tree, with its model set to Reef, and it carries the learned skill.
 
 ## Native variant
@@ -172,7 +172,7 @@ The recorded pass is identical, so the two variants are comparable on the same t
 
 Last updated: 2026-09-20. Every row was measured on the code of the pull request in its Code column, with the tutorial files as they stood there.
 
-The historical measurements below used the previous failure-only `max_score` filter, which has since been removed. The loop under measurement is one fresh scenario through `./run.sh` (pi adapter) or `./run.sh native` (native adapter): the three tasks `[sieve]`, `[fib]` and `[csv]` go through Reef once, each reply is graded 1.0 for the exact answer alone on the last line and 0.0 otherwise, only a 0.0 report batches (`max_score: 0.0`, `batch_size: 1`), and each batched report runs one evolve step whose gate runs the current and the candidate tree once per task. Scores are listed in task order; W / L / T counts the three task pairings of one gate; the model under test is also the proposer.
+The historical measurements below used the previous failure-only `max_score` filter, which has since been removed. The loop under measurement is one fresh scenario through `./run.sh` (pi adapter) or `./run.sh native` (native adapter): the three tasks `[sieve]`, `[fib]` and `[csv]` go through Reef once, each reply is graded 1.0 for the exact answer alone on the last line and 0.0 otherwise, under that filter only a 0.0 report batched (`max_score: 0.0`, `batch_size: 1`), and each batched report ran one evolve step whose gate runs the current and the candidate tree once per task. Scores are listed in task order; W / L / T counts the three task pairings of one gate; the model under test is also the proposer.
 
 ### Environment
 
@@ -263,7 +263,7 @@ The model name is set in two places, `inference.upstream-model` in the serve fil
 
 ### Notes
 
-[1] The recorded pass alone; no report batched and no step ran.
+[1] The recorded pass alone; under the failure-only filter of that measurement no report batched and no step ran. Today every valid scored report batches, so the same all-passing run runs three steps and `run.py` waits for all three.
 [2] End to end, including the pull of the published tree.
 [3] The notebook's committed outputs hold the run cell by cell but no timing.
 [4] `current_residue: 16`: on macOS a `run_bash` call that runs Apple's python3 leaves its bytecode cache under the episode's `HOME`; a Linux run reports 0, and residue is counted, never forbidden, unless `evolution.forbid_residue` is set.
@@ -287,7 +287,7 @@ The current ask command uses `POST /reef/train`, which `deployment.yaml` takes i
 
 ### Known limitations
 
-- `run.py` stops at the first publish, so a run with two failing reports records one verdict.
+- `run.py` waits for the verdict of every step its reports triggered, then reads the head once: a step still pending at the deadline is reported as pending and its verdict lands in the commit log, not in the run's output.
 - A rejected proposal's content is not persisted, so a rejected row can name the mutation's id and op only.
 - vllm serves Qwen3-8B for pi only with `--enable-auto-tool-choice --tool-call-parser hermes`; without them it answers pi's `tool_choice: "auto"` requests with a 400, every episode fails, and every gate ties.
 - The B200 rows and the Mac rows differ in host and model server, so wall clocks compare within a setup, not across.
