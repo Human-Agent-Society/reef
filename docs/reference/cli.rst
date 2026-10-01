@@ -4,8 +4,9 @@ Reef CLI: serve and connect
 ``reef serve`` reads a deployment config and starts every
 process the config declares, in dependency order. ``reef connect`` optionally
 links an existing runtime to your API platform account. (The wheel also installs
-``reef-native`` and ``reef-terminus``, the loop runners those two harness
-adapters launch per episode; nothing calls them by hand.)
+``reef-native`` and ``reef-terminus``, the loop runners the ``native``,
+``native_harbor`` and ``terminus`` harness adapters launch per episode;
+nothing calls them by hand.)
 
 .. code:: bash
 

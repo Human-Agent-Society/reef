@@ -6,37 +6,41 @@ agent with those files and the served model, and how to read its trajectory.
 The tree contains entries, not file paths; the adapter chooses the paths.
 
 Reef includes six adapters for third-party coding-agent CLIs. It also includes
-``native``, Reef's own agent, and ``terminus``, which runs the Harbor
-Terminus 2 agent through a Reef runner. With ``native``, the tree can change
-the agent's tools (``native_tool``) and its responses to loop events
-(``native_hook``).
+``native``, Reef's own agent; ``native_harbor``, the same agent on Harbor
+task directories (`Native on Harbor tasks`_); and ``terminus``, which runs
+the Harbor Terminus 2 agent through a Reef runner. With ``native`` and
+``native_harbor``, the tree can change the agent's tools (``native_tool``)
+and its responses to loop events (``native_hook``).
 
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| Adapter      | Config targets                                             | Install pin                               |
-+==============+============================================================+===========================================+
-| ``pi``       | ``primary`` -> ``pi-agent/settings.json``,                 | npm ``@earendil-works/pi-coding-agent``   |
-|              | ``models`` -> ``pi-agent/models.json``                     | 0.84.2                                    |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``opencode`` | ``primary`` -> ``opencode/opencode.json``                  | npm ``opencode-ai`` 1.18.18               |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``claude``   | ``primary`` -> ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``codex``    | ``primary`` -> ``codex/config.toml``                       | npm ``@openai/codex`` 0.153.4             |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``dsh``      | ``primary`` -> ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
-|              | ``env`` -> ``dsh/.env``,                                   |                                           |
-|              | ``web`` -> ``dsh/profiles/web/cordis.patch.yml``,          |                                           |
-|              | ``web_manifest`` -> ``dsh/profiles/web/package.json``      |                                           |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``hermes``   | ``primary`` -> ``hermes/config.yaml``,                     | git ``NousResearch/hermes-agent``         |
-|              | ``env`` -> ``hermes/.env``                                 | at ``v2026.8.31`` (0.21.0)                |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``native``   | ``primary`` -> ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
-|              | ``models`` -> ``native/models.json``                       |                                           |
-+--------------+------------------------------------------------------------+-------------------------------------------+
-| ``terminus`` | ``primary`` -> ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
-|              |                                                            | reef-eval ships with reef-infra           |
-+--------------+------------------------------------------------------------+-------------------------------------------+
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| Adapter           | Config targets                                             | Install pin                               |
++===================+============================================================+===========================================+
+| ``pi``            | ``primary`` -> ``pi-agent/settings.json``,                 | npm ``@earendil-works/pi-coding-agent``   |
+|                   | ``models`` -> ``pi-agent/models.json``                     | 0.84.2                                    |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``opencode``      | ``primary`` -> ``opencode/opencode.json``                  | npm ``opencode-ai`` 1.18.18               |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``claude``        | ``primary`` -> ``claude/settings.json``                    | npm ``@anthropic-ai/claude-code`` 2.1.257 |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``codex``         | ``primary`` -> ``codex/config.toml``                       | npm ``@openai/codex`` 0.153.4             |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``dsh``           | ``primary`` -> ``dsh/profiles/headless/cordis.patch.yml``, | npm ``@deepseek-ai/dsh`` 0.1.2-alpha.5    |
+|                   | ``env`` -> ``dsh/.env``,                                   |                                           |
+|                   | ``web`` -> ``dsh/profiles/web/cordis.patch.yml``,          |                                           |
+|                   | ``web_manifest`` -> ``dsh/profiles/web/package.json``      |                                           |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``hermes``        | ``primary`` -> ``hermes/config.yaml``,                     | git ``NousResearch/hermes-agent``         |
+|                   | ``env`` -> ``hermes/.env``                                 | at ``v2026.8.31`` (0.21.0)                |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``native``        | ``primary`` -> ``native/config.json``,                     | none: ``reef-native`` ships with reef     |
+|                   | ``models`` -> ``native/models.json``                       |                                           |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``native_harbor`` | ``primary`` -> ``native/config.json``,                     | none: ``reef-native`` ships with reef,    |
+|                   | ``models`` -> ``native/models.json``                       | reef-eval ships with reef-infra           |
++-------------------+------------------------------------------------------------+-------------------------------------------+
+| ``terminus``      | ``primary`` -> ``terminus/config.json``                    | none: ``reef-terminus`` ships with reef,  |
+|                   |                                                            | reef-eval ships with reef-infra           |
++-------------------+------------------------------------------------------------+-------------------------------------------+
 
 Codex model metadata
 ~~~~~~~~~~~~~~~~~~~~
@@ -622,8 +626,10 @@ as a tool error. The sandbox executor checks nested jails before building
 the run, so a host that cannot nest them fails before the first tool call.
 
 Each ``tool/result`` event records an ``enforcement`` object. Its ``mode``
-is ``none`` or ``bwrap``; ``denied`` lists the undeclared ``write``, ``exec``,
-and ``network`` capabilities, or is empty under ``none``. It describes the
+is ``none``, ``bwrap``, or ``task-environment`` (a native_harbor call in the
+task container, `Native on Harbor tasks`_); ``denied`` lists the undeclared
+``write``, ``exec``, and ``network`` capabilities under ``bwrap``, and is
+empty otherwise. It describes the
 profile, not what the tool attempted. Seed tools declare capabilities;
 ``run_bash`` declares all three.
 
@@ -707,10 +713,14 @@ Each event takes and returns a plain object:
   receives the resulting error.
 - ``request_error`` runs after a failed model call. Its input contains
   ``step``, ``attempt``, and an ``error`` with ``code: "MODEL_ERROR"``,
-  ``message``, and optional HTTP ``status``. It returns ``retry`` with
-  ``delay_ms`` or ``fail``. The loop allows at most
+  ``message``, optional HTTP ``status``, and ``is_transient``: true when
+  the endpoint gave no answer or answered 408, 425, 429, or a 5xx status,
+  false for any other status and for a malformed reply. It returns
+  ``retry`` with ``delay_ms`` or ``fail``. The loop allows at most
   ``MAX_REQUEST_ATTEMPTS`` (4) per step and at most ``MAX_RETRY_DELAY_MS``
-  (10 seconds) between attempts, regardless of the hook's request.
+  (10 seconds) between attempts, regardless of the hook's request. Under
+  ``native_harbor`` a transient failure does not reach the hooks: the loop
+  retries it until the episode stops (`Native on Harbor tasks`_).
 - ``post_execute`` runs after a tool call with
   ``{step, call_id, name, arguments, result}``. ``accept`` can replace the
   content the model reads. ``block`` sends ``HOOK_BLOCKED`` with the hook's
@@ -793,12 +803,16 @@ The stage kinds are:
   or ``last_text_matches`` with a regular expression. The first matching
   case wins; otherwise the outcome is ``else``. Every case outcome and
   ``else`` need an edge.
-- ``subagent`` sends the last assistant text, or the task, to the
-  ``native_agent`` named by ``agent`` and then through its ``then`` chain.
-  The last agent's text returns as a user message with
-  ``source.kind: agent``. Outcomes are ``completed``, ``gave_up``,
-  ``budget`` (steps or tool calls exhausted), and ``ask`` (a
-  ``pre_execute`` hook asked during the agent's turn).
+- ``subagent`` runs other agents in one of three modes. With
+  ``mode: sequential``, the default, it sends the last assistant text, or
+  the task, to the ``native_agent`` named by ``agent`` and then through its
+  ``then`` chain. The last agent's text returns as a user message with
+  ``source.kind: agent``. ``mode: parallel`` and ``mode: team`` start the
+  agents listed in ``agents`` at once, each in its own worktree or in a
+  shared workdir (``workspace``); see `Native teams`_. Outcomes are
+  ``completed``, ``gave_up``, ``budget`` (steps, tool calls, or the
+  episode's tokens exhausted), and ``ask`` (a ``pre_execute`` hook asked
+  during an agent's turn).
 - ``compact`` summarizes old messages with one model call after they pass
   ``fire_ratio`` of the context window. It keeps the last ``keep_ratio``
   verbatim, without separating a tool result from its call.
@@ -815,8 +829,12 @@ the case or check and appears as ``timeout`` in the stage detail. A branch
 searches only the last 4,096 characters of the text.
 
 Each ``model`` stage uses one step, and each request asks for at most 4,096
-tokens. Entering a model stage after spending ``max_steps`` ends the turn
-with ``max-steps``.
+tokens (under ``native_harbor``, the binding's ``max_output_tokens``).
+Entering a model stage after spending ``max_steps`` ends the turn with
+``max-steps``. When the episode has a token budget
+(``evolution.episode_tokens``), entering a model stage after the budget is
+spent ends the turn with ``max-tokens``; `Native teams`_ describes the
+budget.
 
 The trajectory records the graph path through ``stage/enter`` (``step``,
 ``stage``, ``kind``) and ``stage/exit`` (``outcome``, ``to``). A verify exit
@@ -868,6 +886,122 @@ reason. It includes ``error`` if the turn ended with one, or
 do not appear in the root path. An episode that could not run has ``None``;
 a trajectory format without stage events has an empty path and a ``None``
 reason.
+
+Native teams
+~~~~~~~~~~~~
+
+A team stage is a ``subagent`` stage whose ``mode`` is ``parallel`` or
+``team``. Its members run at once, each on a thread of the episode process,
+and the stage ends when every member has ended. The stage takes these keys:
+
+- ``mode``: ``parallel`` or ``team``. Without ``mode``, or with
+  ``sequential``, the stage takes ``agent`` and runs as described above.
+- ``agents``: 1 to 8 ``native_agent`` names. Under ``parallel`` the names
+  are distinct; under ``team`` a name may repeat, one member per repeat.
+- ``workspace``: ``own`` (the default) gives each member a git worktree of
+  the caller's workdir; ``shared`` runs every member in the caller's
+  workdir and runs no git.
+
+With ``mode: parallel``, the caller assigns the work. An agent or root whose
+graph holds a parallel stage gets the built-in tool
+``team_assign(agent, task, rules)``. ``agent`` is one of the agents those
+stages list, ``task`` is what the worker is told, and the optional
+``rules`` are added to that worker's prompt alone. Each call queues one
+worker, at most 8 at a time. When the graph reaches the stage, the queued
+workers for the agents it lists start together; workers queued for other
+agents keep waiting. A stage with no queued worker ends ``completed`` and
+starts nobody.
+
+With ``mode: team``, every listed agent starts on the caller's last
+assistant text, or on the task when the caller has said nothing yet. A
+decentralized team is ``mode: team`` with ``workspace: shared`` and
+messages to ``all``.
+
+Each member is named ``<agent>.<k>``, counted from 1 per agent in one stage
+run, for example ``peer.1``, ``peer.2`` and ``critic.1``. A member:
+
+- reads its own ``NativeHost``, with its own mount directory
+  (``sessions/mounts/boot-<pid>-<member>``), so hook module state is not
+  shared between members;
+- runs on its agent's ``max_steps`` (else its graph's), not on the caller's
+  remaining steps, and its steps do not count against the caller;
+- writes its own session file under ``sessions/agents/``. The header names
+  the member as ``agent`` and adds ``role`` (the agent it runs), ``stage``,
+  ``mode``, ``workspace``, and ``workdir``;
+- gets a note at the end of its system prompt that names it, the other
+  members, and the caller.
+
+A member whose tree cannot load, or whose model call fails, ends
+``gave_up``; the other members and the caller go on.
+
+Members talk through two more built-in tools:
+
+- ``team_send(to, text)`` sends one message. ``to`` is a member, a role
+  (every other member that runs that agent), ``all`` (every other member),
+  or the caller's agent name. A message carries at most 8,000 characters,
+  a member sends at most 256 messages per stage run, and the text is
+  redacted of credential-shaped strings before anyone sees it. A member
+  that has already ended does not get the message; the tool result and the
+  ``team/send`` event name it as undelivered.
+- ``team_wait(seconds)`` waits up to ``seconds`` (1 to 300) for a message.
+  It returns early when a message arrives, when every other member has
+  ended, or when the episode stops.
+
+A message reaches the receiver at its next step, before its hooks and its
+model call, as a ``user/message`` with ``source.kind: message``, ``from``,
+and ``message_id``. Messages a member never read are listed in one
+``team/unread`` event in its file. Messages sent to the caller are added to
+the stage's result.
+
+With ``workspace: own``, Reef keeps its own git directory outside the
+caller's workdir: under ``.reef/team`` in the workdir on the host, and
+under ``/reef/team`` in the task container under ``native_harbor``. At the
+start of each stage run it commits the workdir as it stands and adds one
+worktree per member on the branch ``reef/s<run>/<member>``. When every
+member has ended, it commits each worktree and merges the branches into the
+workdir in member order. A merge that conflicts is aborted, so the workdir
+holds only clean merges; the stage's result names the conflicting files
+and the worktree that keeps the member's changes until the episode ends.
+The workdir never gets a ``.git``, a task's own ``.git`` is never read or
+changed, and nothing under ``.reef/`` merges. Git reads no system or user
+configuration. When git is not installed where the tools run, the stage
+ends ``gave_up`` before any member starts.
+
+The stage's outcome is ``budget`` when the episode's token budget is spent,
+the episode stops, or any member ended on a budget; else ``ask`` when any
+member asked; else ``gave_up`` when any member gave up; else
+``completed``. The caller's file records the run as ``team/start``
+(``stage``, ``mode``, ``workspace``, ``stage_run``, ``members``), one
+``team/merge`` per member under ``own`` (``branch``, ``result``:
+``merged``, ``conflict`` or ``empty``, and ``files``), and ``team/end``
+(``outcome`` and each member's ``outcome`` and ``steps``). The caller then
+reads one ``user/message`` with ``source.kind: team`` that gives each
+member's outcome and final text, the merge results, and the messages sent
+to the caller. The ``stage/exit`` event adds ``mode``, ``agents``,
+``outcomes``, the members' ``steps`` summed, and ``merges`` under ``own``.
+
+One token budget covers the whole episode. ``evolution.episode_tokens``
+reaches the loop as ``REEF_EPISODE_TOKENS``, which only the process that
+starts the episode sets, so a tree cannot raise its own budget. Every
+model call of every turn, summaries included, spends the tokens the
+endpoint reported, or an estimate at four characters per token when it
+reported none. Once the budget is spent, each turn ends with
+``max-tokens`` at its next step, so a team stops within one call per live
+member. The per-agent counters in the evaluation results count reported
+tokens only, so they can be lower than what the budget spent.
+
+Rendering refuses an ``agents`` name the tree lacks, a cycle through
+``agents``, a member that carries ``then``, and a team stage inside a
+member: no agent that a member can reach may run a graph with a team
+stage. Admission refuses a native tool named ``team_assign``,
+``team_send``, or ``team_wait``, stored trees included. The serve form
+does not run team stages: a graph with one fails to mount, boot, or
+``harness_try`` with "team stages run in episodes only".
+
+Evaluation results key ``candidate_agents`` and ``current_agents`` by
+member name. When a side's episodes exchanged messages, the results also
+carry ``candidate_messages`` or ``current_messages``: ``sent``,
+``received``, and ``undelivered`` per agent, summed across episodes.
 
 Native loop code
 ~~~~~~~~~~~~~~~~
@@ -970,11 +1104,15 @@ against the declared schema before calling ``run``.
 ``tool/result`` contains ``content``, ``is_error``, and ``enforcement``.
 On error its ``code`` is one of ``UNKNOWN_TOOL``, ``INVALID_ARGS``,
 ``TOOL_FAILED``, ``SANDBOX_FAILED``, ``HOOK_DENIED``,
-``APPROVAL_REQUIRED``, or ``HOOK_BLOCKED``. ``turn/end`` has a reason of
-``completed``, ``gave_up``, ``max-steps``, ``max-tool-calls``, ``rejected``,
-``ask`` (from an agent turn), ``turn-timeout`` (serve mode), or ``error``.
-Error codes include ``MODEL_ERROR``, ``LOAD_ERROR``, ``GRAPH_ERROR``,
-``LOOP_ERROR`` under a native loop, and ``TURN_ERROR`` in serve mode.
+``APPROVAL_REQUIRED``, ``HOOK_BLOCKED``, or ``STOPPED`` (the episode
+stopped before the call ran; like ``SANDBOX_FAILED``, it is no tool
+error). ``turn/end`` has a reason of ``completed``, ``gave_up``,
+``max-steps``, ``max-tool-calls``, ``max-tokens`` (the episode's token
+budget, with ``tokens`` and ``spent``), ``stopped`` (the episode's stop
+flag, with its ``reason``), ``rejected``, ``ask`` (from an agent turn),
+``turn-timeout`` (serve mode), or ``error``. Error codes include
+``MODEL_ERROR``, ``LOAD_ERROR``, ``GRAPH_ERROR``, ``LOOP_ERROR`` under a
+native loop, and ``TURN_ERROR`` in serve mode.
 
 For a tool result longer than 20,000 characters, Reef writes the full text
 to ``.reef/tool-output/<step>-<call_id>.txt`` in the workspace. The model
@@ -982,11 +1120,121 @@ receives the head, a line naming the file and omitted count, and the last
 2,000 characters. ``tool/result.meta.output_file`` names the saved file.
 
 Other events record failures and hook actions. ``request/error`` contains
-the attempt and ``MODEL_ERROR`` failure before ``request_error`` hooks run.
+the attempt and ``MODEL_ERROR`` failure, with ``is_transient``, before
+``request_error`` hooks run.
 ``hook/decision`` records a decision that differs from the next layer,
 including ``event``, ``step``, ``hook``, ``owned``, and the decision.
 ``hook/error`` records a raised exception. Hook-injected text appears as
 ``user/message`` with ``source.kind: hook`` and the event.
+
+A team stage adds ``team/start``, ``team/merge``, and ``team/end`` to the
+caller's file and a ``user/message`` with ``source.kind: team``; a member's
+file adds ``team/send``, ``team/unread``, and a ``user/message`` with
+``source.kind: message`` per message it read (`Native teams`_). Under
+``native_harbor`` the runner adds ``verifier.jsonl`` to the session
+directory: one flat ``verifier`` row, not a ``{type, seq, time, data}``
+event (`Native on Harbor tasks`_).
+
+Native on Harbor tasks
+~~~~~~~~~~~~~~~~~~~~~~
+
+``native_harbor`` runs the native loop, with any team its tree runs, on a
+Harbor task. It renders the same node kinds to the same paths as
+``native``, so a tree moves between the two adapters unchanged. Its prompt
+names a Harbor task directory or registry id, as for ``terminus``, so
+``evolution.task_manifest`` can feed it.
+
+An episode runs ``reef-native task --task <prompt>``. The runner hands the
+task to Harbor through reef-eval with the Harbor agent
+``reef.harness.runners.native.harbor:NativeTeamAgent``:
+
+- The loop and its model calls run in the runner process on the Reef host.
+  The task container needs no Reef and no route to the model.
+- Every tool call runs in the task container. At setup the agent copies the
+  tool child ``sandboxed.py`` and the tree's tool modules to ``/reef``; each
+  call then runs ``python3 /reef/sandboxed.py`` there in the agent's
+  workdir, and its ``tool/result`` names the mode ``task-environment``. A
+  result over 20,000 characters is saved in the container, and the agent
+  removes ``.reef/tool-output`` from the workdir before the verifier runs.
+- The git commands of a ``workspace: own`` stage run in the container too,
+  with the git directory and the member worktrees under ``/reef/team``,
+  outside the workdir the verifier reads. ``/reef/team`` is removed when the
+  turn ends.
+
+The task image needs ``python3``; setup fails with "the task image has no
+python3, which native_harbor tools need" without it. A ``workspace: own``
+stage also needs ``git``. Harbor runs the task in local Docker by default.
+For local Docker the episode keeps the service's ``DOCKER_*`` variables
+and, on macOS, makes its root under ``~/.reef/episodes``, as for
+``terminus`` (`Evaluation directories and Docker context`_).
+``REEF_NATIVE_HARBOR_ENVIRONMENT=e2b`` runs the task on E2B instead; an
+evaluation passes it and ``E2B_API_KEY`` through the sandbox executor's
+``env_from``, as for ``terminus`` (`Docker or E2B`_). Linux, macOS, and
+WSL 2 run the adapter; Windows runs it through WSL 2.
+
+The descriptor sets ``REEF_NATIVE_DIR``, ``REEF_NATIVE_SESSION_DIR``,
+``REEF_NATIVE_HARBOR_TRIALS_DIR`` (``{root}/native_harbor/trials``, where
+Harbor writes its trial tree, outside the session directory), and ``HOME``
+(``{root}/workspace``). The caller of ``run_episode`` can add
+``REEF_EPISODE_TOKENS`` and ``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` through
+``env``, never the tree.
+
+The runner writes one flat ``verifier`` row to
+``native/sessions/verifier.jsonl``: ``task``, ``rewards``, ``reward``
+(Harbor's primary reward), ``failed``, and ``error``, the shape the
+terminus runner writes. ``reef.train.cordis_backend.strategies:verifier_reward``
+scores it. The row is failed when the verifier gave no reward, when an
+infrastructure marker matched, or when the runner itself failed before or
+after the trial; a failed row with an error scores as an episode that
+could not run, not as a zero. The runner exits 1 for a failed row.
+
+``REEF_HARBOR_INFRASTRUCTURE_MARKERS`` names failures of a verifier's own
+machinery that a verifier reports as a reward of 0. It is a JSON list of
+``{"file_name", "key", "values"}``. The runner reads the first file named
+``file_name`` in the trial directory; when the JSON value at ``key`` holds
+one of ``values`` (as a key, a list item, or the string itself), the row is
+failed with ``infrastructure failure: <file_name> <key> names <value>``,
+and the rewards stay in the row. A file that is missing or not JSON is no
+match. A malformed list fails the row and names the variable.
+
+Three behaviors differ from ``native``, all set by the agent rather than
+the tree:
+
+- Each model call asks for the ``max_output_tokens`` the model binding
+  renders into ``models.json`` (32,000 by default) instead of 4,096.
+- A transient model failure is retried until the episode stops, with waits
+  that double from one second to 60 seconds, whatever the
+  ``request_error`` hooks say. Other failures follow the hooks and the
+  four-attempt limit. When the episode stops during the retries, the turn
+  ends in error with the last failure, since the model never answered.
+- At the task's agent timeout Harbor cancels the agent. The agent sets the
+  episode's stop flag: a model call in flight finishes, the rest of its
+  tool calls end ``STOPPED``, every turn ends ``stopped`` at its next step,
+  and a team stage still merges. The agent waits up to 120 seconds for
+  that, then Harbor runs the verifier, as it does after any agent timeout.
+  The agent reports the episode's token counts to Harbor's
+  ``AgentContext``.
+
+The runner process imports every hook and runs any ``native_loop``, and
+it writes the row the episode is scored by. Outside
+``evolution.executor: sandbox``, the adapter's ``validate_execution``
+therefore refuses an episode whose tree carries a ``native_loop`` or a
+``native_hook`` that is not byte for byte a hook in
+``reef.harness.runners.native.seed.SEED_HOOKS``, in the rendered files or
+in ``tree.json``: "native_harbor imports hook and loop code into the
+process that writes the verifier row; ... needs evolution.executor:
+sandbox with remote E2B tasks". Tools are not checked, since the runner
+never imports a tool module. Under the sandbox executor the runner is
+jailed and the task must run on E2B, as for ``terminus``: set
+``REEF_NATIVE_HARBOR_ENVIRONMENT=e2b`` and ``E2B_API_KEY`` in
+``sandbox.env_from`` and list ``egress_hosts``. The E2B episode executor
+(``evolution.executor: e2b``) does not run ``native_harbor``, which manages
+its own containers.
+
+A Reef timeout (``evolution.episode_timeout_s``) scores the episode as one
+that could not run, while a Harbor agent timeout still gets a verifier
+reward. Set ``episode_timeout_s`` above the task's agent timeout plus both
+image builds and the verifier timeout.
 
 Episode and serve modes
 ~~~~~~~~~~~~~~~~~~~~~~
@@ -994,6 +1242,8 @@ Episode and serve modes
 Both modes use the same entries, plugins, and interpreter.
 ``reef-native -p`` runs one episode in one process and turn;
 ``run_episode`` launches it, and the sandbox executor confines it.
+``reef-native task`` is the same episode form on a Harbor task
+(`Native on Harbor tasks`_).
 
 ``reef-native serve`` keeps one resident process per installed tree. It
 loads ``native/tree.json`` into a compose ``Loader`` over
@@ -1003,8 +1253,10 @@ follows the served head by polling the catalog and reading the
 ``x-reef-release-id`` header on inference responses.
 
 The interpreter calls ``loop.before_step(run)`` before each model stage.
-In episode mode it does nothing. In serve mode it applies queued mounts
-and checks the turn's wall clock. Tool and hook modules live under
+In episode mode it ends the turn when the episode's stop flag is set or its
+token budget is spent. In serve mode it applies queued mounts and checks
+the turn's wall clock; the serve form has no episode budget and runs no
+team stage. Tool and hook modules live under
 ``native/mounts/live/``. Unchanged entries keep their modules and memory
 state across mounts; changed entries are reinstalled through their inverse.
 If any mounted entry fails to reach ACTIVE, ``root.update`` rolls back to
@@ -1112,7 +1364,9 @@ Descriptor fields
 - ``model_binding`` contains config nodes for each supported API dialect
   (``openai``, ``responses``, or ``anthropic``). Reef adds the matching nodes
   for evaluation episodes and substitutes ``{base_url}``, ``{api_key}``,
-  and ``{model}`` in their string values. The ``reef-<adapter>`` wrapper
+  and ``{model}`` in their string values; a value that is only
+  ``{max_output_tokens}`` becomes the binding's reply budget as a number
+  (pi and ``native_harbor`` read it). The ``reef-<adapter>`` wrapper
   points an installed binding at its proxy plus what the template writes
   after ``{base_url}`` in the dialect the tree was installed with. It tells
   that dialect by the values with no placeholder that the template writes

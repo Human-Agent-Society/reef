@@ -95,9 +95,10 @@ nodes, whose control flow is a ``native_graph`` node, whose helpers are
 ``native_agent`` nodes a graph can call, and whose loop can be a
 ``native_loop`` node written as code, so the agent can evolve the tools it
 runs, how its loop reacts, the loop itself, and who it delegates to, not
-only the text around a vendor binary; and ``terminus``, Terminal-Bench's
-Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
-those five kinds.
+only the text around a vendor binary; ``native_harbor``, the same agent on
+Harbor task directories, its tools run in the task container; and
+``terminus``, Terminal-Bench's Terminus 2, run through a Reef-owned Harbor
+runner. Only ``native`` and ``native_harbor`` render those five kinds.
 
 A ``native_loop`` node goes one step past a graph: its ``code`` defines
 ``run_turn(ctx)``, and that function runs the root turn in place of the graph
@@ -1180,6 +1181,115 @@ whoever can publish to the scenario
 runs code on the machine the process serves on. ``--follow pinned`` keeps a
 person in that loop.
 
+Run a team on Harbor tasks
+--------------------------
+
+The ``native_harbor`` adapter runs the native agent, with any team its tree
+defines, on Harbor task directories, and scores each episode by the task's
+verifier. The loop and its model calls stay on the Reef host; the tools run
+in the task container.
+
+Before you start, you need:
+
+- Docker, or an E2B key (`Native on Harbor tasks
+  <../developer-guide/harness-adapters.rst#native-on-harbor-tasks>`__). On
+  macOS, episodes run under ``~/.reef/episodes``, which colima and Docker
+  Desktop share with their VM by default.
+- Harbor task directories whose images have ``python3``, which every tool
+  call runs with, and ``git``, which a team with its own worktrees needs.
+- A proposer (`Write a method`_).
+
+This recipe config seeds a lead and its workers. The lead holds
+``team_assign`` because its graph has a ``parallel`` stage; the workers it
+assigns start together, each in its own git worktree, and their changes are
+merged into the task's workdir before the verifier runs:
+
+.. code:: yaml
+
+   recipe:
+     implementation: reef.recipe.cordis:CordisRecipe
+     config:
+       evolution:
+         adapter: native_harbor
+         propose: your_method:propose
+         evaluate: reef.train.cordis_backend.strategies:verifier_reward
+         tasks:
+           - /path/to/tasks/fix-the-parser
+           - /path/to/tasks/add-a-cli-flag
+         # One budget for every model call of the episode, the workers' included.
+         episode_tokens: 400000
+         # Above the tasks' agent timeout plus both image builds and the verifier timeout.
+         episode_timeout_s: 5400
+         seed:
+           - reef.harness.runners.native.seed:SEED_TOOLS
+           - reef.harness.runners.native.seed:SEED_HOOKS
+           - id: lead-rules
+             name: rules
+             config:
+               text: >-
+                 When you hold team_assign, you lead: split the task into two parts, assign each to a worker,
+                 answer "assigned", and after the workers report, check the workdir and finish the task.
+           - id: worker
+             name: native_agent
+             config:
+               name: worker
+               prompt: You are a worker. Do only the task you were given, then answer in one line.
+               max_steps: 40
+           - id: main
+             name: native_graph
+             config:
+               name: main
+               start: plan
+               max_steps: 40
+               stages:
+                 plan: {kind: model}
+                 act: {kind: tools}
+                 crew: {kind: subagent, mode: parallel, agents: [worker], workspace: own}
+                 check: {kind: model}
+                 fix: {kind: tools}
+                 done: {kind: end, reason: completed}
+                 quit: {kind: end, reason: gave_up}
+               edges:
+                 - {from: plan, when: tool_calls, to: act}
+                 - {from: act, when: done, to: plan}
+                 - {from: plan, when: text, to: crew}
+                 - {from: crew, when: completed, to: check}
+                 - {from: crew, when: gave_up, to: check}
+                 - {from: crew, when: budget, to: quit}
+                 - {from: crew, when: ask, to: quit}
+                 - {from: check, when: tool_calls, to: fix}
+                 - {from: fix, when: done, to: check}
+                 - {from: check, when: text, to: done}
+
+Put the ``recipe`` section in a deployment config beside its ``reef`` and
+``inference`` sections, as ``configs/serve-native.yaml`` in the tutorial
+does, and start it with ``reef serve -c <config>``.
+``evolution.task_manifest`` with ``evolution.tasks_root`` can name the task
+directories instead of ``tasks``.
+
+For peers that start together instead of a lead, use ``mode: team`` with
+the agents listed in ``agents``. Members talk with ``team_send`` and
+``team_wait`` in either mode. `Native teams
+<../developer-guide/harness-adapters.rst#native-teams>`__ describes the
+stage keys, the messages, and the merges.
+
+Each episode's score is the task verifier's reward. An episode whose trial
+never ran (the image did not build, the agent could not start) scores as
+one that could not run, not as a zero. The evaluation results carry
+``candidate_agents`` and ``current_agents`` per member (``root``,
+``worker.1``, ``worker.2``), and ``candidate_messages`` and
+``current_messages`` when the members sent messages.
+
+Limits:
+
+- Team stages run in episodes only; ``reef-native serve`` refuses a tree
+  that holds one.
+- Every agent of a tree calls the one model the evaluation binds.
+- Outside ``evolution.executor: sandbox``, the tree's hooks must be the
+  shipped seed hooks and the tree may carry no ``native_loop``: both run in
+  the process that writes the score. To evolve them, run the episodes in
+  the sandbox with the tasks on E2B.
+
 Write a method
 --------------
 
@@ -1194,33 +1304,36 @@ An adapter is one descriptor: where each node kind is written, which kinds
 the agent accepts, how the binary is launched, and where the proxy captures
 the model calls. The bundled descriptors cover these agents:
 
-+---------------+----------------------------------+----------------------------------------+
-| Adapter       | Agent                            | Kinds it renders                       |
-+===============+==================================+========================================+
-| ``pi``        | pi coding agent                  | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
-+---------------+----------------------------------+----------------------------------------+
-| ``opencode``  | OpenCode                         | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
-+---------------+----------------------------------+----------------------------------------+
-| ``claude``    | Claude Code                      | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
-+---------------+----------------------------------+----------------------------------------+
-| ``codex``     | Codex CLI                        | config, rules, agent_command, skill    |
-+---------------+----------------------------------+----------------------------------------+
-| ``dsh``       | DeepSeek Harness                 | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
-+---------------+----------------------------------+----------------------------------------+
-| ``hermes``    | Hermes Agent                     | config, rules, agent_command, skill,   |
-|               |                                  | code_extension                         |
-+---------------+----------------------------------+----------------------------------------+
-| ``terminus``  | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill,   |
-|               |                                  | code_extension (sandbox + E2B)         |
-+---------------+----------------------------------+----------------------------------------+
-| ``native``    | Reef's own loop                  | the five above plus native_tool,       |
-|               |                                  | native_hook, native_graph,             |
-|               |                                  | native_agent, native_loop              |
-+---------------+----------------------------------+----------------------------------------+
++-------------------+----------------------------------+----------------------------------------+
+| Adapter           | Agent                            | Kinds it renders                       |
++===================+==================================+========================================+
+| ``pi``            | pi coding agent                  | config, rules, agent_command, skill,   |
+|                   |                                  | code_extension                         |
++-------------------+----------------------------------+----------------------------------------+
+| ``opencode``      | OpenCode                         | config, rules, agent_command, skill,   |
+|                   |                                  | code_extension                         |
++-------------------+----------------------------------+----------------------------------------+
+| ``claude``        | Claude Code                      | config, rules, agent_command, skill,   |
+|                   |                                  | code_extension                         |
++-------------------+----------------------------------+----------------------------------------+
+| ``codex``         | Codex CLI                        | config, rules, agent_command, skill    |
++-------------------+----------------------------------+----------------------------------------+
+| ``dsh``           | DeepSeek Harness                 | config, rules, agent_command, skill,   |
+|                   |                                  | code_extension                         |
++-------------------+----------------------------------+----------------------------------------+
+| ``hermes``        | Hermes Agent                     | config, rules, agent_command, skill,   |
+|                   |                                  | code_extension                         |
++-------------------+----------------------------------+----------------------------------------+
+| ``terminus``      | Terminus 2 (Terminal-Bench)      | config, rules, agent_command, skill,   |
+|                   |                                  | code_extension (sandbox + E2B)         |
++-------------------+----------------------------------+----------------------------------------+
+| ``native``        | Reef's own loop                  | the five above plus native_tool,       |
+|                   |                                  | native_hook, native_graph,             |
+|                   |                                  | native_agent, native_loop              |
++-------------------+----------------------------------+----------------------------------------+
+| ``native_harbor`` | Reef's own loop on Harbor tasks, | what ``native`` renders; hook changes  |
+|                   | tools in the task container      | and native_loop need sandbox + E2B     |
++-------------------+----------------------------------+----------------------------------------+
 
 `Harness adapters <../developer-guide/harness-adapters.rst>`__ is the descriptor reference and
 how to connect an agent that has no adapter yet.
