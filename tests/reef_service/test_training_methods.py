@@ -80,7 +80,7 @@ def test_a_job_continues_the_active_schedule_and_starts_another_at_step_zero() -
     assert active.learning_rates(3) == pytest.approx(tuple(SFT.learning_rate(step) for step in (6, 7, 8)))
     assert active.advanced(3) == LearningRateScheduleState(SFT, 9)
     assert LearningRateScheduleState.from_dict(active.advanced(3).to_dict()) == active.advanced(3)
-    with pytest.raises(ValueError, match="must not be negative"):
+    with pytest.raises(ValueError, match="must be a non-negative integer"):
         LearningRateScheduleState(SFT, -1)
 
 

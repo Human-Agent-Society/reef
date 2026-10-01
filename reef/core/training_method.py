@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from numbers import Integral, Real
 from typing import Any, Literal
 
@@ -36,7 +36,7 @@ def checked_learning_rate(value: object, name: str) -> float:
 
 def checked_step_count(value: object, name: str) -> int:
     if not isinstance(value, Integral) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"LearningRateSchedule.{name} must be a non-negative integer, got {value!r}")
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
     return int(value)
 
 
@@ -77,8 +77,8 @@ class LearningRateSchedule:
             raise ValueError(
                 "LearningRateSchedule min_learning_rate and initial_learning_rate must not exceed the peak"
             )
-        warmup = checked_step_count(self.warmup_steps, "warmup_steps")
-        decay = checked_step_count(self.decay_steps, "decay_steps")
+        warmup = checked_step_count(self.warmup_steps, "LearningRateSchedule.warmup_steps")
+        decay = checked_step_count(self.decay_steps, "LearningRateSchedule.decay_steps")
         if self.decay_style not in LEARNING_RATE_DECAY_STYLES:
             raise ValueError(
                 f"LearningRateSchedule.decay_style must be one of {', '.join(LEARNING_RATE_DECAY_STYLES)}, "
@@ -96,8 +96,6 @@ class LearningRateSchedule:
 
     def learning_rate(self, step: int) -> float:
         """The rate of the optimizer step that follows ``step`` completed steps of this schedule."""
-        if not isinstance(step, Integral) or isinstance(step, bool) or step < 0:
-            raise ValueError(f"learning-rate schedule step must be a non-negative integer, got {step!r}")
         if self.warmup_steps and step <= self.warmup_steps:
             fraction = step / self.warmup_steps
             return self.initial_learning_rate + (self.peak_learning_rate - self.initial_learning_rate) * fraction
@@ -111,15 +109,7 @@ class LearningRateSchedule:
         return self.min_learning_rate + coefficient * (self.peak_learning_rate - self.min_learning_rate)
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "name": self.name,
-            "peak_learning_rate": self.peak_learning_rate,
-            "warmup_steps": self.warmup_steps,
-            "decay_style": self.decay_style,
-            "decay_steps": self.decay_steps,
-            "min_learning_rate": self.min_learning_rate,
-            "initial_learning_rate": self.initial_learning_rate,
-        }
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> LearningRateSchedule:
@@ -136,12 +126,7 @@ class LearningRateScheduleState:
     completed_steps: int = 0
 
     def __post_init__(self) -> None:
-        if not isinstance(self.schedule, LearningRateSchedule):
-            raise TypeError("LearningRateScheduleState.schedule must be a LearningRateSchedule")
-        if not isinstance(self.completed_steps, Integral) or isinstance(self.completed_steps, bool):
-            raise ValueError("LearningRateScheduleState.completed_steps must be an integer")
-        if self.completed_steps < 0:
-            raise ValueError("LearningRateScheduleState.completed_steps must not be negative")
+        checked_step_count(self.completed_steps, "LearningRateScheduleState.completed_steps")
 
     def learning_rates(self, optimizer_steps: int) -> tuple[float, ...]:
         """The rates of the next ``optimizer_steps`` steps, in order."""
@@ -149,12 +134,10 @@ class LearningRateScheduleState:
 
     def advanced(self, optimizer_steps: int) -> LearningRateScheduleState:
         """This state after ``optimizer_steps`` more steps."""
-        if not isinstance(optimizer_steps, Integral) or isinstance(optimizer_steps, bool) or optimizer_steps < 0:
-            raise ValueError(f"optimizer_steps must be a non-negative integer, got {optimizer_steps!r}")
-        return replace(self, completed_steps=self.completed_steps + int(optimizer_steps))
+        return replace(self, completed_steps=self.completed_steps + optimizer_steps)
 
     def to_dict(self) -> dict[str, Any]:
-        return {"schedule": self.schedule.to_dict(), "completed_steps": self.completed_steps}
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> LearningRateScheduleState:
@@ -200,11 +183,7 @@ class TrainingMethod:
 
     def to_dict(self) -> dict[str, Any]:
         """The job payload's record of this method; it takes part in the job's identity."""
-        schedule = self.learning_rate_schedule
-        return {
-            "objective": self.objective,
-            "learning_rate_schedule": None if schedule is None else schedule.to_dict(),
-        }
+        return asdict(self)
 
     @classmethod
     def from_dict(cls, value: Mapping[str, Any]) -> TrainingMethod:

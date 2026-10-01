@@ -12,7 +12,7 @@ import json
 import os
 import tempfile
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -37,25 +37,16 @@ class TinkerCheckpoint:
         for path in (self.state_path, self.sampler_path):
             if not isinstance(path, str) or not path.startswith("tinker://"):
                 raise ValueError("Tinker checkpoints require remote tinker:// paths")
-        if self.learning_rate_schedule is not None and not isinstance(
-            self.learning_rate_schedule, LearningRateScheduleState
-        ):
-            raise TypeError("Tinker checkpoint learning_rate_schedule must be a LearningRateScheduleState")
 
     def validate_model(self, base_model: str, lora_rank: int) -> None:
         if (self.base_model, self.lora_rank) != (base_model, lora_rank):
             raise ValueError("Tinker checkpoint model/rank does not match the runtime")
 
     def to_dict(self) -> dict[str, Any]:
-        value: dict[str, Any] = {
-            "base_model": self.base_model,
-            "lora_rank": self.lora_rank,
-            "state_path": self.state_path,
-            "sampler_path": self.sampler_path,
-            "schema_version": self.schema_version,
-        }
-        if self.learning_rate_schedule is not None:
-            value["learning_rate_schedule"] = self.learning_rate_schedule.to_dict()
+        value = asdict(self)
+        if self.learning_rate_schedule is None:
+            # Manifests stay as they were until a schedule is selected.
+            value.pop("learning_rate_schedule")
         return value
 
     @classmethod

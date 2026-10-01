@@ -100,8 +100,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
 
     This adapter has no inference control object and never reads or advances
     Reef's publication marker. Its context contains only scheduling values.
-    ``args`` are the arguments the workers started with; without them the
-    bridge trains its startup loss family only.
+    ``args`` are the arguments the workers started with.
     """
 
     def __init__(
@@ -109,7 +108,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         actor_group,
         *,
         batch_processor: TrainingBatchProcessor,
-        args: SlimeArguments | None = None,
+        args: SlimeArguments,
         save_hf_template: str | None,
         start_rollout_id: int = 0,
         storage_config: RetentionConfig | None = None,
@@ -164,10 +163,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         self.args = args
         self.critic_steps_per_actor = critic_steps_per_actor
         self.critic_only_steps = critic_only_steps
-        # Bound algorithms by the loss name jobs use, and each family's worker
-        # arguments by canonical name; the startup family's are the workers' own.
+        # Bound algorithms and each family's worker arguments, by family name;
+        # the startup family's arguments are the workers' own.
         self.loss_algorithms: dict[str, SlimeAlgorithm] = {self._algo.loss_family: self._algo}
-        self.loss_family_args: dict[str, SlimeArguments] = {} if args is None else {self._algo.loss_family: args}
+        self.loss_family_args: dict[str, SlimeArguments] = {self._algo.loss_family: args}
         # Arguments some family changes from the startup ones: an activation sends all of them.
         self.switched_arg_names: set[str] = set()
         # The loss family and schedule state the actor workers train with now.
@@ -262,8 +261,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         algorithm.validate_payload(rollout_data)
         optimizer_steps = 0
         if schedule is not None:
-            if self.args is None:
-                raise RuntimeError("a learning-rate schedule needs the Slime arguments the workers started with")
+            if self.args.decoupled_lr is not None:
+                raise RuntimeError(
+                    "a recipe-selected learning-rate schedule cannot drive --decoupled-lr parameter groups"
+                )
             optimizer_steps = len(optimizer_step_sizes(rollout_data, self.args.global_batch_size))
         context: Any = nullcontext(None)
         if self._storage is not None:
@@ -375,21 +376,13 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         the batch processor; a family that declares one of them with another
         dtype is refused.
         """
-        algorithm = self.loss_algorithms.get(loss_family)
-        if algorithm is not None:
-            return algorithm
         if not self._algo.loss_family:
             # A bridge started without a family trains whatever it is given.
             return self._algo
         spec = resolve_loss_family(loss_family)
-        if spec.loss_family == self._algo.loss_family:
-            self.loss_algorithms[loss_family] = self._algo
-            return self._algo
-        if self.args is None:
-            raise RuntimeError(
-                f"this Slime bridge trains loss family {self._algo.loss_family!r} only; "
-                f"a job selected {spec.loss_family!r}"
-            )
+        algorithm = self.loss_algorithms.get(spec.loss_family)
+        if algorithm is not None:
+            return algorithm
         if isinstance(spec, DistillAlgorithm) and any(
             isinstance(bound, DistillAlgorithm) for bound in self.loss_algorithms.values()
         ):
@@ -418,7 +411,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             None, critic_steps_per_actor=self.critic_steps_per_actor, critic_only_steps=self.critic_only_steps
         )
         self.loss_family_args[spec.loss_family] = job_args
-        self.loss_algorithms[loss_family] = algorithm
+        self.loss_algorithms[spec.loss_family] = algorithm
         return algorithm
 
     def worker_activation(self, loss_family: str, schedule: LearningRateScheduleState | None) -> dict[str, Any]:

@@ -186,12 +186,6 @@ def test_a_method_the_workers_cannot_train_is_refused_before_a_job_exists(tmp_pa
         # A family that configures the critic started with the workers or not at all.
         with pytest.raises(RuntimeError, match="configures the critic"):
             stack.bridge.loss_algorithm("sao")
-        # Without the workers' arguments a bridge trains its startup family only.
-        without_arguments = Stack(tmp_path / "bare", args=None)
-        with pytest.raises(RuntimeError, match="trains loss family 'sft' only"):
-            without_arguments.payload(TrainingMethod(REWARD_OBJECTIVE), step=0)
-        assert without_arguments.group.train_calls == []
-        assert read_marker(marker_path(without_arguments.template)) is None
     finally:
         unregister_loss_family("test-needs-options")
 
@@ -246,6 +240,15 @@ def test_a_job_dropped_before_training_leaves_the_schedule_where_it_was(tmp_path
     retried = stack.activation(0)
     assert retried is not None
     assert retried["learning_rate_schedule"]["completed_steps"] == 0
+
+
+@pytest.mark.unit
+def test_a_schedule_with_decoupled_lr_is_refused_before_training(tmp_path) -> None:
+    stack = Stack(tmp_path, args=worker_args(decoupled_lr=1e-5))
+    with pytest.raises(RuntimeError, match="decoupled-lr"):
+        stack.coordinator.execute_training_job(stack.payload(TrainingMethod("sft", WARMUP), step=0))
+    assert stack.group.train_calls == []
+    assert read_marker(marker_path(stack.template)) is None
 
 
 @pytest.mark.unit

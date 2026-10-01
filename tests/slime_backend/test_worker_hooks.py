@@ -441,12 +441,6 @@ def test_learning_rate_schedule_sets_each_optimizer_step_and_chains_the_user_hoo
     assert [group["lr"] for group in groups] == pytest.approx([7.5e-5, 3.75e-5, 7.5e-5])
     assert worker_hooks.APPLIED_LEARNING_RATE == {}
 
-    args.reef_learning_rate_schedule = schedule.to_dict()
-    decoupled = SimpleNamespace(param_groups=[{"lr": 1.0, "is_decoupled_lr": True}])
-    with pytest.raises(RuntimeError, match="decoupled-lr"):
-        worker_hooks.apply_learning_rate_schedule(args, 7, 0, "model", decoupled, "scheduler")
-    worker_hooks.APPLIED_LEARNING_RATE.clear()
-
 
 @pytest.mark.unit
 def test_logged_step_rates_follow_the_recipe_schedule(monkeypatch: pytest.MonkeyPatch) -> None:

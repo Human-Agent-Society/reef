@@ -427,8 +427,6 @@ def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, op
     state = LearningRateScheduleState.from_dict(schedule)
     rate = state.schedule.learning_rate(state.completed_steps + step_id)
     for group in optimizer.param_groups:
-        if group.get("is_decoupled_lr"):
-            raise RuntimeError("a recipe-selected learning-rate schedule cannot drive --decoupled-lr parameter groups")
         group["lr"] = rate * group.get("lr_mult", 1.0)
     APPLIED_LEARNING_RATE["rate"] = rate
 
