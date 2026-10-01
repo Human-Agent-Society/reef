@@ -19,7 +19,7 @@ from reef.inference.sglang.lora_schema import (
     require_lora_tensor_request_schema,
 )
 from reef.inference.sglang.process import launch_engine, local_gpu_id, node_address_and_port, wait_ready
-from reef.runtime.interfaces import InferenceMemoryOperations
+from reef.runtime.interfaces import InferenceEngine, InferenceMemoryOperations
 from reef.runtime.scheduler import InferenceMemory
 
 logger = logging.getLogger(__name__)
@@ -36,7 +36,7 @@ LORA_SERVING_OPTIONS = (
 )
 
 
-class ReefSGLangEngine:
+class ReefSGLangEngine(InferenceEngine):
     """Own one native SGLang process, or borrow an existing HTTP engine."""
 
     _get_current_node_ip_and_free_port = staticmethod(node_address_and_port)
@@ -300,7 +300,7 @@ class ReefSGLangEngine:
             ) from exc
         return response.json()
 
-    def get_runtime_load_id(self):
+    def get_runtime_load_id(self) -> str | None:
         """Read the supported model-info endpoint instead of Slime's deprecated route.
 
         SGLang spells the runtime-load-ID ``weight_version`` on every wire
@@ -335,7 +335,7 @@ class ReefSGLangEngine:
                 "SGLang scheduler rejected runtime-load-ID synchronization; install and enable Reef's SGLang plugin"
             )
 
-    def flush_cache(self):
+    def flush_cache(self) -> None:
         if self.node_rank != 0:
             return
         for _ in range(60):
@@ -354,7 +354,7 @@ class ReefSGLangEngine:
             time.sleep(1)
         raise TimeoutError("Timeout while flushing cache.")
 
-    def set_runtime_load_id(self, runtime_load_id: str):
+    def set_runtime_load_id(self, runtime_load_id: str) -> object:
         version = str(runtime_load_id)
         result = self._make_request(
             "update_weight_version",
@@ -384,7 +384,7 @@ class ReefSGLangEngine:
             payload["expected_checksums"] = expected_checksums
         return self._make_request("load_lora_adapter_from_tensors", payload)
 
-    def load_lora_adapter_from_disk(self, lora_name: str, lora_path: str, pinned: bool = False):
+    def load_lora_adapter_from_disk(self, lora_name: str, lora_path: str, pinned: bool = False) -> object:
         """Load a PEFT adapter directory the engine's host can read, under ``lora_name``."""
         payload: dict[str, Any] = {"lora_name": lora_name, "lora_path": lora_path}
         if pinned:
@@ -420,13 +420,13 @@ class ReefSGLangEngine:
     def _memory(self) -> InferenceMemory:
         return InferenceMemory(_SGLangMemoryOperations(self), ("weights", "kv_cache", "cuda_graph"))
 
-    def release_memory_occupation(self, tags: list[str] | None = None):
+    def release_memory_occupation(self, tags: Sequence[str] | None = None) -> None:
         self._memory.release(tags or None)
 
-    def resume_memory_occupation(self, tags: list[str] | None = None):
+    def resume_memory_occupation(self, tags: Sequence[str] | None = None) -> None:
         self._memory.resume(tags or None)
 
-    def unload_lora_adapter(self, lora_name: str):
+    def unload_lora_adapter(self, lora_name: str) -> object:
         return self._make_request("unload_lora_adapter", {"lora_name": lora_name})
 
     def update_weights_from_disk(
@@ -436,7 +436,7 @@ class ReefSGLangEngine:
         runtime_load_id: str | None = None,
         files: list[str] | None = None,
         flush_cache: bool = False,
-    ):
+    ) -> object:
         payload: dict[str, Any] = {"model_path": model_path, "flush_cache": flush_cache}
         if load_format is not None:
             payload["load_format"] = load_format
@@ -446,10 +446,10 @@ class ReefSGLangEngine:
             payload["files"] = files
         return self._make_request("update_weights_from_disk", payload)
 
-    def pause_generation(self, mode: str = "retract"):
+    def pause_generation(self, mode: str = "retract") -> object:
         return self._make_request("pause_generation", {"mode": mode})
 
-    def continue_generation(self):
+    def continue_generation(self) -> object:
         return self._make_request("continue_generation")
 
     def _weight_update_timeout_s(self) -> float:
