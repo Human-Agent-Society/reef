@@ -1,1 +1,1 @@
-"""The harness programs Reef ships, the ones an adapter's ``binary`` points at when it is not a third party CLI: ``native`` (``reef-native``) and ``terminus`` (``reef-terminus``)."""
+"""The harness programs Reef ships, the ones an adapter's ``binary`` points at when it is not a third party CLI: ``native`` (``reef-native``, and ``reef-native task`` for ``native_harbor``) and ``terminus`` (``reef-terminus``); ``harbor_trial`` runs a Harbor trial for both Harbor runners."""

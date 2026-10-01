@@ -12,15 +12,15 @@ The map, one subpackage per job:
     one directory per agent, the mapping only: a ``descriptor.yaml`` (schema in
     ``descriptor``) plus quirks, and the ``harness_facts.yaml`` a text proposer
     reads about the harness's own surface (``harness_facts``). pi, opencode, claude, codex, dsh, hermes, and
-    the two programs Reef ships, native and terminus.
+    the adapters of the programs Reef ships, native, native_harbor and terminus.
 ``episodes/``
     one headless run and its reading: launch on a rendered root, locally or
     in a jail (``run``, ``executor``), the model binding, the version pin and
     the trajectory readers.
 ``runners/``
     the programs an adapter's ``binary`` points at when Reef ships them:
-    ``native`` (the loop, its graph, its seed and the resident ``serve`` form)
-    and ``terminus`` (the Harbor runner).
+    ``native`` (the loop, its graph, its seed, its teams, the resident ``serve`` form and the ``task`` form
+    on a Harbor task), ``terminus`` (the Harbor runner), and ``harbor_trial`` (the Harbor trial both run).
 ``client/``
     what runs on a user's machine: the wrapper the install script bakes
     around a pulled harness.
