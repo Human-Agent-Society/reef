@@ -322,6 +322,35 @@ def test_unimplemented_manual_assembly_never_falls_back_to_auto():
         processor.build_batch()
 
 
+def test_status_shows_how_far_a_partly_filled_batch_still_has_to_go():
+    """A batch that will never fill has to look different from one that is still filling.
+
+    An on-policy producer waits on the release its batch makes. If the record stream picks up rows the
+    producer did not send, the batch boundary shifts and the scenario settles below the batch size with the
+    producer waiting for a release that cannot come. Nothing else in the status distinguishes that from
+    training that is merely slow.
+    """
+
+    class CountingProcessor(DataProcessor):
+        supported_training_modes = frozenset({"auto"})
+
+        def __init__(self, context: ProcessorContext) -> None:
+            super().__init__(context)
+            self.held = 0
+
+        def _ready_count(self) -> int:
+            return self.held
+
+    processor = CountingProcessor(ProcessorContext("s", config={"batch_size": 4}, training_mode="auto"))
+    assert processor.status() == {"ready_units": 0, "batch_size": 4}
+    processor.held = 3
+    assert processor.status() == {"ready_units": 3, "batch_size": 4}
+    assert not processor.ready()
+    processor.held = 4
+    assert processor.status() == {"ready_units": 4, "batch_size": 4}
+    assert processor.ready()
+
+
 def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in_hybrid_only():
     class HybridOnlyProcessor(DataProcessor):
         supported_training_modes = frozenset({"auto", "hybrid"})
@@ -329,11 +358,11 @@ def test_status_reports_buffered_requests_when_a_processor_takes_instructions_in
 
     processor = HybridOnlyProcessor(ProcessorContext("s", training_mode="hybrid"))
     processor.ingest(instruction("one"))
-    assert processor.status() == {"buffered_requests": 1}
+    assert processor.status()["buffered_requests"] == 1
     processor.close()
     auto_only = DataProcessor(ProcessorContext("s"))
     auto_only.ingest(instruction("one"))
-    assert auto_only.status() == {}
+    assert "buffered_requests" not in auto_only.status()
     auto_only.close()
 
 
@@ -742,7 +771,7 @@ def test_a_failed_instruction_is_skipped_with_its_error_and_the_queue_moves_on(t
         assert "error" not in _committed_row(dispatcher, "fine")
         current = dispatcher.get_or_create_scenario("s")
         assert current.trainer.pending_instructions() == 0
-        assert current.trainer.processor_status() == {"buffered_requests": 0}
+        assert current.trainer.processor_status()["buffered_requests"] == 0
         assert current.trainer.instruction_failures() == {}
         assert current.records.get("s", "poison") is not None
         assert current.trainer.training_mode == "manual"
@@ -932,7 +961,7 @@ def test_a_logless_scenario_keeps_the_failed_batch_and_skips_it_on_its_next_wake
         assert _wait(lambda: scenario.scenario_step == 2)
         assert _last_committed(scenario).get("skipped") == "no proposal"
         assert scenario.trainer.pending_instructions() == 0
-        assert scenario.trainer.processor_status() == {"buffered_requests": 0}
+        assert scenario.trainer.processor_status()["buffered_requests"] == 0
         assert scenario.trainer.instruction_failures() == {}
         assert scenario.records.get("s", "poison") is not None
     finally:
@@ -1076,7 +1105,7 @@ def test_hybrid_is_a_recipe_and_processor_mode_and_a_fourth_value_is_refused(tmp
         trainer = recipe.build("s", records)
         assert trainer.training_mode == "hybrid"
         assert trainer.processor.training_mode == "hybrid"
-        assert trainer.processor.status() == {"buffered_requests": 0}
+        assert trainer.processor.status()["buffered_requests"] == 0
         trainer.close()
         with pytest.raises(ValueError, match="training_mode"):
             replace(recipe, training_mode="either")
@@ -1142,7 +1171,7 @@ def test_hybrid_runs_two_queued_instructions_oldest_first_one_per_step():
     processor = CordisProcessor(ProcessorContext("s", {"batch_size": 1}, training_mode="hybrid"))
     processor.ingest(instruction("first"))
     processor.ingest(instruction("second"))
-    assert processor.status() == {"buffered_requests": 2}
+    assert processor.status()["buffered_requests"] == 2
     assert processor.ready()
     batch = processor.build_batch()
     assert batch.batch_id == "s:instruction:first"
@@ -1215,7 +1244,7 @@ def test_switching_hybrid_to_auto_holds_the_unread_instruction_for_a_mode_that_t
         records.append(instruction("later"))
         trainer.set_training_mode("auto")
         assert trainer.run_once() is None
-        assert trainer.processor.status() == {"buffered_requests": 1}
+        assert trainer.processor.status()["buffered_requests"] == 1
         failure(records, "a")
         failure(records, "b")
         result = trainer.run_once()

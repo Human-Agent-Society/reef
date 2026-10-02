@@ -55,8 +55,31 @@ fields: ``id`` is unique within the tree, ``name`` selects one of the node
 kinds below, and ``config`` holds that kind's own fields. For the named kinds
 (``agent_command``, ``skill``, ``code_extension``, ``native_tool``,
 ``native_hook``, ``native_loop``), ``config.name`` is the file name the entry
-renders to. Ten kinds are registered in
-`reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__:
+renders to. Ten node kinds are registered in
+`reef/harness/tree/nodes.py <../../reef/harness/tree/nodes.py>`__.
+
+A node kind states what an entry contains, not where it lands. That is decided
+by an adapter, which maps each kind to a concrete file for one agent. The
+process of turning the entries into those files is called rendering, and it is
+more than a copy: ``config`` entries merge into one file and ``rules`` entries
+concatenate. See the adapter guide's `Rendering
+<../developer-guide/harness-adapters.rst#rendering>`__ section for more details
+of this process.
+
+Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
+``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
+Agent)), for ``terminus``, Terminal-Bench's Terminus 2 run through a
+Reef-owned Harbor runner, and for ``native``, Reef's own agent.
+
+An adapter need not map every kind, and a kind it leaves out is refused at
+admission and at render rather than dropped, so the adapter decides which kinds
+a tree may use. The ten node kinds fall into two groups.
+
+General node kinds
+~~~~~~~~~~~~~~~~~~
+
+These five configure an agent whose control loop its vendor owns: its
+configuration, the text it reads, and the commands and code it loads.
 
 +--------------------+----------------------------------------------------------+
 | ``name``           | Renders as                                               |
@@ -66,12 +89,45 @@ renders to. Ten kinds are registered in
 +--------------------+----------------------------------------------------------+
 | ``rules``          | text appended to the agent's rules file                  |
 +--------------------+----------------------------------------------------------+
-| ``agent_command``  | a named prompt template                                  |
-+--------------------+----------------------------------------------------------+
 | ``skill``          | a named ``SKILL.md``                                     |
++--------------------+----------------------------------------------------------+
+| ``agent_command``  | a named prompt template                                  |
 +--------------------+----------------------------------------------------------+
 | ``code_extension`` | a named code file the harness loads in process           |
 +--------------------+----------------------------------------------------------+
+
+Every bundled adapter renders ``config``, ``rules``, and ``skill``, so a
+mutation of one of those three renders under any harness. The other two are
+narrower.
+
+Every adapter except ``native`` renders ``agent_command``; a Codex
+``agent_command`` is a skill invoked as ``$name``. ``native`` renders neither
+``agent_command`` nor ``code_extension``, because the two presuppose a vendor
+binary: its loop reads no prompt directory and loads no vendor plugin. The
+other three kinds it does render.
+
+``code_extension`` is narrower still. Codex rejects it because lifecycle hooks
+run outside its command sandbox; see `Run a Codex session`_ for approvals and
+network access. Terminus accepts one Python module defining
+``Agent(Terminus2)``, and only when Reef's sandbox isolates the runner and
+Harbor uses remote E2B tasks; see the adapter guide for the required
+deployment settings.
+
+Native node kinds
+~~~~~~~~~~~~~~~~~
+
+``native`` is a loop inside the Reef tree rather than a vendor binary, so
+these five kinds are the loop itself: its tools are ``native_tool`` nodes, its
+loop events listen to ``native_hook`` nodes, its control flow is a
+``native_graph`` node, its helpers are ``native_agent`` nodes a graph can
+call, and the loop can be a ``native_loop`` node written as code. The agent
+can therefore evolve the tools it runs, how its loop reacts, the loop itself,
+and who it delegates to, not only the text around a vendor binary. No other
+adapter renders these kinds.
+
++--------------------+----------------------------------------------------------+
+| ``name``           | Renders as                                               |
++====================+==========================================================+
 | ``native_tool``    | a named tool the native harness loads (schema and code)  |
 +--------------------+----------------------------------------------------------+
 | ``native_hook``    | a named listener at one event of the native loop (code)  |
@@ -84,20 +140,6 @@ renders to. Ten kinds are registered in
 | ``native_loop``    | the native loop itself as code: ``run_turn(ctx)`` over   |
 |                    | the context API; always reviewed                         |
 +--------------------+----------------------------------------------------------+
-
-The table describes what each kind contains. Where each kind is written is
-decided by an adapter, which maps every kind to a concrete file for one agent.
-Reef bundles adapters for third-party coding agent CLIs (``pi``, ``opencode``,
-``claude``, ``codex``, ``dsh`` (DeepSeek Harness), and ``hermes`` (Hermes
-Agent)); ``native``, its own agent: a loop inside the reef tree whose tools
-are ``native_tool`` nodes, whose loop events listen to ``native_hook``
-nodes, whose control flow is a ``native_graph`` node, whose helpers are
-``native_agent`` nodes a graph can call, and whose loop can be a
-``native_loop`` node written as code, so the agent can evolve the tools it
-runs, how its loop reacts, the loop itself, and who it delegates to, not
-only the text around a vendor binary; and ``terminus``, Terminal-Bench's
-Terminus 2, run through a Reef-owned Harbor runner. Only ``native`` renders
-those five kinds.
 
 A ``native_loop`` node goes one step past a graph: its ``code`` defines
 ``run_turn(ctx)``, and that function runs the root turn in place of the graph
@@ -115,24 +157,8 @@ a pending release a person promotes, whether or not ``evolution.review_kinds``
 names the kind, and ``harness_try`` refuses to mount one on a serving process:
 the model proposes a loop, a person serves it.
 
-Codex and Terminus support ``config``, ``rules``, ``agent_command``, and
-``skill``. A Codex ``agent_command`` is a skill invoked as ``$name``.
-Codex rejects ``code_extension`` because lifecycle hooks run outside its
-command sandbox. See `Run a Codex session`_ for approvals and network access.
-
-Terminus accepts one Python module defining ``Agent(Terminus2)`` when Reef's
-sandbox isolates the runner and Harbor uses remote E2B tasks. See the adapter
-guide for the required deployment settings.
-
-A tree does not choose where model calls go. Reef's model binding writes the
-endpoint, the key and the model when it renders an episode or an install,
-and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
-adapters, render refuses a ``config`` entry, a command or a skill that sets
-them or names another provider, a transport, a proxy, a credential helper,
-a fallback or another model, also inside a request body the tree passes to
-the endpoint. These checks read the config the tree renders, not the
-requests a run sends, so a request that a tool or a plugin builds itself can
-still name another model. The adapter guide lists the keys for each adapter.
+Rendered paths
+~~~~~~~~~~~~~~
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 
@@ -145,6 +171,21 @@ With the ``pi`` adapter, ``GET /reef/harness`` serves:
      prompts/<name>.md         <- agent_command
      skills/<name>/SKILL.md    <- skill
      extensions/<name>.ts      <- code_extension
+
+The adapter guide gives the paths each other adapter renders to.
+
+Model endpoints stay outside the tree
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+A tree does not choose where model calls go. Reef's model binding writes the
+endpoint, the key and the model when it renders an episode or an install,
+and with the ``claude``, ``dsh``, ``hermes``, ``pi`` and ``terminus``
+adapters, render refuses a ``config`` entry, a command or a skill that sets
+them or names another provider, a transport, a proxy, a credential helper,
+a fallback or another model, also inside a request body the tree passes to
+the endpoint. These checks read the config the tree renders, not the
+requests a run sends, so a request that a tool or a plugin builds itself can
+still name another model. The adapter guide lists the keys for each adapter.
 
 The loop
 --------
@@ -276,6 +317,55 @@ local executor enforces none of this.
 to forward, and missing variables fail configuration. This keeps remote sandbox
 credentials out of candidate compositions. ``egress_hosts`` currently enables
 network access; it does not enforce a hostname firewall.
+
+On macOS or a host without Linux namespaces, select ``e2b`` to run ordinary
+evaluation episodes in disposable cloud sandboxes. Cordis evaluations and GEPA
+minibatches use the same episode runner and trajectory readers::
+
+    evolution:
+      adapter: pi
+      executor: e2b
+      episode_timeout_s: 600
+      sandbox:
+        e2b_api_key_env: E2B_API_KEY
+        # Only needed for a model listening on this evaluation worker's localhost:
+        forward_ports: [8000]
+
+Install ``reef-infra[e2b]`` and supply the E2B key in the named environment
+variable. ``e2b_api_key`` can also supply it explicitly. Only variables named
+in ``env_from`` are forwarded; the E2B key is used by Reef, not passed to the
+agent. Public model endpoints need no forwarded port. Each configured port
+forwards the evaluation worker's ``127.0.0.1`` endpoint to the same port inside
+the VM. With workers on other machines, localhost names that worker, not the
+Reef HTTP host; use a reachable model URL or run the evaluation on the model's
+host. Forwarding is deployment configuration, never inferred from candidate
+files. The ordinary model binding still renders the upstream credential into
+the episode; general credential isolation remains tracked in issue #204.
+
+For an npm-installed adapter, Reef builds a pinned Node 22 template containing
+the agent and bubblewrap. Its name ends in ``-episodes-v1`` so older templates
+without the isolation dependency are not reused. ``e2b_template`` selects a
+custom template; non-npm adapters require one with their binary and bubblewrap
+already installed. ``evolution.binary`` names a binary in that template, not a
+path on the Reef host. Startup checks provider access, the template, the
+binary and namespace support using a short-lived sandbox. The host does not
+install the remote agent. Terminus retains its own Harbor hosted configuration.
+
+Every ordinary episode gets its own VM. The remote filesystem and rendered
+inputs are read-only; the workspace and the adapter's declared state directories
+are writable. Files are copied back before trajectory parsing and residue
+checks. Copy-back or cleanup failure fails the episode. Timeouts terminate the
+process and its children; the VM is destroyed when the episode finishes.
+E2B has outbound internet access and resources set by its template. Nonempty
+``egress_hosts`` or ``limits`` are rejected because these local-sandbox policies
+are not implemented by this provider. Pi and Codex have opt-in real E2B tests
+in ``tests/smoke/test_e2b_episode.py``; other adapters need their template and
+runtime-state paths validated with their own agent binaries.
+
+``evolution.proposer_agent.sandbox: e2b`` remains independent: it selects where
+the proposer and its trials run, reusing the same E2B implementation while
+keeping one VM open for that proposer run. Set ``evolution.executor: e2b`` to
+select cloud execution for the regular evaluation episodes as well.
 
 The throwaway root contains nothing except the rendered tree: a fresh working
 directory and a fresh ``HOME``, with no repository and no files from your
@@ -527,10 +617,11 @@ its committed outputs are a full local run on ollama with no GPU.
 
 ``run.sh`` copies the recipe config out of ``serve.yaml``, starts the service, and runs
 ``run.py``: three exact-answer coding tasks go through Reef, each reply is
-graded, and every result is reported against its receipt. Only failures enter
-the window, so the first failing report triggers one evolve step. In this
-example the served model is its own proposer, and it answers with one skill
-mutation.
+graded, and every result is reported against its receipt. Every valid scored
+report batches, a passing one included, and ``batch_size: 1`` makes each
+report its own batch, so every report this run submits triggers one evolve
+step. In this example the served model is its own proposer, and it answers
+with one skill mutation.
 
 The example's scenario is ``harness-evolve-demo``. ``run.sh`` keeps the
 service up only while ``run.py`` runs. When the loop finishes, it prints the
@@ -557,13 +648,12 @@ service then requires that token, and every ``curl`` on this page needs
 ``-H "Authorization: Bearer $REEF_TOKEN"``.
 
 One step is six episodes, three tasks on each of the two trees, and the
-reference run finished in 63 s on Qwen3-8B: one failing task entered the
-window, the served model proposed a new skill beside the starter, and the evaluation
+reference run finished in 63 s on Qwen3-8B: one reported trace filled the
+batch, the served model proposed a new skill beside the starter, and the evaluation
 scored the candidate 3.0 against 2.0 (1 win, 0 losses, 2 ties). The committed
 notebook run, on ollama ``qwen2.5:7b`` with no GPU, records one step whose candidate
 tied the current tree on every task and lost the gate. The run has succeeded when one
-task fails, the failing report opens the window, one evolve step runs, and
-``GET /reef/harness`` serves a release other than the seed.
+step wins its gate and ``GET /reef/harness`` serves a release other than the seed.
 ``/reef/harness/releases`` then shows that step's training row with
 ``published: true`` in its metrics.
 
@@ -580,10 +670,13 @@ still answering plain requests. A missing model server does not produce
 this symptom: the record phase raises on its first call and ``run.py``
 exits with the upstream error before any evolve step runs.
 
-A model that answers all three tasks correctly also leaves the route at 404,
-because nothing fails, so nothing batches and no step runs. ``run.py`` prints
-``every task passed: nothing batched, no evolve step runs`` when that
-happens.
+A model that answers all three tasks correctly still batches one step per
+report. Evaluation runs the tasks again on the current and candidate trees,
+so passing the initial tasks does not determine whether a candidate will
+win, tie, or lose. A step publishes only when its candidate wins; rejected
+or skipped steps leave the served tree unchanged. ``run.py`` counts all
+submitted reports, waits for the steps they triggered up to its deadline,
+and prints how many reports it batched and how many of them failed.
 
 Install the published tree
 --------------------------

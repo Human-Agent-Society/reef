@@ -231,6 +231,32 @@ the committed checkpoint before restart; its training checkpoint must not be
 used to reconstruct serving. See `Worker executors <../developer-guide/executors.rst>`__ for the
 recovery policy and compatibility limits.
 
+``reef.inference_backend: vllm`` selects the vLLM engine integration for
+training-time serving. Reef launches one vLLM server per engine on the
+reserved GPUs with ``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
+``--logprobs-mode processed_logprobs``, and drives publication through vLLM's
+control routes: ``/pause?mode=keep`` (a retracting pause adds
+``/reset_prefix_cache?reset_running_requests=true``), ``/sleep`` and
+``/wake_up`` for colocated memory release, ``/update_weight_version``,
+``/collective_rpc reload_weights`` and the ``/v1/load_lora_adapter`` routes.
+Engines are single-node; more than one engine needs ``router_url``. Each
+engine takes one port, probed upward from ``engine_port_base`` (default
+15000) on its host; two stacks on one host must set bases far enough apart,
+since a probe reserves nothing until the server binds. Engine
+options use vLLM's engine-argument names; Reef sets ``model``, ``host``,
+``port``, ``tensor_parallel_size`` and ``enable_sleep_mode`` itself, defaults
+``generation_config`` to ``vllm`` so the model's own generation defaults cannot
+add truncation or a temperature the trainer never sees, rejects
+``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
+instead) and enables prefix caching only under a retracting pause. vLLM
+releases the KV cache only together with the weights, so
+``keep-lora-base-resident`` is unavailable on it, and it resumes scheduling by
+itself once every region is resident, so the engine restores the KV cache
+when Reef resumes generation rather than when the coordinator calls
+``onload_kv``: generation stays paused until the coordinator's commit. The Slime and Tinker
+backends still produce SGLang engine options, so their managed launches keep
+``inference.backend: sglang`` until they select options per backend.
+
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
 Reef does not discover, launch, schedule, probe or stop them. The recipe consumes
@@ -340,8 +366,10 @@ trainer. Sampling runs through::
 SGLang and Slime's trainer both read at [A] (full vocabulary, trainer with
 ``rollout_temperature``, no penalties), so they agree as long as a recipe uses
 no penalties or ``logit_bias``. vLLM ``--logprobs-mode processed_logprobs``
-reads at [B], so it matches only with top-k, top-p and min-p off; otherwise
-the trainer must replay vLLM's sampling mask. Verify with Slime's
+reads at [B], so it matches only with top-k, top-p and min-p off, and Reef's
+vLLM client rejects a request whose effective ``top_p`` is below 1, ``top_k``
+above 0 or ``min_p`` above 0; replaying vLLM's sampling mask in the trainer
+would lift that restriction. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
 For both handlers, set ``inference.handler-config.force_reasoning`` to
@@ -943,13 +971,13 @@ Every valid scored report contributes a trace, including successful outcomes.
    evolution.max_failure_streak | 0 | stop automatic evolve steps after this many consecutive rejected steps, instruction steps included; 0 disables the limit; an instruction from ``POST /reef/train`` still runs while the breaker is open
    evolution.max_model_calls_per_step | 0 | cap the proposer's model calls in one step; 0 disables the limit
    evolution.multimodal | | reefine only; the gateway Reef relays a scenario's ``/v1/images``, ``/v1/embeddings``, ``/v1/audio/speech`` and ``/v1/decisions`` to, unrecorded, and the agent proposer's trials reach: ``preset`` (``openrouter``, the default, or ``openai-compatible`` for OrcaRouter, LiteLLM, ...), ``url`` (the gateway's address, no ``/v1``; required for ``openai-compatible``) and ``api_key`` (its key; the profile reads ``REEF_MULTIMODAL_API_KEY``, and ``api_key_env`` names a variable instead; empty, the upstream's key when the upstream is the same address). Without a key those routes answer 501
-   evolution.proposer_agent | | off unless set (the reefine recipe sets it); a proposer that takes ``agent_host`` runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; ``e2b`` runs it in an E2B cloud sandbox that reaches the gateway through a tunnel, with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>``, built on first use), and needs the ``e2b`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See the reefine recipe guide
-   evolution.executor | local | ``local`` runs episodes as a plain subprocess (development, hermetic tests); ``sandbox`` runs each in a bubblewrap jail for a hosted service and refuses to start without it; it also refuses every episode of a ``self_isolating`` adapter such as ``terminus``, whose Docker task container cannot nest in the jail
+   evolution.proposer_agent | | off unless set (the reefine recipe sets it); a proposer that takes ``agent_host`` runs a coding agent under it: ``sandbox`` (``bwrap`` jails it with pasta networking and refuses to start where the host cannot; ``e2b`` runs it in an E2B cloud sandbox that reaches the gateway through a tunnel, with ``e2b_api_key`` (else ``E2B_API_KEY``) and ``e2b_template`` (else ``reef-pi-<version>-episodes-v1`` with bubblewrap, built on first use), and needs the ``e2b`` extra; ``none`` runs it unisolated and must be chosen; unset, or ``REEF_PROPOSER_SANDBOX``, jails it where the host can and leaves it off where it cannot), ``timeout_s`` (1800, the whole agent run) and ``trial_timeout_s`` (300, each run of the candidate harness). See the reefine recipe guide
+   evolution.executor | local | ``local`` runs episodes as a plain subprocess; ``sandbox`` uses a local bubblewrap jail; ``e2b`` creates a cloud VM per episode and checks provider access, template, binary and namespace support at startup. E2B uses remote binaries; Terminus retains its own Harbor execution
    execution.evolution.workers | 1 | fixed worker-group size; CPU auto selects ``uni`` for one and ``mp`` for multiple
    execution.evolution.backend | auto | worker placement, independent of the ``local/sandbox`` episode isolation policy; ``local`` retains shared-memory callbacks
    execution.evolution.resources | | ``cpus_per_worker`` and ``gpus_per_worker``; omitted values retain component defaults; GPUs select Ray under ``auto`` and cannot reduce declared GPU needs
    evolution.episode_workers / worker_executor / worker_resources | | deprecated compatibility aliases; conflicting resource values are rejected; legacy worker_executor cannot accompany role-level workers/resources
-   evolution.sandbox | | the sandbox executor's policy: ``egress_hosts`` (allowlisted model endpoints; empty denies network) and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``)
+   evolution.sandbox | | for ``sandbox``: ``egress_hosts`` and ``limits`` (``cpu_seconds``, ``memory_bytes``, ``processes``, ``file_bytes``); for ``e2b``: ``e2b_api_key_env`` (default ``E2B_API_KEY``), optional ``e2b_api_key``, ``e2b_template`` and ``forward_ports`` (explicit worker-loopback TCP ports). E2B rejects nonempty ``egress_hosts``/``limits``; template resources and outbound internet apply. Both accept ``env_from``
    evolution.promote_failures | false | when true, a failing trace's prompt becomes a permanent evaluation task, so no later candidate can win while bringing the failure back; the seed tasks stay the floor
    evolution.max_promoted_tasks | 50 | the cap on promoted tasks; admission stops there so the suite is bounded
    evolution.max_promoted_per_client | 5 | the cap on promoted tasks from one tagged client (its ``x-reef-tag-client``, else session, tag); untagged traffic has no identity to count under and meets only ``max_promoted_tasks``; 0 disables the cap
