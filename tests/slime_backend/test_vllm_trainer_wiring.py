@@ -11,6 +11,7 @@ from reef.inference.vllm.service import INFERENCE_PROTOCOL as VLLM_PROTOCOL
 from reef.inference.vllm.service import VLLMInferenceService
 from reef.runtime.deployment import DeploymentResources, ModelDeploymentPlan
 from reef.train.slime_backend.inference import inference_config
+from reef.train.slime_backend.reef_adapters.bridge import BridgePreparation, RetentionConfig
 from reef.train.slime_backend.training import WEIGHT_TRANSFER_PROTOCOLS, SlimeTrainingService
 
 
@@ -73,8 +74,10 @@ class _Resources(DeploymentResources):
 
 
 def test_training_service_declares_the_receiver_protocol_for_its_backend():
+    preparation = BridgePreparation(retention=RetentionConfig(), loss_family=None, lora=False)
+
     def service(**kwargs):
-        return SlimeTrainingService(SimpleNamespace(), preparation=None, loss_family_config=None, **kwargs)
+        return SlimeTrainingService(SimpleNamespace(), preparation=preparation, loss_family_config=None, **kwargs)
 
     assert service().weight_transfer_protocol == WEIGHT_TRANSFER_PROTOCOLS["sglang"] == "slime-sglang-control-v2"
     vllm_trainer = service(inference_backend="vllm")

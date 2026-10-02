@@ -131,6 +131,15 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
             },
             "weights checker",
         ),
+        (
+            {
+                "inference.backend": "vllm",
+                "training.options.update-weight-transport": "disk",
+                "inference.num-gpus": "2",
+                "inference.tensor-parallel-size": "1",
+            },
+            "one engine per stack",
+        ),
         ({"inference.backend": "tinker-engine"}, "sglang or vllm"),
     ],
 )
@@ -480,4 +489,5 @@ def test_vllm_receiver_pairs_with_the_disk_weight_transport_without_sglang_flags
     argv = driver_arguments(config)
     assert "--update-weight-transport=disk" in argv
     assert "--rollout-num-gpus=1" in argv
+    assert "--rollout-num-gpus-per-engine=1" in argv
     assert not any(argument.startswith("--sglang-") for argument in argv)

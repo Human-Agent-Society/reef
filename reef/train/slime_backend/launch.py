@@ -109,7 +109,7 @@ def require_vllm_weight_transport(options: Mapping[str, Any]) -> None:
         )
     if int(options.get("megatron-lora-rank") or 0) > 0:
         raise DeployConfigError("inference.backend: vllm does not publish LoRA adapters yet; use full weights")
-    if options.get("check-weight-update-equal") in (True, "true", "True", "1"):
+    if str(options.get("check-weight-update-equal", False)).lower() in ("true", "1"):
         raise DeployConfigError("inference.backend: vllm has no weights checker; drop check-weight-update-equal")
 
 
@@ -131,6 +131,13 @@ class SlimeDeployment(TrainingDeployment):
         if settings["inference_backend"] == "vllm":
             require_vllm_weight_transport(options)
         prepare_inference_config(config, settings, options)
+        reef = config["reef"]
+        if settings["inference_backend"] == "vllm" and reef["inference_num_gpus"] != reef["tensor_parallel_size"]:
+            # Slime cannot name a router_url, and vLLM ships no router of its own.
+            raise DeployConfigError(
+                "inference.backend: vllm serves one engine per stack; "
+                "set inference.num-gpus equal to inference.tensor-parallel-size"
+            )
         checkpoint = options.get("hf-checkpoint")
         if checkpoint is not None and (
             not isinstance(checkpoint, str)
@@ -139,7 +146,6 @@ class SlimeDeployment(TrainingDeployment):
             raise DeployConfigError("training.options.hf-checkpoint must match inference.model-path")
         # Resolve/download the model once; both HTTP and Slime read that same path.
         options["hf-checkpoint"] = "${reef.model_path}"
-        reef = config["reef"]
         reef.update(
             training_backend_options=options,
             ray_namespace=settings["ray_namespace"] or DEFAULT_NAMESPACE,
