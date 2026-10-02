@@ -195,10 +195,12 @@ def test_tinker_trains_behind_the_model_driver_with_a_local_engine(tmp_path, mon
     try:
         address = ray.get_runtime_context().gcs_address
         ready = tmp_path / "ready"
+        # The driver joins this cluster, so retain its authentication configuration.
         env = {
             key: value
             for key, value in os.environ.items()
-            if not key.startswith(("REEF_", "RAY_")) or key == "REEF_TEST_TINKER_REAL"
+            if not key.startswith(("REEF_", "RAY_"))
+            or key in {"REEF_TEST_TINKER_REAL", "RAY_AUTH_MODE", "RAY_AUTH_TOKEN", "RAY_AUTH_TOKEN_PATH"}
         }
         env.update(
             REEF_CONFIG=str(config_path),
