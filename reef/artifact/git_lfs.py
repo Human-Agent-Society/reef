@@ -74,7 +74,7 @@ class _GitWorkspace:
         git_client: GitClient,
     ) -> None:
         self.repository = repository
-        self.work_dir = Path(work_dir)
+        self.work_dir = Path(work_dir).absolute()
         self.clone_dir = self.work_dir / "repository"
         self._git_client = git_client
         self.lock = Lock()

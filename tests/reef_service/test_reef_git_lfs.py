@@ -445,6 +445,26 @@ def test_a_published_file_is_linked_into_the_release_cache_not_copied(tmp_path: 
 
 
 @pytest.mark.integration
+def test_storage_named_relative_to_the_working_directory_publishes(
+    tmp_path: Path, fake_git_lfs: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The Reefine profile names its storage relative to the working directory, and git runs inside the work
+    clone, so no path the backend hands git may resolve against the clone instead."""
+    monkeypatch.chdir(tmp_path)
+    backend = GitLFSRepositoryBackend(
+        "agent", Path("artifacts.git"), work_dir=Path(".reef/artifact-work"), cache_dir=Path(".reef/artifact-cache")
+    )
+    head = backend.fork()
+    source = tmp_path / "release"
+    source.mkdir()
+    (source / "rules.md").write_text("Reproduce a bug with a failing test first.\n")
+    published = backend.publish(Artifact.local(source), expected_parent=head)
+    assert (backend.materialize(published).local_path / "rules.md").read_text() == (
+        "Reproduce a bug with a failing test first.\n"
+    )
+
+
+@pytest.mark.integration
 def test_a_carried_component_is_neither_hashed_nor_copied_again(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
