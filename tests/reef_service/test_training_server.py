@@ -936,14 +936,15 @@ def test_second_stack_signal_skips_shutdown_grace(tmp_path: Path, monkeypatch) -
 
 
 @pytest.mark.unit
-def test_opd_example_selects_frozen_teacher_and_full_parameter_training(monkeypatch) -> None:
+@pytest.mark.parametrize("config_path", [_example_owned("recipes/opd/examples/math/serve.yaml")])
+def test_opd_example_selects_frozen_teacher_and_full_parameter_training(monkeypatch, config_path) -> None:
     from reef_service.config_helpers import load_deployment
     from reef.runtime.executor.arguments import native_arguments
 
     monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen35-sft")
     monkeypatch.setenv("OPD_RUN_DIR", "/tmp/opd-test")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
-    config = load_deployment(deploy.PROJECT_ROOT / "recipes/opd/examples/math/serve.yaml")
+    config = load_deployment(deploy.PROJECT_ROOT / config_path)
     args = deploy.service_config_from_mapping(config)
     assert args.recipe == "recipes.opd.recipe:OPDRecipe"
     flags = native_arguments(config["reef"]["training_backend_options"])
@@ -955,3 +956,25 @@ def test_opd_example_selects_frozen_teacher_and_full_parameter_training(monkeypa
     assert "--padded-vocab-size=248320" in flags
     assert "--global-batch-size=2048" in flags
     assert not any("lora" in flag for flag in flags)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("config_path", [_example_owned("recipes/opd/examples/math/serve.lora-small.yaml")])
+def test_opd_lora_example_covers_reviewed_training_and_evaluation_budgets(monkeypatch, config_path) -> None:
+    from reef_service.config_helpers import load_deployment
+    from reef.runtime.executor.arguments import native_arguments
+    from reef.service.deploy.config_utils import load_config
+
+    monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen35-base")
+    monkeypatch.setenv("OPD_ADAPTER_PATH", "/models/qwen35-sft-adapter")
+    monkeypatch.setenv("OPD_RUN_DIR", "/tmp/opd-lora-test")
+    path = deploy.PROJECT_ROOT / config_path
+    raw = load_config(path, interpolate_env=False)
+    config = load_deployment(path)
+    flags = native_arguments(config["reef"]["training_backend_options"])
+    assert "--rollout-max-response-len=16384" in flags
+    assert "--rollout-max-context-len=32768" in flags
+    assert "--seq-length=32768" in flags
+    assert int(raw["inference"]["options"]["context-length"]) >= 64000 + 1024
+    assert raw["recipe"]["config"]["max-teacher-tokens"] >= 16384 + 1024
+    assert raw["inference"]["handler-config"]["sampling_defaults"]["max_new_tokens"] == 16384
