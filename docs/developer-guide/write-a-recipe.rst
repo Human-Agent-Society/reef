@@ -160,7 +160,8 @@ batch and the committed algorithm state, and trains the job with the
 
    from dataclasses import dataclass
    from reef.recipe import WeightTrainingRecipe, config_field
-   from reef.train.algos import LearningRateSchedule, TrainingMethod, TrainingMethodSelector
+   from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
+   from reef.train.runtime_backend import TrainingMethodSelector
 
    WARMUP = LearningRateSchedule(
        "warmup", 2e-5, warmup_steps=20, decay_style="cosine", decay_steps=500, min_learning_rate=2e-6

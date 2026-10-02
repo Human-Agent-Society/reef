@@ -14,8 +14,10 @@ from uuid import uuid4
 
 import pytest
 
+from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.recovery import FileTrainingJobStore
-from reef.train.algos import FixedTrainingMethod, StepScheduling, TrainingMethod
+from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import FixedTrainingMethod
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 

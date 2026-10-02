@@ -28,9 +28,9 @@ from reef.runtime.interfaces import (
     StaleCandidate,
     TrainingMethod,
     TrainingRuntime,
+    learning_rate_metrics,
 )
 from reef.runtime.recovery import read_json, write_json
-from reef.train.algos.learning_rates import learning_rate_metrics
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig

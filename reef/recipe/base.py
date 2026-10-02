@@ -23,14 +23,21 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
+from reef.runtime.interfaces import (
+    InferenceHandler,
+    InferenceRuntime,
+    MultimodalRelay,
+    TrainingMethod,
+    TrainingRuntime,
+)
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
-from reef.train.algos import FixedTrainingMethod, StepScheduling, TrainingMethod, TrainingMethodSelector
+from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
+from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.trainer import ComponentTrainer, Trainer
 
 
@@ -557,8 +564,6 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
-        from reef.train.runtime_backend import RuntimeCandidateBackend
-
         spec = type(self).training_spec()
         processor_class = spec.processor
         if processor_class is None:

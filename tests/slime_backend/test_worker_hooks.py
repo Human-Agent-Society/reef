@@ -415,8 +415,7 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
 def test_learning_rate_schedule_sets_each_optimizer_step_and_chains_the_user_hook(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from reef.runtime.interfaces import LearningRateSchedule
-    from reef.train.algos.learning_rates import LearningRateScheduleState
+    from reef.runtime.interfaces import LearningRateSchedule, LearningRateScheduleState
 
     chained: list[tuple[object, ...]] = []
     misc = importlib.import_module("slime.utils.misc")

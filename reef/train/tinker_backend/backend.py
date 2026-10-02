@@ -21,6 +21,7 @@ from typing import Any
 
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.interfaces import (
+    LearningRateScheduleState,
     PreparedTrainingJob,
     PreparedTrainingStep,
     TrainingBackend,
@@ -30,9 +31,9 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingMethod,
     TrainingMetrics,
+    learning_rate_metrics,
 )
 from reef.runtime.recovery import ScenarioHistory, history_path, read_json, write_json
-from reef.train.algos.learning_rates import LearningRateScheduleState, learning_rate_metrics
 from reef.train.algos.registry import register_loss_family_ref
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient

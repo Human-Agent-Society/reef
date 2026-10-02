@@ -17,13 +17,14 @@ from reef.runtime.interfaces import (
     ModelCandidate,
     PreparedTrainingStep,
     TrainingBackend,
+    TrainingMethod,
     TrainingRuntime,
 )
 from reef.service.runtime import connect_executor_runtimes
 from reef.train import CandidateBackend
-from reef.train.algos import FixedTrainingMethod, StepScheduling, TrainingMethod
+from reef.train.algos import StepScheduling
 from reef.train.runtime import ExecutorTrainingRuntime
-from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend
 
 from .test_executor_runtime import Coordinator
 

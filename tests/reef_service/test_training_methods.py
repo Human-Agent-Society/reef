@@ -9,12 +9,17 @@ from typing import Any
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime
 
-from reef.runtime.interfaces import LearningRateSchedule, PreparedTrainingStep, TrainingMethod
+from reef.runtime.interfaces import (
+    LearningRateSchedule,
+    LearningRateScheduleState,
+    PreparedTrainingStep,
+    TrainingMethod,
+    resolve_learning_rate_schedule,
+)
 from reef.runtime.scheduler import training_job_id
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.algos import FixedTrainingMethod, StepScheduling, TrainingMethodSelector
-from reef.train.algos.learning_rates import LearningRateScheduleState, resolve_learning_rate_schedule
-from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.types import TrainingBatch
 
 from .test_recipe_config_fields import ConfiguredRecipe

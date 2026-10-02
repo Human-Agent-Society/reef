@@ -916,16 +916,17 @@ valid, as they are for a clipped ratio. ``validate_scheduling`` rejects
 ``epochs > 1`` otherwise, at recipe build and again in each backend before
 preparation.
 
-A ``TrainingMethod`` (``reef.runtime.interfaces``, re-exported from
-``reef.train.algos``) is the objective one job trains with, plus an optional
-``LearningRateSchedule``. ``WeightTrainingRecipe.training_method_selector()``
-returns a ``TrainingMethodSelector``, whose ``select(batch, algorithm_state)``
-picks each job's method from the batch and the committed algorithm state.
-The default ``FixedTrainingMethod`` trains every job with
-``training_spec().objective``. ``RuntimeCandidateBackend`` calls the selector
-before each job and passes the method to ``TrainingRuntime.prepare_training_step``.
-The backend resolves the objective and records the method in the job payload,
-so the method takes part in the job's identity. `Write a recipe
+A ``TrainingMethod`` (``reef.runtime.interfaces``) is the objective one job
+trains with, plus an optional ``LearningRateSchedule``.
+``WeightTrainingRecipe.training_method_selector()`` returns a
+``TrainingMethodSelector`` (``reef.train.runtime_backend``), whose
+``select(batch, algorithm_state)`` picks each job's method from the batch and
+the committed algorithm state. The default ``FixedTrainingMethod`` trains every
+job with ``training_spec().objective``. ``RuntimeCandidateBackend`` calls the
+selector before each job and passes the method to
+``TrainingRuntime.prepare_training_step``. The backend resolves the objective
+and records the method in the job payload, so the method takes part in the
+job's identity. `Write a recipe
 <../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__
 describes selection and schedule semantics.
 

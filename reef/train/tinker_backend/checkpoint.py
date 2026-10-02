@@ -16,7 +16,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
-from reef.train.algos.learning_rates import LearningRateScheduleState
+from reef.runtime.interfaces import LearningRateScheduleState
 
 MANIFEST = "tinker-checkpoint.json"
 

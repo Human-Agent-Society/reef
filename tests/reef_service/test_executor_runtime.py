@@ -26,14 +26,14 @@ from reef.runtime.executor.connection import (
     RayRuntimeError,
 )
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import PreparedTrainingStep
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingMethod
 from reef.runtime.interfaces import TrainingRuntimeError
 from reef.runtime.interfaces import TrainingRuntimeError as ContractTrainingRuntimeError
 from reef.service import assembly
 from reef.service.deploy.service_config import ServiceConfig
 from reef.service.runtime import connect_ray_runtime
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.algos import StepScheduling, TrainingMethod
+from reef.train.algos import StepScheduling
 from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.runtime import ExecutorTrainingRuntime
 

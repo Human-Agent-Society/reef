@@ -31,7 +31,7 @@ import uuid
 from abc import ABC, abstractmethod
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from contextlib import AbstractContextManager, suppress
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from numbers import Integral, Real
 from pathlib import Path
 from threading import Condition
@@ -161,7 +161,7 @@ class LearningRateSchedule:
 
     ``name`` identifies the schedule together with its values. The backend
     keeps the active schedule and its progress with its training state
-    (``reef.train.algos.learning_rates``): a job that selects the active
+    (:class:`LearningRateScheduleState`): a job that selects the active
     schedule continues it, a job that selects another one starts that one at
     step 0, and a job that selects none keeps the active one. To start the same
     curve again, give it another ``name``.
@@ -232,7 +232,7 @@ class LearningRateSchedule:
 class TrainingMethod:
     """The objective one training job trains with, and the learning-rate schedule it selects.
 
-    A recipe selects one for every job (``reef.train.algos.methods``); the
+    A recipe selects one for every job (``reef.train.runtime_backend``); the
     runtime carries it to the backend beside the batch, and the job's payload
     records it, so it is part of the job's identity and stays fixed across the
     job's retries. ``objective`` is a registered objective name or a dotted
@@ -263,6 +263,60 @@ class TrainingMethod:
             raise ValueError("a training method must be an object")
         schedule = value.get("learning_rate_schedule")
         return cls(value["objective"], None if schedule is None else LearningRateSchedule.from_dict(schedule))
+
+
+@dataclass(frozen=True)
+class LearningRateScheduleState:
+    """The active schedule and the optimizer steps it has completed, kept with the training state."""
+
+    schedule: LearningRateSchedule
+    completed_steps: int = 0
+
+    def __post_init__(self) -> None:
+        checked_step_count(self.completed_steps, "LearningRateScheduleState.completed_steps")
+
+    def learning_rates(self, optimizer_steps: int) -> tuple[float, ...]:
+        """The rates of the next ``optimizer_steps`` steps, in order."""
+        return tuple(self.schedule.learning_rate(self.completed_steps + step) for step in range(optimizer_steps))
+
+    def advanced(self, optimizer_steps: int) -> LearningRateScheduleState:
+        """This state after ``optimizer_steps`` more steps."""
+        return replace(self, completed_steps=self.completed_steps + optimizer_steps)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> LearningRateScheduleState:
+        if not isinstance(value, Mapping):
+            raise ValueError("a learning-rate schedule state must be an object")
+        return cls(LearningRateSchedule.from_dict(value["schedule"]), value["completed_steps"])
+
+
+def resolve_learning_rate_schedule(
+    active: LearningRateScheduleState | None, requested: LearningRateSchedule | None
+) -> LearningRateScheduleState | None:
+    """The schedule state a job trains with, given the active state and the job's request.
+
+    No request keeps the active state (``None``: the backend's configured
+    rate); the active schedule continues; any other schedule starts at step 0.
+    """
+    if requested is None or (active is not None and active.schedule == requested):
+        return active
+    return LearningRateScheduleState(requested)
+
+
+def learning_rate_metrics(
+    learning_rates: Sequence[float], schedule: LearningRateScheduleState | None
+) -> dict[str, Any]:
+    """The metrics every backend reports for a job's rate: its last optimizer step's, and the schedule's progress."""
+    metrics: dict[str, Any] = {"learning_rate": learning_rates[-1]}
+    if schedule is not None:
+        metrics["learning_rate_schedule"] = {
+            "name": schedule.schedule.name,
+            "completed_steps": schedule.completed_steps,
+        }
+    return metrics
 
 
 @dataclass(frozen=True, kw_only=True)

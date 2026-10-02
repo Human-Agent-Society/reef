@@ -19,16 +19,21 @@ from reef.core.batches import TrainingBatch, TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision
 from reef.inference.tinker import SampleResult, TinkerInferenceRuntime, TinkerSampler
 from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.interfaces import LearningRateSchedule, TrainingRuntimeError, UpstreamStatusError
+from reef.runtime.interfaces import (
+    LearningRateSchedule,
+    LearningRateScheduleState,
+    TrainingMethod,
+    TrainingRuntimeError,
+    UpstreamStatusError,
+)
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.surface.weights import WeightLoader
-from reef.train.algos import FixedTrainingMethod, StepScheduling, StepSignal, TrainingMethod
-from reef.train.algos.learning_rates import LearningRateScheduleState
+from reef.train.algos import StepScheduling, StepSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig

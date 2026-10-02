@@ -12,9 +12,11 @@ from reef.runtime.interfaces import (
     InferenceHandler,
     ModelCandidate,
     PreparedTrainingStep,
+    TrainingMethod,
     TrainingRuntime,
 )
-from reef.train.algos import FixedTrainingMethod, StepScheduling, TrainingMethod
+from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import FixedTrainingMethod
 from reef.train.types import TrainingBatch
 
 

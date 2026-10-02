@@ -12,10 +12,10 @@ from typing import Any
 
 from reef.observability import ExperimentLogger
 from reef.recipe.base import WeightTrainingRecipe
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime, TrainingMethod, TrainingRuntime
 from reef.storage.records import RecordStore
-from reef.train.algos import FixedTrainingMethod, StepScheduling, TrainingMethod
-from reef.train.runtime_backend import RuntimeCandidateBackend
+from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend
 from reef.train.trainer import Trainer
 
 from ._threshold_processor import ThresholdProcessor

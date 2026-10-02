@@ -10,7 +10,7 @@ import yaml
 
 from reef.runtime.deployment import ADAPTER_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceBackend, LearningRateSchedule
+from reef.runtime.interfaces import InferenceBackend, LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.runtime.recovery import marker_path, read_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.service.deploy.config_utils import DeployConfigError
@@ -18,8 +18,7 @@ from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.deploy.training import local_model_required, training_deployment_for
 from reef.surface.adapter import adapter_name
-from reef.train.algos import StepScheduling, StepSignal, TrainingMethod
-from reef.train.algos.learning_rates import LearningRateScheduleState
+from reef.train.algos import StepScheduling, StepSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.tinker_backend.backend import ADAPTER_DIR, TinkerTrainingBackend
