@@ -13,11 +13,10 @@ from collections.abc import Mapping
 from typing import Any
 
 from reef.core.batches import StepScheduling, TrainingBatch
-from reef.core.training_method import TrainingMethod
 from reef.runtime.executor import Executor
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, TrainingRuntimeError
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, TrainingMethod, TrainingRuntimeError
 
 DEFAULT_ACTOR_NAME = "reef-train-bridge"
 DEFAULT_NAMESPACE = "reef"

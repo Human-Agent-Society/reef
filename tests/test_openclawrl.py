@@ -19,8 +19,8 @@ from recipes.openclawrl.prm import (
 )
 from recipes.openclawrl.processor import OpenClawRLProcessor
 from recipes.openclawrl.turns import TurnJob
-from reef.core.training_method import TrainingMethod
 from reef.core.trajectories import source_record_id
+from reef.runtime.interfaces import TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch, TrajectoryItem

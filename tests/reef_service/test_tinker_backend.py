@@ -17,15 +17,15 @@ from reef.artifact.artifact import Artifact, LiveWeightArtifactRef
 from reef.cli import main
 from reef.core.batches import TrainingBatch, TrajectoryItem
 from reef.core.evaluation import EvaluationResult, SelectionDecision
-from reef.core.training_method import LearningRateSchedule, LearningRateScheduleState
 from reef.inference.tinker import SampleResult, TinkerInferenceRuntime, TinkerSampler
 from reef.runtime.deployment import RuntimeConfigError
-from reef.runtime.interfaces import TrainingRuntimeError, UpstreamStatusError
+from reef.runtime.interfaces import LearningRateSchedule, TrainingRuntimeError, UpstreamStatusError
 from reef.service.deploy import orchestrator
 from reef.service.deploy.orchestrator import resolve_deployment_config
 from reef.service.deploy.training import local_model_required
 from reef.surface.weights import WeightLoader
 from reef.train.algos import FixedTrainingMethod, StepScheduling, StepSignal, TrainingMethod
+from reef.train.algos.learning_rates import LearningRateScheduleState
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
 from reef.train.runtime_backend import RuntimeCandidateBackend

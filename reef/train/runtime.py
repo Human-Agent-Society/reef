@@ -12,7 +12,6 @@ from typing import Any
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch, TrajectoryItem, trajectories
 from reef.core.evaluation import SelectionDecision
-from reef.core.training_method import TrainingMethod
 from reef.runtime.executor.connection import CoordinatorClient, training_job_status
 from reef.runtime.interfaces import (
     CandidateTrainingDeferred,
@@ -20,6 +19,7 @@ from reef.runtime.interfaces import (
     PreparedTrainingStep,
     StaleCandidate,
     TrainingJobResult,
+    TrainingMethod,
     TrainingRuntime,
     TrainingRuntimeError,
 )

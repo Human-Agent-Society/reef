@@ -13,8 +13,8 @@ from recipes.openclawrl import OpenClawRLProcessor, OpenClawRLRecipe
 from recipes.openclawrl.sessions import SessionIndex
 from recipes.openclawrl.turns import TurnJudgment
 from reef.core import AgentRecord, RequestType
-from reef.core.training_method import TrainingMethod
 from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.runtime.interfaces import TrainingMethod
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.surface import Surface, WeightInferenceHooks, WeightLoader
 from reef.train.algos import StepScheduling

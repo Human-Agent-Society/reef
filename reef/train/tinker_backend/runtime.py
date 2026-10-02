@@ -22,10 +22,15 @@ from typing import Any
 from reef.artifact.artifact import Artifact
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.evaluation import SelectionDecision
-from reef.core.training_method import TrainingMethod
-from reef.runtime.interfaces import ModelCandidate, PreparedTrainingStep, StaleCandidate, TrainingRuntime
+from reef.runtime.interfaces import (
+    ModelCandidate,
+    PreparedTrainingStep,
+    StaleCandidate,
+    TrainingMethod,
+    TrainingRuntime,
+)
 from reef.runtime.recovery import read_json, write_json
-from reef.train.algos.methods import learning_rate_metrics
+from reef.train.algos.learning_rates import learning_rate_metrics
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig

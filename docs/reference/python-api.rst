@@ -916,7 +916,7 @@ valid, as they are for a clipped ratio. ``validate_scheduling`` rejects
 ``epochs > 1`` otherwise, at recipe build and again in each backend before
 preparation.
 
-A ``TrainingMethod`` (``reef.core.training_method``, re-exported from
+A ``TrainingMethod`` (``reef.runtime.interfaces``, re-exported from
 ``reef.train.algos``) is the objective one job trains with, plus an optional
 ``LearningRateSchedule``. ``WeightTrainingRecipe.training_method_selector()``
 returns a ``TrainingMethodSelector``, whose ``select(batch, algorithm_state)``

@@ -17,11 +17,11 @@ that job trains, and refuses one it cannot train.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from reef.core.batches import TrainingBatch
-from reef.core.training_method import LearningRateScheduleState, TrainingMethod
+from reef.runtime.interfaces import TrainingMethod
 
 
 class TrainingMethodSelector(ABC):
@@ -59,17 +59,4 @@ class FixedTrainingMethod(TrainingMethodSelector):
         }
 
 
-def learning_rate_metrics(
-    learning_rates: Sequence[float], schedule: LearningRateScheduleState | None
-) -> dict[str, Any]:
-    """The metrics every backend reports for a job's rate: its last optimizer step's, and the schedule's progress."""
-    metrics: dict[str, Any] = {"learning_rate": learning_rates[-1]}
-    if schedule is not None:
-        metrics["learning_rate_schedule"] = {
-            "name": schedule.schedule.name,
-            "completed_steps": schedule.completed_steps,
-        }
-    return metrics
-
-
-__all__ = ["FixedTrainingMethod", "TrainingMethodSelector", "learning_rate_metrics"]
+__all__ = ["FixedTrainingMethod", "TrainingMethodSelector"]

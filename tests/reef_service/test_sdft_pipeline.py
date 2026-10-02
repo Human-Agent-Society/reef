@@ -23,11 +23,11 @@ from recipes.sdft.slime import SdftSettings
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
-from reef.core.training_method import TrainingMethod
 from reef.core.trajectories import source_record_id
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.runtime.interfaces import TrainingMethod
 from reef.train import ProcessorContext
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.data_builder import to_slime_rollout_data

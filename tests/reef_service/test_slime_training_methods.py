@@ -12,12 +12,13 @@ import ray
 from reef_service._trajectories import policy_trajectory
 from reef_service.slime_coordinator import build_slime_coordinator
 
-from reef.core.training_method import LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.core.trajectories import trajectory_reward
+from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
 from reef.runtime.recovery import marker_path, read_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
 from reef.train.algos.helpers import next_steps
+from reef.train.algos.learning_rates import LearningRateScheduleState
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.loss_families import register_loss_family, unregister_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments

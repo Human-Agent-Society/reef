@@ -11,8 +11,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.training_method import TrainingMethod
-from reef.runtime.interfaces import PreparedTrainingStep
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingMethod
 from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import MaterializedSchedule, batch_schedule_seed, materialize_schedule

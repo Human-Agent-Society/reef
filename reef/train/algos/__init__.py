@@ -4,11 +4,12 @@ Optional implementation helpers live in :mod:`reef.train.algos.helpers`;
 the schedule materializer backends share lives in :mod:`reef.train.algos.schedule`.
 Registered-objective APIs live in :mod:`reef.train.algos.registry`. How a
 recipe picks each job's objective and learning-rate schedule lives in
-:mod:`reef.train.algos.methods`.
+:mod:`reef.train.algos.methods`; the schedule progress backends keep with
+their training state lives in :mod:`reef.train.algos.learning_rates`.
 """
 
 from reef.core.batches import StepScheduling
-from reef.core.training_method import LearningRateSchedule, TrainingMethod
+from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
 from reef.train.algos.methods import FixedTrainingMethod, TrainingMethodSelector
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.signals import StepSignal

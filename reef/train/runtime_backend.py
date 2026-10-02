@@ -7,7 +7,6 @@ from dataclasses import asdict
 from typing import Any
 
 from reef.core.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
-from reef.core.training_method import TrainingMethod
 from reef.runtime.interfaces import (
     ActivatedModel,
     CandidateTrainingDeferred,
@@ -17,6 +16,7 @@ from reef.runtime.interfaces import (
     RuntimeContractError,
     StaleCandidate,
     TrainingJobResult,
+    TrainingMethod,
     TrainingRuntime,
 )
 from reef.runtime.scheduler import JOB_OWNER_KEY, RuntimeScheduler

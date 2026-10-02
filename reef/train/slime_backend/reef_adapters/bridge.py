@@ -22,7 +22,6 @@ from pathlib import Path
 from typing import Any
 
 from reef.core.batches import StepScheduling, TrainingBatch
-from reef.core.training_method import LearningRateScheduleState, TrainingMethod, resolve_learning_rate_schedule
 from reef.runtime.executor import resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
@@ -34,12 +33,17 @@ from reef.runtime.interfaces import (
     TrainingContext,
     TrainingCoordinationConfig,
     TrainingJobResult,
+    TrainingMethod,
     TrainingMetrics,
 )
 from reef.runtime.recovery import ScenarioHistory, history_path, marker_rollouts, read_json, write_json
 from reef.runtime.scheduler import _producing_runtime_load_ids
 from reef.runtime.scheduler import max_staleness as _max_staleness
-from reef.train.algos.methods import learning_rate_metrics
+from reef.train.algos.learning_rates import (
+    LearningRateScheduleState,
+    learning_rate_metrics,
+    resolve_learning_rate_schedule,
+)
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data

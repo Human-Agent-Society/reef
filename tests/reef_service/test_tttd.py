@@ -13,8 +13,8 @@ from recipes.tttd.objective import TttdObjective
 from reef.artifact import ArtifactRef
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import ReportValidationError
-from reef.core.training_method import TrainingMethod
 from reef.core.trajectories import trajectory_reward
+from reef.runtime.interfaces import TrainingMethod
 from reef.train import ProcessorContext
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.loss_families import resolve_loss_family

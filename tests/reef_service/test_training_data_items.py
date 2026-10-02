@@ -10,7 +10,6 @@ import pytest
 from reef_service._trajectories import policy_trajectory, recorded_trajectory
 
 from reef.core import AgentRecord, RequestType, RuntimeLoadSpan
-from reef.core.training_method import TrainingMethod
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import (
     make_trajectory,
@@ -19,7 +18,7 @@ from reef.core.trajectories import (
     source_record_id,
     trajectory_reward,
 )
-from reef.runtime.interfaces import InferenceStream
+from reef.runtime.interfaces import InferenceStream, TrainingMethod
 from reef.service.streaming import stream_record
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step

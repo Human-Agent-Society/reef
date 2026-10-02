@@ -7,7 +7,7 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from reef.core.training_method import LearningRateScheduleState
+from reef.train.algos.learning_rates import LearningRateScheduleState
 from reef.train.slime_backend.algorithm import (
     SlimeAlgorithm,
     reset_objective_paths,

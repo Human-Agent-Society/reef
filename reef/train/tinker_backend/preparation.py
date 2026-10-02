@@ -8,13 +8,8 @@ from typing import Any
 
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch, trajectories
-from reef.core.training_method import (
-    LearningRateSchedule,
-    LearningRateScheduleState,
-    TrainingMethod,
-    resolve_learning_rate_schedule,
-)
-from reef.runtime.interfaces import PreparedTrainingStep
+from reef.runtime.interfaces import LearningRateSchedule, PreparedTrainingStep, TrainingMethod
+from reef.train.algos.learning_rates import LearningRateScheduleState, resolve_learning_rate_schedule
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import batch_schedule_seed, materialize_schedule
 from reef.train.tinker_backend.losses import TokenRow, resolve_tinker_loss

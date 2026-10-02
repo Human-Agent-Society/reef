@@ -31,7 +31,6 @@ from typing import Any, Literal
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.core.evaluation import SelectionDecision
-from reef.core.training_method import TrainingMethod
 from reef.observability.operations import OperationMetrics
 from reef.runtime.interfaces import (
     ActivatedModel,
@@ -51,6 +50,7 @@ from reef.runtime.interfaces import (
     TrainingJobResult,
     TrainingJobState,
     TrainingJobStore,
+    TrainingMethod,
     TrainingRuntime,
     TrainingRuntimeError,
 )

@@ -19,8 +19,7 @@ from reef_service._trajectories import policy_trajectory
 from reef_service.slime_coordinator import build_slime_coordinator
 from slime.utils.misc import Box
 
-from reef.core.training_method import TrainingMethod
-from reef.runtime.interfaces import TrainingJobResult
+from reef.runtime.interfaces import TrainingJobResult, TrainingMethod
 from reef.runtime.recovery import read_marker, transition_marker, write_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling
