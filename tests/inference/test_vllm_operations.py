@@ -188,7 +188,7 @@ def test_worker_pauses_in_the_configured_mode_and_recovers_only_dead_engines(mon
     group.engines = [engine for engine in group.all_engines if engine is not None]
     group.recover = lambda: events.append("recover")
     worker.group = group
-    engines = worker_module._VLLMInferenceEngines(worker)
+    engines = worker_module._VLLMEngineGroup(worker)
     engines.pause()
     engines.resume()
     assert events == [("a", "pause", "retract"), ("a", "resume")]

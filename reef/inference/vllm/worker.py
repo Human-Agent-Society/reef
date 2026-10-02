@@ -16,7 +16,7 @@ from reef.runtime.recovery import (
     EngineHealthMonitor,
     HealthMonitorConfig,
     InferenceControl,
-    InferenceEngines,
+    InferenceEngineGroup,
     InferenceMonitor,
     WeightUpdateConnection,
 )
@@ -36,7 +36,7 @@ class VLLMWorker:
                 ray.get(pending)
             self.rollout_engine_lock = self._new_rollout_engine_lock()
             self._control = InferenceControl(
-                _VLLMInferenceEngines(self), _VLLMWeightUpdateConnection(self), _VLLMInferenceMonitor(self)
+                _VLLMEngineGroup(self), _VLLMWeightUpdateConnection(self), _VLLMInferenceMonitor(self)
             )
             if config.health_enabled:
                 monitor = EngineHealthMonitor(
@@ -185,7 +185,7 @@ class VLLMWorker:
             self.rollout_engine_lock = None
 
 
-class _VLLMInferenceEngines(InferenceEngines):
+class _VLLMEngineGroup(InferenceEngineGroup):
     """Ray fan-out and engine replacement behind Reef's control contract."""
 
     def __init__(self, worker: VLLMWorker) -> None:

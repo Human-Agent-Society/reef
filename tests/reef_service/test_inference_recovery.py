@@ -6,13 +6,13 @@ from reef.runtime.publication import WeightUpdateLock
 from reef.runtime.recovery import (
     FileTrainingJobStore,
     InferenceControl,
-    InferenceEngines,
+    InferenceEngineGroup,
     InferenceMonitor,
     WeightUpdateConnection,
 )
 
 
-class MemoryEngines(InferenceEngines):
+class MemoryEngines(InferenceEngineGroup):
     owned = True
 
     def __init__(self, events):
