@@ -171,6 +171,7 @@ def test_bound_agent_fills_the_placeholders_wherever_they_sit() -> None:
         ({"reward": 0.5}, 0.5),
         ({"accuracy": 1, "reward": 0.0}, 0.0),
         ({"accuracy": 1}, 1.0),
+        ({"accuracy": 1, "style": 0}, None),
         ({}, None),
         ({"reward": float("nan")}, None),
         ({"reward": True}, None),
@@ -239,6 +240,13 @@ def test_an_unscored_episode_is_kept_but_not_reported(reef: StandInReef, tmp_pat
     played = player(reef, tmp_path, StandInLab({}, error="the container died")).play(task_path)
     assert played.reward is None and played.error == "the container died"
     assert played.receipts == ("rec-1", "rec-2") and not played.is_reported and reef.reports == []
+
+
+def test_an_episode_whose_verifier_names_no_primary_reward_says_so(reef: StandInReef, tmp_path: Path) -> None:
+    task_path = written_task(tmp_path / "tasks", "t1")
+    played = player(reef, tmp_path, StandInLab({"correctness": 1.0, "style": 0.0})).play(task_path)
+    assert played.reward is None and played.error == "the verifier wrote correctness, style and no reward entry"
+    assert not played.is_reported and reef.reports == []
 
 
 def test_an_episode_without_model_calls_is_not_reported(reef: StandInReef, tmp_path: Path) -> None:
