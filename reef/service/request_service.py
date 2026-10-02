@@ -612,9 +612,13 @@ class RequestService:
         # A handler that reads the tree (a checkpoint manifest, an adapter path) reads the
         # loaded component, never a composed release whose root holds only component directories.
         loaded_component = surface.loader_component
-        if not surface.single and (hooks is not None or loaded_component is not None):
+        if hooks is not None or (not surface.single and loaded_component is not None):
             # The release is frozen for the attempt: the loaded component's view and every
             # component hook read this one materialized copy instead of materializing it again.
+            # A flat release's hooks need it too: after a checkpointed commit the head is a
+            # durable release whose runtime load ID lives only in its metadata, and a weight
+            # hook that cannot read it names no adapter, so the frozen base answers instead.
+            # A live head is returned as is, and a durable one comes from the release cache.
             artifact = artifact.materialize()
         served = artifact if loaded_component is None else surface.component_artifact(artifact, loaded_component)
         return PreparedInference(
