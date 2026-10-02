@@ -44,8 +44,8 @@ from megatron.core import mpu
 from slime.backends.megatron_utils.data import DataIterator
 from slime.backends.megatron_utils.model import forward_only
 
-from reef.train.slime_backend.distill.objective import gather_log_probs_at_ids, native_topk_ids
 from reef.train.slime_backend.distill.teacher import pack_forward_schedule
+from reef.train.slime_backend.vocab_parallel import gather_log_probs_at_ids, native_topk_ids
 
 logger = logging.getLogger(__name__)
 

@@ -58,6 +58,10 @@ class SlimeArguments(Namespace):
     reef_rollout_tensor_dtypes: dict[str, str]
     reef_external_batch_keys: tuple[str, ...]
     reef_rollout_log_skip_keys: tuple[str, ...]
+    score_centering: bool
+    score_centering_top_k: int
+    score_centering_min_tail_mass: float
+    reef_score_centering_base_loss_path: str | None = None
     loss_family: str | None = None
     reef_chained_megatron_init_path: str | None = None
     reef_chained_critic_args_hook_path: str | None = None

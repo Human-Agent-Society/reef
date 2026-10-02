@@ -307,6 +307,60 @@ def test_updater_and_policy_gradient_hooks_replace_only_worker_globals(monkeypat
 
 
 @pytest.mark.unit
+def test_score_centering_adds_to_the_family_loss_and_skips_the_critic(monkeypatch: pytest.MonkeyPatch) -> None:
+    from reef.train.slime_backend.score_centering import term
+
+    monkeypatch.setattr(
+        term,
+        "add_score_centering",
+        lambda _args, _batch, _logits, _reduce, loss, log: (loss + 1, {**log, "score_centering_term": 1}),
+    )
+    loss = _stub_module(
+        monkeypatch,
+        "slime.backends.megatron_utils.loss",
+        policy_loss_function=lambda _args, _batch, _logits, _reduce: (2, {"loss": 2}),
+    )
+    # A stock or pg-primitive family: Slime's policy loss gets the term, once.
+    policy = SimpleNamespace(score_centering=True, loss_type="policy_loss")
+    worker_hooks._install_score_centering(policy)
+    worker_hooks._install_score_centering(policy)
+    assert loss.policy_loss_function(policy, {}, None, None) == (3, {"loss": 2, "score_centering_term": 1})
+
+    # A custom-loss family: its path moves aside and the score-centered loss calls it.
+    custom = SimpleNamespace(
+        score_centering=True, loss_type="custom_loss", custom_loss_function_path="family.loss", loss_family="sao"
+    )
+    worker_hooks._install_score_centering(custom)
+    worker_hooks._install_score_centering(custom)
+    assert custom.custom_loss_function_path == worker_hooks.SCORE_CENTERED_CUSTOM_LOSS_PATH
+    assert custom.reef_score_centering_base_loss_path == "family.loss"
+    misc = importlib.import_module("slime.utils.misc")
+    monkeypatch.setattr(misc, "load_function", {"family.loss": lambda *_: (5, {"loss": 5})}.__getitem__)
+    assert term.score_centered_custom_loss(custom, {}, None, None) == (6, {"loss": 5, "score_centering_term": 1})
+
+    # The distillation loss owns its teacher advantage and applies centering itself.
+    distill = SimpleNamespace(
+        score_centering=True,
+        loss_type="custom_loss",
+        loss_family="sdft",
+        custom_loss_function_path="recipes.sdft.slime.objective.sdft_loss",
+    )
+    worker_hooks._install_score_centering(distill)
+    worker_hooks._install_score_centering(distill)
+    assert distill.custom_loss_function_path == "recipes.sdft.slime.objective.sdft_loss"
+
+    # The critic derives its namespace from the actor's: nothing to center.
+    critic = SimpleNamespace(score_centering=True, loss_type="value_loss", custom_loss_function_path=None)
+    worker_hooks._install_score_centering(critic)
+    assert critic.custom_loss_function_path is None
+    off = SimpleNamespace(score_centering=False, loss_type="custom_loss", custom_loss_function_path="family.loss")
+    worker_hooks._install_score_centering(off)
+    assert off.custom_loss_function_path == "family.loss"
+    with pytest.raises(RuntimeError, match="not --loss-type sft_loss"):
+        worker_hooks._install_score_centering(SimpleNamespace(score_centering=True, loss_type="sft_loss"))
+
+
+@pytest.mark.unit
 def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
     misc = importlib.import_module("slime.utils.misc")
@@ -323,6 +377,7 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
     ):
         monkeypatch.setattr(worker_hooks, name, lambda *_, name=name: calls.append(name))
     monkeypatch.setattr(worker_hooks, "_install_pg_primitive", lambda _args: calls.append("pg"))
+    monkeypatch.setattr(worker_hooks, "_install_score_centering", lambda _args: calls.append("score_centering"))
     args = SimpleNamespace(
         reef_chained_megatron_init_path="custom.init",
         loss_family="openclawrl",
@@ -331,7 +386,8 @@ def test_objective_initializers_chain_user_hooks(monkeypatch: pytest.MonkeyPatch
     worker_hooks.initialize_megatron_objective(args)
 
     assert calls[0:2] == ["custom.init", "resolve"]
-    assert calls[-1] == "pg"
+    # Score centering wraps the loss last, after the pg primitive is routed.
+    assert calls[-2:] == ["pg", "score_centering"]
 
     configured: list[object] = []
     monkeypatch.setattr(

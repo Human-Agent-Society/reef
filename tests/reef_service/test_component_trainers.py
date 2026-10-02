@@ -689,9 +689,9 @@ def test_a_harness_backlog_is_kept_for_the_next_start_when_the_service_stops(
     restarted, backends = dispatchers.open(backends=_dispatched_pair(tmp_path))
     # What a restart does for every registration a repository lists (this in-memory one lists none).
     restarted._preload_scenarios(("agent",))
-    _wait_for(lambda: backends[HARNESS].prepared >= 2)
     scenario = _scenario(restarted)
-    assert backends[HARNESS].prepared == 2 and _training_components(scenario) == [HARNESS, HARNESS]
+    assert _wait_for(lambda: _training_components(scenario) == [HARNESS, HARNESS])
+    assert backends[HARNESS].prepared == 2
 
 
 @pytest.mark.unit
@@ -706,8 +706,8 @@ def test_held_local_cycles_run_nothing_until_the_service_answers(tmp_path: Path,
     time.sleep(0.5)
     assert backends[HARNESS].prepared == 0
     dispatcher.open_local_cycles()
-    _wait_for(lambda: backends[HARNESS].prepared >= 2)
-    assert backends[HARNESS].prepared == 2 and _training_components(scenario) == [HARNESS, HARNESS]
+    assert _wait_for(lambda: _training_components(scenario) == [HARNESS, HARNESS])
+    assert backends[HARNESS].prepared == 2
 
 
 @pytest.mark.unit
