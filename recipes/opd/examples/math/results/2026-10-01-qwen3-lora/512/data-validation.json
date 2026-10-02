@@ -1,9 +1,0 @@
-{
-  "sft_examples": 512,
-  "unique": 512,
-  "contains_all_256_arm": true,
-  "max_tokens": 8192,
-  "mean_tokens": 6781.21484375,
-  "all_natural_eos": true,
-  "opd_aime_identical_to_256": true
-}

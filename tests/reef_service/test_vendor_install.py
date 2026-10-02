@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -258,6 +259,18 @@ def test_an_explicit_binary_never_reaches_the_vendor_resolution(monkeypatch, tmp
     assert calls == []
 
 
+def test_e2b_backend_never_installs_the_agent_on_the_host(monkeypatch) -> None:
+    from reef.harness.episodes.e2b import E2BExecutor
+
+    calls = _counting_resolver(monkeypatch, VendorInstallError("must not install locally"))
+    monkeypatch.setattr(E2BExecutor, "preflight", lambda self: None)
+    backend = _backend(None, _propose, executor=E2BExecutor(api_key="test-key"))
+    try:
+        assert calls == []
+    finally:
+        backend.close()
+
+
 @pytest.mark.unit
 def test_a_vendor_install_failure_refuses_construction(monkeypatch) -> None:
     calls = _counting_resolver(monkeypatch, VendorInstallError("npm exited 1: ERR! 404 not found"))
@@ -287,6 +300,25 @@ def test_version_probe_uses_the_adapters_offline_and_update_guards(monkeypatch, 
     on_path(_npm_shim(tmp_path, log))
     assert resolve_binary(get_adapter("pi"), prefix=prefix) == str(binary)
     assert not log.exists()
+
+
+@pytest.mark.unit
+def test_version_probe_writes_nothing_in_the_home_directory(monkeypatch, tmp_path, on_path) -> None:
+    """The service probes with the descriptor's directories on a scratch root it removes, as the install does."""
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    scratch = tmp_path / "tmp"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    prefix = tmp_path / "prefix"
+    binary = _write_executable(
+        prefix / "node_modules/.bin/pi",
+        '#!/bin/sh\nstate="${PI_CODING_AGENT_DIR:-$HOME/.pi/agent}"\nmkdir -p "$state" && touch "$state/probed" && echo 0.84.2\n',
+    )
+    log = tmp_path / "npm.log"
+    on_path(_npm_shim(tmp_path, log))
+    assert resolve_binary(get_adapter("pi"), prefix=prefix) == str(binary)
+    assert not log.exists() and not (tmp_path / "home" / ".pi").exists()
+    assert list(scratch.iterdir()) == []
 
 
 @pytest.mark.unit

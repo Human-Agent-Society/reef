@@ -31,7 +31,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 from reef.core.trajectories import source_record_id, trajectory_reward
-from reef.train.slime_backend.algorithm import SlimeAlgorithm
+from reef.train.slime_backend.algorithm import PolicyGradientWeight, SlimeAlgorithm
 from reef.train.slime_backend.data_builder import build_policy_rollout_data
 from reef.train.types import TrajectoryItem
 
@@ -133,6 +133,23 @@ class DistillSettings:
     def exact(self) -> bool:
         """Whether the teacher's whole distribution is kept (``top_k == 0``)."""
         return self.top_k == 0
+
+    @property
+    def score_centering_weight(self) -> PolicyGradientWeight:
+        """The sampled reverse-KL weight, refusing losses with a different gradient."""
+        if self.exact or self.divergence != "reverse" or self.top_k_distribution != "renormalized":
+            raise RuntimeError(
+                "score centering for distillation requires sampled reverse KL: set the family's "
+                "divergence=reverse, top-k>0 and top-k-distribution=renormalized"
+            )
+        if self.importance_sampling_cap == 0:
+            return PolicyGradientWeight("none")
+        if self.importance_sampling_level != "token":
+            raise RuntimeError(
+                "score centering for distillation requires importance-sampling-level=token "
+                "or importance-sampling-cap=0; sequence weights depend on other sampled tokens"
+            )
+        return PolicyGradientWeight("truncated", upper=self.importance_sampling_cap)
 
 
 def _is_integer(value: object) -> bool:
@@ -245,6 +262,9 @@ class DistillAlgorithm(SlimeAlgorithm):
     _teacher_settings: DistillSettings | None = None
 
     # --- stage 1: configure ---
+
+    def policy_gradient_weight(self, args: Namespace) -> PolicyGradientWeight:
+        return settings_from_args(args).score_centering_weight
 
     def validate_specific_args(self, args: Namespace, source: str) -> None:
         # The teacher is scored once before the step from the weights the step

@@ -8,6 +8,7 @@ from collections.abc import Sequence
 from reef.train.slime_backend.loss_families import LOSS_FAMILIES
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.megatron.lora import validate_megatron_lora_args
+from reef.train.slime_backend.score_centering import ScoreCenteringSettings, configure_score_centering
 
 REEF_MEGATRON_INIT_PATH = "reef.train.slime_backend.reef_adapters.worker_hooks.initialize_megatron_objective"
 REEF_MODEL_PROVIDER_PATH = "reef.train.slime_backend.reef_adapters.megatron.model_provider.provide_actor_model"
@@ -108,6 +109,28 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         default=False,
         help="Enable a critic when the selected Slime advantage estimator does not imply one.",
     )
+    defaults = ScoreCenteringSettings()
+    parser.add_argument(
+        "--score-centering",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Add score centering (arXiv:2609.20807) to the loss family's policy-gradient loss. The family must "
+            "declare its policy-gradient weight; records need the sampler's top-K (capture_topk)."
+        ),
+    )
+    parser.add_argument(
+        "--score-centering-top-k",
+        type=int,
+        default=defaults.top_k,
+        help=f"Sampler log-probs read per response position. Default {defaults.top_k}.",
+    )
+    parser.add_argument(
+        "--score-centering-min-tail-mass",
+        type=float,
+        default=defaults.min_tail_mass,
+        help=f"Floor of both tail masses before their ratio is taken. Default {defaults.min_tail_mass}.",
+    )
     return parser
 
 
@@ -164,6 +187,7 @@ def configure_reef_loss_args(args: SlimeArguments) -> None:
     args.reef_external_batch_keys = tuple(spec.external_batch_keys)
     args.reef_rollout_log_skip_keys = tuple(spec.rollout_log_skip_keys)
     spec.configure_backend_args(args)
+    configure_score_centering(args, spec)
     if spec.uses_pg_loss_primitive:
         # Route Slime's numerical CISPO callsite onto the family's registered
         # pg primitive: the worker swaps loss.compute_cispo_loss for the

@@ -1,8 +1,0 @@
-{
-  "sft_examples": 256,
-  "unique": 256,
-  "max_tokens": 8175,
-  "mean_tokens": 6794.15625,
-  "all_natural_eos": true,
-  "base_eval_reuse_sha256": "4034078d0b04f87c084616c69224c8c89d48efe8837b6a8eaab068e91f31f847"
-}

@@ -1,4 +1,4 @@
-# Small LoRA experiment: SFT 4096 examples, OPD 30 updates; see README.
+# LoRA rerun: 16K training responses and 64K evaluation; see README.
 schema-version: 2
 reef:
   ready-timeout: 3600
@@ -13,7 +13,7 @@ inference:
   tensor-parallel-size: '1'
   options:
     router-port: '23094'
-    context-length: '33792'
+    context-length: '65536'
     dtype: bfloat16
     mem-fraction-static: '0.6'
     disable-cuda-graph: true
@@ -24,14 +24,14 @@ inference:
       top_p: 1.0
       top_k: -1
       repetition_penalty: 1.0
-      max_new_tokens: 4096
+      max_new_tokens: 16384
 recipe:
   implementation: recipes.opd.recipe:OPDRecipe
   config:
     batch-size: 256
     max-staleness: 0
     tokenizer-path: /work/models/Qwen3.5-9B
-    max-teacher-tokens: 8192
+    max-teacher-tokens: 32768
     checkpoint-every-n-versions: 1000
 training:
   backend: slime
@@ -69,9 +69,9 @@ training:
     num-gpus-per-node: '4'
     tensor-model-parallel-size: '4'
     pipeline-model-parallel-size: '1'
-    seq-length: '8192'
-    rollout-max-response-len: '4096'
-    rollout-max-context-len: '8192'
+    seq-length: '32768'
+    rollout-max-response-len: '16384'
+    rollout-max-context-len: '32768'
     spec:
     - slime_plugins.models.qwen3_5
     - get_qwen3_5_spec
@@ -95,7 +95,7 @@ training:
     recompute-num-layers: '1'
     sequence-parallel: true
     use-dynamic-batch-size: true
-    max-tokens-per-gpu: '8192'
+    max-tokens-per-gpu: '32768'
     log-probs-chunk-size: '512'
     ckpt-fully-parallel-save: true
     attention-dropout: '0.0'

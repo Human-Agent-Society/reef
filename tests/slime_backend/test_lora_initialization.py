@@ -3,8 +3,9 @@
 import json
 
 import pytest
-import torch
-from safetensors.torch import save_file
+
+torch = pytest.importorskip("torch")
+save_file = pytest.importorskip("safetensors.torch").save_file
 
 from reef.train.slime_backend.reef_adapters.megatron.lora_initialization import adapter_shard, load_initial_adapter
 
@@ -47,7 +48,7 @@ class ToyActor(torch.nn.Module):
 
 @pytest.fixture(params=["model.layers", "model.language_model.layers"])
 def initial_adapter(tmp_path, monkeypatch, request):
-    from megatron.core import parallel_state
+    parallel_state = pytest.importorskip("megatron.core.parallel_state")
 
     monkeypatch.setattr(parallel_state, "get_pipeline_model_parallel_world_size", lambda: 1)
     monkeypatch.setattr(parallel_state, "get_tensor_model_parallel_world_size", lambda: 1)

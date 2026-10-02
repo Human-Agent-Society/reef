@@ -22,9 +22,6 @@ torch = pytest.importorskip("torch")
 from reef.train.slime_backend.distill import DistillSettings
 from reef.train.slime_backend.distill.objective import (
     chunked_token_divergence,
-    gather_log_probs_at_ids,
-    global_log_sum_exp,
-    native_topk_ids,
     restricted_divergence,
     sampled_reverse_kl,
     sequence_importance_weight,
@@ -39,6 +36,7 @@ from reef.train.slime_backend.distill.teacher import (
     mix_teacher_weights,
     teacher_weights,
 )
+from reef.train.slime_backend.vocab_parallel import gather_log_probs_at_ids, global_log_sum_exp, native_topk_ids
 
 from .reference_algorithms import distill
 

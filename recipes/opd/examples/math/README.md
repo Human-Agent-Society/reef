@@ -1,9 +1,27 @@
 # OPD on mathematical reasoning
 
-## Small LoRA experiment
+## LoRA experiment and length-budget rerun
 
-The active experiment uses a smaller protocol to test whether OPD improves an
-SFT student. The previous full-parameter SFT was stopped at the contributor's
+The completed [small LoRA experiment](results/2026-09-30-lora-small/README.md)
+used 4096-token training responses and a 32768-token evaluation budget. AIME
+mean sampled accuracy changed from 75.0% to 70.4167%; this did not demonstrate
+an improvement. The historical result and its actual configuration remain
+unchanged in that result packet.
+
+The commands below configure the [requested rerun](https://github.com/Human-Agent-Society/reef/pull/683#issuecomment-5923244778)
+with 16384-token training responses and a 64000-token evaluation budget. Use
+a fresh run directory and the same initial SFT adapter, prompts and seeds;
+do not continue from the negative run's final OPD adapter. Re-evaluate the SFT
+baseline and final checkpoint under the same larger budget. No result for this
+rerun is available yet; changing these limits does not establish an improvement.
+The 65536-token serving context covers the evaluation budget plus the prompt,
+and the 32768-token training/teacher limits cover each full training sequence.
+
+The standalone Qwen3-4B/8B study is tracked separately in
+[experiment #682](https://github.com/Human-Agent-Society/reef/issues/682).
+It is not a Reef reproduction or evidence of a strong SFT baseline.
+
+This LoRA protocol tests whether OPD improves an SFT student. The previous full-parameter SFT was stopped at the contributor's
 request after step 1239/3000 (last saved checkpoint: 1200). Its original
 roadmap acceptance remains separate; this LoRA experiment does not establish
 the original approximately ten-point, full-parameter reproduction target.
@@ -21,12 +39,12 @@ the original approximately ten-point, full-parameter reproduction target.
   projections (18,874,368 trainable parameters for this model).
 - Continue the same adapter with 30 OPD updates, 64 independent DeepMath
   prompts per update and four student responses per prompt. Responses are
-  capped at 4096 tokens; learning rate is 5e-5. No answer rewards are used.
+  capped at 16384 tokens; learning rate is 5e-5. No answer rewards are used.
 - Evaluate the SFT adapter and final update 30 only, using all 30 AIME'24
-  questions and seeds 0 through 15 with a 32768-output-token budget.
+  questions and seeds 0 through 15 with a 64000-output-token budget.
   Report any observed gain separately from the operational 3-percentage-point
   target and paired question-bootstrap uncertainty. Improvement is not assured.
-  The earlier 64K teacher score is not a matched control for this 32K protocol.
+  Record the pinned teacher control and exact evaluation settings separately.
 
 `prepare_small.py` consumes the pinned source files from `prepare.py` and writes
 `manifest.json`, the selected JSONL files, and a length-limited tokenized dataset:
@@ -57,7 +75,7 @@ python recipes/opd/examples/math/run.py \
   --train-data /work/lora-small/data/deepmath.jsonl \
   --eval-data /work/lora-small/data/aime24.jsonl --output /work/lora-small/results \
   --steps 30 --prompts-per-step 64 --samples-per-prompt 4 \
-  --train-tokens 4096 --eval-tokens 32768 --eval-repeats 16 --eval-every 30 --concurrency 64
+  --train-tokens 16384 --eval-tokens 64000 --eval-repeats 16 --eval-every 30 --concurrency 64
 python recipes/opd/examples/math/analyze.py /work/lora-small/results \
   --final-step 30 --eval-every 30 --target-improvement 0.03 --training-mode LoRA
 ```

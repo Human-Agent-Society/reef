@@ -150,12 +150,22 @@ def _run(popen_argv: Sequence[str], *, cwd: Path, env: Mapping[str, str], timeou
 
 
 def _inherited_env() -> dict[str, str]:
-    """The minimal parent environment an episode keeps: how to find binaries."""
-    return {
+    """The minimal parent environment an episode keeps: how to find binaries.
+
+    The running interpreter's scripts directory comes last on PATH, so a
+    runner that ships with reef (reef-terminus, reef-native) is found when
+    ``reef serve`` runs from a venv that is not on PATH; every name PATH
+    already finds resolves as before."""
+    env = {
         key: value
         for key, value in os.environ.items()
         if key in ("PATH", "SYSTEMROOT", "TMPDIR", "CUDA_VISIBLE_DEVICES")
     }
+    scripts = str(Path(sys.executable).parent)
+    path = env.get("PATH", "")
+    if scripts not in path.split(os.pathsep):
+        env["PATH"] = os.pathsep.join([path, scripts]) if path else scripts
+    return env
 
 
 @dataclass(frozen=True)
@@ -431,7 +441,7 @@ def build_executor(
 ) -> EpisodeExecutor:
     """Build the executor a deployment selected.
 
-    ``executor`` is ``local`` (default) or ``sandbox``; a sandbox reads its
+    ``executor`` is ``local`` (default), ``sandbox`` or ``e2b``; a sandbox reads its
     ``egress_hosts``, ``limits``, and an explicit ``env_from`` list of host
     variable names from the same section. The executor is
     preflighted at build so a hosted deployment that requires the sandbox
@@ -441,8 +451,23 @@ def build_executor(
     kind = config.get("executor", "local")
     if kind == "local":
         return LocalExecutor()
+    if kind == "e2b":
+        from reef.harness.adapters import get_adapter
+        from reef.harness.episodes.e2b import E2BExecutor
+
+        section = config.get("sandbox") or {}
+        if not isinstance(section, Mapping):
+            raise ReefError("evolution.sandbox must be a mapping")
+        adapter = config.get("adapter", "pi")
+        binary = config.get("binary")
+        if not isinstance(adapter, str) or (binary is not None and not isinstance(binary, str)):
+            raise ReefError("evolution.adapter and evolution.binary must be strings")
+        remote = E2BExecutor.from_config(section, os.environ if environ is None else environ)
+        remote = remote.for_adapter(get_adapter(adapter), binary=binary)
+        remote.preflight()
+        return remote
     if kind != "sandbox":
-        raise ReefError(f"unknown episode executor {kind!r}; use 'local' or 'sandbox'")
+        raise ReefError(f"unknown episode executor {kind!r}; use 'local', 'sandbox' or 'e2b'")
     sandbox_config = config.get("sandbox") or {}
     if not isinstance(sandbox_config, Mapping):
         raise ReefError("evolution.sandbox must be a mapping")

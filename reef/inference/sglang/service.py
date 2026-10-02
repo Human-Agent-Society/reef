@@ -3,10 +3,9 @@
 from __future__ import annotations
 
 import logging
-from typing import Any
 
-import ray
 
+from reef.inference.process import RayHealthProbe
 from reef.inference.sglang.backend import SGLangInferenceBackend
 from reef.inference.sglang.config import CONTROL_TIMEOUT_S, SGLangConfig
 from reef.inference.sglang.launch import engine_environment
@@ -22,24 +21,6 @@ from reef.runtime.executor.ray import RayExecutor
 
 # Keep the existing wire identifier while removing its implementation dependency.
 INFERENCE_PROTOCOL = "slime-sglang-control-v2"
-
-
-class RayHealthProbe:
-    """Keep one outstanding RPC; a busy actor is not presumed dead."""
-
-    def __init__(self) -> None:
-        self.pending: Any = None
-
-    def poll(self, actor: Any, method: str) -> None:
-        if self.pending is None:
-            self.pending = getattr(actor, method).remote()
-        ready, _ = ray.wait([self.pending], timeout=0)
-        if not ready:
-            return
-        pending, self.pending = self.pending, None
-        result = ray.get(pending)
-        if isinstance(result, dict) and result.get("ok") is False and result.get("recoverable") is not True:
-            raise RuntimeError(f"model component failed its health check: {result!r}")
 
 
 class SGLangInferenceService(InferenceService):
