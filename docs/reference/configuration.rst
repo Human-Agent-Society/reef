@@ -269,7 +269,8 @@ Managed engine launches use one generic builder. A backend definition supplies
 its command template, public parameter bindings, reserved aliases and HTTP
 health path. Adding an engine with this launch contract does not require a
 backend-specific deploy module or a second process lifecycle implementation.
-Currently only the SGLang definition is supplied.
+Reef supplies the SGLang and vLLM definitions; ``--inference.backend`` selects
+one.
 
 The launcher translates public paths to the existing internal service and
 recipe contracts before starting children. Config references such as
