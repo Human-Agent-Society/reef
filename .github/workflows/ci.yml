@@ -473,6 +473,7 @@ jobs:
           python -m pytest ${{ github.workspace }}/tests/reef_service
           -n 4 --dist loadfile
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_bridge.py
+          --ignore=${{ github.workspace }}/tests/reef_service/test_slime_training_methods.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_slime_hf_autofill.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_sao_bridge.py
           --ignore=${{ github.workspace }}/tests/reef_service/test_multi_scenario_bridge.py

@@ -58,7 +58,6 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     validate_bridge_args,
 )
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.slime_arguments import loss_family_job_args
 from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     LEARNING_RATE_SCHEDULES_FILENAME,
@@ -390,6 +389,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 f"loss family {spec.loss_family!r} is a second distillation family in this run; "
                 "a worker keeps one teacher, built from the first distillation family's settings"
             )
+        # Imported here: the argument module reaches the Megatron LoRA stack,
+        # which importing the bridge must not load (test_dependency_boundaries).
+        from reef.train.slime_backend.reef_adapters.slime_arguments import loss_family_job_args
+
         job_args = loss_family_job_args(self.args, spec)
         dtypes = dict(self.args.reef_rollout_tensor_dtypes or {})
         for key, dtype in job_args.reef_rollout_tensor_dtypes.items():
