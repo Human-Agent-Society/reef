@@ -19,7 +19,7 @@ and the 32768-token training/teacher limits cover each full training sequence.
 
 The standalone Qwen3-4B/8B study is tracked separately in
 [experiment #682](https://github.com/Human-Agent-Society/reef/issues/682).
-It is not a Reef reproduction or evidence of a strong SFT baseline.
+It is not a Reef reproduction and does not establish a strong SFT baseline.
 
 This LoRA protocol tests whether OPD improves an SFT student. The previous full-parameter SFT was stopped at the contributor's
 request after step 1239/3000 (last saved checkpoint: 1200). Its original
