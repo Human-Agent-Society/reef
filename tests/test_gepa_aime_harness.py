@@ -319,7 +319,7 @@ def test_episode_files_merge_the_transient_binding_into_the_served_tree(load, mo
     settings = json.loads(merged["pi-agent/settings.json"])
     # The served tree's own config survives the merge; the endpoint is added.
     assert settings["defaultTools"] == []
-    assert settings["defaultModel"] == "reef/task-model"
+    assert settings["defaultModel"] == "task-model"
     assert json.loads(merged["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://service.test/v1"
 
 

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -135,3 +136,40 @@ def test_real_pi_episode_renders_runs_and_cleans_up(tmp_path: Path) -> None:
     assert result.residue == ()
     # The wrapper captured the raw session file for the workflow's artifact.
     assert capture.is_file() and capture.stat().st_size > 0
+
+
+def test_real_pi_keeps_the_bound_model_beside_other_credentials(tmp_path: Path) -> None:
+    """A person's session runs with their whole environment (the reef-pi wrapper copies it), so another
+    provider's key may sit beside the binding; pi must still pick the bound model and call Reef."""
+    server = StubOpenAI()
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        pi = get_adapter("pi")
+        binding = ModelBinding(f"http://127.0.0.1:{server.server_address[1]}", MODEL, api_key="dummy")
+        for relative, text in render_composition(binding.compose_nodes(pi), pi).items():
+            (tmp_path / relative).parent.mkdir(parents=True, exist_ok=True)
+            (tmp_path / relative).write_text(text, encoding="utf-8")
+        environment = {
+            **os.environ,
+            "PI_CODING_AGENT_DIR": str(tmp_path / "pi-agent"),
+            "PI_CODING_AGENT_SESSION_DIR": str(tmp_path / "sessions"),
+            "PI_OFFLINE": "1",
+            "PI_SKIP_VERSION_CHECK": "1",
+            "ANTHROPIC_API_KEY": "decoy-anthropic-key",
+            "OPENAI_API_KEY": "decoy-openai-key",
+        }
+        completed = subprocess.run(
+            [REAL_PI, "--mode", "json", "-p", "Reply with exactly the word READY"],
+            cwd=tmp_path,
+            env=environment,
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert completed.returncode == 0, (completed.stdout, completed.stderr)
+    assert server.bodies, "pi sent the session's model call to another provider, not to the binding"
+    assert {json.loads(body)["model"] for body in server.bodies} == {MODEL}

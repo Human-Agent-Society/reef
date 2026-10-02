@@ -1177,7 +1177,7 @@ def test_model_binding_reaches_episodes_but_never_the_published_tree(tmp_path: P
     models = json.loads(seen[0]["pi-agent/models.json"])
     assert models["providers"]["reef"]["baseUrl"] == "http://localhost:8000/v1"
     assert models["providers"]["reef"]["apiKey"] == "dummy"
-    assert json.loads(seen[0]["pi-agent/settings.json"])["defaultModel"] == "reef/qwen3-8b"
+    assert json.loads(seen[0]["pi-agent/settings.json"])["defaultModel"] == "qwen3-8b"
 
     assert result.artifact is not None
     published = Path(result.artifact.local_path)

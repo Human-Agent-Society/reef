@@ -415,7 +415,7 @@ def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> Non
     providers = next(data for _, data in pi if "providers" in data["data"])["data"]["providers"]["reef"]
     assert [m["id"] for m in providers["models"]] == ["served", "other/big", "other/small"]
     primary = next(data for _, data in pi if "defaultModel" in data["data"])["data"]
-    assert primary["defaultModel"] == "reef/served"
+    assert primary["defaultModel"] == "served"
     opencode = binding.compose_nodes(get_adapter("opencode"), models=("other/big",))
     data = opencode[0][1]["data"]
     assert list(data["provider"]["reef"]["models"]) == ["served", "other/big"] and data["model"] == "reef/served"
@@ -482,7 +482,9 @@ def test_episode_templates_follow_the_dialect() -> None:
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["api"] == "anthropic-messages"
     assert json.loads(anthropic["pi-agent/models.json"])["providers"]["reef"]["baseUrl"] == "http://up"
     for files in (openai, responses, anthropic):
-        assert json.loads(files["pi-agent/settings.json"])["defaultModel"] == "reef/m"
+        settings = json.loads(files["pi-agent/settings.json"])
+        providers = json.loads(files["pi-agent/models.json"])["providers"]
+        assert settings["defaultModel"] in [model["id"] for model in providers[settings["defaultProvider"]]["models"]]
 
 
 def test_an_endpoint_without_a_key_still_renders_a_key_the_agent_accepts() -> None:
