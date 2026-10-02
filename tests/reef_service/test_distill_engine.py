@@ -217,7 +217,7 @@ def test_provider_recipe_rejects_teacher():
 def test_engine_columns_match_native_actor_columns_on_identical_logits(monkeypatch):
     import sys
 
-    import torch
+    torch = pytest.importorskip("torch")
 
     from reef.train.slime_backend.distill.teacher import gather_teacher_topk
 
