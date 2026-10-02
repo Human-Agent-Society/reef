@@ -1,0 +1,314 @@
+{
+  "calls_after_resume": 207,
+  "calls_before_resume": 44,
+  "comparisons": [
+    {
+      "family": "logical_deduction_seven_objects",
+      "release_id": "15fbfb9e09fa4fc5afcb731888c8ae7a",
+      "vs_baseline": {
+        "improved_tasks": 0,
+        "mean_delta": 0.0,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.0
+        ],
+        "unchanged_tasks": 12
+      },
+      "vs_previous": {
+        "improved_tasks": 0,
+        "mean_delta": 0.0,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.0
+        ],
+        "unchanged_tasks": 12
+      }
+    },
+    {
+      "family": "tracking_shuffled_objects_seven_objects",
+      "release_id": "15fbfb9e09fa4fc5afcb731888c8ae7a",
+      "vs_baseline": {
+        "improved_tasks": 0,
+        "mean_delta": 0.0,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.0
+        ],
+        "unchanged_tasks": 12
+      },
+      "vs_previous": {
+        "improved_tasks": 0,
+        "mean_delta": 0.0,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.0
+        ],
+        "unchanged_tasks": 12
+      }
+    },
+    {
+      "family": "logical_deduction_seven_objects",
+      "release_id": "0402aa691c054c638347f1a9014a05bd",
+      "vs_baseline": {
+        "improved_tasks": 2,
+        "mean_delta": 0.0,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 2,
+        "task_bootstrap_95_percent_interval": [
+          -0.16666666666666666,
+          0.16666666666666666
+        ],
+        "unchanged_tasks": 8
+      },
+      "vs_previous": {
+        "improved_tasks": 2,
+        "mean_delta": 0.0,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 2,
+        "task_bootstrap_95_percent_interval": [
+          -0.16666666666666666,
+          0.16666666666666666
+        ],
+        "unchanged_tasks": 8
+      }
+    },
+    {
+      "family": "tracking_shuffled_objects_seven_objects",
+      "release_id": "0402aa691c054c638347f1a9014a05bd",
+      "vs_baseline": {
+        "improved_tasks": 1,
+        "mean_delta": 0.041666666666666664,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.125
+        ],
+        "unchanged_tasks": 11
+      },
+      "vs_previous": {
+        "improved_tasks": 1,
+        "mean_delta": 0.041666666666666664,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.125
+        ],
+        "unchanged_tasks": 11
+      }
+    },
+    {
+      "family": "logical_deduction_seven_objects",
+      "release_id": "7fc1c954897744b88d00cb3f9a838234",
+      "vs_baseline": {
+        "improved_tasks": 2,
+        "mean_delta": 0.08333333333333333,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.20833333333333334
+        ],
+        "unchanged_tasks": 10
+      },
+      "vs_previous": {
+        "improved_tasks": 2,
+        "mean_delta": 0.08333333333333333,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.20833333333333334
+        ],
+        "unchanged_tasks": 10
+      }
+    },
+    {
+      "family": "tracking_shuffled_objects_seven_objects",
+      "release_id": "7fc1c954897744b88d00cb3f9a838234",
+      "vs_baseline": {
+        "improved_tasks": 1,
+        "mean_delta": 0.041666666666666664,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.125
+        ],
+        "unchanged_tasks": 11
+      },
+      "vs_previous": {
+        "improved_tasks": 0,
+        "mean_delta": 0.0,
+        "paired_runs": 24,
+        "paired_tasks": 12,
+        "planned_tasks": 12,
+        "regressed_tasks": 0,
+        "task_bootstrap_95_percent_interval": [
+          0.0,
+          0.0
+        ],
+        "unchanged_tasks": 12
+      }
+    }
+  ],
+  "dataset_sources": [
+    {
+      "examples": 250,
+      "sha256": "b59fd05b850c37cf57cb514ae1e6975c00b1638ade2291722056b2af3c54084d",
+      "url": "https://raw.githubusercontent.com/suzgunmirac/BIG-Bench-Hard/9ee07bd481feebf959a6b59d61ea57bdcf30964d/bbh/tracking_shuffled_objects_seven_objects.json"
+    },
+    {
+      "examples": 250,
+      "sha256": "2896c7e3482eea318dd37bcc370d24ec3cc91e8374c1784287b5dbd38a529e33",
+      "url": "https://raw.githubusercontent.com/suzgunmirac/BIG-Bench-Hard/9ee07bd481feebf959a6b59d61ea57bdcf30964d/bbh/logical_deduction_seven_objects.json"
+    }
+  ],
+  "experiment_base_commit": "ebe8eb2bee19f7665ce759c8fa8d53de5f5b2b75",
+  "heldout_episodes": 144,
+  "heldout_tool_calls": 22,
+  "heldout_used_for_selection": false,
+  "matrix": [
+    {
+      "correct": 22,
+      "episodes": 24,
+      "family": "logical_deduction_seven_objects",
+      "release_index": 0
+    },
+    {
+      "correct": 23,
+      "episodes": 24,
+      "family": "tracking_shuffled_objects_seven_objects",
+      "release_index": 0
+    },
+    {
+      "correct": 22,
+      "episodes": 24,
+      "family": "logical_deduction_seven_objects",
+      "release_index": 1
+    },
+    {
+      "correct": 24,
+      "episodes": 24,
+      "family": "tracking_shuffled_objects_seven_objects",
+      "release_index": 1
+    },
+    {
+      "correct": 24,
+      "episodes": 24,
+      "family": "logical_deduction_seven_objects",
+      "release_index": 2
+    },
+    {
+      "correct": 24,
+      "episodes": 24,
+      "family": "tracking_shuffled_objects_seven_objects",
+      "release_index": 2
+    }
+  ],
+  "mutable_model_alias": true,
+  "phase_usage": {
+    "changed-suite": {
+      "calls": 7,
+      "completion_tokens": 1542,
+      "prompt_tokens": 5748,
+      "provider_errors": 0
+    },
+    "heldout": {
+      "calls": 166,
+      "completion_tokens": 45319,
+      "prompt_tokens": 133299,
+      "provider_errors": 0
+    },
+    "reflection-and-validation-0": {
+      "calls": 13,
+      "completion_tokens": 2805,
+      "prompt_tokens": 13110,
+      "provider_errors": 0
+    },
+    "reflection-and-validation-1": {
+      "calls": 9,
+      "completion_tokens": 3795,
+      "prompt_tokens": 12927,
+      "provider_errors": 0
+    },
+    "train-0": {
+      "calls": 11,
+      "completion_tokens": 2195,
+      "prompt_tokens": 7202,
+      "provider_errors": 0
+    },
+    "train-1": {
+      "calls": 8,
+      "completion_tokens": 3431,
+      "prompt_tokens": 6178,
+      "provider_errors": 0
+    }
+  },
+  "phases": [
+    {
+      "accepted": true,
+      "family": "tracking_shuffled_objects_seven_objects",
+      "release_id": "0402aa691c054c638347f1a9014a05bd"
+    },
+    {
+      "accepted": true,
+      "family": "logical_deduction_seven_objects",
+      "release_id": "7fc1c954897744b88d00cb3f9a838234"
+    }
+  ],
+  "provider_calls": 214,
+  "raw_export_sha256": {
+    "dataset.json": "3716c6043523358810d9d7e21ce895599d82a3819b92af16ddee4716b52ae1b7",
+    "heldout/run.json": "f30eec1f23117e18a166a0b6e3d1b345efb0198d2056d947c91dfb3fe33ef615",
+    "protocol.json": "b4651797117c52b7044a5c476d4cc1aa246a09f7c0905bcd4ca23a2af394ecae",
+    "provider-usage.json": "54c258a53f33304024baf934350f8d6daf8387f43824596c4020f0b6ac8e2e41"
+  },
+  "releases": [
+    "15fbfb9e09fa4fc5afcb731888c8ae7a",
+    "0402aa691c054c638347f1a9014a05bd",
+    "7fc1c954897744b88d00cb3f9a838234"
+  ],
+  "resume_preserved_bytes": true,
+  "resume_reused_episodes": 3,
+  "run_fingerprint": "a78e72b35d726114e61f1cdc154e1d95569a96dc11d435ea16d254ac63acabfa",
+  "scenario_unchanged": true,
+  "scored_episodes": 144,
+  "source_files": {
+    "reef/scenario/evaluation.py": "b1eb1c38ffc829492b37db5338404e7b99cb3ecca8d0835397c2517f42f7b8e1",
+    "tutorials/release_evaluation/provider.py": "8271ed6e76f8dea9826dfdb1f3220f2eeb3b378a1e0899f31bf255956b4ee89b",
+    "tutorials/release_evaluation/run.py": "03f9221e65dfed1f57c4d5f3d7919ba6de2ee839d47dd0a5e2b0c8bdb9b71e97"
+  },
+  "status": "completed"
+}
