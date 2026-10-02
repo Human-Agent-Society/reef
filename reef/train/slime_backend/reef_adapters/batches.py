@@ -7,6 +7,10 @@ from typing import Any
 
 import ray
 
+#: The job's loss-family projection and learning-rate schedule state, when the
+#: bridge switches the actor workers for it; every rank receives it whole.
+TRAINING_METHOD_KEY = "reef_training_method"
+
 _PER_SAMPLE_KEYS = (
     "tokens",
     "multimodal_train_inputs",
@@ -49,6 +53,23 @@ def tensorize_external_fields(data: dict[str, Any], extra_dtypes: Mapping[str, s
             data[key] = [torch.as_tensor(value, dtype=dtype).detach().cpu().contiguous() for value in data[key]]
 
 
+def optimizer_step_sizes(data: Mapping[str, Any], global_batch_size: int) -> list[int]:
+    """Rollouts per optimizer step of one job's rollout data, in order: Reef's schedule, or the configured size."""
+    rollout_count = len(dict.fromkeys(data["rollout_ids"]))
+    step_sizes = data.get("external_step_sizes")
+    remainder = data.get("external_remainder", "error")
+    if step_sizes is not None:
+        if sum(step_sizes) != rollout_count:
+            raise ValueError(f"external_step_sizes {step_sizes!r} do not cover the {rollout_count} rollouts")
+        return [int(size) for size in step_sizes]
+    full_steps, tail = divmod(rollout_count, global_batch_size)
+    if tail and remainder != "partial":
+        raise ValueError(
+            f"{rollout_count} external rollouts do not form complete global batches of {global_batch_size}"
+        )
+    return [global_batch_size] * full_steps + ([tail] if tail else [])
+
+
 class TrainingBatchProcessor:
     """Prepare rank-specific data without owning actors or inference connections."""
 
@@ -77,7 +98,7 @@ class TrainingBatchProcessor:
             for key in dict.fromkeys(per_sample_keys):
                 if key in data:
                     rollout_data[key] = [data[key][index] for index in partition]
-            for key in ("raw_reward", "total_lengths"):
+            for key in ("raw_reward", "total_lengths", TRAINING_METHOD_KEY):
                 if key in data:
                     rollout_data[key] = data[key]
             rollout_data.update(
@@ -98,20 +119,10 @@ class TrainingBatchProcessor:
 
     def _resolve_step_sizes(self, data) -> list[int]:
         """Rollouts per optimizer step, in order — Reef's schedule or the configured size cut here."""
-        rollout_count = len(dict.fromkeys(data["rollout_ids"]))
-        step_sizes = data.pop("external_step_sizes", None)
-        remainder = data.pop("external_remainder", "error")
-        if step_sizes is not None:
-            if sum(step_sizes) != rollout_count:
-                raise ValueError(f"external_step_sizes {step_sizes!r} do not cover the {rollout_count} rollouts")
-            return [int(size) for size in step_sizes]
-        global_batch_size = self.args.global_batch_size
-        full_steps, tail = divmod(rollout_count, global_batch_size)
-        if tail and remainder != "partial":
-            raise ValueError(
-                f"{rollout_count} external rollouts do not form complete global batches of {global_batch_size}"
-            )
-        return [global_batch_size] * full_steps + ([tail] if tail else [])
+        step_sizes = optimizer_step_sizes(data, self.args.global_batch_size)
+        data.pop("external_step_sizes", None)
+        data.pop("external_remainder", None)
+        return step_sizes
 
     def _schedule_steps(self, data, step_sizes: list[int]):
         """Run Slime's DP/micro-batch packer one step at a time and splice the results.

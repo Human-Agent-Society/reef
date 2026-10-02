@@ -12,9 +12,11 @@ from reef.runtime.interfaces import (
     InferenceHandler,
     ModelCandidate,
     PreparedTrainingStep,
+    TrainingMethod,
     TrainingRuntime,
 )
 from reef.train.algos import StepScheduling
+from reef.train.runtime_backend import FixedTrainingMethod
 from reef.train.types import TrainingBatch
 
 
@@ -47,7 +49,7 @@ class StubTrainingRuntime(TrainingRuntime):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
         scenario_step: int,
@@ -133,12 +135,13 @@ def runtime_bindings(value):
 
 
 def candidate_backend(value, objective, scheduling, **kwargs):
+    """A runtime backend that trains every job with the objective named ``objective``."""
     from reef.train.runtime_backend import RuntimeCandidateBackend
 
     bindings = runtime_bindings(value)
     return RuntimeCandidateBackend(
         bindings["training_runtime"],
-        objective,
+        FixedTrainingMethod(TrainingMethod(objective)),
         scheduling,
         inference_runtime=bindings["runtime"],
         **kwargs,
@@ -155,7 +158,9 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
         from reef.service.runtime import connect_executor_runtimes
 
         training, inference = components if components is not None else connect_executor_runtimes(**kwargs)
-        super().__init__(training, "sft", StepScheduling(), inference_runtime=inference)
+        super().__init__(
+            training, FixedTrainingMethod(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+        )
 
     @property
     def inference(self):

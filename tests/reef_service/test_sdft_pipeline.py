@@ -27,6 +27,7 @@ from reef.core.trajectories import source_record_id
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.runtime.interfaces import TrainingMethod
 from reef.train import ProcessorContext
 from reef.train.algos import StepScheduling
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
@@ -289,7 +290,7 @@ def test_slime_payload_carries_the_teacher_sequence_beside_the_policy_row(tokeni
     processor.ingest(_report("r1", ("i1",)))
     batch = processor.build_batch()
 
-    prepared = prepare_slime_step(batch, "sdft", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, TrainingMethod("sdft"), {}, StepScheduling(unit="sample"))
     payload = prepared.payload
     assert payload is not None
     assert payload["loss"] == "sdft"

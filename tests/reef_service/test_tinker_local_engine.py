@@ -10,7 +10,7 @@ import yaml
 
 from reef.runtime.deployment import ADAPTER_FILES_PROTOCOL, RuntimeConfigError, RuntimeRegistry
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import InferenceBackend
+from reef.runtime.interfaces import InferenceBackend, LearningRateSchedule, LearningRateScheduleState, TrainingMethod
 from reef.runtime.recovery import marker_path, read_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.service.deploy.config_utils import DeployConfigError
@@ -36,14 +36,16 @@ class RemoteClient:
 
     def __init__(self):
         self.calls = []
+        self.learning_rates = []
         self.downloads = []
         self.closed = False
 
     def initialize(self):
         return TinkerCheckpoint("Qwen/Qwen3-8B", 32, "tinker://base/state", "tinker://base/sampler")
 
-    def train(self, checkpoint, batches, loss):
+    def train(self, checkpoint, batches, loss, learning_rates):
         self.calls.append((checkpoint, batches, loss))
+        self.learning_rates.append(tuple(learning_rates))
         number = len(self.calls)
         return TinkerCheckpoint(
             checkpoint.base_model, 32, f"tinker://update-{number}/state", f"tinker://update-{number}/sampler"
@@ -167,11 +169,11 @@ class Stack:
         )
         self.coordinator = TrainingCoordinator(self.backend, self.engines)
 
-    def payload(self, objective, *, step):
+    def payload(self, objective, *, step, schedule=None):
         version = self.coordinator.serving_runtime_load_id()
         prepared = self.coordinator.prepare_training_step(
             TrainingBatch("b", (item(version, sample=step),)),
-            objective.name,
+            TrainingMethod(objective.name, schedule),
             {},
             StepScheduling(unit="sample", batch_size="actual"),
         )
@@ -375,3 +377,22 @@ def test_coordinator_runtime_kind_connects_through_an_injected_connector():
     assert built[0] is not None and built[1] is not None
     with pytest.raises(RuntimeConfigError, match="inference_runtime"):
         RuntimeRegistry().build({"type": "coordinator_training", "connect": connect}, model_path="/models/demo")
+
+
+def test_a_schedule_continues_from_the_published_incumbent_after_a_restart(tmp_path, objective):
+    warmup = LearningRateSchedule("warmup", 1e-4, warmup_steps=2)
+    stack = Stack(tmp_path)
+    first = stack.coordinator.execute_training_job(stack.payload(objective, step=0, schedule=warmup))
+    assert stack.client.learning_rates == [(0.0,)]
+    assert first.metrics["learning_rate_schedule"] == {"name": "warmup", "completed_steps": 1}
+    stack.coordinator.update_serving_weights(first.training_job_id)
+    stack.coordinator.acknowledge_training_commit(first.training_job_id)
+    stack.coordinator.shutdown()
+
+    restarted = Stack(tmp_path, engines=Engines())
+    second = restarted.coordinator.execute_training_job(restarted.payload(objective, step=1, schedule=warmup))
+    # The published incumbent carries one completed step: the warmup does not start over.
+    assert restarted.client.learning_rates == [(5e-5,)]
+    assert TinkerCheckpoint.read(Path(second.checkpoint_path)).learning_rate_schedule == LearningRateScheduleState(
+        warmup, 2
+    )

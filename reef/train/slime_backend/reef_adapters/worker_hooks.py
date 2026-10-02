@@ -7,7 +7,13 @@ import os
 from collections.abc import Mapping
 from typing import Any
 
-from reef.train.slime_backend.algorithm import SlimeAlgorithm, resolve_args_loss_family, resolve_objective_paths
+from reef.runtime.interfaces import LearningRateScheduleState
+from reef.train.slime_backend.algorithm import (
+    SlimeAlgorithm,
+    reset_objective_paths,
+    resolve_args_loss_family,
+    resolve_objective_paths,
+)
 from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.loss_families import UnknownLossFamilyError
 
@@ -22,6 +28,10 @@ _WORKER_STEP_METRICS: list[dict[str, float]] = []
 #: under the ``train/step`` step key; the flat merge above keeps only the
 #: last, this keeps them all for experiment trackers that plot every step.
 WORKER_STEP_METRICS_KEY = "train_steps"
+#: The rate the before-step hook set for the current optimizer step while a
+#: recipe's learning-rate schedule is active. Slime logs its own scheduler's
+#: rate (``train/lr-pg_*``), which that schedule overrides.
+APPLIED_LEARNING_RATE: dict[str, float] = {}
 
 
 def _loss_family_spec(args) -> SlimeAlgorithm | None:
@@ -106,14 +116,15 @@ def initialize_megatron_objective(args) -> None:
 def _install_external_batch_keys(args) -> None:
     from slime.backends.megatron_utils import model
 
-    spec = _loss_family_spec(args)
-    declared = spec.external_batch_keys if spec is not None else ()
-    external_keys = tuple(dict.fromkeys((*declared, *getattr(args, "reef_external_batch_keys", ()))))
     current = model.get_batch
     if getattr(current, "_reef_external_keys", False):
         return
 
     def get_batch(data_iterator, keys, *call_args, **kwargs):
+        # Read per call: a job may switch the worker's loss family.
+        spec = _loss_family_spec(args)
+        declared = spec.external_batch_keys if spec is not None else ()
+        external_keys = dict.fromkeys((*declared, *getattr(args, "reef_external_batch_keys", ())))
         extended = [*keys, *(key for key in external_keys if key not in keys)]
         return current(data_iterator, extended, *call_args, **kwargs)
 
@@ -147,6 +158,10 @@ def _install_metric_capture() -> None:
         return
 
     def log(args, metrics, step_key):
+        rate = APPLIED_LEARNING_RATE.get("rate")
+        if rate is not None and step_key == "train/step":
+            # The recipe's schedule set this step's rate, not Slime's scheduler.
+            metrics = {key: rate if key.startswith("train/lr-pg_") else value for key, value in metrics.items()}
         record_worker_metrics(metrics)
         if step_key == "train/step":
             record_worker_step(metrics)
@@ -314,20 +329,26 @@ def _install_versioned_updaters() -> None:
 
 
 def _install_pg_primitive(args) -> None:
-    path = getattr(args, "custom_pg_loss_function_path", None)
-    if not path:
-        return
+    """Route Slime's CISPO callsite onto the family's pg primitive, looked up per call."""
     from slime.backends.megatron_utils import loss
     from slime.utils.misc import load_function
 
-    primitive = load_function(path)
+    current = loss.compute_cispo_loss
+    if getattr(current, "_reef_pg_primitive", False):
+        return
 
-    def compute_custom_pg_loss(ppo_kl, log_probs, advantages, eps_clip, eps_clip_high):
-        return primitive(args, ppo_kl, log_probs, advantages)
+    def compute_cispo_loss(ppo_kl, log_probs, advantages, eps_clip, eps_clip_high):
+        # ``advantage_estimator`` was already routed to "cispo" driver-side
+        # (``configure_reef_loss_args``) for a family that registers a
+        # primitive; a job may switch to a family that does not.
+        path = args.custom_pg_loss_function_path
+        if not path:
+            return current(ppo_kl, log_probs, advantages, eps_clip, eps_clip_high)
+        return load_function(path)(args, ppo_kl, log_probs, advantages)
 
-    # ``advantage_estimator`` was already routed to "cispo" driver-side
-    # (``configure_reef_loss_args``); the worker only swaps the callsite.
-    loss.compute_cispo_loss = compute_custom_pg_loss
+    marked_compute_cispo_loss: Any = compute_cispo_loss
+    marked_compute_cispo_loss._reef_pg_primitive = True
+    loss.compute_cispo_loss = compute_cispo_loss
 
 
 def _install_score_centering(args) -> None:
@@ -336,6 +357,27 @@ def _install_score_centering(args) -> None:
     # policy-gradient term to center.
     if not args.score_centering or args.loss_type == "value_loss":
         return
+    from slime.backends.megatron_utils import loss
+
+    from reef.train.slime_backend.score_centering.term import add_score_centering
+
+    # Installed whatever the startup family's loss type: a job may switch to a
+    # policy-loss family, and the wrapper only runs for Slime's policy loss.
+    current = loss.policy_loss_function
+    if not getattr(current, "_reef_score_centering", False):
+
+        def policy_loss_function(args, batch, logits, sum_of_sample_mean):
+            base, log = current(args, batch, logits, sum_of_sample_mean)
+            return add_score_centering(args, batch, logits, sum_of_sample_mean, base, log)
+
+        marked_policy_loss_function: Any = policy_loss_function
+        marked_policy_loss_function._reef_score_centering = True
+        loss.policy_loss_function = policy_loss_function
+    route_score_centered_loss(args)
+
+
+def route_score_centered_loss(args) -> None:
+    """Put the score-centered loss in place of a custom-loss family's own path; refuse a loss it cannot center."""
     if args.loss_type == "custom_loss":
         # Distillation computes its teacher advantage and effective masks inside
         # its loss, where it also adds the correction exactly once.
@@ -347,21 +389,46 @@ def _install_score_centering(args) -> None:
         return
     if args.loss_type != "policy_loss":
         raise RuntimeError(f"score centering adds to a policy-gradient loss, not --loss-type {args.loss_type}")
-    from slime.backends.megatron_utils import loss
 
-    from reef.train.slime_backend.score_centering.term import add_score_centering
 
-    current = loss.policy_loss_function
-    if getattr(current, "_reef_score_centering", False):
+def activate_loss_family(args) -> None:
+    """Re-point an actor worker's family hooks after a job switched ``args.loss_family``.
+
+    The job's family projection is already on ``args``; this clears the
+    previous family's objective hooks, resolves the new family's, and routes
+    score centering onto its loss. Hooks installed at init read ``args`` per
+    call and follow.
+    """
+    reset_objective_paths(args)
+    args.reef_score_centering_base_loss_path = None
+    resolve_objective_paths(args)
+    if args.score_centering:
+        route_score_centered_loss(args)
+
+
+def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, opt_param_scheduler) -> None:
+    """Slime's before-train-step hook: set the step's rate from the schedule the recipe selected.
+
+    ``args.reef_learning_rate_schedule`` is the job's schedule state (the
+    schedule and the steps it completed before the job), or ``None`` to leave
+    Slime's configured scheduler in charge. ``step_id`` counts the job's
+    optimizer steps from 0. Megatron's scheduler keeps its own count, so a
+    checkpoint still loads under the startup options.
+    """
+    chained = args.reef_chained_before_train_step_hook_path
+    if chained:
+        from slime.utils.misc import load_function
+
+        load_function(chained)(args, rollout_id, step_id, model, optimizer, opt_param_scheduler)
+    schedule = args.reef_learning_rate_schedule
+    if schedule is None:
+        APPLIED_LEARNING_RATE.clear()
         return
-
-    def policy_loss_function(args, batch, logits, sum_of_sample_mean):
-        base, log = current(args, batch, logits, sum_of_sample_mean)
-        return add_score_centering(args, batch, logits, sum_of_sample_mean, base, log)
-
-    marked_policy_loss_function: Any = policy_loss_function
-    marked_policy_loss_function._reef_score_centering = True
-    loss.policy_loss_function = policy_loss_function
+    state = LearningRateScheduleState.from_dict(schedule)
+    rate = state.schedule.learning_rate(state.completed_steps + step_id)
+    for group in optimizer.param_groups:
+        group["lr"] = rate * group.get("lr_mult", 1.0)
+    APPLIED_LEARNING_RATE["rate"] = rate
 
 
 def record_worker_metrics(metrics: Mapping[str, Any]) -> None:

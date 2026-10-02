@@ -26,8 +26,13 @@ class TinkerClient(ABC):
 
     @abstractmethod
     def train(
-        self, checkpoint: TinkerCheckpoint, batches: Sequence[Sequence[TokenRow]], loss: TinkerLoss
-    ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]: ...
+        self,
+        checkpoint: TinkerCheckpoint,
+        batches: Sequence[Sequence[TokenRow]],
+        loss: TinkerLoss,
+        learning_rates: Sequence[float],
+    ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
+        """Train one optimizer step per batch from ``checkpoint``, step ``i`` at ``learning_rates[i]``."""
 
     @abstractmethod
     def download(self, checkpoint: TinkerCheckpoint, directory: Path) -> None:
@@ -103,8 +108,14 @@ class TinkerSDKClient(TinkerClient):
             service.close(status).result(timeout=self._config.train_timeout_s)
 
     def train(
-        self, checkpoint: TinkerCheckpoint, batches: Sequence[Sequence[TokenRow]], loss: TinkerLoss
+        self,
+        checkpoint: TinkerCheckpoint,
+        batches: Sequence[Sequence[TokenRow]],
+        loss: TinkerLoss,
+        learning_rates: Sequence[float],
     ) -> tuple[TinkerCheckpoint, Mapping[str, Any]]:
+        if len(learning_rates) != len(batches):
+            raise ValueError("Tinker training needs one learning rate per optimizer batch")
         service = self._new_service()
         status = "errored"
         try:
@@ -119,7 +130,7 @@ class TinkerSDKClient(TinkerClient):
                 raise ValueError("remote Tinker training checkpoint does not match the configured model/rank")
             trainer = service.create_training_client_from_state_with_optimizer(checkpoint.state_path)
             metrics: dict[str, Any] = {}
-            for rows in batches:
+            for rows, learning_rate in zip(batches, learning_rates, strict=True):
                 base = self._base_logprobs(rows) if loss.needs_base_logprobs and self._config.kl_coef else []
                 inputs = loss.inputs(rows, base, kl_coef=self._config.kl_coef)
                 if len(inputs) != len(rows):
@@ -137,7 +148,7 @@ class TinkerSDKClient(TinkerClient):
                     future = trainer.forward_backward(data, loss_fn=loss.loss_fn)
                 result = future.result(timeout=self._config.train_timeout_s)
                 metrics.update(result.metrics)
-                trainer.optim_step(self._sdk.AdamParams(learning_rate=self._config.learning_rate)).result(
+                trainer.optim_step(self._sdk.AdamParams(learning_rate=learning_rate)).result(
                     timeout=self._config.train_timeout_s
                 )
             metrics["optimizer_steps"] = len(batches)

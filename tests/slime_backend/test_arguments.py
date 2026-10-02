@@ -6,6 +6,7 @@ import pytest
 
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.slime_arguments import (
+    REEF_BEFORE_TRAIN_STEP_HOOK_PATH,
     REEF_MEGATRON_INIT_PATH,
     REEF_MODEL_PROVIDER_PATH,
     add_reef_slime_arguments,
@@ -33,6 +34,7 @@ def slime_args(**overrides):
         "custom_model_provider_path": "custom.model_provider",
         "loss_family": None,
         "score_centering": False,
+        "advantage_estimator": "grpo",
     }
     values.update(overrides)
     return SlimeArguments(**values)
@@ -62,6 +64,7 @@ def test_finalize_arguments_chains_user_hooks_and_enables_explicit_critic() -> N
         megatron_lora_rank=8,
         custom_megatron_init_path="custom.initialize",
         custom_model_provider_path="custom.model_provider",
+        custom_megatron_before_train_step_hook_path="custom.before_step",
     )
 
     finalize_reef_slime_args(args, ["--use-critic", "--megatron-lora-rank=8"])
@@ -75,6 +78,9 @@ def test_finalize_arguments_chains_user_hooks_and_enables_explicit_critic() -> N
     assert args.reef_chained_megatron_init_path == "custom.initialize"
     assert args.custom_model_provider_path == REEF_MODEL_PROVIDER_PATH
     assert args.reef_chained_model_provider_path == "custom.model_provider"
+    # Every optimizer step passes Reef's learning-rate hook, which runs the user's hook first.
+    assert args.custom_megatron_before_train_step_hook_path == REEF_BEFORE_TRAIN_STEP_HOOK_PATH
+    assert args.reef_chained_before_train_step_hook_path == "custom.before_step"
 
 
 @pytest.mark.unit
@@ -100,6 +106,8 @@ def test_loss_family_projection_uses_public_slime_primitives() -> None:
     sao = slime_args(loss_family="sao")
     configure_reef_loss_args(sao)
     assert sao.advantage_estimator == "cispo"
+    # The configured estimator stays on record for a job of another family.
+    assert sao.reef_configured_advantage_estimator == "grpo"
     assert sao.compute_advantages_and_returns is True
 
     topk = slime_args(loss_family="openclawrl")

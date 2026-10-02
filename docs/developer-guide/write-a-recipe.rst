@@ -76,7 +76,7 @@ A weight recipe is four pieces plus the class that binds them.
    processor | assembles valid reports and referenced records into samples and typed batches
    report type | the ``ReportBase`` subclass Reef validates at ingress, so a malformed report is HTTP 400 rather than a training-time surprise; a scenario of several components admits a report any of them accepts, and a trainer releases one shaped for another component
    candidate evaluation | measures the checkpoint the backend exported and decides select or reject. Every recipe carries one; the default, ``BackendAlwaysSelectPlugin``, selects whatever the backend produced
-   recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the objective (by registered name or dotted class/instance path), and the step schedule
+   recipe class | a frozen dataclass whose ``training_spec()`` names the processor, the objective (by registered name or dotted class/instance path), and the step schedule; ``training_method_selector()`` optionally picks another objective or a learning-rate schedule for each job
 
 `Python API <../reference/python-api.rst>`__ is the contract for each.
 ``recipes/sao/`` is the smallest cookbook implementation and the one to read
@@ -144,6 +144,88 @@ resolves those fields before connecting the runtime and passes them to
 ``from_resolved_config``. ``from_environment`` uses that same resolution path
 for standalone recipe construction. Custom construction hooks should consume
 the resolved values; ``_recipe_kwargs`` continues to own non-field sections.
+
+Switch methods within a run
+~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+By default every job trains ``training_spec().objective`` at the backend's
+configured learning rate. A recipe that runs several phases in one continuing
+run, such as supervised training followed by policy training with a lower rate
+and a fresh warmup, overrides ``training_method_selector``. Reef calls the
+selector's ``select(batch, algorithm_state)`` once for each job, with the
+batch and the committed algorithm state, and trains the job with the
+``TrainingMethod`` it returns:
+
+.. code:: python
+
+   from dataclasses import dataclass
+   from reef.recipe import WeightTrainingRecipe, config_field
+   from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
+   from reef.train.runtime_backend import TrainingMethodSelector
+
+   WARMUP = LearningRateSchedule(
+       "warmup", 2e-5, warmup_steps=20, decay_style="cosine", decay_steps=500, min_learning_rate=2e-6
+   )
+   POLICY = LearningRateSchedule("policy", 1e-6, warmup_steps=10)
+
+
+   class WarmupThenPolicy(TrainingMethodSelector):
+       def __init__(self, warmup_jobs: int) -> None:
+           self.warmup_jobs = warmup_jobs
+
+       def select(self, batch, algorithm_state):
+           if algorithm_state.get("steps", 0) < self.warmup_jobs:
+               return TrainingMethod("my_pkg.objectives:WarmupObjective", WARMUP)
+           return TrainingMethod("my_pkg.objectives:PolicyObjective", POLICY)
+
+
+   @dataclass(frozen=True)
+   class MyMethodRecipe(WeightTrainingRecipe):
+       warmup_jobs: int = config_field(200)
+
+       def training_method_selector(self):
+           return WarmupThenPolicy(self.warmup_jobs)
+
+When to switch, and which data each phase trains on, is the recipe's logic.
+Reef does not ask for the list of objectives in advance.
+
+- ``select`` must depend only on its arguments. A retry calls it again with
+  the same batch and state, and the method is part of the job's identity. The
+  ``steps`` counter that the shipped objectives keep (``next_steps``) is a
+  convenient switch point. Each objective returns the whole next state, so
+  after a switch only what the new objective carries forward remains.
+- Name an objective from another package by its dotted reference. The
+  training backend resolves the objective in its own process, where a short
+  name is known only if its package was imported.
+- The backend validates each selected method before that job trains and
+  refuses one it cannot train. ``training_spec().objective`` is the startup
+  objective: Slime starts its workers with that objective's loss family and
+  driver options. `Per-job loss families
+  <loss-families.rst#per-job-families>`__ lists what a later family may
+  change on Slime; `Train with Tinker <../user-guide/tinker.rst>`__ lists what
+  Tinker supports.
+
+A ``LearningRateSchedule`` counts optimizer steps, including every optimizer
+step within one job. The rate rises linearly from ``initial_learning_rate`` to
+``peak_learning_rate`` over ``warmup_steps``. Then it stays at the peak
+(``constant``), or decays ``linear`` or ``cosine`` over ``decay_steps`` to
+``min_learning_rate``. The backend keeps the active schedule and its progress
+with its training state:
+
+- A job that selects the active schedule continues it, including on a retry
+  or after a restart. Warmup does not start over.
+- A job that selects another schedule starts that schedule at step 0. To
+  restart the same curve, give it another ``name``.
+- A job that selects no schedule keeps the active one. If no schedule was
+  ever selected, the backend's configured rate applies.
+- Starting a schedule changes the rate only. It does not reset the optimizer
+  state.
+
+Each job's metrics include ``training_method``: its objective and requested
+schedule. While a schedule is active, a job that took optimizer steps also
+reports ``learning_rate``, the rate of its last step, and
+``learning_rate_schedule``, the schedule's name and completed steps. Tinker
+reports ``learning_rate`` for every job.
 
 Gate a candidate
 ~~~~~~~~~~~~~~~~

@@ -465,7 +465,8 @@ def test_stale_batch_is_discarded_and_next_valid_job_runs(start_dispatcher) -> N
     assert len(receipts) == 1
     assert receipts[0]["metadata"] == {
         "outcome": "stale",
-        "metrics": stale_metrics,
+        # The receipt keeps the method the dropped batch was prepared with.
+        "metrics": {**stale_metrics, "training_method": {"objective": "sft", "learning_rate_schedule": None}},
     }
     assert receipts[0]["consumed_ids"] == ("inference-1", "report-1")
 

@@ -18,7 +18,9 @@ A recipe binds ``WeightTrainingSpec(objective=..., processor=..., scheduling=...
 ``WeightTrainingSpec.loss_family`` derives the family from that objective;
 ``StepSignal`` carries advantages, metrics and proposed state, and the recipe's
 ``StepScheduling`` says how the runtime cuts the batch into optimizer steps.
-The bridge still rejects a payload whose ``loss`` differs from its boot family.
+The workers start with that objective's family. A recipe that selects another
+objective for a job trains that objective's family on the same workers (see
+`Per-job families`_).
 
 Layout
 ------
@@ -44,7 +46,9 @@ Family to driver flags
 ----------------------
 
 The recipe's ``loss_family`` and the driver's flags must describe the same
-objective; the driver checks it at start and refuses a mismatch.
+objective; the driver checks it at start and refuses a mismatch. These flags
+describe the startup family. A family that a later job selects takes its loss
+type from its spec.
 
 +---------------------+-----------------------------+----------------------------+
 | Loss family         | ``--loss-type``             | Rollout log-probs          |
@@ -150,6 +154,58 @@ row), ``recipes/sao/slime/`` (critic schedule, the pg-primitive lane),
 ``recipes/openclawrl/slime/`` (a custom row, both actor lifecycle hooks, a
 frozen Megatron teacher), ``recipes/sdft/slime/`` and ``recipes/sdpo/slime/``
 (thin families on the distillation base below).
+
+Per-job families
+----------------
+
+A recipe's ``training_method_selector`` can give a job an objective with
+another loss family (`Switch methods within a run
+<write-a-recipe.rst#switch-methods-within-a-run>`__). The workers keep the
+arguments they started with; on the family's first job, the bridge derives
+that family's arguments from them and validates the family against them.
+
+The family sets:
+
+- ``loss_family``, its reference, and its ``loss_type``;
+- its objective hooks, which the worker resolves again;
+- the advantage routing: the CISPO callsite for a pg-primitive family, and
+  otherwise the estimator the driver was started with;
+- Slime's pre-train advantage pass, which is on only for a family that allows it;
+- its wire declarations;
+- its driver options, at their defaults.
+
+These options stay as the workers started with them, and the family is
+validated against them: the model and parallelism, the optimizer and its
+learning-rate flags, ``--use-rollout-logprobs``, ``--kl-coef`` and the
+reference model, ``--num-steps-per-rollout``, the critic, and
+``--score-centering``.
+
+The bridge refuses the family before the job exists if:
+
+- it needs driver options, since only the startup family's flags are parsed;
+- it configures the critic (``configure_critic_args``, a zero-initialized
+  value head), as SAO does;
+- it is a second distillation family, since a worker keeps one teacher built
+  from the first family's settings;
+- it declares a wire key with a dtype that another family of the run
+  declares differently;
+- its own validation refuses the startup options.
+
+The actor workers switch when they receive the job's data; the critic keeps
+the startup family. A family's actor init hook runs on its first job. A
+distillation teacher that moves with the policy is seeded from the weights at
+that job; as after a restart, it is not checkpointed.
+
+A job's learning-rate schedule sets the rate of each actor optimizer step
+through Slime's before-train-step hook. Reef chains any
+``--custom-megatron-before-train-step-hook-path`` before it, and the job's
+``train/lr-pg_*`` step metrics report that rate. Megatron's scheduler keeps
+its own configured curve and count, so a checkpoint still loads under the
+startup flags. The schedule and its completed steps are recorded, per
+scenario, in ``reef_learning_rate_schedules.json`` beside the job marker with
+every checkpoint. A critic-only step does not advance it. The bridge refuses
+to start when the record is newer than the checkpoint the workers loaded, and
+refuses a schedule on ``--decoupled-lr`` parameter groups.
 
 The distillation base
 ---------------------
