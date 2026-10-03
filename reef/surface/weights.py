@@ -12,6 +12,7 @@ from reef.surface.base import (
     AdapterWeightRuntime,
     ArtifactActivator,
     InferenceHooks,
+    RecoveryRestorer,
     ServingRuntime,
     Surface,
     WeightRuntime,
@@ -41,7 +42,7 @@ def artifact_runtime_load_id(artifact: Artifact | ArtifactRef) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-class WeightLoader(ArtifactActivator):
+class WeightLoader(ArtifactActivator, RecoveryRestorer):
     """Restore weight checkpoints and recover the live serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
