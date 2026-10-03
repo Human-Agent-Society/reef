@@ -201,7 +201,7 @@ def create_training_plan(
     except UnknownLossFamilyError as exc:
         raise RuntimeError(f"reef.recipe {recipe!r} declares unsupported loss family {loss_family!r}: {exc}") from exc
     combined_args = [
-        *driver_arguments(config),
+        *driver_arguments(config, loss_family=loss_family),
         *(load_args_file(args_file) if args_file else []),
         *direct_args,
     ]

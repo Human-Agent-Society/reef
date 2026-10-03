@@ -201,6 +201,46 @@ operations over vocab shards (log-sum-exp, the log-probs at ids on any
 shard, the top-K ids) live in ``reef/train/slime_backend/vocab_parallel.py``,
 shared by the distillation base, score centering and OpenClaw-RL's teacher.
 
+Independent distillation teacher
+-------------------------------
+
+Slime distillation families can opt into a separately allocated SGLang teacher
+through a deployment's ``teacher`` section. ``model-path`` selects its HF
+weights, ``num-gpus`` reserves its own Ray GPUs and sets tensor parallel size,
+``port`` selects its internal endpoint, ``timeout`` bounds each scoring request,
+and ``options`` supplies native SGLang options. The existing checkpoint-swap
+teacher remains the default; no wire rows, loss formulas or report schema change.
+
+The teacher reads the exact recorded teacher-prefix and student-response IDs.
+The bridge requests prefill probabilities with ``max_new_tokens=0`` and checks
+all response IDs and row counts before inserting
+``distill_teacher_sampled_log_probs``, ``distill_teacher_topk_ids`` and
+``distill_teacher_topk_log_probs``. These columns are partitioned and tensorized
+with the rest of the batch. Scoring completes before the training job starts;
+a failure does not leave a partially scored batch. ``perf/distill_teacher_time`` measures
+scoring wall time in seconds, including endpoint identity validation.
+
+Managed deployment supplies ``--<family>-teacher-url``,
+``--<family>-teacher-model-path`` and ``--<family>-teacher-timeout``. Explicit
+process stacks may set these flags themselves; the endpoint must be a frozen
+SGLang server, and its reported model path must match the local model directory
+used to validate the token vocabulary and decoder. Chat templates may differ
+because scoring never renders or retokenizes text. Keep ``teacher=separate``
+and remove ``teacher-checkpoint``. All teacher processes must see the model
+files, as with the student deployment.
+
+The initial engine path requires temperature 1 and teacher-selected positive
+``top_k``. It supports sampled reverse KL and the existing top-K forward,
+reverse and JSD objectives. SGLang input probabilities are not temperature
+scaled. Exact full-vocabulary and student-selected top-K scoring continue to
+use checkpoint mode: the pinned arbitrary-ID API accepts a list per request,
+not a different list for each response position. Unsupported combinations fail
+validation instead of silently changing the loss. Comparing engine scores
+against native teacher scores should allow for measured BF16 kernel differences.
+
+See ``recipes/opd/examples/math/serve.teacher-engine.yaml`` for the Qwen3-4B /
+Qwen3-8B topology. It is an integration example, not a benchmark result.
+
 Score centering
 ---------------
 

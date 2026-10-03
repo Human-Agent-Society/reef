@@ -171,6 +171,11 @@ _ENVIRONMENT_FIELDS = {
     "token": "REEF_TOKEN",
 }
 _CONFIGURED_FIELDS = {
+    "teacher_model_path",
+    "teacher_num_gpus",
+    "teacher_port",
+    "teacher_options",
+    "teacher_timeout",
     "inference_url",
     "inference_handler_factory",
     "inference_handler_config",
@@ -322,12 +327,14 @@ def resolve_model_paths(config: dict[str, Any]) -> bool:
     """
     changed = False
     reef_section = config.get("reef")
-    if isinstance(reef_section, dict) and isinstance(reef_section.get("model_path"), str):
-        resolved = resolve_hf_snapshot(reef_section["model_path"])
-        if resolved != reef_section["model_path"]:
-            _log(f"downloaded HF model {reef_section['model_path']} -> {resolved}")
-            reef_section["model_path"] = resolved
-            changed = True
+    if isinstance(reef_section, dict):
+        for name in ("model_path", "teacher_model_path"):
+            if isinstance(reef_section.get(name), str):
+                resolved = resolve_hf_snapshot(reef_section[name])
+                if resolved != reef_section[name]:
+                    _log(f"downloaded HF model {reef_section[name]} -> {resolved}")
+                    reef_section[name] = resolved
+                    changed = True
     training_section = config.get("training")
     if isinstance(training_section, dict) and isinstance(training_section.get("megatron_checkpoint_path"), str):
         resolved = resolve_hf_snapshot(training_section["megatron_checkpoint_path"])
