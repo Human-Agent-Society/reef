@@ -485,13 +485,18 @@ def _branch_cases(name: str, cases: Any) -> None:
         outcomes.add(outcome)
 
 
-def assignments_need_a_parallel_stage(stages: Mapping[str, Any], kinds: Mapping[str, str]) -> None:
+def assignments_need_a_parallel_stage(stages: Mapping[str, Mapping[str, object]], kinds: Mapping[str, str]) -> None:
     """A branch on ``assignments_at_least`` needs a parallel stage in its own graph: only that graph gives its run
     ``team_assign``, so anywhere else the case could never hold."""
     if any(kind == "subagent" and stages[name].get("mode") == "parallel" for name, kind in kinds.items()):
         return
     for name, kind in kinds.items():
-        if kind == "branch" and any(case["when"] == "assignments_at_least" for case in stages[name]["cases"]):
+        cases = stages[name].get("cases")
+        if (
+            kind == "branch"
+            and isinstance(cases, Sequence)
+            and any(isinstance(case, Mapping) and case.get("when") == "assignments_at_least" for case in cases)
+        ):
             raise ValueError(
                 f"native_graph stage {name!r} tests assignments_at_least, but no stage of the graph has mode parallel, "
                 "so the run never holds team_assign"
