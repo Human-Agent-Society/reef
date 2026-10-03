@@ -25,7 +25,7 @@ import argparse
 import math
 from argparse import Namespace
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from numbers import Integral, Real
 from typing import Any
 
@@ -37,7 +37,7 @@ from reef.train.types import TrajectoryItem
 #: ``self``: the student's own weights read a privileged prefix (the current
 #: weights at update rate 1, an EMA of them below 1, a frozen snapshot at 0).
 #: ``separate``: another model with the same tokenizer scores the student's
-#: sequence; its Megatron checkpoint is named by ``teacher_checkpoint``.
+#: sequence; its checkpoint is named by ``teacher_checkpoint``.
 TEACHER_SOURCES = ("self", "separate")
 #: ``forward`` is KL(teacher || student), the SDFT reference's default and
 #: what its paper's results used (GKD-style); ``reverse`` is KL(student ||
@@ -95,7 +95,7 @@ class DistillSettings:
         if not isinstance(self.teacher_checkpoint, str):
             raise ValueError("distill teacher_checkpoint must be a path string")
         if self.teacher == "separate" and not self.teacher_checkpoint.strip():
-            raise ValueError("distill teacher 'separate' needs teacher_checkpoint, the teacher's Megatron checkpoint")
+            raise ValueError("distill teacher 'separate' needs teacher_checkpoint, the teacher's checkpoint directory")
         if not _is_finite(self.importance_sampling_cap) or self.importance_sampling_cap < 0:
             raise ValueError(
                 "distill importance_sampling_cap must be a finite number >= 0 (0 disables the correction)"
@@ -260,8 +260,9 @@ class DistillAlgorithm(SlimeAlgorithm):
 
     def parse_specific_options(self, arguments: Sequence[str]) -> tuple[DistillSettings, list[str]]:
         prefix = f"--{self.loss_family}-"
-        # Read class defaults before validating the user-supplied teacher checkpoint.
-        defaults = self.settings_type
+        # Field defaults for the help text: a family that requires an option, such as a separate
+        # teacher's checkpoint, has no valid default instance.
+        defaults = {field.name: field.default for field in fields(self.settings_type)}
         parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
         parser.add_argument(
             f"{prefix}teacher",
@@ -270,7 +271,7 @@ class DistillAlgorithm(SlimeAlgorithm):
             help=(
                 "Who scores the student's samples: 'self' is the student's own weights reading the privileged "
                 "prefix, 'separate' another model with the same tokenizer (see teacher-checkpoint). "
-                f"Default {defaults.teacher}."
+                f"Default {defaults['teacher']}."
             ),
         )
         parser.add_argument(
@@ -279,7 +280,7 @@ class DistillAlgorithm(SlimeAlgorithm):
             choices=list(DIVERGENCES),
             help=(
                 "The per-token divergence: 'forward' is KL(teacher || student), 'reverse' is KL(student || "
-                f"teacher), 'jsd' the generalized Jensen-Shannon divergence. Default {defaults.divergence}."
+                f"teacher), 'jsd' the generalized Jensen-Shannon divergence. Default {defaults['divergence']}."
             ),
         )
         parser.add_argument(
@@ -288,7 +289,7 @@ class DistillAlgorithm(SlimeAlgorithm):
             type=int,
             help=(
                 "Keep the teacher's log-probs at K ids per position (see top-k-source) and at the sampled token "
-                f"instead of its whole distribution; 0 keeps the whole distribution. Default {defaults.top_k}."
+                f"instead of its whole distribution; 0 keeps the whole distribution. Default {defaults['top_k']}."
             ),
         )
         parser.add_argument(
@@ -298,13 +299,13 @@ class DistillAlgorithm(SlimeAlgorithm):
             help=(
                 "For a 'self' teacher: the fraction of the current policy mixed into the teacher's weights after "
                 "every step (the SDFT reference's ref_model_mixup_alpha). 1 makes the current policy the teacher, "
-                f"0 freezes the initial weights. Default {defaults.teacher_update_rate}."
+                f"0 freezes the initial weights. Default {defaults['teacher_update_rate']}."
             ),
         )
         parser.add_argument(
             f"{prefix}teacher-checkpoint",
             dest="teacher_checkpoint",
-            help="For a 'separate' teacher: its Megatron checkpoint, loaded beside the actor's weights.",
+            help="For a 'separate' teacher: its checkpoint, loaded into the actor's layout beside the student's weights.",
         )
         parser.add_argument(
             f"{prefix}importance-sampling-cap",
@@ -312,7 +313,7 @@ class DistillAlgorithm(SlimeAlgorithm):
             type=float,
             help=(
                 "Cap of the truncated importance-sampling weight between the policy and the rollout engine's "
-                f"log-probs, averaged over the response. 0 disables it. Default {defaults.importance_sampling_cap}."
+                f"log-probs, averaged over the response. 0 disables it. Default {defaults['importance_sampling_cap']}."
             ),
         )
         parser.add_argument(
@@ -321,14 +322,14 @@ class DistillAlgorithm(SlimeAlgorithm):
             type=int,
             help=(
                 "Response tokens at the start of every sample left out of the loss and its denominator. "
-                f"Default {defaults.skip_response_tokens}."
+                f"Default {defaults['skip_response_tokens']}."
             ),
         )
         parser.add_argument(
             f"{prefix}jsd-beta",
             dest="jsd_beta",
             type=float,
-            help=f"For 'jsd': the teacher's weight in the mixture. Default {defaults.jsd_beta}.",
+            help=f"For 'jsd': the teacher's weight in the mixture. Default {defaults['jsd_beta']}.",
         )
         parser.add_argument(
             f"{prefix}top-k-source",

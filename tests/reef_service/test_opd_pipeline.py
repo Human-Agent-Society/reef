@@ -22,21 +22,11 @@ from reef.train.types import TrainingBatch
 TOKENS = [5, 6, 7, 1, 2, 3]
 
 
-class UnusedTokenizer:
-    """OPD must not re-render a prompt whose exact token IDs are recorded."""
-
-    @classmethod
-    def from_pretrained(cls, path: str, **options: object) -> "UnusedTokenizer":
-        return cls()
-
-    def apply_chat_template(self, *args, **kwargs):
-        raise AssertionError("OPD must use the recorded prefix, including assistant prefill")
-
-
 @pytest.fixture
 def processor(monkeypatch: pytest.MonkeyPatch) -> OPDProcessor:
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace(AutoTokenizer=UnusedTokenizer))
-    return OPDProcessor(ProcessorContext("math", {"batch_size": 1, "tokenizer_path": "/model"}, TeacherContextReport))
+    # OPD reads the recorded ids: loading any tokenizer would fail on this stand-in module.
+    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace())
+    return OPDProcessor(ProcessorContext("math", {"batch_size": 1}, TeacherContextReport))
 
 
 def inference() -> AgentRecord:
@@ -75,7 +65,7 @@ def test_exact_student_tokens_and_no_scalar_reward_reach_slime(processor: OPDPro
     batch = processor.build_batch()
     assert isinstance(batch, TrainingBatch)
     assert batch.batch_id == "math:opd:1"
-    prepared = prepare_slime_step(batch, "opd", {}, StepScheduling(unit="sample"))
+    prepared = prepare_slime_step(batch, "opd", {}, StepScheduling(unit="sample", batch_size="actual"))
     payload = prepared.payload
     assert payload is not None
     assert "advantages" not in payload
@@ -98,7 +88,7 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     recipe = build_recipe(
         "recipes.opd.recipe:OPDRecipe",
         {},
-        {"data": {"tokenizer_path": "/model"}},
+        {},
         **runtime_bindings(StubTrainingRuntime()),
     )
     assert isinstance(recipe, OPDRecipe)
@@ -106,6 +96,7 @@ def test_recipe_resolves_and_rejects_multiple_epochs() -> None:
     assert recipe.max_staleness == 0
     spec = recipe.training_spec()
     assert (spec.objective, spec.processor, spec.loss_family) == ("opd", OPDProcessor, "opd")
+    assert spec.scheduling == StepScheduling(unit="sample", batch_size="actual")
     with pytest.raises(ValueError, match="epochs"):
         OpdObjective().validate_scheduling(StepScheduling(unit="sample", epochs=2))
 
@@ -134,11 +125,7 @@ def test_driver_parses_required_checkpoint_before_validating_defaults() -> None:
 
 @pytest.mark.unit
 def test_overflow_report_does_not_fill_the_batch(processor: OPDProcessor) -> None:
-    limited = OPDProcessor(
-        ProcessorContext(
-            "math", {"batch_size": 1, "tokenizer_path": "/model", "max_teacher_tokens": 5}, TeacherContextReport
-        )
-    )
+    limited = OPDProcessor(ProcessorContext("math", {"batch_size": 1, "max_teacher_tokens": 5}, TeacherContextReport))
     limited.ingest(inference())
     limited.ingest(report())
     assert not limited.ready()

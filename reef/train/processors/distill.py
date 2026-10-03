@@ -70,12 +70,16 @@ class DistillProcessor(ReportedFeedbackProcessor):
     its report is released with its inference record and counted in
     ``teacher_overflow_reports``. A recipe's subclass overrides
     :meth:`teacher_request` with its composition and sets ``batch_label``,
-    its batches' name.
+    its batches' name. A subclass whose teacher reads the recorded ids as
+    they are sets ``renders_teacher_prompt`` to ``False``: it then needs no
+    ``tokenizer_path`` and loads no tokenizer.
     """
 
     output_schema = TrainingBatch
     exclusive_sources = True
     batch_label = "teacher"
+    renders_teacher_prompt = True
+    """Whether :meth:`teacher_tokens` renders a prompt, which needs the served model's tokenizer."""
 
     def __init__(self, context: ProcessorContext) -> None:
         config = context.config
@@ -84,12 +88,15 @@ class DistillProcessor(ReportedFeedbackProcessor):
         if self._max_teacher_tokens < 0:
             raise ValueError("max_teacher_tokens must be non-negative (0 disables the limit)")
         tokenizer_path = str(config.get("tokenizer_path", "")).strip()
-        if not tokenizer_path:
+        if self.renders_teacher_prompt and not tokenizer_path:
             raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
-        # transformers belongs to the training environment; the service never renders a prompt.
-        from transformers import AutoTokenizer
+        if self.renders_teacher_prompt:
+            # transformers belongs to the training environment; the service never renders a prompt.
+            from transformers import AutoTokenizer
 
-        self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+            self._tokenizer = AutoTokenizer.from_pretrained(tokenizer_path, trust_remote_code=True)
+        else:
+            self._tokenizer = None
         self._overflow_reports: set[str] = set()
         self._overflow_count = 0
         super().__init__(context)
@@ -141,6 +148,8 @@ class DistillProcessor(ReportedFeedbackProcessor):
         when set, for templates that render a thinking switch into the
         generation prompt, so the teacher reads what the engine rendered.
         """
+        if self._tokenizer is None:
+            raise RuntimeError(f"{type(self).__name__} reads recorded ids and renders no teacher prompt")
         template_options: dict[str, Any] = {}
         if enable_thinking is not None:
             template_options["enable_thinking"] = enable_thinking
@@ -175,6 +184,11 @@ class DistillProcessor(ReportedFeedbackProcessor):
         teacher_tokens = self.teacher_tokens(
             teacher_messages, teacher_tools, sample.training["tokens"][-response_length:]
         )
+        self.check_teacher_length(context, teacher_tokens)
+        return sample.with_training(teacher_tokens=teacher_tokens)
+
+    def check_teacher_length(self, context: ReportContext, teacher_tokens: Sequence[int]) -> None:
+        """Mark a report whose teacher sequence exceeds ``max_teacher_tokens``; its group decision releases it."""
         if self._max_teacher_tokens and len(teacher_tokens) > self._max_teacher_tokens:
             self._overflow_reports.add(context.report.agent_record_id)
             logger.warning(
@@ -183,7 +197,6 @@ class DistillProcessor(ReportedFeedbackProcessor):
                 len(teacher_tokens),
                 self._max_teacher_tokens,
             )
-        return sample.with_training(teacher_tokens=teacher_tokens)
 
     def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
         # An overflowing report is its own group, so the group decision can release it.
