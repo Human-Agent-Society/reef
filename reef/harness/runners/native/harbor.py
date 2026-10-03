@@ -5,7 +5,10 @@ Harbor builds the task container and calls ``setup`` and ``run`` on the trial's 
 this host. Every tool call and every team git command goes to the container through ``HarborTaskEnvironment``,
 which schedules Harbor's coroutines on the trial's event loop and waits for them. When Harbor cancels ``run`` at the
 task's agent timeout, the episode's stop flag is set and ``run`` waits up to ``CANCEL_GRACE_SECONDS`` for the turn
-to end, so the members stop and a stage merges. However ``run`` returns, the bridge then closes, so a turn still
+to end, so the members stop and a stage merges. With a time budget (``seconds_limit``, from
+``evolution.episode_seconds``) the agent sets the stop flag itself, with reason ``deadline``, before Harbor's
+timeout, and a tool call started near the deadline gets only the time left, so the members end, a stage merges
+and the turn ends in time. However ``run`` returns, the bridge then closes, so a turn still
 running starts no command in the container, and the saved tool output, the team's git state and anything already
 in Harbor's verifier directory are removed: the verifier sees the workdir as it stands and writes its output afresh.
 
@@ -32,7 +35,7 @@ from harbor.models.trial.paths import EnvironmentPaths
 
 from reef.core.version import __version__
 from reef.harness.runners.native import run_loop
-from reef.harness.runners.native.control import EpisodeControl, RequestPolicy, TeamBudget
+from reef.harness.runners.native.control import EpisodeControl, RequestPolicy, TeamBudget, deadline_after
 from reef.harness.runners.native.enforce import CHILD
 from reef.harness.runners.native.environment import (
     FILE_TIMEOUT_SECONDS,
@@ -114,9 +117,9 @@ class NativeTeamAgent(BaseAgent):
     """Reef's native loop, with any team its tree runs, as a Harbor agent.
 
     Harbor passes the trial config's agent ``kwargs``: where the rendered tree and its sessions are on this host, the
-    reply budget of a model call from the binding, and the episode's token budget. The model and its key come from
-    the tree's ``models.json``, so no credential goes into the trial config. ``verifier_path`` is where Harbor's
-    verifier writes in the container."""
+    reply budget of a model call from the binding, and the episode's token and time budgets. The model and its key
+    come from the tree's ``models.json``, so no credential goes into the trial config. ``verifier_path`` is where
+    Harbor's verifier writes in the container."""
 
     SUPPORTS_ATIF = False
 
@@ -129,6 +132,7 @@ class NativeTeamAgent(BaseAgent):
         session_path: str,
         max_completion_tokens: int,
         token_limit: int | None = None,
+        seconds_limit: float | None = None,
         support_path: str = str(SUPPORT_PATH),
         verifier_path: str = str(EnvironmentPaths.verifier_dir),
         **harbor_options: object,
@@ -138,6 +142,7 @@ class NativeTeamAgent(BaseAgent):
         self.session_path = Path(session_path)
         self.max_completion_tokens = max_completion_tokens
         self.token_limit = token_limit
+        self.seconds_limit = seconds_limit
         self.support_path = PurePosixPath(support_path)
         self.verifier_path = PurePosixPath(verifier_path)
 
@@ -175,14 +180,16 @@ class NativeTeamAgent(BaseAgent):
         if found.return_code != 0 or not workdir.is_absolute():
             raise RuntimeError(f"the task environment names no working directory: {found.stdout!r}")
         bridge = HarborTaskEnvironment(environment, asyncio.get_running_loop())
+        # The deadline starts here, with the run: the time budget covers the turn, the members and the merge.
         control = EpisodeControl(
             budget=TeamBudget(self.token_limit),
             command_runner=EnvironmentCommandRunner(bridge),
             team_path=self.support_path / "team",
             request_policy=RequestPolicy(is_retry_until_stopped=True),
             max_completion_tokens=self.max_completion_tokens,
+            deadline=deadline_after(self.seconds_limit),
         )
-        enforcer = TaskEnvironmentEnforcer(bridge, self.support_path)
+        enforcer = TaskEnvironmentEnforcer(bridge, self.support_path, control=control)
         # to_thread runs in a copy of this task's context and every member's thread in a copy of the root's, so the
         # environment overlay Harbor keeps in a context variable reaches every command.
         turn = asyncio.ensure_future(
@@ -196,6 +203,7 @@ class NativeTeamAgent(BaseAgent):
                 control=control,
             )
         )
+        deadline_timer = control.start_deadline_timer()
         try:
             try:
                 exit_code = await asyncio.shield(turn)
@@ -205,6 +213,8 @@ class NativeTeamAgent(BaseAgent):
                     await asyncio.wait_for(asyncio.shield(turn), CANCEL_GRACE_SECONDS)
                 raise
         finally:
+            if deadline_timer is not None:
+                deadline_timer.cancel()
             # A turn still running past the grace starts no command in the container.
             bridge.close()
             context.n_input_tokens = control.budget.input_tokens

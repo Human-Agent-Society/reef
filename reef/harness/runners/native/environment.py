@@ -19,6 +19,7 @@ from collections.abc import Sequence
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from reef.harness.runners.native.control import EpisodeControl
 from reef.harness.runners.native.enforce import Enforcer, SandboxFailed, Tool, ToolFailed
 from reef.harness.runners.native.workspaces import CommandOutcome, CommandRunner
 
@@ -26,6 +27,8 @@ from reef.harness.runners.native.workspaces import CommandOutcome, CommandRunner
 SUPPORT_PATH = PurePosixPath("/reef")
 #: The longest one tool call may run in the container; a tool's own timeouts are shorter.
 TOOL_CALL_TIMEOUT_SECONDS = 1800.0
+#: The least a tool call gets near the episode's deadline, so a command started late still runs.
+TOOL_CALL_MIN_SECONDS = 30.0
 #: The longest a directory or an upload of one file may take.
 FILE_TIMEOUT_SECONDS = 120.0
 
@@ -46,13 +49,23 @@ class TaskEnvironment(ABC):
 
 
 class TaskEnvironmentEnforcer(Enforcer):
-    """Each call imports the tool's module afresh in the task container; the container is the boundary."""
+    """Each call imports the tool's module afresh in the task container; the container is the boundary.
+
+    With ``control``, a call started near the episode's deadline gets only the time left to it,
+    ``TOOL_CALL_MIN_SECONDS`` at least, so no member sits in a command past the deadline."""
 
     mode = "task-environment"
 
-    def __init__(self, environment: TaskEnvironment, support_path: PurePosixPath = SUPPORT_PATH) -> None:
+    def __init__(
+        self,
+        environment: TaskEnvironment,
+        support_path: PurePosixPath = SUPPORT_PATH,
+        *,
+        control: EpisodeControl | None = None,
+    ) -> None:
         self.environment = environment
         self.support_path = support_path
+        self.control = control
 
     def describe(self, tool: Tool | None) -> dict[str, Any]:
         return {"mode": self.mode, "denied": []}
@@ -65,12 +78,18 @@ class TaskEnvironmentEnforcer(Enforcer):
         # A file, not the command line: Harbor's exec takes no stdin, and a large argument outgrows an argv.
         request_path = self.support_path / "requests" / f"{uuid.uuid4().hex}.json"
         child, quoted = shlex.quote(str(self.support_path / "sandboxed.py")), shlex.quote(str(request_path))
+        left = None if self.control is None else self.control.seconds_left()
+        timeout_seconds = (
+            TOOL_CALL_TIMEOUT_SECONDS
+            if left is None
+            else min(TOOL_CALL_TIMEOUT_SECONDS, max(TOOL_CALL_MIN_SECONDS, left))
+        )
         try:
             self.upload_text(json.dumps(request, default=str), str(request_path))
             done = self.environment.exec(
                 f"python3 {child} < {quoted}; code=$?; rm -f {quoted}; exit $code",
                 cwd=str(workdir),
-                timeout_seconds=TOOL_CALL_TIMEOUT_SECONDS,
+                timeout_seconds=timeout_seconds,
             )
         except TaskEnvironmentError as exc:
             raise SandboxFailed(f"the task environment could not run the call: {exc}") from exc

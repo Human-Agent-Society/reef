@@ -29,6 +29,7 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
 from reef.harness.episodes.executor import (
+    EPISODE_SECONDS_ENV,
     EPISODE_TOKENS_ENV,
     EpisodeExecutor,
     LocalExecutor,
@@ -310,6 +311,9 @@ class CordisRecipe(Recipe):
     binary: str | None = None
     episode_timeout_s: float = 600.0
     episode_tokens: int | None = None
+    #: The time budget of one native episode, in seconds: the stop flag is set with reason ``deadline`` when it runs
+    #: out, so the team merges and ends before the episode timeout and a Harbor task's agent timeout.
+    episode_seconds: float | None = None
     infrastructure_markers: tuple[InfrastructureMarker, ...] = ()
     episode_repeats: int = 1
     forbid_residue: bool = False
@@ -398,6 +402,8 @@ class CordisRecipe(Recipe):
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_tokens is not None and self.episode_tokens < 1:
             raise ValueError("episode_tokens must be at least 1 when set")
+        if self.episode_seconds is not None and not 0 < self.episode_seconds < self.episode_timeout_s:
+            raise ValueError("episode_seconds must be positive and below episode_timeout_s when set")
         request_fields(self.served_request, "served_request")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
@@ -499,6 +505,24 @@ class CordisRecipe(Recipe):
             if evolution.get("adapter", "pi") not in ("native", "native_harbor"):
                 raise RecipeConfigError(
                     "evolution.episode_tokens is enforced only by the native and native_harbor adapters"
+                )
+        episode_seconds = evolution.get("episode_seconds")
+        if episode_seconds is not None:
+            if (
+                isinstance(episode_seconds, bool)
+                or not isinstance(episode_seconds, (int, float))
+                or episode_seconds <= 0
+            ):
+                raise RecipeConfigError("evolution.episode_seconds must be a positive number of seconds")
+            if evolution.get("adapter", "pi") not in ("native", "native_harbor"):
+                raise RecipeConfigError(
+                    "evolution.episode_seconds is enforced only by the native and native_harbor adapters"
+                )
+            # The time budget ends the team in time to merge; the timeout ends the episode as one that could not run.
+            if episode_seconds >= timeout:
+                raise RecipeConfigError(
+                    f"evolution.episode_seconds ({episode_seconds:g}) must be below evolution.episode_timeout_s "
+                    f"({timeout:g}), which ends the episode without a score"
                 )
         markers: tuple[InfrastructureMarker, ...] = ()
         if evolution.get("infrastructure_markers") is not None:
@@ -728,6 +752,7 @@ class CordisRecipe(Recipe):
             "binary": binary,
             "episode_timeout_s": float(timeout),
             "episode_tokens": episode_tokens,
+            "episode_seconds": None if episode_seconds is None else float(episode_seconds),
             "infrastructure_markers": markers,
             "episode_repeats": repeats,
             "on_stale": on_stale,
@@ -884,6 +909,7 @@ class CordisRecipe(Recipe):
             "episode_timeout_s": self.episode_timeout_s,
             "episode_env": {
                 **({EPISODE_TOKENS_ENV: str(self.episode_tokens)} if self.episode_tokens else {}),
+                **({EPISODE_SECONDS_ENV: str(self.episode_seconds)} if self.episode_seconds else {}),
                 **(
                     {INFRASTRUCTURE_MARKERS_ENV: markers_text(self.infrastructure_markers)}
                     if self.infrastructure_markers

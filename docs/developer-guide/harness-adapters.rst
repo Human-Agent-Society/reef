@@ -1011,6 +1011,10 @@ reported none. Once the budget is spent, each turn ends with
 ``max-tokens`` at its next step and a ``compact`` stage makes no summary
 call, so a team stops within one call per live member. The per-agent counters in the evaluation results count reported
 tokens only, so they can be lower than what the budget spent.
+``evolution.episode_seconds`` is the time budget beside it, passed as
+``REEF_EPISODE_SECONDS`` the same way: when it runs out the process that
+started the episode sets the stop flag with reason ``deadline``, and every
+turn ends ``stopped`` at its next step.
 
 Rendering refuses an ``agents`` name the tree lacks, a cycle through
 ``agents``, a member that carries ``then``, and a team stage inside a
@@ -1245,6 +1249,13 @@ the tree:
   for any Harbor agent. Harbor then runs the verifier, as it does after any
   agent timeout. The agent reports the episode's token counts to Harbor's
   ``AgentContext``.
+- With ``evolution.episode_seconds`` the agent stops the episode itself,
+  with reason ``deadline``, that many seconds after its run starts. A tool
+  call started near the deadline gets only the time left (30 seconds at
+  least) instead of the 1800 second cap, so a member in a long command ends
+  at its next step too, the stage merges, and the turn ends before Harbor's
+  agent timeout. The ``native`` adapter reads the same budget from
+  ``REEF_EPISODE_SECONDS``; its tool calls keep their own timeouts.
 
 The runner process imports every hook and runs any ``native_loop``, and
 it writes the row the episode is scored by. The adapter's

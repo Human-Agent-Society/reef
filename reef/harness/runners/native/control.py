@@ -1,19 +1,23 @@
 """What the process that starts a native episode sets and the tree cannot: the budget, the stop, where team git runs.
 
 ``run_episode`` passes the budget as ``REEF_EPISODE_TOKENS`` from ``evolution.episode_tokens``; no node renders it,
-so a candidate tree cannot raise the budget it is judged under. The budget and the stop flag are shared by every
-agent turn of the episode, the members of a team stage included, and read before each step. The Harbor agent
+so a candidate tree cannot raise the budget it is judged under. The time budget comes the same way, as
+``REEF_EPISODE_SECONDS`` from ``evolution.episode_seconds``: the deadline it sets ends the episode through the stop
+flag, with reason ``deadline``. The budget and the stop flag are shared by every agent turn of the episode, the
+members of a team stage included, and read before each step. The Harbor agent
 (``reef.harness.runners.native.harbor``) also sets the reply budget of a model call and the retry policy.
 """
 
 from __future__ import annotations
 
+import math
 import threading
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 
-from reef.harness.episodes.executor import EPISODE_TOKENS_ENV
+from reef.harness.episodes.executor import EPISODE_SECONDS_ENV, EPISODE_TOKENS_ENV
 from reef.harness.runners.native.workspaces import CommandRunner, HostCommandRunner
 
 
@@ -25,6 +29,25 @@ def episode_token_limit(environ: Mapping[str, str]) -> int | None:
     if not (text.isascii() and text.isdigit()) or int(text) <= 0:
         raise ValueError(f"{EPISODE_TOKENS_ENV}={text!r} must be a positive integer of tokens")
     return int(text)
+
+
+def episode_seconds_limit(environ: Mapping[str, str]) -> float | None:
+    """The time budget ``REEF_EPISODE_SECONDS`` names, in seconds: None when unset, else a positive number."""
+    text = environ.get(EPISODE_SECONDS_ENV)
+    if text is None:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        seconds = math.nan
+    if not seconds > 0 or math.isinf(seconds):
+        raise ValueError(f"{EPISODE_SECONDS_ENV}={text!r} must be a positive number of seconds")
+    return seconds
+
+
+def deadline_after(seconds_limit: float | None) -> float | None:
+    """The episode's deadline on the monotonic clock, ``seconds_limit`` seconds from now; None without a limit."""
+    return None if seconds_limit is None else time.monotonic() + seconds_limit
 
 
 class TeamBudget:
@@ -96,8 +119,26 @@ class EpisodeControl:
     request_policy: RequestPolicy = field(default_factory=RequestPolicy)
     #: Tokens one model call may generate; None is the loop's own cap, ``MAX_COMPLETION_TOKENS``.
     max_completion_tokens: int | None = None
+    #: When the episode must end, on the monotonic clock (``deadline_after``); None is no time budget.
+    deadline: float | None = None
 
     @property
     def is_ending(self) -> bool:
         """Whether the stop flag is set or the budget spent, so every turn ends at its next step."""
         return self.stop.is_set or self.budget.is_spent
+
+    def seconds_left(self) -> float | None:
+        """Seconds to the deadline, 0 once it passed; None without one."""
+        return None if self.deadline is None else max(0.0, self.deadline - time.monotonic())
+
+    def start_deadline_timer(self) -> threading.Timer | None:
+        """A daemon timer that sets the stop flag with reason ``deadline`` when the time budget runs out, so every
+        turn ends at its next step and a team stage merges; None without a deadline. The caller cancels it once
+        the turn ended."""
+        left = self.seconds_left()
+        if left is None:
+            return None
+        timer = threading.Timer(left, self.stop.set, ("deadline",))
+        timer.daemon = True
+        timer.start()
+        return timer

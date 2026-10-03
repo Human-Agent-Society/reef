@@ -23,7 +23,7 @@ from reef.core.errors import ReefError
 from reef.harness.episodes.trajectory import primary_reward
 from reef.harness.runners.harbor_trial import HarborTrialError, infrastructure_error, infrastructure_markers, run_trial
 from reef.harness.runners.native import LoadError, binding_from, output_token_limit_from
-from reef.harness.runners.native.control import episode_token_limit
+from reef.harness.runners.native.control import episode_seconds_limit, episode_token_limit
 
 TRIALS_DIR_ENV = "REEF_NATIVE_HARBOR_TRIALS_DIR"
 #: Where Harbor runs the task: ``docker`` (the default) or ``e2b``.
@@ -75,6 +75,7 @@ def run_task(task: str) -> int:
                 "session_path": str(session_path),
                 "max_completion_tokens": max_completion_tokens,
                 "token_limit": episode_token_limit(os.environ),
+                "seconds_limit": episode_seconds_limit(os.environ),
             },
         }
         result = run_trial(task, agent, trials_path=trials_path, environment=environment, runner_name="native_harbor")

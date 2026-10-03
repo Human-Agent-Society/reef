@@ -34,7 +34,13 @@ from types import ModuleType
 from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, usage_of
-from reef.harness.runners.native.control import EpisodeControl, TeamBudget, episode_token_limit
+from reef.harness.runners.native.control import (
+    EpisodeControl,
+    TeamBudget,
+    deadline_after,
+    episode_seconds_limit,
+    episode_token_limit,
+)
 from reef.harness.runners.native.enforce import (
     Enforcer,
     InProcessEnforcer,
@@ -978,8 +984,15 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("-p/--prompt is required")
     try:
         token_limit = episode_token_limit(os.environ)
+        seconds_limit = episode_seconds_limit(os.environ)
     except ValueError as exc:
         parser.error(str(exc))
     root = Path(os.environ.get("REEF_NATIVE_DIR") or "native")
     session_dir = Path(os.environ.get("REEF_NATIVE_SESSION_DIR") or root / "sessions")
-    return run_loop(args.prompt, root, session_dir, Path.cwd(), control=EpisodeControl(TeamBudget(token_limit)))
+    control = EpisodeControl(TeamBudget(token_limit), deadline=deadline_after(seconds_limit))
+    deadline_timer = control.start_deadline_timer()
+    try:
+        return run_loop(args.prompt, root, session_dir, Path.cwd(), control=control)
+    finally:
+        if deadline_timer is not None:
+            deadline_timer.cancel()

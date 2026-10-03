@@ -30,12 +30,19 @@ from reef_service.test_native_harness import (
 )
 
 from reef.harness.adapters import get_adapter
-from reef.harness.episodes.executor import EPISODE_TOKENS_ENV
+from reef.harness.episodes.executor import EPISODE_SECONDS_ENV, EPISODE_TOKENS_ENV
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import reader_for
 from reef.harness.runners.native import TEAM_DIR, Session, ToolModule, ToolRunner, _Loop, run_loop
-from reef.harness.runners.native.control import EpisodeControl, EpisodeStop, TeamBudget, episode_token_limit
+from reef.harness.runners.native.control import (
+    EpisodeControl,
+    EpisodeStop,
+    TeamBudget,
+    deadline_after,
+    episode_seconds_limit,
+    episode_token_limit,
+)
 from reef.harness.runners.native.enforce import InProcessEnforcer, ToolFailed
 from reef.harness.runners.native.graph import Run, _tokens, run_graph
 from reef.harness.runners.native.host import NativeHost
@@ -239,6 +246,49 @@ def test_the_budget_reaches_the_loop_only_through_the_episode_environment(tmp_pa
         assert refused.exit_code == 2 and EPISODE_TOKENS_ENV in refused.stderr
     finally:
         stop(model)
+
+
+class SlowReadingModel(_FakeModel):
+    """Takes a while over every call, and every answer is a read."""
+
+    def __init__(self, delay_seconds: float) -> None:
+        super().__init__()
+        self.delay_seconds = delay_seconds
+
+    def script(self, body: dict) -> dict:
+        time.sleep(self.delay_seconds)
+        return READ
+
+
+def test_the_time_budget_reaches_the_loop_through_the_episode_environment_and_ends_the_turn_at_the_deadline(
+    tmp_path: Path,
+) -> None:
+    assert episode_seconds_limit({}) is None and episode_seconds_limit({EPISODE_SECONDS_ENV: "21000"}) == 21000.0
+    assert episode_seconds_limit({EPISODE_SECONDS_ENV: "1.5"}) == 1.5
+    for bad in ("0", "-1", "5s", "", "nan", "inf"):
+        with pytest.raises(ValueError, match=f"{EPISODE_SECONDS_ENV}=.* must be a positive number of seconds"):
+            episode_seconds_limit({EPISODE_SECONDS_ENV: bad})
+    # The control reads the clock: the time left shrinks to 0 and never below, and the timer sets the stop.
+    assert EpisodeControl().seconds_left() is None and EpisodeControl().start_deadline_timer() is None
+    control = EpisodeControl(deadline=deadline_after(0.2))
+    left = control.seconds_left()
+    assert left is not None and 0 < left <= 0.2
+    assert control.start_deadline_timer() is not None
+    assert control.stop.wait(5) and control.stop.reason == "deadline" and control.seconds_left() == 0
+    model = SlowReadingModel(0.4)
+    descriptor = get_adapter("native")
+    binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy")
+    files = render_composition([*_seed_nodes(SEED_TOOLS), *binding.compose_nodes(descriptor)], descriptor)
+    task = "read the notes"
+    try:
+        limited = run_episode(descriptor, files, task, binary=_launcher(tmp_path), env={EPISODE_SECONDS_ENV: "1"})
+        refused = run_episode(descriptor, files, task, binary=_launcher(tmp_path), env={EPISODE_SECONDS_ENV: "soon"})
+    finally:
+        stop(model)
+    # The call in flight at the deadline came back and the turn ended at its next step, within one call of it.
+    assert limited.trajectory[-1]["data"]["reason"] == {"kind": "stopped", "reason": "deadline"}
+    assert limited.exit_code == 0 and len(model.requests) <= 4
+    assert refused.exit_code == 2 and EPISODE_SECONDS_ENV in refused.stderr
 
 
 # -- team stages: members on their own threads ----------------------------------------------------------------------

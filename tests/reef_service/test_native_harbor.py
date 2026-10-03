@@ -39,10 +39,18 @@ from reef.harness.runners.harbor_trial import (
 )
 from reef.harness.runners.native import MAX_COMPLETION_TOKENS, run_loop
 from reef.harness.runners.native.__main__ import main as native_main
-from reef.harness.runners.native.control import EpisodeControl, RequestPolicy
+from reef.harness.runners.native.control import EpisodeControl, RequestPolicy, deadline_after
+from reef.harness.runners.native.enforce import Tool
+from reef.harness.runners.native.environment import (
+    TOOL_CALL_MIN_SECONDS,
+    TOOL_CALL_TIMEOUT_SECONDS,
+    TaskEnvironment,
+    TaskEnvironmentEnforcer,
+)
 from reef.harness.runners.native.plugins import check_native_config
 from reef.harness.runners.native.seed import SEED_HOOKS, SEED_NODES, SEED_TOOLS
 from reef.harness.runners.native.task import AGENT_IMPORT_PATH, ENVIRONMENT_ENV, TRIALS_DIR_ENV
+from reef.harness.runners.native.workspaces import CommandOutcome
 from reef.harness.tree.render import render_composition
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, tree_files
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, verifier_reward
@@ -353,6 +361,41 @@ def test_the_bridge_returns_a_commands_stdout_alone_and_a_wrapper_failure_as_its
     assert (failed.return_code, failed.stdout) == (125, "") and "mktemp" in failed.stderr
 
 
+class TimedEnvironment(TaskEnvironment):
+    """Records the timeout of each command and answers every tool call with one reply."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def exec(self, command, *, cwd, timeout_seconds):
+        self.timeouts.append(timeout_seconds)
+        return CommandOutcome(0, json.dumps({"ok": True, "text": "fine"}), "")
+
+    def upload_file(self, source_path, target_path):
+        return None
+
+
+class SlowTool(Tool):
+    name = "slow"
+    capabilities = ()
+    path = Path("slow.py")
+
+    def run(self, args, workdir, /):
+        return ""
+
+
+def test_a_tool_call_near_the_deadline_gets_only_the_time_left_and_the_floor_at_least() -> None:
+    environment = TimedEnvironment()
+    for left in (None, 5000.0, 400.0, 12.0, 0.0):
+        control = EpisodeControl(deadline=deadline_after(left))
+        assert TaskEnvironmentEnforcer(environment, control=control).run(SlowTool(), {}, Path("/work")) == "fine"
+    # Without a control the cap stands.
+    assert TaskEnvironmentEnforcer(environment).run(SlowTool(), {}, Path("/work")) == "fine"
+    cap, floor = TOOL_CALL_TIMEOUT_SECONDS, TOOL_CALL_MIN_SECONDS
+    # The deadline sits on the monotonic clock, so the time left is a little under what was set.
+    assert environment.timeouts == pytest.approx([cap, cap, 400.0, floor, floor, cap], abs=1.0)
+
+
 class BigModel(_FakeModel):
     def script(self, body: dict) -> dict:
         if any(message.get("role") == "tool" for message in body["messages"]):
@@ -621,6 +664,74 @@ def test_past_the_cancel_grace_no_command_of_the_episode_reaches_the_container(t
     assert merge["result"] == "failed" and "takes no more commands" in merge["error"]
 
 
+SLEEP_TOOL = (
+    "native_tool",
+    {
+        "name": "sleep",
+        "description": "Sleeps six seconds.",
+        "parameters": {"type": "object", "properties": {}},
+        "code": "import time\n\n\ndef run(args, workdir):\n    time.sleep(6)\n    return 'slept'\n",
+    },
+)
+
+
+class DeadlineModel(MemberModel):
+    """The root hands the task on; peer.1 writes a.txt and sleeps in a tool at once, peer.2 writes b.txt and reads
+    on until something stops it."""
+
+    def reply(self, instance: str, body: dict) -> dict:
+        if instance == "root":
+            return _reply(content="go")
+        done = sum(1 for message in body["messages"] if message.get("role") == "tool")
+        if done == 0 and instance == "peer.1":
+            write = _call("write_file", {"path": "a.txt", "content": "from one\n"}, "w0")
+            return _reply(tool_calls=[write, _call("sleep", {}, "s0")])
+        if done == 0:
+            return _reply(tool_calls=[_call("write_file", {"path": "b.txt", "content": "from two\n"}, "w0")])
+        if instance == "peer.1":
+            return _reply(tool_calls=[_call("sleep", {}, f"s{done}")])
+        return _reply(tool_calls=[_call("read_file", {"path": "missing.txt"}, f"r{done}")])
+
+
+def test_the_deadline_ends_every_member_cuts_a_long_tool_call_and_the_stage_still_merges(
+    tmp_path: Path, monkeypatch
+) -> None:
+    harbor_agent_class()
+    import reef.harness.runners.native.environment as environment_module
+
+    # The floor is 30 seconds for a real task; here a cut command must show within the test.
+    monkeypatch.setattr(environment_module, "TOOL_CALL_MIN_SECONDS", 0.2)
+    model = DeadlineModel()
+    environment = FakeEnvironment(tmp_path)
+    crew = crew_graph(mode="team", agents=["peer", "peer"], workspace="own")
+    try:
+        root = render_tree(tmp_path, model, [*TEAM_NODES, SLEEP_TOOL, ("native_graph", crew)])
+        started = time.monotonic()
+        context = asyncio.run(play(make_agent(tmp_path, root, environment, seconds_limit=1.0), environment))
+        elapsed = time.monotonic() - started
+    finally:
+        stop(model)
+    sessions = root / "sessions"
+    files = member_files(sessions)
+    assert sorted(files) == ["peer.1", "peer.2"]
+    for found in files.values():
+        assert found[-1]["data"]["reason"] == {"kind": "stopped", "reason": "deadline"}
+    # peer.1's sleep was cut at the deadline with the usual tool error, long before the six seconds it asked for.
+    cut = next(e["data"] for e in files["peer.1"] if e["type"] == "tool/result" and e["data"]["name"] == "sleep")
+    assert cut["is_error"] and cut["error"]["code"] == "SANDBOX_FAILED" and elapsed < 5
+    # The clones merged after the deadline, so the verifier sees both files, and the root turn ended on budget.
+    root_events = events(sessions / "session.jsonl")
+    merges = typed(root_events, "team/merge")
+    assert [(merge["agent"], merge["result"]) for merge in merges] == [("peer.1", "merged"), ("peer.2", "merged")]
+    assert (environment.workspace_path / "a.txt").read_text() == "from one\n"
+    assert (environment.workspace_path / "b.txt").read_text() == "from two\n"
+    (stage_exit,) = [e for e in typed(root_events, "stage/exit") if e["stage"] == "delegate"]
+    assert (stage_exit["outcome"], stage_exit["to"]) == ("budget", "quit")
+    assert typed(root_events, "turn/end")[-1]["reason"] == {"kind": "gave_up"}
+    # The token counts of every call, the members' included, still reach Harbor.
+    assert context.n_input_tokens > 0 and context.n_output_tokens > 0
+
+
 PLANT_TOOL = (
     "native_tool",
     {
@@ -703,6 +814,7 @@ def runner_env(tmp_path: Path, monkeypatch) -> Path:
         monkeypatch.setenv(key, value.replace("{root}", str(tmp_path / "root")))
     monkeypatch.delenv(INFRASTRUCTURE_MARKERS_ENV, raising=False)
     monkeypatch.delenv("REEF_EPISODE_TOKENS", raising=False)
+    monkeypatch.delenv("REEF_EPISODE_SECONDS", raising=False)
     return tmp_path / "root" / "native" / "sessions"
 
 
@@ -742,6 +854,7 @@ def test_the_runner_writes_one_flat_verifier_row_that_the_scorer_reads(runner_en
             "session_path": str(runner_env),
             "max_completion_tokens": 900,
             "token_limit": 5000,
+            "seconds_limit": None,
         },
     }
     # No credential rides in the trial config Harbor writes.
@@ -833,11 +946,14 @@ def test_a_runner_error_before_the_trial_still_writes_a_failed_row(runner_env: P
     assert score(runner_env, 1).score is None
 
 
-def test_harbor_builds_the_agent_from_the_spec_the_runner_hands_it(runner_env: Path, tmp_path: Path) -> None:
+def test_harbor_builds_the_agent_from_the_spec_the_runner_hands_it(
+    runner_env: Path, tmp_path: Path, monkeypatch
+) -> None:
     agent_class = harbor_agent_class()
     from harbor.agents.factory import AgentFactory
     from harbor.models.trial.config import AgentConfig, TaskConfig, TrialConfig
 
+    monkeypatch.setenv("REEF_EPISODE_SECONDS", "21000")
     assert native_main(["task", "--task", TASK]) == 0
     (spec,) = FakeLab.specs
     config = TrialConfig.model_validate(
@@ -851,4 +967,5 @@ def test_harbor_builds_the_agent_from_the_spec_the_runner_hands_it(runner_env: P
     assert config.agent.import_path == AGENT_IMPORT_PATH and isinstance(agent, agent_class)
     assert (agent.tree_path, agent.session_path) == (runner_env.parent, runner_env)
     assert (agent.max_completion_tokens, agent.token_limit, str(agent.support_path)) == (900, None, "/reef")
+    assert agent.seconds_limit == 21000.0
     assert agent.to_agent_info().name == "reef-native"

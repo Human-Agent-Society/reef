@@ -1272,6 +1272,8 @@ merged into the task's workdir before the verifier runs:
            - /path/to/tasks/add-a-cli-flag
          # One budget for every model call of the episode, the workers' included.
          episode_tokens: 400000
+         # The team stops here, with reason deadline, so the clones merge before the tasks' agent timeout.
+         episode_seconds: 3000
          # Above the tasks' agent timeout plus both image builds and the verifier timeout.
          episode_timeout_s: 5400
          seed:
@@ -1319,7 +1321,12 @@ Put the ``recipe`` section in a deployment config beside its ``reef`` and
 ``inference`` sections, as ``configs/serve-native.yaml`` in the tutorial
 does, and start it with ``reef serve -c <config>``.
 ``evolution.task_manifest`` with ``evolution.tasks_root`` can name the task
-directories instead of ``tasks``.
+directories instead of ``tasks``. ``episode_seconds`` is the time budget
+beside the token budget: when it runs out, each member ends at its next
+step, a tool call started near the deadline gets only the time left, the
+stage merges the clones, and the root turn ends with reason ``deadline``.
+Keep the tasks' Harbor agent timeout above ``episode_seconds`` plus the
+time the merge takes, and ``episode_timeout_s`` above that.
 
 For peers that start together instead of a lead, use ``mode: team`` with
 the agents listed in ``agents``. Members talk with ``team_send`` and
