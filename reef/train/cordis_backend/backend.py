@@ -18,7 +18,7 @@ import threading
 import time
 import weakref
 from collections import deque
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
@@ -106,6 +106,7 @@ class EpisodeEvaluationWorker:
     forbid_residue: bool
     owner_lease: bool = False
     transfer_records: bool = False
+    episode_env: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         self.executor.preflight()
@@ -150,6 +151,7 @@ class EpisodeEvaluationWorker:
                 timeout=self.timeout,
                 executor=self.executor,
                 keep_dir=keep_dir,
+                env=dict(self.episode_env),
             )
         except EpisodeError as error:
             # A timeout, or a render the tree's own files broke, is the harness's failure, so a rerun cannot give it
@@ -184,6 +186,7 @@ class EpisodeEvaluationWorker:
         """The score and the observations of an episode that ran."""
         residue = len(result.residue)
         agents = _agent_work(result.trajectory)
+        messages = team_message_counts(result.trajectory)
         path = _stage_path(result.trajectory)
         if residue and self.forbid_residue:
             cause = f"{residue} file(s) outside the cleanup whitelist: {result.residue[0]}"
@@ -193,47 +196,55 @@ class EpisodeEvaluationWorker:
                 residue,
                 agents,
                 path,
+                messages=messages,
                 fault="harness",
                 label="execution_error",
             )
         trial_error = _failed_trial_error(result.trajectory)
         if trial_error:
-            # The terminus runner recorded a trial that never ran (the image did not build, the agent could not
-            # start): no answer was given, so it ranks below every real score instead of tying a zero.
+            # A Harbor runner (terminus, native_harbor) recorded a trial that never ran (the image did not build,
+            # the agent could not start): no answer was given, so it ranks below every real score instead of tying a
+            # zero.
             return _ScoredEpisode(
                 None,
                 FailureObservation(task=task, stage="trial", cause=trial_error),
                 residue,
                 agents,
                 path,
+                messages=messages,
                 fault="infrastructure",
                 label="execution_error",
             )
+        turn_failure: FailureObservation | None = None
         if path.get("error") is not None:
-            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
-            # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
-            # score instead of tying a zero.
             error = path["error"]
             cause = f"{error.get('code', 'error')}: {error.get('message', '')}".strip(": ")
             if path.get("errored_agent"):
                 cause = f"agent {path['errored_agent']}: {cause}"
             # A loop turn walks no graph: the failure names the loop when the root's header does.
             stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
-            return _ScoredEpisode(
-                None,
-                FailureObservation(task=task, stage=stage, cause=cause),
-                residue,
-                agents,
-                path,
-                fault="harness",
-                label="execution_error",
-            )
+            turn_failure = FailureObservation(task=task, stage=stage, cause=cause)
+            # The native loop ended its turn on an error (a tree that cannot load, a graph that cannot run, an
+            # agent whose failure ended the run): nothing it wrote is an answer, so it ranks below every real
+            # score instead of tying a zero. A Harbor verifier grades the workdir after a turn that ran and then
+            # failed (a model error, a stop during retries), so its reward stands then.
+            if error.get("code") == "LOAD_ERROR" or not is_graded_trial(result.trajectory):
+                return _ScoredEpisode(
+                    None,
+                    turn_failure,
+                    residue,
+                    agents,
+                    path,
+                    messages=messages,
+                    fault="harness",
+                    label="execution_error",
+                )
         reply = final_assistant_text(result.trajectory)
         try:
             score = float(
                 self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
             )
-        except ScoreUnavailable as error:
+        except ScoreUnavailable as unavailable:
             if result.exit_code != 0 and not result.trajectory:
                 # The harness exited on an error before it wrote anything to score (a terminus tree that cannot
                 # load): its own failure, not a score the scorer could not find.
@@ -245,35 +256,52 @@ class EpisodeEvaluationWorker:
                     residue,
                     agents,
                     path,
+                    messages=messages,
                     fault="harness",
                     label="execution_error",
                 )
             # The episode ran and its scorer found no score: invalid, never an ordinary zero.
             return _ScoredEpisode(
                 None,
-                FailureObservation(task=task, stage="score", cause=str(error)),
+                FailureObservation(task=task, stage="score", cause=str(unavailable)),
                 residue,
                 agents,
                 path,
                 reply,
+                messages=messages,
                 fault="infrastructure",
                 label="invalid",
             )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
+        if turn_failure is not None:
+            return _ScoredEpisode(score, turn_failure, residue, agents, path, reply, messages=messages)
         if result.exit_code != 0:
             stderr_lines = result.stderr.strip().splitlines()
             cause = f"exit {result.exit_code}: {stderr_lines[-1] if stderr_lines else ''}".strip()
             return _ScoredEpisode(
-                score, FailureObservation(task=task, stage="exit", cause=cause), residue, agents, path, reply
+                score,
+                FailureObservation(task=task, stage="exit", cause=cause),
+                residue,
+                agents,
+                path,
+                reply,
+                messages=messages,
             )
         # An empty trajectory is no failure: a grader that reads files scored the run as it stands. The summary
         # still says no transcript was read, so a low score a text grader gave is not blamed on the request.
-        return _ScoredEpisode(score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory))
+        return _ScoredEpisode(
+            score, None, residue, agents, path, reply, transcript_read=bool(result.trajectory), messages=messages
+        )
+
+
+def is_graded_trial(trajectory: Sequence[Mapping[str, Any]]) -> bool:
+    """Whether a Harbor runner recorded a ``verifier`` row that is not failed: the verifier graded the trial."""
+    return any(event.get("type") == "verifier" and not event.get("failed") for event in trajectory)
 
 
 def _failed_trial_error(trajectory: Sequence[Mapping[str, Any]]) -> str:
-    """The error of a terminus trial that never ran (a failed ``verifier`` row with an error), else empty."""
+    """The error of a Harbor trial that never ran (a failed ``verifier`` row with an error), else empty."""
     for event in trajectory:
         if event.get("type") == "verifier" and event.get("failed") and event.get("error"):
             return str(event["error"])
@@ -526,6 +554,7 @@ class _BudgetedBinding(ModelBinding):
             api=inner.api,
             timeout_s=inner.timeout_s,
             metadata=inner.metadata,
+            request=inner.request if isinstance(inner, ModelBinding) else {},
         )
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_calls", calls)
@@ -824,6 +853,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
     state's ``entries``, carried by ``initial_state`` and loaded once at
     construction so an invalid seed refuses boot. A recovered state brings
     its own entries and therefore always wins over the seed.
+
+    ``episode_env`` adds variables to every episode's environment, such as
+    the recipe's token budget; the tree under evaluation cannot set them.
     """
 
     def __init__(
@@ -863,11 +895,15 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         agent_trial_timeout_s: float = 300.0,
         on_stale: StaleResultPolicy = "merge",
         eval_split_tasks: Mapping[str, EvalSplitTask] | None = None,
+        episode_env: Mapping[str, str] | None = None,
     ) -> None:
         if not tasks:
             raise ValueError("harness evolution requires a non-empty task set")
         if eval_split_tasks is not None and set(eval_split_tasks) != set(tasks):
             raise ValueError("eval_split_tasks must name exactly the evaluation tasks")
+        episode_env = dict(episode_env or {})
+        if not all(isinstance(key, str) and key and isinstance(value, str) for key, value in episode_env.items()):
+            raise ValueError("episode_env must map variable names to strings")
         # A task manifest's eval split: a task a consumed batch named is skipped, and eval failures stay out of the
         # proposer's failure manifest. None for prompt tasks.
         self.eval_split_tasks = None if eval_split_tasks is None else dict(eval_split_tasks)
@@ -1013,6 +1049,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                     forbid_residue,
                     self._worker_selection.settings.backend != "uni",
                     self._worker_selection.settings.backend not in ("uni", "mp"),
+                    episode_env,
                 ),
             ),
         )
@@ -1508,6 +1545,10 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             metrics[f"{side}_score"] = float(sum(score for score in scores[side] if score is not None))
             # Per agent sums over the side's episodes, so a result says which agent did the work.
             metrics[f"{side}_agents"] = _sum_agents(run.agents for run in runs[side])
+            # Team messages per agent, only when the side's episodes sent any, so an ordinary result keeps its shape.
+            messages = sum_message_counts(run.messages for run in runs[side])
+            if messages:
+                metrics[f"{side}_messages"] = messages
             # Per episode, in pairing order: the root's stage path and how its turn ended.
             metrics[f"{side}_paths"] = tuple(run.path for run in runs[side])
         if "candidate" in sides:
@@ -1964,6 +2005,8 @@ class _ScoredEpisode:
     label: EpisodeLabel = "valid"
     #: Remote workers return the kept trajectory; the driver owns its durable path.
     record_archive: bytes | None = field(default=None, repr=False)
+    #: Team messages per agent (``MESSAGE_COUNTERS``); empty when the episode sent none.
+    messages: dict[str, dict[str, int]] = field(default_factory=dict)
 
 
 #: How many candidate episodes a step's evaluation summarizes, and how much of each text it keeps: a summary for
@@ -2069,6 +2112,42 @@ def _agent_work(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, 
         elif type_ == "tool/result" and data.get("is_error"):
             work[agent]["tool_errors"] += 1
     return work
+
+
+#: The counters a result carries per agent for team messages: sends, messages read at a step, and names a send
+#: did not reach because that member had ended.
+MESSAGE_COUNTERS = ("sent", "received", "undelivered")
+
+
+def team_message_counts(trajectory: Sequence[Mapping[str, Any]]) -> dict[str, dict[str, int]]:
+    """Sent, received and undelivered team messages per agent of a native-jsonl trajectory, keyed as ``_agent_work``
+    keys its counters; an agent that neither sent nor received one is left out."""
+    counts: dict[str, dict[str, int]] = {}
+    agent: str | None = None
+    for event in trajectory:
+        type_, data = event.get("type"), event.get("data") or {}
+        if type_ == "session":
+            agent = str(data.get("agent") or "root")
+        elif agent is None:
+            continue
+        elif type_ == "team/send":
+            sender = counts.setdefault(agent, dict.fromkeys(MESSAGE_COUNTERS, 0))
+            sender["sent"] += 1
+            sender["undelivered"] += len(data.get("undelivered") or ())
+        elif type_ == "user/message" and (data.get("source") or {}).get("kind") == "message":
+            counts.setdefault(agent, dict.fromkeys(MESSAGE_COUNTERS, 0))["received"] += 1
+    return counts
+
+
+def sum_message_counts(runs: Iterable[Mapping[str, Mapping[str, int]]]) -> dict[str, dict[str, int]]:
+    """``team_message_counts`` of several episodes added up per agent, by agent name."""
+    total: dict[str, dict[str, int]] = {}
+    for counts in runs:
+        for agent, agent_counts in counts.items():
+            sums = total.setdefault(agent, dict.fromkeys(MESSAGE_COUNTERS, 0))
+            for key in MESSAGE_COUNTERS:
+                sums[key] += agent_counts.get(key, 0)
+    return {agent: total[agent] for agent in sorted(total)}
 
 
 def _sum_agents(runs: Any) -> dict[str, dict[str, int]]:

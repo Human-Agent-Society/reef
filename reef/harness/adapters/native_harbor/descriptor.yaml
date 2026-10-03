@@ -1,0 +1,70 @@
+# Reef's own coding agent on a Harbor task. The prompt is a Harbor task
+# directory or registry id, as for terminus: `reef-native task` hands it to
+# Harbor through reef-eval with the native loop as the Harbor agent. The loop
+# and its model calls run in this process; every tool call runs in the task
+# container with the container's python3. The tree is the native adapter's:
+# the same node kinds render to the same paths.
+name: native_harbor
+binary: reef-native
+is_prompt_task_directory: true
+argv: ["task", "--task", "{prompt}"]
+env:
+  REEF_NATIVE_DIR: "{root}/native"
+  REEF_NATIVE_SESSION_DIR: "{root}/native/sessions"
+  REEF_NATIVE_HARBOR_TRIALS_DIR: "{root}/native_harbor/trials"
+  # Harbor and the docker CLI write under HOME, and the workspace is outside the residue audit.
+  HOME: "{root}/workspace"
+# Harbor drives the task container with the docker CLI, as for terminus: the
+# episode keeps the service's own endpoint, context and config directory.
+host_env:
+  DOCKER_HOST: ""
+  DOCKER_CONTEXT: ""
+  DOCKER_CONFIG: "{home}/.docker"
+# Harbor bind-mounts each trial's directories under the root into the task
+# container, so on macOS a local episode makes its root under ~/.reef/episodes.
+is_root_bind_mounted: true
+files:
+  config:
+    primary:
+      path: "native/config.json"
+      defaults: {}
+    models:
+      path: "native/models.json"
+      defaults: {}
+  rules: "native/RULES.md"
+  skill: "native/skills/{name}/SKILL.md"
+  native_tool: "native/tools/{name}.py"
+  native_hook: "native/hooks/{name}.py"
+  native_graph: "native/graphs/{name}.json"
+  native_agent: "native/agents/{name}.json"
+  native_loop: "native/loops/{name}.py"
+  tree: "native/tree.json"
+trajectory:
+  format: native-jsonl
+  path: "native/sessions"
+writable_paths:
+  - "native/sessions"
+  - "native_harbor/trials"
+cleanup_whitelist:
+  - "native/sessions/**"
+  - "native/mounts/**"
+  - "native/tools/__pycache__/**"
+  - "native/hooks/__pycache__/**"
+  # Harbor's trial tree and reef-eval's results database.
+  - "native_harbor/trials/**"
+# The execution quirk admits hook and loop code only in Reef's sandbox with remote E2B tasks.
+self_isolating: true
+quirks: reef.harness.adapters.native_harbor.quirks
+# The native binding, plus the reply budget of one model call: a long task
+# needs more than the native loop's 4096 tokens. The fixed request fields go
+# under every call the loop makes; a tree cannot set them.
+model_binding:
+  openai:
+    - target: models
+      data:
+        api: openai
+        base_url: "{base_url}"
+        api_key: "{api_key}"
+        model: "{model}"
+        max_output_tokens: "{max_output_tokens}"
+        request: "{request}"

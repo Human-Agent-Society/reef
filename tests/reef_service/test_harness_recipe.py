@@ -1360,6 +1360,189 @@ def test_backend_rejects_invalid_gate_knobs(tmp_path: Path) -> None:
         build(forbid_residue="no")
 
 
+def test_recipe_parses_episode_tokens_for_the_native_adapters_only(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_episode_tokens.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_episode_tokens:propose",
+                "evaluate": "demo_episode_tokens:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    for bad in (0, -1, True, "5"):
+        with pytest.raises(RecipeConfigError, match=r"evolution\.episode_tokens must be a positive integer of tokens"):
+            CordisRecipe.from_environment({}, config=config(adapter="native", episode_tokens=bad))
+    # No other harness reads the budget, so under pi it would be a limit nothing enforces.
+    with pytest.raises(
+        RecipeConfigError, match=r"evolution\.episode_tokens is enforced only by the native and native_harbor adapters"
+    ):
+        CordisRecipe.from_environment({}, config=config(episode_tokens=5000))
+    built = CordisRecipe.from_environment({}, config=config(adapter="native", episode_tokens=5000), runtime=runtime())
+    assert built.episode_tokens == 5000
+    assert built._backend_kwargs()["episode_env"] == {"REEF_EPISODE_TOKENS": "5000"}
+    on_harbor = CordisRecipe.from_environment(
+        {}, config=config(adapter="native_harbor", episode_tokens=5000), runtime=runtime()
+    )
+    assert on_harbor._backend_kwargs()["episode_env"] == {"REEF_EPISODE_TOKENS": "5000"}
+    unset = CordisRecipe.from_environment({}, config=config(adapter="native"), runtime=runtime())
+    assert unset.episode_tokens is None and unset._backend_kwargs()["episode_env"] == {}
+
+
+def test_recipe_reads_the_served_request_fields_and_a_named_models_request(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_served_request.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_served_request:propose",
+                "evaluate": "demo_served_request:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    fixed = {"reasoning": {"effort": "high"}}
+    built = CordisRecipe.from_environment({}, config=config(served_request=fixed), runtime=runtime())
+    served = built.model_bindings().served
+    assert built.served_request == fixed and served.request == fixed
+    # The fields ride into an episode's models.json through the binding's own node.
+    (node,) = served.compose_nodes(get_adapter("native"))
+    assert node[1]["data"]["request"] == fixed
+    assert CordisRecipe.from_environment({}, config=config(), runtime=runtime()).model_bindings().served.request == {}
+    with pytest.raises(RecipeConfigError, match=r"evolution\.served_request must be a JSON object"):
+        CordisRecipe.from_environment({}, config=config(served_request="high"))
+    with pytest.raises(RecipeConfigError, match=r"evolution\.served_request may not set max_tokens, stream"):
+        CordisRecipe.from_environment({}, config=config(served_request={"stream": True, "max_tokens": 1}))
+    named = {"teacher": {"url": "http://big", "model": "large", "request": {"temperature": 0}}}
+    built = CordisRecipe.from_environment({}, config=config(models=named), runtime=runtime())
+    assert built.model_bindings()["teacher"].request == {"temperature": 0}
+    bad = {"teacher": {"url": "http://big", "model": "large", "request": {"tools": []}}}
+    with pytest.raises(RecipeConfigError, match=r"evolution\.models\.teacher\.request may not set tools"):
+        CordisRecipe.from_environment({}, config=config(models=bad))
+
+
+def test_recipe_parses_episode_seconds_below_the_episode_timeout_for_the_native_adapters_only(
+    tmp_path: Path, monkeypatch
+) -> None:
+    module = tmp_path / "demo_episode_seconds.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_episode_seconds:propose",
+                "evaluate": "demo_episode_seconds:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    for bad in (0, -1, True, "5"):
+        with pytest.raises(
+            RecipeConfigError, match=r"evolution\.episode_seconds must be a positive number of seconds"
+        ):
+            CordisRecipe.from_environment({}, config=config(adapter="native", episode_seconds=bad))
+    with pytest.raises(
+        RecipeConfigError,
+        match=r"evolution\.episode_seconds is enforced only by the native and native_harbor adapters",
+    ):
+        CordisRecipe.from_environment({}, config=config(episode_seconds=300))
+    # The budget must leave time before the Reef timeout, which scores the episode as one that could not run.
+    with pytest.raises(
+        RecipeConfigError,
+        match=r"evolution\.episode_seconds \(600\) must be below evolution\.episode_timeout_s \(600\)",
+    ):
+        CordisRecipe.from_environment({}, config=config(adapter="native_harbor", episode_seconds=600))
+    built = CordisRecipe.from_environment(
+        {}, config=config(adapter="native_harbor", episode_seconds=21000, episode_timeout_s=22500), runtime=runtime()
+    )
+    assert built.episode_seconds == 21000.0
+    assert built._backend_kwargs()["episode_env"] == {"REEF_EPISODE_SECONDS": "21000.0"}
+    on_native = CordisRecipe.from_environment(
+        {}, config=config(adapter="native", episode_seconds=1.5, episode_tokens=5000), runtime=runtime()
+    )
+    assert on_native._backend_kwargs()["episode_env"] == {"REEF_EPISODE_TOKENS": "5000", "REEF_EPISODE_SECONDS": "1.5"}
+    unset = CordisRecipe.from_environment({}, config=config(adapter="native"), runtime=runtime())
+    assert unset.episode_seconds is None and unset._backend_kwargs()["episode_env"] == {}
+
+
+def test_recipe_passes_infrastructure_markers_to_native_harbor_episodes_only(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_markers.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    markers = [{"file_name": "suite_eval.json", "key": "test_branch_errors", "values": ["__infra__"]}]
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_markers:propose",
+                "evaluate": "demo_markers:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    with pytest.raises(
+        RecipeConfigError, match=r"evolution\.infrastructure_markers is read only by the native_harbor"
+    ):
+        CordisRecipe.from_environment({}, config=config(adapter="native", infrastructure_markers=markers))
+    for bad in ({"file_name": "m.json"}, [{"file_name": "a/m.json", "key": "k", "values": ["v"]}]):
+        with pytest.raises(RecipeConfigError, match=r"evolution\.infrastructure_markers must be a JSON list"):
+            CordisRecipe.from_environment({}, config=config(adapter="native_harbor", infrastructure_markers=bad))
+    built = CordisRecipe.from_environment(
+        {}, config=config(adapter="native_harbor", infrastructure_markers=markers), runtime=runtime()
+    )
+    (text,) = built._backend_kwargs()["episode_env"].values()
+    assert built._backend_kwargs()["episode_env"] == {"REEF_HARBOR_INFRASTRUCTURE_MARKERS": text}
+    assert json.loads(text) == markers
+
+
+def test_the_backend_passes_its_episode_env_to_every_episode(tmp_path: Path, monkeypatch) -> None:
+    envs: list[dict[str, str]] = []
+    original = reef_cordis_backend.run_episode
+
+    def spy(descriptor, files, prompt, **kwargs):
+        envs.append(kwargs["env"])
+        return original(descriptor, files, prompt, **kwargs)
+
+    def build(**kwargs) -> CordisBackend:
+        return CordisBackend(
+            descriptor=get_adapter("pi"),
+            propose=resolve_proposer(
+                lambda n, s, m: Mutation("create", "r1", {"name": "rules", "config": {"text": "marker"}})
+            ),
+            score_episode=resolve_episode_scorer(evaluate),
+            tasks=("task one",),
+            models=MODEL,
+            binary=str(make_binary(tmp_path)),
+            **kwargs,
+        )
+
+    monkeypatch.setattr(reef_cordis_backend, "run_episode", spy)
+    b = build(episode_env={"REEF_EPISODE_TOKENS": "5000"})
+    run_backend_step(b, batch(), b.initial_state())
+    assert envs == [{"REEF_EPISODE_TOKENS": "5000"}] * 2
+    with pytest.raises(ValueError, match="episode_env must map variable names to strings"):
+        build(episode_env={"REEF_EPISODE_TOKENS": 5000})
+
+
 def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch) -> None:
     """data.batch_policy records swaps the processor; the default stays the
     reported window."""

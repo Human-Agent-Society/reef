@@ -25,6 +25,8 @@ from pathlib import Path
 from typing import Any, NoReturn
 
 from reef.harness.episodes.model_binding import ModelBinding
+from reef.harness.runners.native.enforce import Tool
+from reef.harness.runners.native.inbox import Assignment, TeamMember
 from reef.harness.runners.native.seed import SEED_GRAPH
 from reef.harness.tree.nodes import _NAME, NATIVE_END_REASONS, validate_native_graph
 
@@ -139,7 +141,7 @@ class Host(ABC):
     def system_prompt(self, *, skills: Sequence[str] | None = None, prompt: str | None = None) -> str: ...
 
 
-class _Stop(BaseException):
+class GraphStop(BaseException):
     """The run ended inside a stage; carries the exit status and, for an agent's turn, its outcome.
 
     A BaseException: the end of a turn crosses a ``native_loop``'s own code,
@@ -159,7 +161,7 @@ class _Escalate(Exception):
         self.reason = reason
 
 
-def _last_assistant_text(messages: list[dict[str, Any]]) -> str:
+def last_assistant_text(messages: list[dict[str, Any]]) -> str:
     for message in reversed(messages):
         if message.get("role") == "assistant" and isinstance(message.get("content"), str):
             return message["content"]
@@ -217,7 +219,10 @@ class Run:
     """One turn's state, shared by every stage handler: the messages, the step counter, the log.
 
     The tools, hooks, agents and prompt are read from the host at each use;
-    ``allow`` narrows the tools to the names an agent may see."""
+    ``allow`` narrows the tools to the names an agent may see. ``builtin_tools``
+    (a team member's message tools, a lead's ``team_assign``) come after that
+    filter, so no list hides them; ``assignments`` are the workers the run
+    queued for its next parallel stage."""
 
     def __init__(
         self,
@@ -235,6 +240,7 @@ class Run:
         skills: Sequence[str] | None = None,
         agent_prompt: str | None = None,
         max_tool_calls: int | None = None,
+        team_member: TeamMember | None = None,
     ) -> None:
         self.loop = loop
         self.prompt = prompt
@@ -248,6 +254,9 @@ class Run:
         self.skills = None if skills is None else tuple(skills)
         self.agent_prompt = agent_prompt
         self.max_tool_calls = max_tool_calls
+        self.team_member = team_member
+        self.builtin_tools: dict[str, Tool] = {}
+        self.assignments: list[Assignment] = []
         self.max_steps = 0
         self.tool_calls = 0
         self.tool_errors = 0
@@ -267,7 +276,8 @@ class Run:
     @property
     def tools(self) -> Mapping[str, Any]:
         tools = self.host.tools
-        return tools if self.allow is None else {name: tool for name, tool in tools.items() if name in self.allow}
+        allowed = tools if self.allow is None else {name: tool for name, tool in tools.items() if name in self.allow}
+        return {**allowed, **self.builtin_tools}
 
     @property
     def hooks(self) -> Mapping[str, list]:
@@ -285,6 +295,13 @@ class Run:
         self.session.write("user/message", {"step": self.step, "source": dict(source), "content": content})
         self.messages.append({"role": "user", "content": content})
 
+    def charge(self, sent: list[dict[str, Any]], reply: dict[str, Any], usage: Mapping[str, int] | None) -> None:
+        """Spend one model call on the episode budget: the tokens the endpoint reported, else an estimate of both."""
+        if usage:
+            self.loop.control.budget.spend(usage["input_tokens"], usage["output_tokens"])
+        else:
+            self.loop.control.budget.spend(_tokens(sent), _tokens([reply]))
+
     def close_step(self) -> None:
         if self.step_open:
             self.session.write("step/end", {"turn": self.turn, "step": self.step})
@@ -292,7 +309,7 @@ class Run:
 
     def end_turn(self, reason: Mapping[str, Any], outcome: str) -> NoReturn:
         self.end_turn_quietly(reason)
-        raise _Stop(0, outcome)
+        raise GraphStop(0, outcome)
 
     def end_turn_quietly(self, reason: Mapping[str, Any]) -> None:
         self.close_step()
@@ -309,6 +326,12 @@ class Run:
             self.end_turn({"kind": "max-steps", "steps": graph.max_steps}, "budget")
         self.step += 1
         step = self.step
+        member = self.team_member
+        if member is not None:
+            # A team message arrives at the receiver's next step, before its hooks and its call see the messages.
+            for message in member.inbox.take(member.instance):
+                source = {"kind": "message", "from": message.sender, "message_id": message.message_id}
+                self.say(f"Message from {message.sender}: {message.text}", source)
         # What the host holds now is what this step runs on; the hooks see the same messages the model will.
         self.system = self.host.system_prompt(skills=self.skills, prompt=self.agent_prompt)
         self.messages[0] = {"role": "system", "content": self.system}
@@ -329,12 +352,13 @@ class Run:
             )
         for content in loop._texts(entry.get("messages")):
             self.say(content, {"kind": "hook", "event": "pre_step"})
-        body: dict[str, Any] = {"messages": self.messages, "max_tokens": loop.MAX_COMPLETION_TOKENS}
+        body: dict[str, Any] = {"messages": self.messages, "max_tokens": loop.max_completion_tokens}
         if self.declarations:
             body["tools"] = self.declarations
-        message, usage = loop._request(self.session, self.binding, self.hooks["request_error"], body, step)
+        message, usage = loop.request(self.session, self.binding, self.hooks["request_error"], body, step)
         if message is None:
-            raise _Stop(1)
+            raise GraphStop(1)
+        self.charge(self.messages, message, usage)
         calls = list(message.get("tool_calls") or [])
         self.messages.append(message)
         self.last = message
@@ -360,7 +384,9 @@ class Run:
     def tools_stage(self, graph: Graph, stage: Mapping[str, Any]) -> str:
         loop = self.loop
         allow = stage.get("allow")
-        tools = self.tools if not allow else {name: tool for name, tool in self.tools.items() if name in allow}
+        tools = self.tools
+        if allow:
+            tools = {name: tool for name, tool in tools.items() if name in allow or name in self.builtin_tools}
         step = self.step
         contexts: list[str] = []
         for call in list(self.last.get("tool_calls") or []):
@@ -392,20 +418,32 @@ class Run:
                     raise _Escalate(str(decision.get("reason") or f"{tool.name} needs approval"))
                 return decision
 
-            result = loop._invoke(
-                tools, name, raw, self.workdir, full_output_path=full_output_path, gate=gate, enforcer=loop.enforcer
-            )
-            payload = {
-                "step": step,
-                "call_id": call_id,
-                "name": name,
-                "arguments": result.get("arguments"),
-                "result": result,
-            }
-            verdict = loop._decide(self.session, self.hooks["post_execute"], "post_execute", step, payload)
-            result = loop._judged(result, verdict)
-            # A jail that could not run is the sandbox's failure, not the tool's: it moves no branch on tool errors.
-            if result.get("is_error") and (result.get("error") or {}).get("code") != "SANDBOX_FAILED":
+            verdict: Mapping[str, Any] = {}
+            if loop.control.stop.is_set:
+                # The episode is stopping: the rest of the batch does not run, and no hook is asked about it.
+                result = loop.tool_error("STOPPED", "the episode stopped before this call ran", raw)
+            else:
+                result = loop._invoke(
+                    tools,
+                    name,
+                    raw,
+                    self.workdir,
+                    full_output_path=full_output_path,
+                    gate=gate,
+                    enforcer=loop.enforcer,
+                )
+                payload = {
+                    "step": step,
+                    "call_id": call_id,
+                    "name": name,
+                    "arguments": result.get("arguments"),
+                    "result": result,
+                }
+                verdict = loop._decide(self.session, self.hooks["post_execute"], "post_execute", step, payload)
+                result = loop._judged(result, verdict)
+            # A jail that could not run, or a call the stop kept from running, is no failure of the tool: it moves
+            # no branch on tool errors.
+            if result.get("is_error") and (result.get("error") or {}).get("code") not in ("SANDBOX_FAILED", "STOPPED"):
                 self.tool_errors += 1
             # The log says what was enforced on this tool, whether or not the call reached its run.
             called = tools.get(name)
@@ -424,7 +462,7 @@ class Run:
         return "done"
 
     def verify(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
-        text = _last_assistant_text(self.messages)
+        text = last_assistant_text(self.messages)
         line = _last_line(text)
         check = stage["check"]
         hit: bool | str = False
@@ -448,7 +486,7 @@ class Run:
 
     def branch(self, graph: Graph, stage: Mapping[str, Any]) -> tuple[str, dict[str, Any]]:
         """The first case that holds names the outcome; none, ``else``."""
-        text = _last_assistant_text(self.messages)
+        text = last_assistant_text(self.messages)
         misses: dict[str, str] = {}
         for case in stage["cases"]:
             when, value = str(case["when"]), case["value"]
@@ -456,6 +494,9 @@ class Run:
                 hit = self.step >= int(value)
             elif when == "tool_errors_at_least":
                 hit = self.tool_errors >= int(value)
+            elif when == "assignments_at_least":
+                # The workers team_assign queued that no parallel stage has taken yet; a stage takes its agents' share.
+                hit = len(self.assignments) >= int(value)
             else:
                 # A search with no answer is a case that does not hold, named with its reason in the detail.
                 found = bounded_search(str(value), text[-NATIVE_MATCH_WINDOW:])
@@ -476,12 +517,15 @@ class Run:
         head, older, tail = _split(self.messages, policy["keep_ratio"] * self.context_window)
         if not older:
             return "done", {"fired": False, "tokens": before}
+        if loop.control.is_ending:
+            # The next model stage ends the turn, so no summary call goes out after a stop or a spent budget.
+            return "done", {"fired": False, "tokens": before, "is_ending": True}
         body = {
             "messages": [
                 {"role": "system", "content": SUMMARY_PROMPT},
                 {"role": "user", "content": _transcript(older)},
             ],
-            "max_tokens": loop.MAX_COMPLETION_TOKENS,
+            "max_tokens": loop.max_completion_tokens,
         }
         message, failure, usage = loop._complete(self.binding, body)
         record: dict[str, Any] = {"step": self.step, "stage": name, "policy": policy, "tokens_before": before}
@@ -491,6 +535,7 @@ class Run:
             # The span stays as it was: a summary that did not arrive drops nothing the model saw.
             self.session.write("context/compacted", {**record, "fired": False, "error": failure})
             return "done", {"fired": False, "tokens": before, "error": str((failure or {}).get("code", ""))}
+        self.charge(body["messages"], message, usage)
         summary = str(message.get("content") or "").strip()
         note = {"role": "user", "content": f"Summary of the earlier steps:\n{summary}"}
         self.messages = [*head, note, *tail]
@@ -506,9 +551,14 @@ class Run:
         self.end_turn({"kind": reason}, reason)
 
     def subagent(self, graph: Graph, stage: Mapping[str, Any], name: str) -> tuple[str, dict[str, Any]]:
-        """Hand the last assistant text (or the task) to an agent, then down its ``then`` pipeline; its text comes back."""
+        """Hand the last assistant text (or the task) to an agent, then down its ``then`` pipeline; its text comes
+        back. A team stage (a mode other than ``sequential``) runs its members at once instead."""
+        if stage.get("mode", "sequential") != "sequential":
+            from reef.harness.runners.native.team import run_team_stage  # late: team.py imports this module
+
+            return run_team_stage(self, stage, name)
         first = str(stage["agent"])
-        text = _last_assistant_text(self.messages) or self.prompt
+        text = last_assistant_text(self.messages) or self.prompt
         outcome = "completed"
         ran: list[str] = []
         queue = [first]
@@ -549,6 +599,9 @@ class Run:
             agent_prompt=str(agent.get("prompt", "")),
             max_tool_calls=agent.get("max_tool_calls"),
         )
+        from reef.harness.runners.native.team import attach_team_tools  # late: team.py imports this module
+
+        attach_team_tools(child, graph)
         tools = child.tools
         session.write(
             "session",
@@ -567,7 +620,7 @@ class Run:
         )
         session.write("turn/start", {"turn": turn, "parent": self.agent})
         try:
-            outcome, text = _walk(child, graph)
+            outcome, text = walk_graph(child, graph)
         finally:
             # Steps are drawn from the episode total, so the parent's budget shrinks by what the child spent.
             self.step += child.step
@@ -575,11 +628,11 @@ class Run:
         return outcome, text, child.step
 
 
-def _walk(run: Run, graph: Graph) -> tuple[str, str]:
+def walk_graph(run: Run, graph: Graph) -> tuple[str, str]:
     """Walk the graph from its start to an end stage or a budget stop; (outcome, the last assistant text).
 
     A failure (a model call that ended in error, a graph that exceeded its
-    transition bound) raises ``_Stop`` with a nonzero exit status, which the
+    transition bound) raises ``GraphStop`` with a nonzero exit status, which the
     root turns into the episode's exit and an agent's turn propagates."""
     session = run.session
     name = graph.start
@@ -610,24 +663,24 @@ def _walk(run: Run, graph: Graph) -> tuple[str, str]:
             target = graph.edges[(name, outcome)]
             session.write("stage/exit", {"step": run.step, "stage": name, "outcome": outcome, "to": target, **detail})
             name = target
-    except _Stop as stop:
+    except GraphStop as stop:
         if stop.exit_code != 0:
             raise
-        return stop.outcome, _last_assistant_text(run.messages)
+        return stop.outcome, last_assistant_text(run.messages)
     except _Escalate as ask:
         run.end_turn_quietly({"kind": "ask", "reason": ask.reason})
         return "ask", ask.reason
     run.close_step()
     failure = {"code": "GRAPH_ERROR", "message": f"graph {graph.name!r} took more than {limit} transitions"}
     run.loop._abort(session, failure, turn=run.turn)
-    raise _Stop(1)
+    raise GraphStop(1)
 
 
 def run_graph(run: Run, graph: Graph) -> int:
     """The root turn: walk the graph and map its end to the episode's exit status."""
     try:
-        _walk(run, graph)
-    except _Stop as stop:
+        walk_graph(run, graph)
+    except GraphStop as stop:
         return stop.exit_code
     finally:
         for session in run.loop.open:
@@ -730,7 +783,7 @@ class LoopContext:
     def _ended(self) -> None:
         """After the turn's end, a call that acts gets the end again: loop code that caught it cannot act past it."""
         if self._frame.exited:
-            raise _Stop(self._frame.exit_code)
+            raise GraphStop(self._frame.exit_code)
 
     def _transition(self) -> None:
         """One call into the run; past the cap the turn aborts with ``LOOP_ERROR`` as a graph's does with ``GRAPH_ERROR``."""
@@ -744,7 +797,7 @@ class LoopContext:
                 "message": f"loop {self._name!r} took more than {self._limit} transitions",
             }
             run.loop._abort(run.session, failure, turn=run.turn)
-            raise _Stop(1)
+            raise GraphStop(1)
 
     def model(self) -> str:
         """One model step; ``"tool_calls"`` or ``"text"``. The step budget ends the turn with ``max-steps`` as a graph does."""
@@ -757,7 +810,7 @@ class LoopContext:
         self._run.tools_stage(self._budget, {"kind": "tools", "allow": None if allow is None else list(allow)})
 
     def text(self) -> str:
-        return _last_assistant_text(self._run.messages)
+        return last_assistant_text(self._run.messages)
 
     def say(self, text: str) -> None:
         """A user message from the loop; a transition, so the cap bounds a loop that only talks."""
@@ -770,10 +823,10 @@ class LoopContext:
         run = self._run
         if name not in run.agents:
             raise ValueError(f"agent {name!r} is not in the tree")
-        prompt = text if text is not None else (_last_assistant_text(run.messages) or run.prompt)
+        prompt = text if text is not None else (last_assistant_text(run.messages) or run.prompt)
         try:
             outcome, result, _ = run.run_agent(name, prompt)
-        except _Stop as stop:
+        except GraphStop as stop:
             # An agent's abort ends the run without a root turn/end, as under a graph; the frame records it as the end.
             self._frame.exited = True
             self._frame.exit_code = stop.exit_code
@@ -819,7 +872,7 @@ def run_loop_module(run: Run, module: TurnLoop) -> int:
     try:
         try:
             module.run_turn(LoopContext(run, module, frame))
-        except (_Stop, KeyboardInterrupt):
+        except (GraphStop, KeyboardInterrupt):
             raise
         except BaseException as exc:
             if frame.exited:
@@ -835,7 +888,7 @@ def run_loop_module(run: Run, module: TurnLoop) -> int:
         if frame.exited:
             return frame.exit_code
         run.end_turn_quietly({"kind": "completed"})
-    except _Stop as stop:
+    except GraphStop as stop:
         return frame.exit_code if frame.exited else stop.exit_code
     finally:
         run.session = session

@@ -29,15 +29,24 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
 from reef.harness.episodes.executor import (
+    EPISODE_SECONDS_ENV,
+    EPISODE_TOKENS_ENV,
     EpisodeExecutor,
     LocalExecutor,
     SandboxExecutor,
     SandboxUnavailable,
     build_executor,
 )
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, request_fields
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
+from reef.harness.runners.harbor_trial import (
+    INFRASTRUCTURE_MARKERS_ENV,
+    HarborTrialError,
+    InfrastructureMarker,
+    markers_from,
+    markers_text,
+)
 from reef.harness.tree.render import render_composition
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -151,7 +160,9 @@ class _ScenarioModels(ModelBindingsResolver):
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
         # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
-        binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
+        binding = self.recipe.bind_model_metadata(
+            ModelBinding.from_runtime(runtime, request=self.recipe.served_request)
+        )
         served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
 
@@ -263,17 +274,22 @@ class CordisRecipe(Recipe):
     reaches ``propose`` as ``models.served`` and is rendered into each
     evaluation episode through the adapter's ``model_binding`` template, so
     the seed carries no provider nodes and neither does the published tree; a
-    client points its own harness at Reef. A method's auxiliary models - a
-    stronger proposer, a judge - are declared under ``evolution.models`` and
-    reach ``propose`` as ``models["name"]``::
+    client points its own harness at Reef. ``evolution.served_request`` is
+    the fixed request fields the served binding sends under every call's own
+    (``{reasoning: {effort: high}}`` asks a reasoning model for high effort).
+    A method's auxiliary models - a stronger proposer, a judge - are declared
+    under ``evolution.models`` and reach ``propose`` as ``models["name"]``::
 
         evolution:
+          served_request:
+            reasoning: {effort: high}
           models:
             teacher:
               url: https://api.openai.com
               model: gpt-4o
               api_key_env: OPENAI_API_KEY   # the key stays out of the file
               api: openai                   # default; or responses / anthropic
+              request: {temperature: 0}     # fixed request fields, optional
 
     A seed names the baseline nodes the first mutation is measured against::
 
@@ -294,6 +310,11 @@ class CordisRecipe(Recipe):
     adapter: str = "pi"
     binary: str | None = None
     episode_timeout_s: float = 600.0
+    episode_tokens: int | None = None
+    #: The time budget of one native episode, in seconds: the stop flag is set with reason ``deadline`` when it runs
+    #: out, so the team merges and ends before the episode timeout and a Harbor task's agent timeout.
+    episode_seconds: float | None = None
+    infrastructure_markers: tuple[InfrastructureMarker, ...] = ()
     episode_repeats: int = 1
     forbid_residue: bool = False
     max_steps: int = 0
@@ -314,6 +335,8 @@ class CordisRecipe(Recipe):
     client_models: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
+    #: Fixed request fields of the served model's binding, sent under every call's own fields.
+    served_request: Mapping[str, object] = field(default_factory=dict)
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
     #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
@@ -377,6 +400,11 @@ class CordisRecipe(Recipe):
             )
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
+        if self.episode_tokens is not None and self.episode_tokens < 1:
+            raise ValueError("episode_tokens must be at least 1 when set")
+        if self.episode_seconds is not None and not 0 < self.episode_seconds < self.episode_timeout_s:
+            raise ValueError("episode_seconds must be positive and below episode_timeout_s when set")
+        request_fields(self.served_request, "served_request")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
         if self.on_stale not in STALE_RESULT_POLICIES:
@@ -435,7 +463,7 @@ class CordisRecipe(Recipe):
             if not descriptor.is_prompt_task_directory:
                 raise RecipeConfigError(
                     f"evolution.task_manifest needs an adapter that takes a task directory, not a prompt; "
-                    f"{adapter_name!r} takes a prompt (terminus takes a task directory)"
+                    f"{adapter_name!r} takes a prompt (terminus and native_harbor take a task directory)"
                 )
             if evolution.get("promote_failures", False):
                 raise RecipeConfigError(
@@ -469,6 +497,42 @@ class CordisRecipe(Recipe):
         timeout = evolution.get("episode_timeout_s", 600.0)
         if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or timeout <= 0:
             raise RecipeConfigError("evolution.episode_timeout_s must be a positive number")
+        episode_tokens = evolution.get("episode_tokens")
+        if episode_tokens is not None:
+            if isinstance(episode_tokens, bool) or not isinstance(episode_tokens, int) or episode_tokens <= 0:
+                raise RecipeConfigError("evolution.episode_tokens must be a positive integer of tokens")
+            # Only Reef's own loop reads the budget; any other harness would run unlimited under it.
+            if evolution.get("adapter", "pi") not in ("native", "native_harbor"):
+                raise RecipeConfigError(
+                    "evolution.episode_tokens is enforced only by the native and native_harbor adapters"
+                )
+        episode_seconds = evolution.get("episode_seconds")
+        if episode_seconds is not None:
+            if (
+                isinstance(episode_seconds, bool)
+                or not isinstance(episode_seconds, (int, float))
+                or episode_seconds <= 0
+            ):
+                raise RecipeConfigError("evolution.episode_seconds must be a positive number of seconds")
+            if evolution.get("adapter", "pi") not in ("native", "native_harbor"):
+                raise RecipeConfigError(
+                    "evolution.episode_seconds is enforced only by the native and native_harbor adapters"
+                )
+            # The time budget ends the team in time to merge; the timeout ends the episode as one that could not run.
+            if episode_seconds >= timeout:
+                raise RecipeConfigError(
+                    f"evolution.episode_seconds ({episode_seconds:g}) must be below evolution.episode_timeout_s "
+                    f"({timeout:g}), which ends the episode without a score"
+                )
+        markers: tuple[InfrastructureMarker, ...] = ()
+        if evolution.get("infrastructure_markers") is not None:
+            # Only the native_harbor runner reads them, after its trial; terminus records every trial as it ran.
+            if evolution.get("adapter", "pi") != "native_harbor":
+                raise RecipeConfigError("evolution.infrastructure_markers is read only by the native_harbor adapter")
+            try:
+                markers = markers_from(evolution["infrastructure_markers"], "evolution.infrastructure_markers")
+            except HarborTrialError as exc:
+                raise RecipeConfigError(str(exc)) from exc
         repeats = evolution.get("episode_repeats", 1)
         if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats < 1:
             raise RecipeConfigError("evolution.episode_repeats must be an integer of at least 1")
@@ -587,6 +651,10 @@ class CordisRecipe(Recipe):
                 raise RecipeConfigError(str(exc)) from exc
         model = settings.get("model")
         model_name = model.get("path") if isinstance(model, Mapping) else None
+        try:
+            served_request = request_fields(evolution.get("served_request", {}), "evolution.served_request")
+        except ValueError as exc:
+            raise RecipeConfigError(str(exc)) from exc
         named = evolution.get("models") or {}
         if not isinstance(named, Mapping):
             raise RecipeConfigError("evolution.models must map a name to a model section (url, model, api_key_env)")
@@ -683,6 +751,9 @@ class CordisRecipe(Recipe):
             "adapter": adapter,
             "binary": binary,
             "episode_timeout_s": float(timeout),
+            "episode_tokens": episode_tokens,
+            "episode_seconds": None if episode_seconds is None else float(episode_seconds),
+            "infrastructure_markers": markers,
             "episode_repeats": repeats,
             "on_stale": on_stale,
             "forbid_residue": forbid_residue,
@@ -697,6 +768,7 @@ class CordisRecipe(Recipe):
             "client_models": tuple(client_models),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
+            "served_request": served_request,
             "models": models,
             "model_metadata": model_metadata,
             "candidate_plugin": candidate_plugin,
@@ -721,7 +793,7 @@ class CordisRecipe(Recipe):
                 "in the deployment config"
             )
         try:
-            binding = ModelBinding.from_runtime(self.runtime, model=self.model_name)
+            binding = ModelBinding.from_runtime(self.runtime, model=self.model_name, request=self.served_request)
         except ValueError as exc:
             raise RecipeConfigError(str(exc)) from exc
         return self.served_through_service(self.bind_model_metadata(binding), scenario)
@@ -835,6 +907,15 @@ class CordisRecipe(Recipe):
             "on_stale": self.on_stale,
             "binary": self.binary,
             "episode_timeout_s": self.episode_timeout_s,
+            "episode_env": {
+                **({EPISODE_TOKENS_ENV: str(self.episode_tokens)} if self.episode_tokens else {}),
+                **({EPISODE_SECONDS_ENV: str(self.episode_seconds)} if self.episode_seconds else {}),
+                **(
+                    {INFRASTRUCTURE_MARKERS_ENV: markers_text(self.infrastructure_markers)}
+                    if self.infrastructure_markers
+                    else {}
+                ),
+            },
             "episode_repeats": self.episode_repeats,
             "forbid_residue": self.forbid_residue,
             "executor": self.executor,

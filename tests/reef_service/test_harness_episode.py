@@ -223,6 +223,16 @@ def test_an_adapter_without_host_env_keeps_no_service_variable_and_roots_in_the_
     assert Path(session["root"]).parent == Path(tempfile.gettempdir())
 
 
+def test_the_callers_episode_env_reaches_the_binary_and_cannot_move_the_root(tmp_path: Path) -> None:
+    printer = "#!/usr/bin/env python3\nimport os\nprint(os.environ.get('REEF_EPISODE_TOKENS'))\n"
+    binary = fake_binary(tmp_path, printer)
+    result = run_episode(get_adapter("pi"), pi_files(), "t", binary=binary, env={"REEF_EPISODE_TOKENS": "5000"})
+    assert result.stdout.strip() == "5000"
+    for key in ("REEF_NATIVE_DIR", "HOME"):
+        with pytest.raises(EpisodeError, match=f"episode env sets {key}, which the native episode sets itself"):
+            run_episode(get_adapter("native"), {}, "t", binary=binary, env={key: "x"})
+
+
 def test_episode_cleanup_repairs_permissions(tmp_path: Path) -> None:
     root = tmp_path / "root"
     locked = root / "locked"

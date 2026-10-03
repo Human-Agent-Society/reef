@@ -54,8 +54,16 @@ NATIVE_LOOP_DEFAULT_MAX_STEPS = 12
 NATIVE_EVENTS = ("pre_step", "pre_execute", "request_error", "post_execute")
 #: What a native_tool may declare it does; the loop reports them and a pre_execute hook reads them.
 NATIVE_CAPABILITIES = ("read", "write", "exec", "network")
-#: Names reserved for built-in tools (``reef.harness.runners.native.selftools``); no tree entry may take one.
-NATIVE_RESERVED_TOOL_NAMES = ("harness_inspect", "harness_propose", "harness_try")
+#: Names reserved for built-in tools (the serve form's ``reef.harness.runners.native.selftools`` and the team tools of
+#: ``reef.harness.runners.native.team``); no tree entry may take one.
+NATIVE_RESERVED_TOOL_NAMES = (
+    "harness_inspect",
+    "harness_propose",
+    "harness_try",
+    "team_assign",
+    "team_send",
+    "team_wait",
+)
 #: Entry ids of reef's own shipped entries (the update notice, the harness requests extension and its skill): a seed or a
 #: recovered state carries them, and no mutation creates, updates or removes one.
 RESERVED_ENTRY_IDS = frozenset({"reef-version-check", "reef-requests", "reef-pi-extension-api"})
@@ -67,19 +75,29 @@ NATIVE_STAGES: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
     "message": (("text",), ("done",)),
     "branch": (("cases",), ("else",)),
     "compact": (("fire_ratio", "keep_ratio"), ("done",)),
-    "subagent": (("agent",), ("completed", "gave_up", "budget", "ask")),
+    "subagent": (("agent", "mode", "agents", "workspace"), ("completed", "gave_up", "budget", "ask")),
     "end": (("reason",), ()),
 }
+#: How a subagent stage runs its agents: one after another (``agent`` and its ``then``), or the ``agents`` of a
+#: team stage at once, each on its own thread and budget (``parallel``: the workers the caller assigned with
+#: ``team_assign``; ``team``: every listed agent, a name listed twice run twice, each handed the caller's text).
+NATIVE_TEAM_MODES = ("parallel", "team")
+NATIVE_SUBAGENT_MODES = ("sequential", *NATIVE_TEAM_MODES)
+#: Where a team stage's members work: a git clone each, merged back when the stage ends, or the caller's workdir.
+NATIVE_TEAM_WORKSPACES = ("own", "shared")
+#: The members one team stage lists, and the assignments one run may hold for its parallel stages.
+NATIVE_TEAM_MAX_AGENTS = 8
 #: What one native_agent node may carry beside its name.
 NATIVE_AGENT_KEYS = ("prompt", "graph", "tools", "skills", "max_steps", "max_tool_calls", "then")
 NATIVE_AGENT_MAX_TOOL_CALLS = 256
 NATIVE_AGENT_MAX_THEN = 8
 NATIVE_VERIFY_CHECKS = ("last_line_integer", "last_line_matches", "nonempty")
-#: What a branch case may test: the run's own counters, or the last assistant text against a pattern.
-NATIVE_BRANCH_PREDICATES = ("steps_used_at_least", "tool_errors_at_least", "last_text_matches")
+#: What a branch case may test: the run's own counters, the workers it queued with ``team_assign`` that no parallel
+#: stage has taken yet, or the last assistant text against a pattern.
+NATIVE_BRANCH_PREDICATES = ("steps_used_at_least", "tool_errors_at_least", "assignments_at_least", "last_text_matches")
 NATIVE_END_REASONS = ("completed", "gave_up")
 #: Size caps on one graph, so admission and the interpreter's guard stay cheap.
-NATIVE_GRAPH_MAX_STEPS = 32
+NATIVE_GRAPH_MAX_STEPS = 1024
 NATIVE_GRAPH_MAX_STAGES = 16
 NATIVE_GRAPH_MAX_EDGES = 64
 NATIVE_GRAPH_MAX_CASES = 8
@@ -380,9 +398,7 @@ def _graph_stage(name: str, stage: Any) -> str:
     elif kind == "compact":
         _compact_ratios(name, stage)
     elif kind == "subagent":
-        agent = stage.get("agent")
-        if not isinstance(agent, str) or not _NAME.fullmatch(agent):
-            raise ValueError(f"native_graph stage {name!r} 'agent' must name an agent")
+        check_subagent_stage(name, stage)
     elif kind == "end" and stage.get("reason", "completed") not in NATIVE_END_REASONS:
         raise ValueError(f"native_graph stage {name!r} 'reason' must be one of {', '.join(NATIVE_END_REASONS)}")
     return kind
@@ -401,6 +417,47 @@ def _admit_pattern(value: Any, where: str) -> None:
         raise ValueError(f"{where} must be a regular expression: {exc}") from exc
 
 
+def check_subagent_stage(name: str, stage: Mapping[str, Any]) -> None:
+    """A subagent stage's mode and the keys it takes: ``agent`` for one agent after another, else ``agents`` to run
+    at once and the ``workspace`` they share or split."""
+    mode = stage.get("mode", "sequential")
+    if mode not in NATIVE_SUBAGENT_MODES:
+        raise ValueError(f"native_graph stage {name!r} 'mode' must be one of {', '.join(NATIVE_SUBAGENT_MODES)}")
+    if mode == "sequential":
+        extra = sorted({"agents", "workspace"} & set(stage))
+        if extra:
+            raise ValueError(
+                f"native_graph stage {name!r} takes {' and '.join(extra)} only with mode "
+                f"{' or '.join(NATIVE_TEAM_MODES)}"
+            )
+        agent = stage.get("agent")
+        if not isinstance(agent, str) or not _NAME.fullmatch(agent):
+            raise ValueError(f"native_graph stage {name!r} 'agent' must name an agent")
+        return
+    if "agent" in stage:
+        raise ValueError(f"native_graph stage {name!r} with mode {mode} names its agents in 'agents', not 'agent'")
+    agents = stage.get("agents")
+    if (
+        not isinstance(agents, Sequence)
+        or isinstance(agents, str)
+        or not 1 <= len(agents) <= NATIVE_TEAM_MAX_AGENTS
+        or any(not isinstance(agent, str) or not _NAME.fullmatch(agent) for agent in agents)
+    ):
+        raise ValueError(
+            f"native_graph stage {name!r} 'agents' must be a list of 1 to {NATIVE_TEAM_MAX_AGENTS} agent names"
+        )
+    if mode == "parallel" and len(set(agents)) < len(agents):
+        raise ValueError(f"native_graph stage {name!r} 'agents' must be distinct with mode parallel")
+    dotted = sorted({agent for agent in agents if ".." in agent})
+    if dotted:
+        raise ValueError(
+            f"native_graph stage {name!r} 'agents' cannot name {', '.join(dotted)}: a member's name is part of a "
+            "git branch name, which cannot hold '..'"
+        )
+    if stage.get("workspace", "own") not in NATIVE_TEAM_WORKSPACES:
+        raise ValueError(f"native_graph stage {name!r} 'workspace' must be one of {', '.join(NATIVE_TEAM_WORKSPACES)}")
+
+
 def _branch_cases(name: str, cases: Any) -> None:
     """A branch's cases: a closed predicate each, a value of that predicate's type, and a distinct outcome."""
     if not isinstance(cases, Sequence) or isinstance(cases, str) or not 1 <= len(cases) <= NATIVE_GRAPH_MAX_CASES:
@@ -416,15 +473,34 @@ def _branch_cases(name: str, cases: Any) -> None:
             )
         if when == "last_text_matches":
             _admit_pattern(value, f"native_graph stage {name!r} case 'value'")
-        elif isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= NATIVE_GRAPH_MAX_STEPS:
-            raise ValueError(
-                f"native_graph stage {name!r} case 'value' must be an integer from 0 to {NATIVE_GRAPH_MAX_STEPS}"
-            )
+        else:
+            # A run queues at most NATIVE_TEAM_MAX_AGENTS workers, so a higher count could never hold.
+            low, high = (1, NATIVE_TEAM_MAX_AGENTS) if when == "assignments_at_least" else (0, NATIVE_GRAPH_MAX_STEPS)
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f"native_graph stage {name!r} case 'value' must be an integer from {low} to {high}")
         if not isinstance(outcome, str) or not _NAME.fullmatch(outcome) or outcome == "else":
             raise ValueError(f"native_graph stage {name!r} case 'outcome' must be a name other than else")
         if outcome in outcomes:
             raise ValueError(f"native_graph stage {name!r} names outcome {outcome!r} twice")
         outcomes.add(outcome)
+
+
+def assignments_need_a_parallel_stage(stages: Mapping[str, Mapping[str, object]], kinds: Mapping[str, str]) -> None:
+    """A branch on ``assignments_at_least`` needs a parallel stage in its own graph: only that graph gives its run
+    ``team_assign``, so anywhere else the case could never hold."""
+    if any(kind == "subagent" and stages[name].get("mode") == "parallel" for name, kind in kinds.items()):
+        return
+    for name, kind in kinds.items():
+        cases = stages[name].get("cases")
+        if (
+            kind == "branch"
+            and isinstance(cases, Sequence)
+            and any(isinstance(case, Mapping) and case.get("when") == "assignments_at_least" for case in cases)
+        ):
+            raise ValueError(
+                f"native_graph stage {name!r} tests assignments_at_least, but no stage of the graph has mode parallel, "
+                "so the run never holds team_assign"
+            )
 
 
 def _compact_ratios(name: str, stage: Mapping[str, Any]) -> None:
@@ -493,6 +569,7 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
     if not isinstance(stages, Mapping) or not 1 <= len(stages) <= NATIVE_GRAPH_MAX_STAGES:
         raise ValueError(f"native_graph node 'stages' must be an object of 1 to {NATIVE_GRAPH_MAX_STAGES} stages")
     kinds = {str(name): _graph_stage(str(name), stage) for name, stage in stages.items()}
+    assignments_need_a_parallel_stage(stages, kinds)
     outcomes = {name: _stage_outcomes(kind, stages[name]) for name, kind in kinds.items()}
     start = options.get("start")
     if start not in kinds:

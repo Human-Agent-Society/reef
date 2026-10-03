@@ -38,6 +38,10 @@ from pathlib import Path
 from reef.core.errors import ReefError
 
 ISOLATION_ENV = "REEF_EPISODE_ISOLATION"
+#: The episode's token budget (``evolution.episode_tokens``); only ``run_episode``'s caller sets it, never the tree.
+EPISODE_TOKENS_ENV = "REEF_EPISODE_TOKENS"
+#: The episode's time budget in seconds (``evolution.episode_seconds``), set the same way.
+EPISODE_SECONDS_ENV = "REEF_EPISODE_SECONDS"
 
 EPISODE_OWNER_LEASE: ContextVar[bool] = ContextVar("episode_owner_lease", default=False)
 

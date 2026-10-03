@@ -338,11 +338,11 @@ def resolve_proposer(value: object) -> Proposer:
 def required_verifier_reward(task: str, result: EpisodeResult) -> float:
     """The Harbor verifier's reward for a task directory episode, raising ``ScoreUnavailable`` when there is none.
 
-    The terminus runner writes one ``verifier`` row per episode with the task it played and the rewards
-    its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry. An episode
-    that exited without a row, a failed episode and a verifier that wrote nothing have no score; a row for
-    another task, several rewards without a ``reward`` entry, or a reward that is not a finite number is
-    an error.
+    The terminus and native_harbor runners write one ``verifier`` row per episode with the task it played
+    and the rewards its verifier wrote; Harbor's primary reward is the ``reward`` entry, else the sole entry.
+    An episode that exited without a row, a failed episode and a verifier that wrote nothing have no score; a
+    row for another task, several rewards without a ``reward`` entry, or a reward that is not a finite number
+    is an error.
     """
     rows = [event for event in result.trajectory if event.get("type") == "verifier"]
     if not rows and result.exit_code:

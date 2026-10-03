@@ -51,14 +51,33 @@ NO_KEY_PLACEHOLDER = "no-key"
 ANTHROPIC_VERSION = "2023-06-01"
 ANTHROPIC_DEFAULT_MAX_TOKENS = 4096
 
+#: Request fields a binding's fixed ``request`` may not carry: each call sets them itself, whatever the dialect.
+RESERVED_REQUEST_FIELDS = frozenset(
+    {"messages", "input", "model", "stream", "tools", "max_tokens", "max_output_tokens", "system"}
+)
+
+
+def request_fields(value: object, where: str) -> dict[str, object]:
+    """``value`` as a binding's fixed request fields: a JSON object that sets none of the reserved fields."""
+    if not isinstance(value, Mapping) or not all(isinstance(key, str) for key in value):
+        raise ValueError(f"{where} must be a JSON object of request fields")
+    reserved = sorted(RESERVED_REQUEST_FIELDS.intersection(value))
+    if reserved:
+        raise ValueError(f"{where} may not set {', '.join(reserved)}: each call sets those itself")
+    return dict(value)
+
 
 class ModelBindingError(ReefError):
-    """A model call failed; ``status`` carries the HTTP status when there was one."""
+    """A model call failed; ``status`` carries the HTTP status when there was one, and ``is_malformed_reply`` says
+    the endpoint answered with a body that is not a reply."""
 
-    def __init__(self, message: str, *, status: int | None = None, detail: str = "") -> None:
+    def __init__(
+        self, message: str, *, status: int | None = None, detail: str = "", is_malformed_reply: bool = False
+    ) -> None:
         super().__init__(message)
         self.status = status
         self.detail = detail
+        self.is_malformed_reply = is_malformed_reply
 
 
 def usage_of(response: Any) -> dict[str, int] | None:
@@ -131,6 +150,9 @@ class ModelBinding:
     #: the default leaves room for both. A harness that sets none of its own picks a smaller one (pi takes 16384).
     max_output_tokens: int = 32000
     metadata: ModelMetadata | None = None
+    #: Fixed request fields sent under every call's own (``{"reasoning": {"effort": "high"}}`` asks a reasoning
+    #: model for high effort); the caller's fields win where both name one.
+    request: Mapping[str, object] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if not self.base_url:
@@ -144,10 +166,13 @@ class ModelBinding:
         if isinstance(self.max_output_tokens, bool) or self.max_output_tokens <= 0:
             raise ValueError("model binding max_output_tokens must be a positive number of tokens")
         object.__setattr__(self, "base_url", self.base_url.rstrip("/"))
+        object.__setattr__(self, "request", request_fields(self.request, "model binding request"))
 
     @classmethod
-    def from_runtime(cls, runtime: InferenceRuntime, *, model: str | None = None) -> ModelBinding:
-        """Bind to ``runtime``'s endpoint; ``model`` overrides its model path."""
+    def from_runtime(
+        cls, runtime: InferenceRuntime, *, model: str | None = None, request: Mapping[str, object] | None = None
+    ) -> ModelBinding:
+        """Bind to ``runtime``'s endpoint; ``model`` overrides its model path, ``request`` is the fixed fields."""
 
         name = model or getattr(runtime, "model_path", "") or ""
         if not name:
@@ -158,6 +183,7 @@ class ModelBinding:
             api_key=getattr(runtime, "api_key", None),
             api=getattr(runtime, "api", "openai") or "openai",
             timeout_s=float(runtime.inference_timeout_s),
+            request=request or {},
         )
 
     @classmethod
@@ -169,9 +195,10 @@ class ModelBinding:
         where: str = "model",
     ) -> ModelBinding:
         """A binding from a config section: ``url``, ``model``, optional
-        ``api`` (default ``openai``), ``timeout_s``, and the credential as a
-        literal ``api_key`` or the name of an environment variable in
-        ``api_key_env`` (so the key itself stays out of the file)."""
+        ``api`` (default ``openai``), ``timeout_s``, ``request`` (a JSON
+        object of fixed request fields), and the credential as a literal
+        ``api_key`` or the name of an environment variable in ``api_key_env``
+        (so the key itself stays out of the file)."""
 
         def text(key: str, *, required: bool = True) -> str | None:
             value = config.get(key)
@@ -190,6 +217,7 @@ class ModelBinding:
             timeout_s = float(timeout_raw)
         except (TypeError, ValueError) as exc:
             raise ValueError(f"{where}.timeout_s must be a number") from exc
+        request = request_fields(config.get("request", {}), f"{where}.request")
         try:
             return cls(
                 base_url=text("url") or "",
@@ -198,6 +226,7 @@ class ModelBinding:
                 api=text("api", required=False) or "openai",
                 timeout_s=timeout_s,
                 metadata=ModelMetadata.from_config(config["metadata"]) if "metadata" in config else None,
+                request=request,
             )
         except ValueError as exc:
             raise ValueError(f"{where}: {exc}") from exc
@@ -295,14 +324,15 @@ class ModelBinding:
         """POST one request in the binding's native dialect and return the
         response object: Chat Completions for ``openai``, Responses for
         ``responses``, and Messages for ``anthropic``. ``model`` defaults to
-        this binding's. A streaming request is read to the end and folded into
+        this binding's, and the binding's fixed ``request`` fields fill in
+        under ``body``. A streaming request is read to the end and folded into
         the non-streaming response shape, so callers see one contract either
         way. Prefer :meth:`chat` unless the method needs the raw response.
         """
 
         object.__setattr__(self, "_last_response", None)
         object.__setattr__(self, "_last_usage", None)
-        request_body = {"model": self.model, **body}
+        request_body = {"model": self.model, **self.request, **body}
         headers = {"content-type": "application/json"}
         if self.api == "anthropic":
             path = "/v1/messages"
@@ -343,8 +373,10 @@ class ModelBinding:
                 status=exc.code,
                 detail=detail,
             ) from exc
-        except (urllib.error.URLError, OSError, ValueError) as exc:
+        except (urllib.error.URLError, OSError) as exc:
             raise ModelBindingError(f"model endpoint unreachable: {exc}") from exc
+        except ValueError as exc:
+            raise ModelBindingError(f"model endpoint sent a malformed reply: {exc}", is_malformed_reply=True) from exc
 
     # -- Episode-side rendering ----------------------------------------------
 
@@ -385,6 +417,7 @@ class ModelBinding:
             "model": self.model,
             "max_output_tokens": self.max_output_tokens,
             "model_metadata": metadata,
+            "request": dict(self.request),
         }
         choices = [self.model]
         for name in models:
@@ -644,4 +677,4 @@ def _fold_responses_stream(response: Any) -> dict[str, Any]:
     }
 
 
-__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings", "usage_of"]
+__all__ = ["MODEL_APIS", "ModelBinding", "ModelBindingError", "ModelBindings", "request_fields", "usage_of"]

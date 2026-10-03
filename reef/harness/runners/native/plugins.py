@@ -23,7 +23,7 @@ from reef.harness.runners.native.host import NativeHost, TreeOrder
 from reef.harness.tree import nodes
 
 #: The models config fields the host pins from the installed binding; a tree entry never sets them.
-PINNED_MODEL_FIELDS = ("api", "base_url", "api_key", "model")
+PINNED_MODEL_FIELDS = ("api", "base_url", "api_key", "model", "request")
 
 
 class LoaderOrder(TreeOrder):

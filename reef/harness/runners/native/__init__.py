@@ -1,6 +1,7 @@
 """Reef's native coding agent: a headless single prompt loop whose tools and loop events are composition nodes.
 
-One episode is one process and one turn. The rendered composition root
+One episode is one process and one root turn; the members of a team stage are agent turns that run at once on
+threads of that process. The rendered composition root
 (``REEF_NATIVE_DIR``) holds ``RULES.md``, ``skills/``, ``tools/``, ``hooks/``,
 ``graphs/``, ``agents/``, ``loops/`` and ``models.json``; the loop reads them once into a
 ``NativeHost`` (``reef.harness.runners.native.host``), talks to the served model
@@ -28,11 +29,18 @@ import time
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError, usage_of
+from reef.harness.runners.native.control import (
+    EpisodeControl,
+    TeamBudget,
+    deadline_after,
+    episode_seconds_limit,
+    episode_token_limit,
+)
 from reef.harness.runners.native.enforce import (
     Enforcer,
     InProcessEnforcer,
@@ -42,6 +50,7 @@ from reef.harness.runners.native.enforce import (
     select_enforcer,
 )
 from reef.harness.runners.native.graph import TurnLoop
+from reef.harness.runners.native.workspaces import TeamWorkspaces
 from reef.harness.tree.nodes import NATIVE_EVENTS, NATIVE_LOOP_DEFAULT_MAX_STEPS, scope_bindings, validate_native_loop
 
 #: Step and tool result budgets; an episode also runs under the executor's wall clock.
@@ -51,11 +60,17 @@ MAX_RESULT_CHARS = 20_000
 #: marker naming the file, and this many characters of tail.
 TOOL_OUTPUT_DIR = ".reef/tool-output"
 TOOL_OUTPUT_TAIL_CHARS = 2_000
+#: Where team stages keep Reef's git directory and the member clones on the host, under the workspace.
+TEAM_DIR = ".reef/team"
 #: Tokens one model call may generate; a local single slot server stalls every other caller behind an unbounded one.
 MAX_COMPLETION_TOKENS = 4096
 #: Provider attempts one step may spend and the longest wait between them, whatever a request_error hook asks.
 MAX_REQUEST_ATTEMPTS = 4
 MAX_RETRY_DELAY_MS = 10_000
+#: Under a policy that retries until stopped, the wait after a transient failure doubles from one second to this.
+TRANSIENT_RETRY_MAX_DELAY_SECONDS = 60
+#: HTTP statuses a model call is retried on under that policy, besides every 5xx and a call that got no answer.
+TRANSIENT_STATUSES = (408, 425, 429)
 DEFAULT_SYSTEM_PROMPT = "You are a coding agent. Use the tools to complete the task, then answer."
 SESSION_VERSION = 1
 #: The entries list beside the rendered files (``files.tree`` of the native descriptor), relative to the root.
@@ -458,13 +473,28 @@ def load_agents(agents_dir: Path) -> dict[str, Mapping[str, Any]]:
 
 
 def binding_from(models_path: Path) -> ModelBinding:
+    """The binding models.json carries, its fixed ``request`` fields included; a LoadError when those are not an
+    object of fields a call may set."""
     data = json.loads(models_path.read_text(encoding="utf-8"))
-    return ModelBinding(
-        base_url=str(data["base_url"]),
-        model=str(data["model"]),
-        api_key=str(data.get("api_key") or ""),
-        api=str(data.get("api") or "openai"),
-    )
+    try:
+        return ModelBinding(
+            base_url=str(data["base_url"]),
+            model=str(data["model"]),
+            api_key=str(data.get("api_key") or ""),
+            api=str(data.get("api") or "openai"),
+            request=data.get("request") or {},
+        )
+    except ValueError as exc:
+        raise LoadError(f"{models_path.name}: {exc}") from exc
+
+
+def output_token_limit_from(models_path: Path) -> int:
+    """``max_output_tokens`` in models.json, which the native_harbor binding writes; a LoadError when it is not a
+    positive integer. The native adapter never reads it: its calls ask for ``MAX_COMPLETION_TOKENS``."""
+    value = json.loads(models_path.read_text(encoding="utf-8")).get("max_output_tokens")
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        raise LoadError(f"{models_path.name} max_output_tokens must be a positive integer of tokens, not {value!r}")
+    return value
 
 
 def context_window_from(models_path: Path) -> int:
@@ -485,12 +515,14 @@ class Session:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._handle = path.open("a", encoding="utf-8")
         self._seq = 0
+        self.write_lock = threading.Lock()
 
     def write(self, type_: str, data: Mapping[str, Any]) -> None:
-        event = {"type": type_, "seq": self._seq, "time": int(time.time() * 1000), "data": dict(data)}
-        self._seq += 1
-        self._handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
-        self._handle.flush()
+        with self.write_lock:
+            event = {"type": type_, "seq": self._seq, "time": int(time.time() * 1000), "data": dict(data)}
+            self._seq += 1
+            self._handle.write(json.dumps(event, ensure_ascii=False, default=str) + "\n")
+            self._handle.flush()
 
     def close(self) -> None:
         self._handle.close()
@@ -593,37 +625,60 @@ def _texts(value: Any) -> list[str]:
 def _complete(
     binding: ModelBinding, body: Mapping[str, Any]
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None, dict[str, int] | None]:
-    """One provider attempt: the assistant message and the usage it reported, or the closed MODEL_ERROR failure."""
+    """One provider attempt: the assistant message and the usage it reported, or the closed MODEL_ERROR failure.
+
+    ``is_transient`` says whether a later attempt may succeed: the endpoint gave no answer, or answered a status in
+    ``TRANSIENT_STATUSES`` or a 5xx; a malformed reply and any other status are not."""
     try:
         response = binding.complete(dict(body))
         return dict(response["choices"][0]["message"]), None, usage_of(response)
     except (ModelBindingError, KeyError, IndexError, TypeError) as exc:
         failure: dict[str, Any] = {"code": "MODEL_ERROR", "message": f"{type(exc).__name__}: {exc}"[:600]}
-        if isinstance(exc, ModelBindingError) and exc.status is not None:
-            failure["status"] = exc.status
+        status = exc.status if isinstance(exc, ModelBindingError) else None
+        if status is not None:
+            failure["status"] = status
+        failure["is_transient"] = (
+            isinstance(exc, ModelBindingError)
+            and not exc.is_malformed_reply
+            and (status is None or status in TRANSIENT_STATUSES or status >= 500)
+        )
         return None, failure, None
 
 
 def _request(
-    session: Session, binding: ModelBinding, hooks: Sequence[HookModule], body: Mapping[str, Any], step: int
+    session: Session,
+    binding: ModelBinding,
+    hooks: Sequence[HookModule],
+    body: Mapping[str, Any],
+    step: int,
+    control: EpisodeControl,
 ) -> tuple[dict[str, Any] | None, dict[str, int] | None]:
     """The step's model call and the usage it reported, retried while a request_error hook says so;
-    ``(None, None)`` once the turn ended in error."""
-    for attempt in range(1, MAX_REQUEST_ATTEMPTS + 1):
+    ``(None, None)`` once the turn ended in error.
+
+    Under a policy that retries until stopped, a transient failure is retried whatever the hooks say, until the
+    episode's stop flag is set; the turn then ends in error with the last failure, since the model never answered.
+    Every wait between attempts ends early at the stop."""
+    attempt = 0
+    while True:
+        attempt += 1
         message, failure, usage = _complete(binding, body)
         if failure is None:
             return message, usage
         session.write("request/error", {"step": step, "attempt": attempt, "error": failure})
-        action = _decide(session, hooks, "request_error", step, {"step": step, "attempt": attempt, "error": failure})
-        if action.get("kind") == "retry" and attempt < MAX_REQUEST_ATTEMPTS:
+        if control.request_policy.is_retry_until_stopped and failure["is_transient"]:
+            if not control.stop.wait(min(2 ** (attempt - 1), TRANSIENT_RETRY_MAX_DELAY_SECONDS)):
+                continue
+        else:
+            payload = {"step": step, "attempt": attempt, "error": failure}
+            action = _decide(session, hooks, "request_error", step, payload)
             delay = action.get("delay_ms")
-            time.sleep(
-                min(float(delay) if isinstance(delay, (int, float)) and delay > 0 else 0.0, MAX_RETRY_DELAY_MS) / 1000
-            )
-            continue
+            delay_ms = min(float(delay) if isinstance(delay, (int, float)) and delay > 0 else 0.0, MAX_RETRY_DELAY_MS)
+            is_retried = action.get("kind") == "retry" and attempt < MAX_REQUEST_ATTEMPTS
+            if is_retried and not control.stop.wait(delay_ms / 1000):
+                continue
         _abort(session, failure, attempts=attempt)
         return None, None
-    return None, None
 
 
 def _abort(session: Session, failure: Mapping[str, Any], turn: int = 1, **detail: Any) -> int:
@@ -648,11 +703,29 @@ def _judged(result: dict[str, Any], verdict: Mapping[str, Any]) -> dict[str, Any
     return result
 
 
-def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
-    """One turn: the tree's loop as code when it carries one, else its graph (or the seed graph) walked stage by stage."""
+def run_loop(
+    prompt: str,
+    root: Path,
+    session_dir: Path,
+    workdir: Path,
+    *,
+    enforcer: Enforcer | None = None,
+    control: EpisodeControl | None = None,
+) -> int:
+    """One turn: the tree's loop as code when it carries one, else its graph (or the seed graph) walked stage by stage.
+
+    ``enforcer`` runs the tool calls (default: the one ``REEF_NATIVE_ENFORCE`` selects); ``control`` carries what
+    the episode's caller set (default: no token budget, team git on this host)."""
     from reef.harness.runners.native import graph as graphs  # late: graph.py imports this module
     from reef.harness.runners.native.host import NativeHost
 
+    control = control or EpisodeControl()
+    main_path = PurePosixPath(workdir)
+    workspaces = TeamWorkspaces(
+        control.command_runner,
+        main_path=main_path,
+        team_path=main_path / TEAM_DIR if control.team_path is None else control.team_path,
+    )
     binding = binding_from(root / "models.json")
     session = Session(session_dir / "session.jsonl")
     header = {
@@ -667,7 +740,7 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
     try:
         try:
             # The enforcer is chosen before any module of the tree runs in this process, so the tree cannot choose it.
-            enforcer = select_enforcer(os.environ)
+            enforcer = enforcer or select_enforcer(os.environ)
             header["enforcement"] = enforcer.mode
             # The session directory is the one writable path under the sandbox, so a tree boot mounts there.
             # One directory per process, cleared on the way out: the wrapper reuses the sessions directory
@@ -680,7 +753,15 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             session.write("session", {**header, "tools": [], "hooks": {}, "graph": None, "loop": None})
             session.write("turn/start", {"turn": 1})
             return _abort(session, {"code": "LOAD_ERROR", "message": str(exc)[:600]})
-        tools, hooks, module = host.tools, host.hooks, host.loop
+        module = host.loop
+        loop = _Loop(session, root, session_dir, header, enforcer=enforcer, control=control, workspaces=workspaces)
+        run = graphs.Run(loop, prompt, binding, host, workdir)
+        if module is None:
+            from reef.harness.runners.native.team import attach_team_tools  # late: team.py imports this module
+
+            # Built before the header, so the header lists team_assign when the graph holds a parallel stage.
+            attach_team_tools(run, graph)
+        tools, hooks = run.tools, host.hooks
         session.write(
             "session",
             {
@@ -697,26 +778,26 @@ def run_loop(prompt: str, root: Path, session_dir: Path, workdir: Path) -> int:
             },
         )
         session.write("turn/start", {"turn": 1})
-        loop = _Loop(session, root, session_dir, header, enforcer=enforcer)
-        run = graphs.Run(loop, prompt, binding, host, workdir)
         try:
             if module is not None:
                 return graphs.run_loop_module(run, module)
             return graphs.run_graph(run, graph)
         finally:
             host.dispose()
+            workspaces.close()
     finally:
         session.close()
 
 
-def _clip(text: str, workdir: Path, full_output_path: Path | None) -> tuple[str, dict[str, Any]]:
-    """What the model reads of a result over the cap: with ``full_output_path``, the whole text lands there and the model gets the head, a marker naming the file, and the tail; without it, the head alone."""
+def _clip(text: str, workdir: Path, full_output_path: Path | None, writer: Enforcer) -> tuple[str, dict[str, Any]]:
+    """What the model reads of a result over the cap: with ``full_output_path``, ``writer`` saves the whole text
+    there, where the calls run, and the model gets the head, a marker naming the file, and the tail; without it, the
+    head alone."""
     if len(text) <= MAX_RESULT_CHARS:
         return text, {"truncated": False}
     if full_output_path is None:
         return text[:MAX_RESULT_CHARS], {"truncated": True}
-    full_output_path.parent.mkdir(parents=True, exist_ok=True)
-    full_output_path.write_text(text, encoding="utf-8")
+    writer.write_output(full_output_path, text)
     relative = full_output_path.relative_to(workdir).as_posix()
     tail = text[-TOOL_OUTPUT_TAIL_CHARS:]
     marker = f"\n... [{len(text) - MAX_RESULT_CHARS} characters omitted; the full result is in {relative}] ...\n"
@@ -801,7 +882,11 @@ def _invoke(
     except Exception as exc:
         return _error("TOOL_FAILED", f"{type(exc).__name__}: {exc}", arguments)
     text = result if isinstance(result, str) else json.dumps(result, ensure_ascii=False, default=str)
-    content, clipped = _clip(text, workdir, full_output_path)
+    try:
+        # The environment's enforcer, not the tool's: a built-in tool's output lands in the same workdir.
+        content, clipped = _clip(text, workdir, full_output_path, enforcer or InProcessEnforcer())
+    except SandboxFailed as exc:
+        return _error("SANDBOX_FAILED", str(exc), arguments)
     return {
         "content": content,
         "is_error": False,
@@ -814,7 +899,6 @@ class _Loop:
     """What the stage handlers reach of this module: the session, the root, and the loop's own helpers."""
 
     TOOL_OUTPUT_DIR = TOOL_OUTPUT_DIR
-    MAX_COMPLETION_TOKENS = MAX_COMPLETION_TOKENS
 
     def __init__(
         self,
@@ -823,29 +907,63 @@ class _Loop:
         session_dir: Path,
         header: Mapping[str, Any] = {},
         enforcer: Enforcer | None = None,
+        control: EpisodeControl | None = None,
+        workspaces: TeamWorkspaces | None = None,
     ) -> None:
         self.session = session
         self.root = root
         self.session_dir = session_dir
         self.header = dict(header)
         self.enforcer = enforcer or InProcessEnforcer()
+        self.control = control or EpisodeControl()
+        limit = self.control.max_completion_tokens
+        #: The reply budget of every model call: the caller's when it set one (native_harbor), else the loop's cap.
+        self.max_completion_tokens = MAX_COMPLETION_TOKENS if limit is None else limit
+        #: The git state of ``workspace: own`` stage runs; only the episode form keeps one.
+        self.workspaces = workspaces
         self.turns = 1
         self.open: list[Session] = []
+        # Team members run on threads of this process, so the turn and stage run counters are taken under a lock.
+        self.turn_lock = threading.Lock()
+        self.team_stage_runs = 0
 
     def open_turn(self, agent: str) -> tuple[Session, int]:
         """A session file for one agent turn, numbered in run order under ``agents/``; the root's file sorts last."""
-        self.turns += 1
-        session = Session(self.session_dir / "agents" / f"{self.turns:03d}-{agent}.jsonl")
-        self.open.append(session)
-        return session, self.turns
+        with self.turn_lock:
+            self.turns += 1
+            session = Session(self.session_dir / "agents" / f"{self.turns:03d}-{agent}.jsonl")
+            self.open.append(session)
+            return session, self.turns
+
+    def next_team_stage_run(self) -> int:
+        """The number of the team stage run that starts now, from 1 in this episode."""
+        with self.turn_lock:
+            self.team_stage_runs += 1
+            return self.team_stage_runs
 
     def before_step(self, run: Any) -> None:
-        """Called at the top of every model stage; the episode form has nothing to land between steps."""
+        """Called at the top of every model stage: a stop or a spent budget ends the turn there, before the call."""
+        stop, budget = self.control.stop, self.control.budget
+        if stop.is_set:
+            run.end_turn({"kind": "stopped", "reason": stop.reason}, "budget")
+        if budget.is_spent:
+            run.end_turn({"kind": "max-tokens", "tokens": budget.token_limit, "spent": budget.spent_tokens}, "budget")
+
+    def request(
+        self,
+        session: Session,
+        binding: ModelBinding,
+        hooks: Sequence[HookModule],
+        body: Mapping[str, Any],
+        step: int,
+    ) -> tuple[dict[str, Any] | None, dict[str, int] | None]:
+        """The step's model call under the episode's request policy and stop flag."""
+        return _request(session, binding, hooks, body, step, self.control)
 
     _decide = staticmethod(_decide)
     _complete = staticmethod(_complete)
-    _request = staticmethod(_request)
     _invoke = staticmethod(_invoke)
+    tool_error = staticmethod(_error)
     enforcer_for = staticmethod(enforcer_for)
     _judged = staticmethod(_judged)
     _texts = staticmethod(_texts)
@@ -864,6 +982,17 @@ def main(argv: list[str] | None = None) -> int:
         return 0
     if not args.prompt:
         parser.error("-p/--prompt is required")
+    try:
+        token_limit = episode_token_limit(os.environ)
+        seconds_limit = episode_seconds_limit(os.environ)
+    except ValueError as exc:
+        parser.error(str(exc))
     root = Path(os.environ.get("REEF_NATIVE_DIR") or "native")
     session_dir = Path(os.environ.get("REEF_NATIVE_SESSION_DIR") or root / "sessions")
-    return run_loop(args.prompt, root, session_dir, Path.cwd())
+    control = EpisodeControl(TeamBudget(token_limit), deadline=deadline_after(seconds_limit))
+    deadline_timer = control.start_deadline_timer()
+    try:
+        return run_loop(args.prompt, root, session_dir, Path.cwd(), control=control)
+    finally:
+        if deadline_timer is not None:
+            deadline_timer.cancel()

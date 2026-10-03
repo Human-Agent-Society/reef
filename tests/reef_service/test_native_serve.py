@@ -852,6 +852,43 @@ def test_a_group_wrapped_entry_is_neither_tried_nor_mounted_nor_booted(tmp_path:
         Server(_tree(tmp_path / "boot", reef, "r2"), scenario=SCENARIO).start()
 
 
+@pytest.mark.parametrize("mode", ["parallel", "team"])
+def test_a_graph_with_a_team_stage_is_neither_tried_nor_mounted_nor_booted(
+    tmp_path: Path, reef: _FakeReef, mode: str
+) -> None:
+    worker = _entry("worker", "native_agent", name="worker", prompt="You are a worker.")
+    crew = {"kind": "subagent", "mode": mode, "agents": ["worker"]}
+    edges = [
+        SEED_EDGES[0],
+        SEED_EDGES[2],
+        {"from": "think", "when": "text", "to": "crew"},
+        *({"from": "crew", "when": outcome, "to": "done"} for outcome in ("completed", "gave_up", "budget", "ask")),
+    ]
+    team = _graph({**SEED_STAGES, "crew": crew}, edges)
+    refusal = f"stage 'crew' uses mode {mode}, which the serve form does not run; team stages run in episodes only"
+    reef.release("r1", [_tool("shout"), worker])
+    mutation = {"op": "create", "id": "main", "options": {"name": "native_graph", "config": team["config"]}}
+    reef.replies = [_reply(tool_calls=[_call("harness_try", {"mutations": [mutation]}, "c1")]), _reply("done")]
+    with _running(_tree(tmp_path, reef, "r1"), self_tools=True, poll_interval_s=0.1) as server:
+        result, streamed = _turn(server, "try a team")
+        (tried,) = _typed(streamed, "tool/result")
+        assert result["text"] == "done" and json.loads(tried["content"]) == {"entry": "main", "error": refusal}
+        log = server.sessions_dir / serve.SERVE_LOG
+        reef.release("r2", [_tool("shout"), worker, team], parent="r1")
+        _wait(lambda: bool(_typed(_events(log), "harness/mount-failed")))
+        failed = _typed(_events(log), "harness/mount-failed")[0]
+        assert (failed["release_id"], failed["entry"], failed["kind"], failed["error"]) == (
+            "r2",
+            "main",
+            "native_graph",
+            refusal,
+        )
+        assert server.status()["release_id"] == "r1"
+        assert [entry["id"] for entry in server.live_entries()] == ["shout", "worker"]
+    with pytest.raises(ServeError, match=f"does not mount: main: stage 'crew' uses mode {mode}, which the serve"):
+        Server(_tree(tmp_path / "boot", reef, "r2"), scenario=SCENARIO).start()
+
+
 # -- the pieces on their own -------------------------------------------------------------------------------
 
 

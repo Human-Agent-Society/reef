@@ -99,6 +99,11 @@ class Enforcer(ABC):
     @abstractmethod
     def run(self, tool: Tool, arguments: dict[str, Any], workdir: Path) -> Any: ...
 
+    def write_output(self, output_path: Path, text: str) -> None:
+        """Save a clipped result whole in the workdir, which is where the calls run: this host by default."""
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.write_text(text, encoding="utf-8")
+
 
 def denied(capabilities: Sequence[str]) -> list[str]:
     """What a bwrap profile withholds from a tool declaring ``capabilities``, in the closed order."""

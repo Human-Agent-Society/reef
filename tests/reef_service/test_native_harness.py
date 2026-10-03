@@ -887,8 +887,8 @@ def test_native_graph_admission_names_the_rule_a_bad_graph_breaks() -> None:
             ),
             "not reachable",
         ),
-        (_graph(max_steps=0), "'max_steps' must be an integer from 1 to 32"),
-        (_graph(max_steps=33), "'max_steps' must be an integer from 1 to 32"),
+        (_graph(max_steps=0), "'max_steps' must be an integer from 1 to 1024"),
+        (_graph(max_steps=1025), "'max_steps' must be an integer from 1 to 1024"),
         (_graph(start="nowhere"), "'start' must name a stage"),
         (
             _graph(
@@ -938,6 +938,55 @@ def test_native_graph_admission_names_the_rule_a_bad_graph_breaks() -> None:
     )
     with pytest.raises(ValueError, match="cycle without a model stage"):
         NODE_KINDS["native_graph"](None, cycle)
+
+
+def test_a_long_task_graph_and_agent_step_budget_pass_admission() -> None:
+    NODE_KINDS["native_graph"](None, _graph(max_steps=1024))
+    NODE_KINDS["native_agent"](None, {**CHECKER[1], "max_steps": 40})
+
+
+def test_a_team_stage_takes_agents_and_a_workspace_and_a_sequential_stage_takes_neither() -> None:
+    def crew(**keys):
+        """The seed graph with a subagent stage made of ``keys`` on the model's answer."""
+        to_act, _, to_think = SEED_GRAPH["edges"]
+        outcomes = ("completed", "gave_up", "budget", "ask")
+        return _graph(
+            stages={**SEED_GRAPH["stages"], "crew": {"kind": "subagent", **keys}},
+            edges=[
+                to_act,
+                to_think,
+                {"from": "think", "when": "text", "to": "crew"},
+                *({"from": "crew", "when": outcome, "to": "done"} for outcome in outcomes),
+            ],
+        )
+
+    for keys in (
+        {"agent": "checker"},
+        {"mode": "sequential", "agent": "checker"},
+        {"mode": "parallel", "agents": ["worker", "critic"]},
+        {"mode": "parallel", "agents": ["worker"], "workspace": "shared"},
+        {"mode": "team", "agents": ["peer", "peer", "critic"]},
+        {"mode": "team", "agents": ["peer", "peer"], "workspace": "shared"},
+    ):
+        NODE_KINDS["native_graph"](None, crew(**keys))
+    bad = [
+        ({"mode": "wide", "agents": ["worker"]}, "'mode' must be one of sequential, parallel, team"),
+        ({"mode": "team", "agents": [f"p{i}" for i in range(9)]}, "'agents' must be a list of 1 to 8 agent names"),
+        ({"mode": "parallel", "agents": [f"w{i}" for i in range(9)]}, "'agents' must be a list of 1 to 8 agent names"),
+        ({"mode": "parallel", "agents": []}, "'agents' must be a list of 1 to 8 agent names"),
+        ({"mode": "parallel", "agents": ["../x"]}, "'agents' must be a list of 1 to 8 agent names"),
+        ({"mode": "parallel", "agents": ["worker", "worker"]}, "'agents' must be distinct with mode parallel"),
+        ({"mode": "parallel", "agents": ["a..b"]}, "'agents' cannot name a..b: a member's name is part of a git"),
+        ({"mode": "parallel", "agent": "worker"}, "with mode parallel names its agents in 'agents', not 'agent'"),
+        ({"mode": "team", "agent": "peer"}, "with mode team names its agents in 'agents', not 'agent'"),
+        ({"agent": "checker", "agents": ["worker"]}, "stage 'crew' takes agents only with mode parallel or team"),
+        ({"agent": "checker", "workspace": "own"}, "stage 'crew' takes workspace only with mode parallel or team"),
+        ({"mode": "team", "agents": ["peer"], "workspace": "mine"}, "'workspace' must be one of own, shared"),
+        ({"mode": "parallel", "agents": ["worker"], "then": ["x"]}, r"stage 'crew' \(subagent\) does not take then"),
+    ]
+    for keys, message in bad:
+        with pytest.raises(ValueError, match=message):
+            NODE_KINDS["native_graph"](None, crew(**keys))
 
 
 def test_native_graph_renders_sorted_json_and_checks_its_allow_list() -> None:
@@ -1170,7 +1219,10 @@ def test_branch_and_compact_admission_names_the_rule_a_bad_stage_breaks() -> Non
         ({**route, "cases": []}, "'cases' must be a list of 1 to 8"),
         ({**route, "cases": [{"when": "steps_used_at_least", "value": 2}]}, "objects with when, value and outcome"),
         ({**route, "cases": [{"when": "moon_phase", "value": 2, "outcome": "x"}]}, "'when' must be one of"),
-        ({**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]}, "integer from 0 to 32"),
+        (
+            {**route, "cases": [{"when": "steps_used_at_least", "value": "2", "outcome": "x"}]},
+            "integer from 0 to 1024",
+        ),
         ({**route, "cases": [{"when": "last_text_matches", "value": "(", "outcome": "x"}]}, "regular expression"),
         # A proposer's pattern is bounded where it runs (bounded_search); admission keeps the length rule only.
         ({**route, "cases": [{"when": "last_text_matches", "value": "a" * 201, "outcome": "x"}]}, "at most 200"),
@@ -1623,7 +1675,7 @@ def test_native_agent_admission_and_render_checks_name_what_is_missing() -> None
         ({**CHECKER[1], "tools": ["a", "a"]}, "'tools' must be a list of distinct names"),
         ({**CHECKER[1], "then": ["checker"]}, "cannot hand its text to itself"),
         ({**CHECKER[1], "then": [f"a{i}" for i in range(9)]}, "'then' takes at most 8"),
-        ({**CHECKER[1], "max_steps": 0}, "'max_steps' must be an integer from 1 to 32"),
+        ({**CHECKER[1], "max_steps": 0}, "'max_steps' must be an integer from 1 to 1024"),
         ({**CHECKER[1], "max_tool_calls": "3"}, "'max_tool_calls' must be an integer from 1 to 256"),
     ]
     for config, rule in bad:
