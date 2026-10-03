@@ -189,6 +189,13 @@ is admitted the same way. It enters the release chain only if
 ``peft_type``, the weights are present, and its base model matches the one the
 engine holds.
 
+To start a scenario's adapter from an offline PEFT run instead of from zeros,
+add ``--megatron-lora-init=<adapter directory>`` with the same rank and
+alpha. The importer loads unfused Qwen3 and Qwen3.5 adapters on the MLP down
+and attention output projections into the matching TP shards before the
+optimizer is created. It refuses other targets, fused projections, pipeline
+parallelism and PEFT options such as DoRA, rsLoRA, bias or dropout.
+
 What a published adapter contains
 ---------------------------------
 
