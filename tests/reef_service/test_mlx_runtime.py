@@ -19,6 +19,7 @@ from reef.core.evaluation import EvaluationResult, SelectionDecision
 from reef.core.trajectories import trajectory_reward
 from reef.runtime.deployment import RuntimeRegistry
 from reef.runtime.interfaces import ModelCandidate, RuntimeContractError
+from reef.runtime.scheduler import RuntimeScheduler
 from reef.train.algos.base import StepPreparer, register_step_preparer
 from reef.train.algos.signals import StepScheduling, StepSignal
 from reef.train.mlx_backend.runtime import MLXRuntime
@@ -282,6 +283,74 @@ def test_rollback_loads_a_published_adapter(tmp_path: Path) -> None:
 
     assert restored == "fake-2"
     assert runtime.engine.loaded == [adapter]
+
+
+@pytest.mark.unit
+def test_checkpoint_restore_publishes_new_runtime_id_before_reopening_admission(tmp_path: Path) -> None:
+    from reef.artifact.artifact import Artifact
+
+    class CheckedServing(MLXServingRuntime):
+        def release(self):
+            assert self.current_runtime_load_id() == self.serving_runtime_load_id()
+            super().release()
+
+    adapter = tmp_path / "published"
+    adapter.mkdir()
+    engine = FakeEngine()
+    serving = CheckedServing(engine)
+
+    restored = serving.restore_checkpoint(Artifact.local(adapter))
+
+    assert serving.inference_admission_status["open"] is True
+    assert serving.serving_runtime_load_id() == restored
+    assert serving.current_runtime_load_id() == restored
+    assert engine.loaded == [adapter]
+
+
+@pytest.mark.unit
+def test_failed_checkpoint_restore_keeps_admission_closed(tmp_path: Path) -> None:
+    from reef.artifact.artifact import Artifact
+
+    class FailingEngine(FakeEngine):
+        def load_adapter(self, source):
+            raise RuntimeError("adapter load failed")
+
+    adapter = tmp_path / "published"
+    adapter.mkdir()
+    serving = MLXServingRuntime(FailingEngine())
+    current = serving.current_runtime_load_id()
+
+    with pytest.raises(RuntimeError, match="adapter load failed"):
+        serving.restore_checkpoint(Artifact.local(adapter))
+
+    assert serving.inference_admission_status["open"] is False
+    assert serving.current_runtime_load_id() == current
+    assert serving.serving_runtime_load_id() == current
+
+
+@pytest.mark.unit
+def test_scheduler_commit_publishes_mlx_runtime_id_before_reopening_admission(tmp_path: Path) -> None:
+    class CheckedServing(MLXServingRuntime):
+        def resume_admission(self):
+            assert self.current_runtime_load_id() == self.serving_runtime_load_id()
+            super().resume_admission()
+
+    engine = FakeEngine()
+    serving = CheckedServing(engine)
+    training = MLXRuntime(engine, checkpoint_dir=str(tmp_path / "ckpt"), serving=serving)
+    scheduler = RuntimeScheduler(training, serving)
+    prepared = scheduler.prepare_training_step(batch(), "mlx-test-tttd", {}, 0)
+    candidate = scheduler.train_candidate(prepared.payload)
+
+    activated = scheduler.activate_candidate(candidate)
+    assert serving.inference_admission_status["open"] is False
+    assert serving.serving_runtime_load_id() == activated.runtime_load_id
+    assert serving.current_runtime_load_id() != activated.runtime_load_id
+
+    scheduler.acknowledge_commit(1, candidate.training_job_id)
+
+    assert serving.inference_admission_status["open"] is True
+    assert serving.current_runtime_load_id() == activated.runtime_load_id
 
 
 @pytest.mark.unit

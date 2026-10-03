@@ -5,10 +5,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from reef_service.runtime_stubs import StubTrainingRuntime
+from reef_service.runtime_stubs import StubInferenceRuntime, StubTrainingRuntime
 
-from reef.artifact import Artifact, ArtifactRef, LiveWeightArtifactRef
+from reef.artifact import Artifact, ArtifactRef, InMemoryRepositoryBackend, LiveWeightArtifactRef
 from reef.core.errors import ReefError
+from reef.dispatcher import Dispatcher
+from reef.recipe import Recipe
+from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import adapter_name, create_weight_surface
 from reef.surface.base import WeightRuntime
 from reef.surface.weights import WeightInferenceHooks, WeightLoader, artifact_runtime_load_id
@@ -182,6 +185,53 @@ def test_a_head_that_is_its_own_checkpoint_still_gets_restored(tmp_path: Path) -
     # ...but the question it short-circuits past has already been answered.
     assert loader.restore_recovered(ckpt, Runtime()) == "mlx-222-2"
     assert restored == [str(ckpt.local_path)]
+
+
+def test_scenario_startup_restores_materialized_checkpoint_into_fresh_runtime(tmp_path: Path) -> None:
+    class MaterializingBackend(InMemoryRepositoryBackend):
+        def materialize(self, ref):
+            artifact = super().materialize(ref)
+            return Artifact(ref, None, local_path=artifact.local_path, metadata=self._storage.metadata[ref.release_id])
+
+    class WeightSurfaceRecipe(Recipe):
+        def build_surface(self, scenario):
+            return create_weight_surface()
+
+    restored: list[tuple[Path, str]] = []
+
+    class FreshRuntime(StubInferenceRuntime):
+        def serving_runtime_load_id(self):
+            return "mlx-fresh-1"
+
+        def restore_checkpoint(self, artifact):
+            restored.append((artifact.local_path, artifact.metadata["runtime_load_id"]))
+            return "mlx-fresh-2"
+
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    backend_factory = MaterializingBackend.factory(initial, root=tmp_path / "repository")
+    first = Dispatcher(WeightSurfaceRecipe(), backend_factory, scenario_storage=SQLiteScenarioStorage())
+    first.get_or_create_scenario("math")
+    first.close()
+
+    backend = backend_factory("math")
+    staged = checkpoint(tmp_path, "mlx-previous-40")
+    checkpoint_artifact = Artifact.local(
+        staged.local_path,
+        metadata={**backend.metadata(), "runtime_load_id": "mlx-previous-40"},
+    )
+    published = backend.publish(checkpoint_artifact, expected_parent=backend.current())
+
+    runtime = FreshRuntime(StubTrainingRuntime(), base_url="http://fresh-runtime")
+    second = Dispatcher(
+        WeightSurfaceRecipe(runtime=runtime), backend_factory, scenario_storage=SQLiteScenarioStorage()
+    )
+    try:
+        scenario = second.get_or_create_scenario("math")
+        assert scenario.repository.require_current_artifact() == published
+        assert restored == [(backend.materialize(published).local_path, "mlx-previous-40")]
+    finally:
+        second.close()
 
 
 def test_a_materialized_artifact_carries_the_version_it_was_published_under(tmp_path: Path) -> None:
