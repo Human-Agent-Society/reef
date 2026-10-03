@@ -92,8 +92,9 @@ NATIVE_AGENT_KEYS = ("prompt", "graph", "tools", "skills", "max_steps", "max_too
 NATIVE_AGENT_MAX_TOOL_CALLS = 256
 NATIVE_AGENT_MAX_THEN = 8
 NATIVE_VERIFY_CHECKS = ("last_line_integer", "last_line_matches", "nonempty")
-#: What a branch case may test: the run's own counters, or the last assistant text against a pattern.
-NATIVE_BRANCH_PREDICATES = ("steps_used_at_least", "tool_errors_at_least", "last_text_matches")
+#: What a branch case may test: the run's own counters, the workers it queued with ``team_assign`` that no parallel
+#: stage has taken yet, or the last assistant text against a pattern.
+NATIVE_BRANCH_PREDICATES = ("steps_used_at_least", "tool_errors_at_least", "assignments_at_least", "last_text_matches")
 NATIVE_END_REASONS = ("completed", "gave_up")
 #: Size caps on one graph, so admission and the interpreter's guard stay cheap.
 NATIVE_GRAPH_MAX_STEPS = 1024
@@ -472,15 +473,29 @@ def _branch_cases(name: str, cases: Any) -> None:
             )
         if when == "last_text_matches":
             _admit_pattern(value, f"native_graph stage {name!r} case 'value'")
-        elif isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= NATIVE_GRAPH_MAX_STEPS:
-            raise ValueError(
-                f"native_graph stage {name!r} case 'value' must be an integer from 0 to {NATIVE_GRAPH_MAX_STEPS}"
-            )
+        else:
+            # A run queues at most NATIVE_TEAM_MAX_AGENTS workers, so a higher count could never hold.
+            low, high = (1, NATIVE_TEAM_MAX_AGENTS) if when == "assignments_at_least" else (0, NATIVE_GRAPH_MAX_STEPS)
+            if isinstance(value, bool) or not isinstance(value, int) or not low <= value <= high:
+                raise ValueError(f"native_graph stage {name!r} case 'value' must be an integer from {low} to {high}")
         if not isinstance(outcome, str) or not _NAME.fullmatch(outcome) or outcome == "else":
             raise ValueError(f"native_graph stage {name!r} case 'outcome' must be a name other than else")
         if outcome in outcomes:
             raise ValueError(f"native_graph stage {name!r} names outcome {outcome!r} twice")
         outcomes.add(outcome)
+
+
+def _assignments_need_a_parallel_stage(stages: Mapping[str, Any], kinds: Mapping[str, str]) -> None:
+    """A branch on ``assignments_at_least`` needs a parallel stage in its own graph: only that graph gives its run
+    ``team_assign``, so anywhere else the case could never hold."""
+    if any(kind == "subagent" and stages[name].get("mode") == "parallel" for name, kind in kinds.items()):
+        return
+    for name, kind in kinds.items():
+        if kind == "branch" and any(case["when"] == "assignments_at_least" for case in stages[name]["cases"]):
+            raise ValueError(
+                f"native_graph stage {name!r} tests assignments_at_least, but no stage of the graph has mode parallel, "
+                "so the run never holds team_assign"
+            )
 
 
 def _compact_ratios(name: str, stage: Mapping[str, Any]) -> None:
@@ -549,6 +564,7 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
     if not isinstance(stages, Mapping) or not 1 <= len(stages) <= NATIVE_GRAPH_MAX_STAGES:
         raise ValueError(f"native_graph node 'stages' must be an object of 1 to {NATIVE_GRAPH_MAX_STAGES} stages")
     kinds = {str(name): _graph_stage(str(name), stage) for name, stage in stages.items()}
+    _assignments_need_a_parallel_stage(stages, kinds)
     outcomes = {name: _stage_outcomes(kind, stages[name]) for name, kind in kinds.items()}
     start = options.get("start")
     if start not in kinds:

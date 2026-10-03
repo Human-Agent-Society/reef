@@ -800,9 +800,12 @@ The stage kinds are:
 - ``branch`` selects an outcome from at most eight
   ``{when, value, outcome}`` cases. ``when`` can be
   ``steps_used_at_least`` or ``tool_errors_at_least`` with an integer value,
-  or ``last_text_matches`` with a regular expression. The first matching
-  case wins; otherwise the outcome is ``else``. Every case outcome and
-  ``else`` need an edge.
+  ``assignments_at_least`` with an integer from 1 to 8, or
+  ``last_text_matches`` with a regular expression. ``assignments_at_least``
+  holds when at least that many workers queued by ``team_assign`` wait for
+  a parallel stage; admission refuses it in a graph without one. The first
+  matching case wins; otherwise the outcome is ``else``. Every case outcome
+  and ``else`` need an edge.
 - ``subagent`` runs other agents in one of three modes. With
   ``mode: sequential``, the default, it sends the last assistant text, or
   the task, to the ``native_agent`` named by ``agent`` and then through its
@@ -910,7 +913,9 @@ stages list, ``task`` is what the worker is told, and the optional
 worker, at most 8 at a time. When the graph reaches the stage, the queued
 workers for the agents it lists start together; workers queued for other
 agents keep waiting. A stage with no queued worker ends ``completed`` and
-starts nobody.
+starts nobody. A ``branch`` case ``assignments_at_least`` routes to the
+stage as soon as the caller has queued that many workers, so a caller that
+assigns from a tool step hands off without ending a step with text first.
 
 With ``mode: team``, every listed agent starts on the caller's last
 assistant text, or on the task when the caller has said nothing yet. A

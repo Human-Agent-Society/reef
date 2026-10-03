@@ -1509,6 +1509,122 @@ def test_an_agent_whose_graph_holds_a_parallel_stage_gets_team_assign_and_leads_
     assert code == 0 and root_typed(sessions, "turn/end")[-1]["reason"] == {"kind": "completed"}
 
 
+#: plan, act, then a branch that enters the crew as soon as a worker is queued; a lead reaches the crew from a tool
+#: step, with no text turn between the assignment and the stage.
+LEAD_GRAPH = {
+    "name": "main",
+    "start": "plan",
+    "max_steps": 6,
+    "stages": {
+        "plan": {"kind": "model"},
+        "act": {"kind": "tools"},
+        "route": {"kind": "branch", "cases": [{"when": "assignments_at_least", "value": 1, "outcome": "assigned"}]},
+        "crew": {"kind": "subagent", "mode": "parallel", "agents": ["worker"], "workspace": "shared"},
+        "done": {"kind": "end", "reason": "completed"},
+        "quit": {"kind": "end", "reason": "gave_up"},
+    },
+    "edges": [
+        {"from": "plan", "when": "tool_calls", "to": "act"},
+        {"from": "plan", "when": "text", "to": "done"},
+        {"from": "act", "when": "done", "to": "route"},
+        {"from": "route", "when": "assigned", "to": "crew"},
+        {"from": "route", "when": "else", "to": "plan"},
+        {"from": "crew", "when": "completed", "to": "plan"},
+        {"from": "crew", "when": "gave_up", "to": "plan"},
+        {"from": "crew", "when": "budget", "to": "quit"},
+        {"from": "crew", "when": "ask", "to": "quit"},
+    ],
+}
+ASSIGN = _reply(tool_calls=[_call("team_assign", {"agent": "worker", "task": "count the primes below 50"}, "a1")])
+
+
+class ScriptedLead(MemberModel):
+    """The root answers its calls with ``replies`` in order; a worker answers with its task."""
+
+    def __init__(self, replies: list[dict]) -> None:
+        super().__init__()
+        self.replies = list(replies)
+
+    def reply(self, instance: str, body: dict) -> dict:
+        if instance != "root":
+            return _reply(content=f"{instance} did: {body['messages'][1]['content']}")
+        return self.replies.pop(0)
+
+
+def test_a_lead_that_assigns_and_keeps_calling_tools_reaches_the_crew_through_the_branch(tmp_path: Path) -> None:
+    model = ScriptedLead([ASSIGN, READ, _reply(content="finished")])
+    try:
+        code, sessions = run_turn(tmp_path, model, [*_seed_nodes(SEED_TOOLS), WORKER, ("native_graph", LEAD_GRAPH)])
+    finally:
+        stop(model)
+    assert code == 0
+    # The crew ran in the step that assigned, before the lead's next call; that call read the worker's result.
+    assert [e["stage"] for e in root_typed(sessions, "stage/enter")] == [
+        *("plan", "act", "route", "crew"),
+        *("plan", "act", "route"),
+        *("plan", "done"),
+    ]
+    assert [e for e in root_typed(sessions, "stage/exit") if e["stage"] == "route"] == [
+        {"step": 1, "stage": "route", "outcome": "assigned", "to": "crew", "case": "assignments_at_least", "value": 1},
+        {"step": 2, "stage": "route", "outcome": "else", "to": "plan", "case": "else"},
+    ]
+    (said,) = root_typed(sessions, "user/message")
+    assert said["source"] == {"kind": "team", "stage": "crew", "mode": "parallel", "outcome": "completed"}
+    lead_requests = [request for request in model.requests if member_of(request) == "root"]
+    assert lead_requests[1]["messages"][-1] == {
+        "role": "user",
+        "content": "worker.1 (worker) ended with completed: worker.1 did: count the primes below 50",
+    }
+    assert root_typed(sessions, "turn/end")[-1]["reason"] == {"kind": "completed"}
+
+
+def test_a_lead_that_assigns_nobody_takes_the_else_edge_and_no_crew_runs(tmp_path: Path) -> None:
+    model = ScriptedLead([READ, _reply(content="finished")])
+    try:
+        code, sessions = run_turn(tmp_path, model, [*_seed_nodes(SEED_TOOLS), WORKER, ("native_graph", LEAD_GRAPH)])
+    finally:
+        stop(model)
+    assert code == 0
+    assert [e["stage"] for e in root_typed(sessions, "stage/enter")] == ["plan", "act", "route", "plan", "done"]
+    (route_exit,) = [e for e in root_typed(sessions, "stage/exit") if e["stage"] == "route"]
+    assert route_exit == {"step": 1, "stage": "route", "outcome": "else", "to": "plan", "case": "else"}
+    assert not root_typed(sessions, "team/start") and not (sessions / "agents").exists()
+
+
+def test_a_branch_counts_the_queued_workers_until_a_stage_takes_its_agents_share(tmp_path: Path) -> None:
+    model = MemberModel()
+    try:
+        turn = TeamTurn(tmp_path, model, TEAM_NODES)
+        graph = turn.host.graph("seed")
+        route = {"kind": "branch", "cases": [{"when": "assignments_at_least", "value": 2, "outcome": "ready"}]}
+        turn.run.assignments = [
+            Assignment("peer", "a", ""),
+            Assignment("critic", "b", ""),
+            Assignment("peer", "c", ""),
+        ]
+        assert turn.run.branch(graph, route) == ("ready", {"case": "assignments_at_least", "value": 2})
+        stage = {"kind": "subagent", "mode": "parallel", "agents": ["peer"], "workspace": "shared"}
+        assert run_team_stage(turn.run, stage, "crew")[1]["agents"] == ["peer.1", "peer.2"]
+        # The critic's worker still waits, and one is below the case's two.
+        assert turn.run.branch(graph, route) == ("else", {"case": "else"})
+        turn.finish()
+    finally:
+        stop(model)
+
+
+def test_admission_bounds_assignments_at_least_and_refuses_it_without_a_parallel_stage() -> None:
+    NODE_KINDS["native_graph"](None, LEAD_GRAPH)
+    stages = LEAD_GRAPH["stages"]
+    for value in (0, 9, "1", True):
+        route = {"kind": "branch", "cases": [{"when": "assignments_at_least", "value": value, "outcome": "assigned"}]}
+        with pytest.raises(ValueError, match="stage 'route' case 'value' must be an integer from 1 to 8"):
+            NODE_KINDS["native_graph"](None, {**LEAD_GRAPH, "stages": {**stages, "route": route}})
+    rule = "stage 'route' tests assignments_at_least, but no stage of the graph has mode parallel"
+    for crew in ({"kind": "subagent", "agent": "worker"}, {"kind": "subagent", "mode": "team", "agents": ["worker"]}):
+        with pytest.raises(ValueError, match=rule):
+            NODE_KINDS["native_graph"](None, {**LEAD_GRAPH, "stages": {**stages, "crew": crew}})
+
+
 def test_render_refuses_unknown_members_a_cycle_through_them_nested_team_stages_and_a_member_with_then() -> None:
     descriptor = get_adapter("native")
     seed = _seed_nodes(SEED_TOOLS)

@@ -494,6 +494,9 @@ class Run:
                 hit = self.step >= int(value)
             elif when == "tool_errors_at_least":
                 hit = self.tool_errors >= int(value)
+            elif when == "assignments_at_least":
+                # The workers team_assign queued that no parallel stage has taken yet; a stage takes its agents' share.
+                hit = len(self.assignments) >= int(value)
             else:
                 # A search with no answer is a case that does not hold, named with its reason in the detail.
                 found = bounded_search(str(value), text[-NATIVE_MATCH_WINDOW:])

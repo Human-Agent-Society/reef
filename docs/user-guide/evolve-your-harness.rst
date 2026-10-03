@@ -1254,9 +1254,11 @@ Before you start, you need:
 - A proposer (`Write a method`_).
 
 This recipe config seeds a lead and its workers. The lead holds
-``team_assign`` because its graph has a ``parallel`` stage; the workers it
-assigns start together, each in its own git clone, and their changes are
-merged into the task's workdir before the verifier runs:
+``team_assign`` because its graph has a ``parallel`` stage, and the
+``route`` stage sends it to ``crew`` as soon as it has assigned a worker,
+so a lead that keeps calling tools still hands off; the workers it assigns
+start together, each in its own git clone, and their changes are merged
+into the task's workdir before the verifier runs:
 
 .. code:: yaml
 
@@ -1283,8 +1285,8 @@ merged into the task's workdir before the verifier runs:
              name: rules
              config:
                text: >-
-                 When you hold team_assign, you lead: split the task into two parts, assign each to a worker,
-                 answer "assigned", and after the workers report, check the workdir and finish the task.
+                 When you hold team_assign, you lead: split the task into two parts, assign each to a worker
+                 with team_assign, and after the workers report, check the workdir and finish the task.
            - id: worker
              name: native_agent
              config:
@@ -1300,6 +1302,7 @@ merged into the task's workdir before the verifier runs:
                stages:
                  plan: {kind: model}
                  act: {kind: tools}
+                 route: {kind: branch, cases: [{when: assignments_at_least, value: 1, outcome: assigned}]}
                  crew: {kind: subagent, mode: parallel, agents: [worker], workspace: own}
                  check: {kind: model}
                  fix: {kind: tools}
@@ -1307,7 +1310,9 @@ merged into the task's workdir before the verifier runs:
                  quit: {kind: end, reason: gave_up}
                edges:
                  - {from: plan, when: tool_calls, to: act}
-                 - {from: act, when: done, to: plan}
+                 - {from: act, when: done, to: route}
+                 - {from: route, when: assigned, to: crew}
+                 - {from: route, when: else, to: plan}
                  - {from: plan, when: text, to: crew}
                  - {from: crew, when: completed, to: check}
                  - {from: crew, when: gave_up, to: check}
