@@ -1323,10 +1323,13 @@ does, and start it with ``reef serve -c <config>``.
 ``evolution.task_manifest`` with ``evolution.tasks_root`` can name the task
 directories instead of ``tasks``. ``episode_seconds`` is the time budget
 beside the token budget: when it runs out, each member ends at its next
-step, a tool call started near the deadline gets only the time left, the
-stage merges the clones, and the root turn ends with reason ``deadline``.
-Keep the tasks' Harbor agent timeout above ``episode_seconds`` plus the
-time the merge takes, and ``episode_timeout_s`` above that.
+step with reason ``deadline``, a tool call started near the deadline gets
+only the time left, the stage merges the clones and exits ``budget``, and
+the root turn ends as it does on a spent token budget. A model call in
+flight at the deadline runs on, 600 seconds at most, before that member
+ends, so keep the tasks' Harbor agent timeout above ``episode_seconds``
+plus one model call and the time the merge takes, and ``episode_timeout_s``
+above that.
 
 For peers that start together instead of a lead, use ``mode: team`` with
 the agents listed in ``agents``. Members talk with ``team_send`` and
