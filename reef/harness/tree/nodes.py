@@ -485,7 +485,7 @@ def _branch_cases(name: str, cases: Any) -> None:
         outcomes.add(outcome)
 
 
-def _assignments_need_a_parallel_stage(stages: Mapping[str, Any], kinds: Mapping[str, str]) -> None:
+def assignments_need_a_parallel_stage(stages: Mapping[str, Any], kinds: Mapping[str, str]) -> None:
     """A branch on ``assignments_at_least`` needs a parallel stage in its own graph: only that graph gives its run
     ``team_assign``, so anywhere else the case could never hold."""
     if any(kind == "subagent" and stages[name].get("mode") == "parallel" for name, kind in kinds.items()):
@@ -564,7 +564,7 @@ def validate_native_graph(config: Any) -> Mapping[str, Any]:
     if not isinstance(stages, Mapping) or not 1 <= len(stages) <= NATIVE_GRAPH_MAX_STAGES:
         raise ValueError(f"native_graph node 'stages' must be an object of 1 to {NATIVE_GRAPH_MAX_STAGES} stages")
     kinds = {str(name): _graph_stage(str(name), stage) for name, stage in stages.items()}
-    _assignments_need_a_parallel_stage(stages, kinds)
+    assignments_need_a_parallel_stage(stages, kinds)
     outcomes = {name: _stage_outcomes(kind, stages[name]) for name, kind in kinds.items()}
     start = options.get("start")
     if start not in kinds:
