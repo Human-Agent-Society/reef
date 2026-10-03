@@ -56,6 +56,21 @@ Reports and training
 
 **A report was accepted but nothing trains.** Check whether the recipe's trigger is reached (``batch_size`` samples, or a complete TTTD rollout grid), whether training reported a data-contract error, and whether the receipts were already consumed by an earlier step. Reports cannot set training eligibility flags, and missing references are rejected at admission. ``GET /reef/scenarios/{scenario}/contract`` shows the recipe contract; ``/reef/status`` shows whether a batch is ready.
 
+**Full-weight publication fails after colocated training.** With both
+``colocate`` and ``offload-train`` enabled, training and inference share GPU
+memory in separate phases. The Megatron actor must restore its training weights
+before exporting or sending them, then offload them again before inference
+resumes. The Reef adapter performs this restoration around Slime's native
+full-weight publication hook, including offloading after a publication error.
+
+If a worker fails while reading training weights during publication, inspect
+the training worker log for the first error rather than the later request
+timeout. Check that the installed Reef adapter includes this lifecycle handling
+and that Slime matches the runtime pin in ``pyproject.toml``. A failed restore
+or a failed transfer can also have other causes; this handling does not replace
+CUDA, transport, or inference-engine diagnostics. LoRA publication uses its
+existing adapter lifecycle, and disjoint deployments retain Slime's lifecycle.
+
 **400 on a report.** The recipe declares a report schema and the body violates it: a missing ``score``, a boolean where a number is expected, a missing ``metadata`` field. `Bundled recipes <recipes.rst>`__ lists each schema.
 
 **409 on a report.** The client-chosen ``agent_record_id`` was sent before with different content. Use a new id, or resend identical content.
