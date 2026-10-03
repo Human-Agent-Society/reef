@@ -40,7 +40,8 @@ cleanup_whitelist:
   - "native/tools/__pycache__/**"
   - "native/hooks/__pycache__/**"
 # The served model reaches the loop through this file only; the served tree
-# never carries a provider.
+# never carries a provider. The fixed request fields go under every call the
+# loop makes; a tree cannot set them.
 model_binding:
   openai:
     - target: models
@@ -49,3 +50,4 @@ model_binding:
         base_url: "{base_url}"
         api_key: "{api_key}"
         model: "{model}"
+        request: "{request}"

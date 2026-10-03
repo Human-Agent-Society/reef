@@ -554,6 +554,7 @@ class _BudgetedBinding(ModelBinding):
             api=inner.api,
             timeout_s=inner.timeout_s,
             metadata=inner.metadata,
+            request=inner.request if isinstance(inner, ModelBinding) else {},
         )
         object.__setattr__(self, "_inner", inner)
         object.__setattr__(self, "_calls", calls)

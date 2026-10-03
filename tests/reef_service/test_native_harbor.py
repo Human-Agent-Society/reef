@@ -40,6 +40,7 @@ from reef.harness.runners.harbor_trial import (
 from reef.harness.runners.native import MAX_COMPLETION_TOKENS, run_loop
 from reef.harness.runners.native.__main__ import main as native_main
 from reef.harness.runners.native.control import EpisodeControl, RequestPolicy
+from reef.harness.runners.native.plugins import check_native_config
 from reef.harness.runners.native.seed import SEED_HOOKS, SEED_NODES, SEED_TOOLS
 from reef.harness.runners.native.task import AGENT_IMPORT_PATH, ENVIRONMENT_ENV, TRIALS_DIR_ENV
 from reef.harness.tree.render import render_composition
@@ -132,10 +133,18 @@ class FakeEnvironment:
         return [command for _, command in self.commands if "sandboxed.py" in command]
 
 
-def render_tree(tmp_path: Path, model: _FakeModel, nodes, *, max_output_tokens: int = 32000) -> Path:
+def render_tree(
+    tmp_path: Path, model: _FakeModel, nodes, *, max_output_tokens: int = 32000, request: dict | None = None
+) -> Path:
     """The native_harbor tree over ``nodes`` and the model's binding, rendered under ``episode``; its native root."""
     descriptor = get_adapter("native_harbor")
-    binding = ModelBinding(base_url=model.base_url, model="fake", api_key="dummy", max_output_tokens=max_output_tokens)
+    binding = ModelBinding(
+        base_url=model.base_url,
+        model="fake",
+        api_key="dummy",
+        max_output_tokens=max_output_tokens,
+        request=request or {},
+    )
     for relative, text in render_composition([*nodes, *binding.compose_nodes(descriptor)], descriptor).items():
         path = tmp_path / "episode" / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -206,6 +215,7 @@ def test_the_adapter_is_bundled_and_renders_what_native_renders() -> None:
                 "api_key": "k",
                 "model": "m",
                 "max_output_tokens": 32000,
+                "request": {},
             },
         },
     )
@@ -390,6 +400,28 @@ def test_the_harbor_agent_asks_for_the_bindings_output_limit_and_reports_the_tok
         stop(model)
     assert [body["max_tokens"] for body in model.requests] == [777, 777, MAX_COMPLETION_TOKENS, MAX_COMPLETION_TOKENS]
     assert (context.n_input_tokens, context.n_output_tokens) == (400, 200)
+
+
+def test_the_fixed_request_fields_reach_models_json_and_every_call_and_no_tree_entry_sets_them(tmp_path: Path) -> None:
+    model = ToolsModel()
+    environment = FakeEnvironment(tmp_path)
+    fixed = {"reasoning": {"effort": "high"}}
+    try:
+        root = render_tree(tmp_path, model, [*_seed_nodes(SEED_TOOLS), PID_TOOL], request=fixed)
+        assert json.loads((root / "models.json").read_text(encoding="utf-8"))["request"] == fixed
+        asyncio.run(play(make_agent(tmp_path, root, environment), environment))
+        # The same tree under the native loop alone sends them too.
+        (tmp_path / "alone").mkdir()
+        assert run_loop("again", root, tmp_path / "alone-sessions", tmp_path / "alone") == 0
+    finally:
+        stop(model)
+    assert len(model.requests) == 4
+    # Under the loop's own fields: the messages, the tools and the reply budget stay the loop's.
+    assert all(body["reasoning"] == fixed["reasoning"] and "messages" in body for body in model.requests)
+    assert all("max_tokens" in body and "tools" in body for body in model.requests)
+    # A tree entry cannot set them: the host refuses the config node, as it refuses the model and the endpoint.
+    with pytest.raises(ValueError, match="config node target 'models' cannot set request"):
+        check_native_config({"target": "models", "data": {"request": {"reasoning": {"effort": "low"}}}})
 
 
 class RateLimitedModel(_FakeModel):

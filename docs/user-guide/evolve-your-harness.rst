@@ -134,6 +134,10 @@ a fallback or another model, also inside a request body the tree passes to
 the endpoint. These checks read the config the tree renders, not the
 requests a run sends, so a request that a tool or a plugin builds itself can
 still name another model. The adapter guide lists the keys for each adapter.
+Under ``native`` and ``native_harbor`` the binding also writes
+``evolution.served_request``, fixed fields sent under every model call, such
+as ``{reasoning: {effort: high}}`` for a reasoning model's effort; a
+``config`` entry that sets ``request`` fails to load.
 
 With the ``pi`` adapter, ``GET /reef/harness`` serves:
 

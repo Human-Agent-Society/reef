@@ -1397,7 +1397,9 @@ Descriptor fields
   for evaluation episodes and substitutes ``{base_url}``, ``{api_key}``,
   and ``{model}`` in their string values; a value that is only
   ``{max_output_tokens}`` becomes the binding's reply budget as a number
-  (pi and ``native_harbor`` read it). The ``reef-<adapter>`` wrapper
+  (pi and ``native_harbor`` read it), and one that is only ``{request}``
+  becomes the binding's fixed request fields as an object (``native`` and
+  ``native_harbor`` read it). The ``reef-<adapter>`` wrapper
   points an installed binding at its proxy plus what the template writes
   after ``{base_url}`` in the dialect the tree was installed with. It tells
   that dialect by the values with no placeholder that the template writes

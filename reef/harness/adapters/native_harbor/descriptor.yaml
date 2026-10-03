@@ -56,7 +56,8 @@ cleanup_whitelist:
 self_isolating: true
 quirks: reef.harness.adapters.native_harbor.quirks
 # The native binding, plus the reply budget of one model call: a long task
-# needs more than the native loop's 4096 tokens.
+# needs more than the native loop's 4096 tokens. The fixed request fields go
+# under every call the loop makes; a tree cannot set them.
 model_binding:
   openai:
     - target: models
@@ -66,3 +67,4 @@ model_binding:
         api_key: "{api_key}"
         model: "{model}"
         max_output_tokens: "{max_output_tokens}"
+        request: "{request}"

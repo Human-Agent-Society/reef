@@ -467,13 +467,19 @@ def load_agents(agents_dir: Path) -> dict[str, Mapping[str, Any]]:
 
 
 def binding_from(models_path: Path) -> ModelBinding:
+    """The binding models.json carries, its fixed ``request`` fields included; a LoadError when those are not an
+    object of fields a call may set."""
     data = json.loads(models_path.read_text(encoding="utf-8"))
-    return ModelBinding(
-        base_url=str(data["base_url"]),
-        model=str(data["model"]),
-        api_key=str(data.get("api_key") or ""),
-        api=str(data.get("api") or "openai"),
-    )
+    try:
+        return ModelBinding(
+            base_url=str(data["base_url"]),
+            model=str(data["model"]),
+            api_key=str(data.get("api_key") or ""),
+            api=str(data.get("api") or "openai"),
+            request=data.get("request") or {},
+        )
+    except ValueError as exc:
+        raise LoadError(f"{models_path.name}: {exc}") from exc
 
 
 def output_token_limit_from(models_path: Path) -> int:

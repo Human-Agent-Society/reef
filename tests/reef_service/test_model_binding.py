@@ -548,6 +548,50 @@ def test_from_config_reads_the_key_from_the_named_environment_variable() -> None
         ModelBinding.from_config({"model": "m"}, {}, where="evolution.models.t")
 
 
+def test_from_config_reads_fixed_request_fields_and_refuses_what_a_call_sets_itself() -> None:
+    from reef.core.model_metadata import ModelMetadata
+
+    fixed = {"reasoning": {"effort": "high"}}
+    binding = ModelBinding.from_config(
+        {"url": "http://u", "model": "m", "request": fixed}, {}, where="evolution.models.t"
+    )
+    assert binding.request == fixed
+    assert ModelBinding.from_config({"url": "http://u", "model": "m"}, {}).request == {}
+    # Every copy keeps the fields: a reroute through Reef's evaluation route, a metadata bind.
+    assert replace(binding, base_url="http://reef/evaluation", api_key="tok").request == fixed
+    assert binding.with_metadata(ModelMetadata(1000, True)).request == fixed
+    with pytest.raises(ValueError, match=r"evolution\.models\.t\.request must be a JSON object"):
+        ModelBinding.from_config({"url": "http://u", "model": "m", "request": "high"}, {}, where="evolution.models.t")
+    with pytest.raises(ValueError, match=r"evolution\.models\.t\.request may not set messages, model"):
+        ModelBinding.from_config(
+            {"url": "http://u", "model": "m", "request": {"messages": [], "model": "x", "temperature": 0}},
+            {},
+            where="evolution.models.t",
+        )
+    with pytest.raises(ValueError, match="model binding request may not set tools"):
+        ModelBinding("http://u", "m", request={"tools": []})
+
+
+def test_complete_sends_the_fixed_request_fields_under_the_calls_own_in_every_dialect(monkeypatch) -> None:
+    fixed = {"reasoning": {"effort": "high"}, "temperature": 0.5}
+    replies = {
+        "openai": {"choices": [{"message": {"role": "assistant", "content": "hi"}}]},
+        "anthropic": {"content": [{"type": "text", "text": "hi"}]},
+        "responses": {
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "hi"}]}]
+        },
+    }
+    for api, reply in replies.items():
+        seen = _capture(monkeypatch, reply)
+        binding = ModelBinding("http://up", "m", api=api, request=fixed)
+        assert binding.chat([{"role": "user", "content": "u"}], temperature=0.2) == "hi"
+        binding.complete({"messages": [], "max_tokens": 5})
+        chat, raw = seen[0]["body"], seen[1]["body"]
+        # The call's own fields win where both name one; the fixed ones fill the rest.
+        assert (chat["model"], chat["reasoning"], chat["temperature"]) == ("m", {"effort": "high"}, 0.2), api
+        assert (raw["reasoning"], raw["temperature"], raw["max_tokens"]) == ({"effort": "high"}, 0.5, 5), api
+
+
 def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     module = tmp_path / "demo_models.py"
     module.write_text(
@@ -725,3 +769,12 @@ def test_budgeted_binding_keeps_model_metadata() -> None:
     binding = ModelBinding("http://up", "served", api="responses", metadata=ModelMetadata(640_000, True))
     budgeted = _BudgetedBinding(binding, _StepCalls(0, []))
     assert budgeted.compose_nodes(get_adapter("codex")) == binding.compose_nodes(get_adapter("codex"))
+
+
+def test_the_budgeted_binding_keeps_the_fixed_request_fields() -> None:
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
+
+    binding = ModelBinding("http://up", "served", request={"reasoning": {"effort": "high"}})
+    budgeted = _BudgetedBinding(binding, _StepCalls(0, []))
+    assert budgeted.request == binding.request
+    assert budgeted.compose_nodes(get_adapter("native")) == binding.compose_nodes(get_adapter("native"))

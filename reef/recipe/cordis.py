@@ -36,7 +36,7 @@ from reef.harness.episodes.executor import (
     SandboxUnavailable,
     build_executor,
 )
-from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver
+from reef.harness.episodes.model_binding import ModelBinding, ModelBindings, ModelBindingsResolver, request_fields
 from reef.harness.episodes.requests import request_entries
 from reef.harness.episodes.version_check import version_check_entry
 from reef.harness.runners.harbor_trial import (
@@ -159,7 +159,9 @@ class _ScenarioModels(ModelBindingsResolver):
         if runtime is None:
             return self.recipe.default_model_bindings(scenario)
         # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
-        binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
+        binding = self.recipe.bind_model_metadata(
+            ModelBinding.from_runtime(runtime, request=self.recipe.served_request)
+        )
         served = self.recipe.served_through_service(binding, scenario)
         return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
 
@@ -271,17 +273,22 @@ class CordisRecipe(Recipe):
     reaches ``propose`` as ``models.served`` and is rendered into each
     evaluation episode through the adapter's ``model_binding`` template, so
     the seed carries no provider nodes and neither does the published tree; a
-    client points its own harness at Reef. A method's auxiliary models - a
-    stronger proposer, a judge - are declared under ``evolution.models`` and
-    reach ``propose`` as ``models["name"]``::
+    client points its own harness at Reef. ``evolution.served_request`` is
+    the fixed request fields the served binding sends under every call's own
+    (``{reasoning: {effort: high}}`` asks a reasoning model for high effort).
+    A method's auxiliary models - a stronger proposer, a judge - are declared
+    under ``evolution.models`` and reach ``propose`` as ``models["name"]``::
 
         evolution:
+          served_request:
+            reasoning: {effort: high}
           models:
             teacher:
               url: https://api.openai.com
               model: gpt-4o
               api_key_env: OPENAI_API_KEY   # the key stays out of the file
               api: openai                   # default; or responses / anthropic
+              request: {temperature: 0}     # fixed request fields, optional
 
     A seed names the baseline nodes the first mutation is measured against::
 
@@ -324,6 +331,8 @@ class CordisRecipe(Recipe):
     client_models: tuple[str, ...] = ()
     seed: tuple[Mapping[str, Any], ...] = ()
     model_name: str | None = None
+    #: Fixed request fields of the served model's binding, sent under every call's own fields.
+    served_request: Mapping[str, object] = field(default_factory=dict)
     models: Mapping[str, ModelBinding] = field(default_factory=dict)
     model_metadata: Mapping[str, ModelMetadata] = field(default_factory=dict)
     #: Where this Reef answers inference: evaluation episodes sample the release it serves through it.
@@ -389,6 +398,7 @@ class CordisRecipe(Recipe):
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_tokens is not None and self.episode_tokens < 1:
             raise ValueError("episode_tokens must be at least 1 when set")
+        request_fields(self.served_request, "served_request")
         if self.episode_repeats < 1:
             raise ValueError("episode_repeats must be at least 1")
         if self.on_stale not in STALE_RESULT_POLICIES:
@@ -617,6 +627,10 @@ class CordisRecipe(Recipe):
                 raise RecipeConfigError(str(exc)) from exc
         model = settings.get("model")
         model_name = model.get("path") if isinstance(model, Mapping) else None
+        try:
+            served_request = request_fields(evolution.get("served_request", {}), "evolution.served_request")
+        except ValueError as exc:
+            raise RecipeConfigError(str(exc)) from exc
         named = evolution.get("models") or {}
         if not isinstance(named, Mapping):
             raise RecipeConfigError("evolution.models must map a name to a model section (url, model, api_key_env)")
@@ -729,6 +743,7 @@ class CordisRecipe(Recipe):
             "client_models": tuple(client_models),
             "seed": tuple(seed),
             "model_name": model_name if isinstance(model_name, str) and model_name else None,
+            "served_request": served_request,
             "models": models,
             "model_metadata": model_metadata,
             "candidate_plugin": candidate_plugin,
@@ -753,7 +768,7 @@ class CordisRecipe(Recipe):
                 "in the deployment config"
             )
         try:
-            binding = ModelBinding.from_runtime(self.runtime, model=self.model_name)
+            binding = ModelBinding.from_runtime(self.runtime, model=self.model_name, request=self.served_request)
         except ValueError as exc:
             raise RecipeConfigError(str(exc)) from exc
         return self.served_through_service(self.bind_model_metadata(binding), scenario)

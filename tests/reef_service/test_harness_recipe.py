@@ -1396,6 +1396,43 @@ def test_recipe_parses_episode_tokens_for_the_native_adapters_only(tmp_path: Pat
     assert unset.episode_tokens is None and unset._backend_kwargs()["episode_env"] == {}
 
 
+def test_recipe_reads_the_served_request_fields_and_a_named_models_request(tmp_path: Path, monkeypatch) -> None:
+    module = tmp_path / "demo_served_request.py"
+    module.write_text(
+        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+
+    def config(**evolution):
+        return {
+            "evolution": {
+                "propose": "demo_served_request:propose",
+                "evaluate": "demo_served_request:evaluate",
+                "tasks": ["task one"],
+                **evolution,
+            }
+        }
+
+    fixed = {"reasoning": {"effort": "high"}}
+    built = CordisRecipe.from_environment({}, config=config(served_request=fixed), runtime=runtime())
+    served = built.model_bindings().served
+    assert built.served_request == fixed and served.request == fixed
+    # The fields ride into an episode's models.json through the binding's own node.
+    (node,) = served.compose_nodes(get_adapter("native"))
+    assert node[1]["data"]["request"] == fixed
+    assert CordisRecipe.from_environment({}, config=config(), runtime=runtime()).model_bindings().served.request == {}
+    with pytest.raises(RecipeConfigError, match=r"evolution\.served_request must be a JSON object"):
+        CordisRecipe.from_environment({}, config=config(served_request="high"))
+    with pytest.raises(RecipeConfigError, match=r"evolution\.served_request may not set max_tokens, stream"):
+        CordisRecipe.from_environment({}, config=config(served_request={"stream": True, "max_tokens": 1}))
+    named = {"teacher": {"url": "http://big", "model": "large", "request": {"temperature": 0}}}
+    built = CordisRecipe.from_environment({}, config=config(models=named), runtime=runtime())
+    assert built.model_bindings()["teacher"].request == {"temperature": 0}
+    bad = {"teacher": {"url": "http://big", "model": "large", "request": {"tools": []}}}
+    with pytest.raises(RecipeConfigError, match=r"evolution\.models\.teacher\.request may not set tools"):
+        CordisRecipe.from_environment({}, config=config(models=bad))
+
+
 def test_recipe_passes_infrastructure_markers_to_native_harbor_episodes_only(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_markers.py"
     module.write_text(
