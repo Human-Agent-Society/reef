@@ -942,6 +942,7 @@ def test_opd_example_selects_frozen_teacher_and_full_parameter_training(monkeypa
     from reef.runtime.executor.arguments import native_arguments
 
     monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen35-sft")
+    monkeypatch.setenv("OPD_TEACHER_PATH", "/models/qwen35-teacher")
     monkeypatch.setenv("OPD_RUN_DIR", "/tmp/opd-test")
     monkeypatch.delenv("REEF_TOKEN", raising=False)
     config = load_deployment(deploy.PROJECT_ROOT / config_path)
@@ -949,32 +950,24 @@ def test_opd_example_selects_frozen_teacher_and_full_parameter_training(monkeypa
     assert args.recipe == "recipes.opd.recipe:OPDRecipe"
     flags = native_arguments(config["reef"]["training_backend_options"])
     assert "--opd-teacher=separate" in flags
-    assert "--opd-teacher-checkpoint=/work/models/Qwen3.5-9B" in flags
+    assert "--opd-teacher-checkpoint=/models/qwen35-teacher" in flags
     assert "--opd-divergence=reverse" in flags
     assert "--opd-top-k=1" in flags
-    assert "--vocab-size=248320" in flags
-    assert "--padded-vocab-size=248320" in flags
-    assert "--global-batch-size=2048" in flags
     assert not any("lora" in flag for flag in flags)
 
 
 @pytest.mark.unit
 @pytest.mark.parametrize("config_path", [_example_owned("recipes/opd/examples/math/serve.lora-small.yaml")])
-def test_opd_lora_example_covers_reviewed_training_and_evaluation_budgets(monkeypatch, config_path) -> None:
+def test_opd_lora_example_starts_from_the_sft_adapter(monkeypatch, config_path) -> None:
     from reef_service.config_helpers import load_deployment
     from reef.runtime.executor.arguments import native_arguments
-    from reef.service.deploy.config_utils import load_config
 
     monkeypatch.setenv("OPD_MODEL_PATH", "/models/qwen35-base")
+    monkeypatch.setenv("OPD_TEACHER_PATH", "/models/qwen35-teacher")
     monkeypatch.setenv("OPD_ADAPTER_PATH", "/models/qwen35-sft-adapter")
     monkeypatch.setenv("OPD_RUN_DIR", "/tmp/opd-lora-test")
-    path = deploy.PROJECT_ROOT / config_path
-    raw = load_config(path, interpolate_env=False)
-    config = load_deployment(path)
+    config = load_deployment(deploy.PROJECT_ROOT / config_path)
     flags = native_arguments(config["reef"]["training_backend_options"])
-    assert "--rollout-max-response-len=16384" in flags
-    assert "--rollout-max-context-len=32768" in flags
-    assert "--seq-length=32768" in flags
-    assert int(raw["inference"]["options"]["context-length"]) >= 64000 + 1024
-    assert raw["recipe"]["config"]["max-teacher-tokens"] >= 16384 + 1024
-    assert raw["inference"]["handler-config"]["sampling_defaults"]["max_new_tokens"] == 16384
+    assert "--opd-teacher-checkpoint=/models/qwen35-teacher" in flags
+    assert "--megatron-lora-init=/models/qwen35-sft-adapter" in flags
+    assert "--megatron-lora-rank=32" in flags

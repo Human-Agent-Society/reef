@@ -11,6 +11,9 @@ from pathlib import Path
 import torch
 from safetensors.torch import load_file
 
+#: PEFT key prefixes of the decoder layers: Qwen3, and Qwen3.5 whose text model sits beside a vision encoder.
+LAYER_PREFIXES = ("base_model.model.model.layers.", "base_model.model.model.language_model.layers.")
+
 
 def adapter_shard(weight: torch.Tensor, parameter: torch.Tensor, rank: int, world_size: int) -> torch.Tensor:
     """Match a PEFT tensor to one Megatron parameter, checking the TP layout."""
@@ -38,7 +41,7 @@ def load_initial_adapter(model: torch.nn.Module, path: str, *, rank: int, alpha:
     directory = Path(path)
     config = json.loads((directory / "adapter_config.json").read_text())
     if config.get("r") != rank or config.get("lora_alpha") != alpha:
-        raise ValueError("Initial adapter rank/alpha must match the OPD adapter")
+        raise ValueError("Initial adapter rank/alpha must match --megatron-lora-rank and --megatron-lora-alpha")
     if any(
         config.get(key)
         for key in ("use_dora", "use_rslora", "fan_in_fan_out", "modules_to_save", "rank_pattern", "alpha_pattern")
@@ -47,11 +50,7 @@ def load_initial_adapter(model: torch.nn.Module, path: str, *, rank: int, alpha:
     if config.get("bias", "none") != "none" or config.get("lora_dropout", 0) != 0:
         raise ValueError("Initial adapter requires no bias and zero dropout")
     weights = load_file(str(directory / "adapter_model.safetensors"), device="cpu")
-    prefixes = [
-        prefix
-        for prefix in ("base_model.model.model.layers.", "base_model.model.model.language_model.layers.")
-        if any(key.startswith(prefix) for key in weights)
-    ]
+    prefixes = [prefix for prefix in LAYER_PREFIXES if any(key.startswith(prefix) for key in weights)]
     if len(prefixes) != 1:
         raise ValueError("Initial adapter must use exactly one supported Qwen layer prefix")
     prefix = prefixes[0]

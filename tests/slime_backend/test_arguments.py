@@ -26,6 +26,7 @@ def slime_args(**overrides):
         "megatron_lora_alpha": None,
         "megatron_lora_dropout": 0.0,
         "megatron_lora_target_modules": None,
+        "megatron_lora_init": None,
         "megatron_to_hf_mode": "raw",
         "only_train_params_name_list": None,
         "freeze_params_name_list": None,

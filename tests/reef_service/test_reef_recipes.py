@@ -431,7 +431,7 @@ def test_opd_recipe_uses_configured_runtime_and_checkpoint_schedule() -> None:
         "recipes.opd.recipe:OPDRecipe",
         {},
         config={
-            "data": {"batch_size": 4, "tokenizer_path": "/models/qwen35"},
+            "data": {"batch_size": 4},
             "artifact": {"checkpoint_every_n_versions": 20},
         },
         **runtime_bindings(runtime),

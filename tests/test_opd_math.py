@@ -28,7 +28,7 @@ def test_driver_rejects_batch_mismatch_before_creating_output(tmp_path) -> None:
     config.write_text("recipe:\n  config:\n    batch-size: 32\ntraining:\n  config:\n    global_batch_size: 32\n")
     output = tmp_path / "results"
     args = Namespace(config=config, steps=1, prompts_per_step=512, samples_per_prompt=4, output=output)
-    with pytest.raises(ValueError, match="Driver batch must match"):
+    with pytest.raises(ValueError, match="recipe's batch-size"):
         Campaign(args)
     assert not output.exists()
 

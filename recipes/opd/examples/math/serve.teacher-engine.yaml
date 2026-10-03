@@ -29,7 +29,6 @@ recipe:
   config:
     batch-size: 16
     max-staleness: 0
-    tokenizer-path: ${inference.model-path}
     max-teacher-tokens: 8192
     checkpoint-every-n-versions: 1000
 training:

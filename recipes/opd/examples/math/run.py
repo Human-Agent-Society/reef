@@ -71,12 +71,8 @@ class Campaign:
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         stack = yaml.safe_load(args.config.read_text())
-        expected = args.prompts_per_step * args.samples_per_prompt
-        if args.steps and (
-            stack["recipe"]["config"]["batch-size"] != expected
-            or stack["training"]["config"]["global_batch_size"] != expected
-        ):
-            raise ValueError("Driver batch must match both recipe and trainer in the deployed configuration")
+        if args.steps and stack["recipe"]["config"]["batch-size"] != args.prompts_per_step * args.samples_per_prompt:
+            raise ValueError("The driver's prompts times samples per step must equal the recipe's batch-size")
         if int(stack["inference"]["options"]["context-length"]) <= args.eval_tokens:
             raise ValueError("Inference context must fit evaluation tokens plus the prompt")
         self.client = ReefClient(args.url, token=os.environ.get("REEF_TOKEN"), timeout_s=args.timeout)

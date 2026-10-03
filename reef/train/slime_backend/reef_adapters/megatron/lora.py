@@ -32,7 +32,7 @@ def validate_megatron_lora_args(args: Namespace) -> None:
         raise ValueError("--megatron-lora-dropout must be in [0, 1)")
 
     if rank == 0:
-        if getattr(args, "megatron_lora_init", None):
+        if args.megatron_lora_init:
             raise ValueError("--megatron-lora-init requires a positive --megatron-lora-rank")
         if args.megatron_lora_alpha is not None:
             raise ValueError("--megatron-lora-alpha requires a positive --megatron-lora-rank")

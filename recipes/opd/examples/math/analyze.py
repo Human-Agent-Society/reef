@@ -135,7 +135,7 @@ def main() -> None:
     )
     axes.legend()
     axes.grid(alpha=0.2)
-    figure.savefig(args.results / "learning-curve.png", dpi=180)
+    figure.savefig(args.results / "learning_curve.png", dpi=180)
     plt.close(figure)
     print(json.dumps(report, indent=2))
 

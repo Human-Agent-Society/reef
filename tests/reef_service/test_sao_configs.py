@@ -188,8 +188,8 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 _CONFIG_ENV = {
     "OPD_MODEL_PATH": "/root/models/Qwen3.5-9B-SFT",
     "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
-    "OPD_TEACHER_PATH": "/root/models/Qwen3-8B",
     "OPD_ADAPTER_PATH": "/root/models/Qwen3.5-9B-SFT-adapter",
+    "OPD_TEACHER_PATH": "/root/models/Qwen3.5-9B",
     "REEF_TOKEN": "config-test-token",
     "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
     "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
@@ -443,7 +443,6 @@ def test_user_facing_example_deployments_are_discovered() -> None:
         "recipes/opd/examples/math/serve.yaml",
         "recipes/opd/examples/math/serve.lora-small.yaml",
         "recipes/opd/examples/math/serve.teacher-engine.yaml",
-        "recipes/opd/examples/math/results/2026-09-29-qwen3.5-9b/teacher/serve.yaml",
         "recipes/tttd/examples/tttd/serve.yaml",
         "recipes/tttd/examples/tttd/serve-tinker.yaml",
     }

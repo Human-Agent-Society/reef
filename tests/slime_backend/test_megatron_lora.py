@@ -32,6 +32,7 @@ def _args(**overrides):
     values = {
         "megatron_lora_rank": 32,
         "megatron_lora_alpha": None,
+        "megatron_lora_init": None,
         "megatron_lora_dropout": 0.0,
         "megatron_lora_target_modules": None,
         "megatron_to_hf_mode": "bridge",

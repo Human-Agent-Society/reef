@@ -13,8 +13,10 @@ class OpdSettings(DistillSettings):
     A positive ``top_k`` selects the base's sampled-token reverse-KL
     estimator. Only the sampled-token log-probability enters that loss;
     keeping one top entry minimizes the unused top-K payload. The teacher
-    still scores the token against the full vocabulary. No truncation or
-    sequence-level importance correction is applied to an on-policy step.
+    still scores the token against the full vocabulary. ``importance_sampling_cap``
+    0 drops the truncated importance-sampling ratio between the sampler and the
+    trainer that the cookbook loss applies; with one update per on-policy batch
+    the ratio is 1 up to numerics.
     """
 
     teacher: str = "separate"
