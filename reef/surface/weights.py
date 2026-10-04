@@ -11,7 +11,9 @@ from reef.surface.adapter import adapter_name
 from reef.surface.base import (
     AdapterWeightRuntime,
     ArtifactActivator,
+    CheckpointRecoveryRuntime,
     InferenceHooks,
+    RecoveryRestorer,
     ServingRuntime,
     Surface,
     WeightRuntime,
@@ -41,7 +43,7 @@ def artifact_runtime_load_id(artifact: Artifact | ArtifactRef) -> str | None:
     return version if isinstance(version, str) and version else None
 
 
-class WeightLoader(ArtifactActivator):
+class WeightLoader(ArtifactActivator, RecoveryRestorer):
     """Restore weight checkpoints and recover the live serving head.
 
     ``scenario`` binds the loader to one scenario of a runtime that serves a
@@ -134,17 +136,18 @@ class WeightLoader(ArtifactActivator):
         rollbacks, where the weights are already in place, and its signature
         cannot tell which caller it has. This runs on the startup path only.
 
+        Only runtimes explicitly supporting startup reload are eligible.
         Loads on a positive mismatch — both versions known and different. An
         artifact recording no version says nothing about the engine, and a
         runtime already serving that version needs nothing.
         """
-        if not isinstance(runtime, WeightRuntime) or artifact.local_path is None:
+        if not isinstance(runtime, CheckpointRecoveryRuntime) or artifact.local_path is None:
             return None
         recorded = artifact_runtime_load_id(artifact)
         if recorded is None:
             return None
         served = self._served_version(runtime)
-        if served == recorded:
+        if served is None or served == recorded:
             return None
         logger.info(
             "restoring %r into the serving runtime: published under %r, engine holds %r",
@@ -152,7 +155,10 @@ class WeightLoader(ArtifactActivator):
             recorded,
             served,
         )
-        return self.load(artifact, runtime)
+        runtime_load_id = runtime.restore_recovered_checkpoint(artifact)
+        if not isinstance(runtime_load_id, str) or not runtime_load_id:
+            raise TypeError("restore_recovered_checkpoint must return a non-empty runtime load ID")
+        return runtime_load_id
 
 
 class WeightInferenceHooks(InferenceHooks):

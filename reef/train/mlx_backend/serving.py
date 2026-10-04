@@ -21,14 +21,15 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.artifact import Artifact
 from reef.runtime.interfaces import ActivatedModel, InferenceHandler, InferenceRuntime, RuntimeContractError
-from reef.surface.base import WeightRuntime
+from reef.surface.base import CheckpointRecoveryRuntime
 from reef.train.mlx_backend.inference import MLXInferenceBackend
 
 logger = logging.getLogger(__name__)
 
 
-class MLXServingRuntime(InferenceRuntime, WeightRuntime):
+class MLXServingRuntime(InferenceRuntime, CheckpointRecoveryRuntime):
     """Owns the resident model, the admission gate, and the served version."""
 
     def __init__(self, engine: Any, *, adapter_name: str = "reef-mlx", inference_timeout_s: float = 300.0) -> None:
@@ -43,9 +44,7 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         self._pending: dict[str, Any] = {}
         #: What the engine holds. Advances the moment weights are swapped.
         self._serving_runtime_load_id: str | None = engine.next_runtime_load_id()
-        #: What Reef has made available to new requests. Lags the above between
-        #: activation and the durable commit.
-        self._committed_runtime_load_id: str | None = self._serving_runtime_load_id
+        self.mark_published()
 
     # -- The engine, for the training half that shares it.
 
@@ -74,15 +73,6 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         # name over a wire, but naming it keeps the served identity explicit
         # in records and in the weight surface.
         return self._adapter_name
-
-    def current_runtime_load_id(self) -> str | None:
-        """The version Reef has actually made available to new inference.
-
-        Between activation and Reef's durable commit this deliberately lags
-        :meth:`serving_runtime_load_id`: the engine already holds the new
-        weights, but no request may be admitted against them yet.
-        """
-        return self._committed_runtime_load_id
 
     # -- The gate.
 
@@ -117,12 +107,15 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         if local_path is None:
             raise RuntimeContractError("mlx rollback requires a materialized adapter")
         self.hold()
-        try:
-            self._engine.load_adapter(Path(local_path))
-            self._serving_runtime_load_id = self._engine.next_runtime_load_id()
-        finally:
-            self.release()
+        self._engine.load_adapter(Path(local_path))
+        self._serving_runtime_load_id = self._engine.next_runtime_load_id()
+        self.mark_published()
+        self.release()
         return self._serving_runtime_load_id
+
+    def restore_recovered_checkpoint(self, artifact: Artifact) -> str:
+        """Reload the in-process adapter lost when the previous runtime exited."""
+        return self.restore_checkpoint(artifact)
 
     def stage_candidate(self, candidate_id: str, snapshot: Any) -> None:
         """Hold a trained snapshot until Reef selects or rejects it."""
@@ -162,5 +155,5 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         publication is durable, which is the first moment a new request can
         safely freeze the new head.
         """
-        self._committed_runtime_load_id = self._serving_runtime_load_id
+        self.mark_published()
         self.release()

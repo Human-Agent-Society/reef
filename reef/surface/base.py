@@ -55,6 +55,19 @@ class WeightRuntime(ServingRuntime):
         return artifact.ref.release_id
 
 
+class CheckpointRecoveryRuntime(WeightRuntime):
+    """Opt-in runtime capability to reload a recovered checkpoint at startup.
+
+    Ordinary weight inspection and rollback do not imply this capability:
+    remote runtimes can keep their weights resident across Reef restarts.
+    """
+
+    @abstractmethod
+    def restore_recovered_checkpoint(self, artifact: Artifact) -> str:
+        """Load startup weights and return their new runtime load ID."""
+        ...
+
+
 class AdapterWeightRuntime(WeightRuntime):
     """A weight runtime that can inspect each scenario's resident adapter."""
 
@@ -171,6 +184,7 @@ __all__ = [
     "AdapterWeightRuntime",
     "ArtifactActivator",
     "ArtifactLoader",
+    "CheckpointRecoveryRuntime",
     "FileTree",
     "HarnessInfo",
     "InferenceHooks",
