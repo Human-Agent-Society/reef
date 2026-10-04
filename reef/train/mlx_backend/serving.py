@@ -21,14 +21,15 @@ import logging
 from pathlib import Path
 from typing import Any
 
+from reef.artifact.artifact import Artifact
 from reef.runtime.interfaces import ActivatedModel, InferenceHandler, InferenceRuntime, RuntimeContractError
-from reef.surface.base import WeightRuntime
+from reef.surface.base import CheckpointRecoveryRuntime
 from reef.train.mlx_backend.inference import MLXInferenceBackend
 
 logger = logging.getLogger(__name__)
 
 
-class MLXServingRuntime(InferenceRuntime, WeightRuntime):
+class MLXServingRuntime(InferenceRuntime, CheckpointRecoveryRuntime):
     """Owns the resident model, the admission gate, and the served version."""
 
     def __init__(self, engine: Any, *, adapter_name: str = "reef-mlx", inference_timeout_s: float = 300.0) -> None:
@@ -111,6 +112,10 @@ class MLXServingRuntime(InferenceRuntime, WeightRuntime):
         self.mark_published()
         self.release()
         return self._serving_runtime_load_id
+
+    def restore_recovered_checkpoint(self, artifact: Artifact) -> str:
+        """Reload the in-process adapter lost when the previous runtime exited."""
+        return self.restore_checkpoint(artifact)
 
     def stage_candidate(self, candidate_id: str, snapshot: Any) -> None:
         """Hold a trained snapshot until Reef selects or rejects it."""

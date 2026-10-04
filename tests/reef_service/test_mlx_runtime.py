@@ -286,8 +286,10 @@ def test_rollback_loads_a_published_adapter(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
-def test_checkpoint_restore_publishes_new_runtime_id_before_reopening_admission(tmp_path: Path) -> None:
+@pytest.mark.parametrize("startup", [False, True])
+def test_checkpoint_restore_publishes_new_runtime_id_before_reopening_admission(tmp_path: Path, startup: bool) -> None:
     from reef.artifact.artifact import Artifact
+    from reef.surface.weights import WeightLoader
 
     class CheckedServing(MLXServingRuntime):
         def release(self):
@@ -299,8 +301,10 @@ def test_checkpoint_restore_publishes_new_runtime_id_before_reopening_admission(
     engine = FakeEngine()
     serving = CheckedServing(engine)
 
-    restored = serving.restore_checkpoint(Artifact.local(adapter))
+    artifact = Artifact.local(adapter, metadata={"runtime_load_id": "old-incarnation:4"})
+    restored = WeightLoader().restore_recovered(artifact, serving) if startup else serving.restore_checkpoint(artifact)
 
+    assert restored == "fake-2"
     assert serving.inference_admission_status["open"] is True
     assert serving.serving_runtime_load_id() == restored
     assert serving.current_runtime_load_id() == restored
@@ -308,8 +312,10 @@ def test_checkpoint_restore_publishes_new_runtime_id_before_reopening_admission(
 
 
 @pytest.mark.unit
-def test_failed_checkpoint_restore_keeps_admission_closed(tmp_path: Path) -> None:
+@pytest.mark.parametrize("startup", [False, True])
+def test_failed_checkpoint_restore_keeps_admission_closed(tmp_path: Path, startup: bool) -> None:
     from reef.artifact.artifact import Artifact
+    from reef.surface.weights import WeightLoader
 
     class FailingEngine(FakeEngine):
         def load_adapter(self, source):
@@ -320,8 +326,12 @@ def test_failed_checkpoint_restore_keeps_admission_closed(tmp_path: Path) -> Non
     serving = MLXServingRuntime(FailingEngine())
     current = serving.current_runtime_load_id()
 
+    artifact = Artifact.local(adapter, metadata={"runtime_load_id": "old-incarnation:4"})
     with pytest.raises(RuntimeError, match="adapter load failed"):
-        serving.restore_checkpoint(Artifact.local(adapter))
+        if startup:
+            WeightLoader().restore_recovered(artifact, serving)
+        else:
+            serving.restore_checkpoint(artifact)
 
     assert serving.inference_admission_status["open"] is False
     assert serving.current_runtime_load_id() == current
