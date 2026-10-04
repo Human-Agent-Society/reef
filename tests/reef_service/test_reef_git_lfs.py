@@ -47,6 +47,35 @@ def test_git_lfs_repository_initializes_default_local_repository(
 
 
 @pytest.mark.integration
+def test_git_lfs_repository_publishes_with_a_relative_work_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_git_lfs: None,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    backend = GitLFSRepositoryBackend(
+        "math",
+        tmp_path / "artifacts.git",
+        work_dir=Path("work"),
+        cache_dir=tmp_path / "cache",
+        bootstrap_files={"rules.md": "old rules\n"},
+    )
+    parent = backend.fork()
+    candidate = tmp_path / "candidate"
+    candidate.mkdir()
+    (candidate / "rules.md").write_text("new rules\n")
+
+    published = backend.publish(Artifact.local(candidate), expected_parent=parent)
+
+    assert published.parent_release_id == parent.release_id
+    assert backend.current() == published
+    materialized = backend.materialize(published).local_path
+    assert materialized is not None
+    assert (materialized / "rules.md").read_text() == "new rules\n"
+    assert not (tmp_path / "work" / "publish-index").exists()
+
+
+@pytest.mark.integration
 def test_local_repository_base_carries_the_bootstrap_files_and_an_existing_base_wins(
     tmp_path: Path,
     fake_git_lfs: None,
