@@ -114,7 +114,9 @@ def designer_prompt(request: DesignerRequest) -> str:
         )
         parts.append(
             "GROUNDING: the environment must make the agent execute a technique or operate a system from this "
-            "document. Never mention the document in the environment's text." + cut + "\n"
+            "document. Never mention the document in the environment's text."
+            + cut
+            + "\n"
             + untrusted_text(kept, "reference document")
         )
     parts.extend([HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit), HARBOR_OUTPUT_TEXT])
