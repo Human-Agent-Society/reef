@@ -1146,6 +1146,7 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         snapshot = tuple(dict(entry) for entry in self._entries())
         skipped_state = {"steps": steps, "entries": [dict(entry) for entry in snapshot], **carried}
         record: list[dict[str, Any]] = []
+        requires_count = 0
         # An agent's pending proposal goes first; the method proposes only when none waits.
         inbox = self.proposals
         # A manual request owns this step; an unrelated inbox proposal must
@@ -1205,7 +1206,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             # Recorded, not charged: the platform meters served traffic, the evolve step only counts its own.
             metrics["proposer_input_tokens"], metrics["proposer_output_tokens"] = _proposer_tokens(record)
             if batch.request is not None and handed is not None:
-                requires, refused = _merged_requires(batch.request.requires, handed.get("requires"))
+                requires, refused = merged_requires(batch.request.requires, handed.get("requires"))
+                requires_count = len(requires)
                 metrics["training_request"] = {"id": batch.request.id, **batch.request.to_dict(), "requires": requires}
                 if refused:
                     metrics["training_request"]["refused_requires"] = refused
@@ -1219,6 +1221,9 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # The parsed proposal lands before admission, so a refused one is on file too, redacted and clipped
         # like the proposer's traffic: the tree boundary has not seen it yet.
         self._write_record(step_dir, RECORD_MUTATIONS_FILE, [_bounded(_mutation_record(m)) for m in mutations])
+        if requires_count > MAX_REQUIRES:
+            reason = f"proposal requires {requires_count} items; at most {MAX_REQUIRES} are allowed; split the request"
+            return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": reason})
         if not mutations:
             return PreparedStep.skipped(state=skipped_state, metrics={**metrics, "skipped": "no proposal"})
 
@@ -1684,23 +1689,16 @@ def _proposer_requires(
     return added, refused
 
 
-def _merged_requires(
+def merged_requires(
     base: Sequence[Mapping[str, Any]], handed: object
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """The person's items, then what the proposer added by name, capped at ``MAX_REQUIRES`` naming the dropped.
+    """Merge screened requirements by name without truncating the proposal's requirements.
 
-    Returned with what :func:`_proposer_requires` refused, so the commit
-    records the items the person will not see in the list."""
+    Return refused items alongside the complete list. The backend rejects
+    proposals over the cap before applying their mutations.
+    """
     added, refused = _proposer_requires(base, handed)
-    merged = merge_requires(base, added)
-    if len(merged) > MAX_REQUIRES:
-        logging.getLogger(__name__).warning(
-            "propose: requires capped at %d items; dropped: %s",
-            MAX_REQUIRES,
-            ", ".join(str(item["name"]) for item in merged[MAX_REQUIRES:]),
-        )
-        merged = merged[:MAX_REQUIRES]
-    return merged, refused
+    return merge_requires(base, added), refused
 
 
 def _proposal_mutations(proposal: Proposal) -> tuple[Mutation, ...]:
