@@ -731,10 +731,10 @@ def test_live_and_settled_pages_show_independent_checks_and_escape_model_text() 
         assert "&lt;script&gt;" in page
 
 
-def test_long_check_results_expand_without_hiding_or_inserting_model_html() -> None:
+def test_long_failed_check_results_remain_visible_and_escape_model_html() -> None:
     from reef.service.check_page import checks_html
 
     reason = "Observed <script> content. " * 15
     rendered = checks_html([{"id": "request", "status": "fail", "reason": reason}])
-    assert "<details><summary>" in rendered and html.escape(reason) in rendered
+    assert '<p class="evaluation-observed">' + html.escape(reason) in rendered
     assert "<script>" not in rendered

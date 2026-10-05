@@ -26,6 +26,7 @@ from collections.abc import Mapping, Sequence
 
 from reef.core.requirements import required_by
 from reef.harness.step_result import design_sections, floor_tasks_note, next_action, reef_installs, rejection_text
+from reef.service.check_page import STYLE as EVALUATION_STYLE
 from reef.service.check_page import checks_html, evaluation_html
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_span
 from reef.service.release_page import (
@@ -429,7 +430,7 @@ def build_request_page(
         change_label = "Proposed changes" if state in ("pending", "rejected", "skipped", "failed") else "What changed"
         body = (
             f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query, adapter, record_id)}</section>\n'
-            f"{evaluation_html(metrics)}"
+            f"{evaluation_html(metrics, result=state)}"
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
             f"{review_html(metrics, rejected=state == 'rejected')}{design_html(metrics)}"
         )
@@ -457,7 +458,7 @@ def build_request_page(
     served = served_step(rows)
     return document(
         title=f"Harness request {record_id[:8]}",
-        style=STYLE,
+        style=STYLE + EVALUATION_STYLE,
         breadcrumb="Requests",
         context=scenario,
         state=state,

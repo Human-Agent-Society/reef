@@ -34,6 +34,7 @@ from reef.harness.step_result import (
     reef_installs,
     unscored_failures,
 )
+from reef.service.check_page import STYLE as EVALUATION_STYLE
 from reef.service.check_page import evaluation_html
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
@@ -536,7 +537,7 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     if isinstance(failure, str) and failure.strip():
         # Why the proposer produced nothing: a failed model call, a reply with no entry.
         listed += f'<div class="failure"><h3>Proposer failure</h3><p>{escape(failure)}</p></div>'
-    return summary + grid + listed + evaluation_html(metrics)
+    return summary + grid + listed
 
 
 def _scrolled(table: str, label: str) -> str:
@@ -757,7 +758,7 @@ def build_release_page(
     served = served_step(rows)
     return document(
         title=f"Harness v{step}",
-        style=STYLE,
+        style=STYLE + EVALUATION_STYLE,
         breadcrumb="Versions",
         context=link_query.get("scenario", "") if link_query else "",
         state=selection_result,
@@ -768,6 +769,7 @@ def build_release_page(
         home="" if served is None or served == step else step_href(served, link_query),
         body=_steps_nav(step, rows, link_query)
         + '<div class="stack">\n'
+        + evaluation_html(metrics, result=selection_result)
         + _card("Why", f"{_why(row, metrics)}\n")
         + _design(metrics)
         + _card("What changed", f"{_what_changed(row, metrics, entries, before_files, node_paths or {})}\n")
