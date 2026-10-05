@@ -140,6 +140,7 @@ class _ScenarioModels(ModelBindingsResolver):
     recipe: CordisRecipe
     #: The scenario the bindings serve; a call naming none resolves for it.
     scenario: str | None = None
+    auxiliary_models: Mapping[str, ModelBinding] | None = None
 
     def resolve(self, scenario: str | None = None) -> ModelBindings:
         scenario = self.scenario if scenario is None else scenario
@@ -149,7 +150,10 @@ class _ScenarioModels(ModelBindingsResolver):
         # The scenario's own model is served by this Reef too, so an episode reaches it through the same route.
         binding = self.recipe.bind_model_metadata(ModelBinding.from_runtime(runtime))
         served = self.recipe.served_through_service(binding, scenario)
-        return ModelBindings(served=served, named=dict.fromkeys(self.recipe.models, served))
+        named = dict.fromkeys(self.recipe.models, served)
+        if self.auxiliary_models is not None:
+            named.update(self.auxiliary_models)
+        return ModelBindings(served=served, named=named)
 
 
 def _resolve_callable(value: Any, what: str) -> Any:

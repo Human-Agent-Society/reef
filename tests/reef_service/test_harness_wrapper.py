@@ -433,14 +433,17 @@ def test_run_agent_puts_the_harness_binary_first_on_path(tmp_path) -> None:
     compose = _make_compose(tmp_path, 1)
     bin_dir = tmp_path / "node_modules" / ".bin"
     bin_dir.mkdir(parents=True)
-    binary = bin_dir / "pi"
+    binary = tmp_path / "dist" / "cli.py"
+    binary.parent.mkdir()
     seen = tmp_path / "path.txt"
     binary.write_text(f'#!/usr/bin/env python3\nimport os\nopen({str(seen)!r}, "w").write(os.environ["PATH"])\n')
     binary.chmod(0o755)
+    command = bin_dir / "pi"
+    command.symlink_to(binary)
 
     env = {**os.environ, "REEF_HARNESS_CAPTURES_DIR": str(tmp_path)}
     with patch.dict(os.environ, env), contextlib.suppress(SystemExit):
-        run_agent(str(binary), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "review"])
+        run_agent(str(command), compose, "test-scenario", "pi", "PI_CODING_AGENT_DIR", ["-p", "review"])
 
     entries = seen.read_text().split(os.pathsep)
     assert entries[0] == str(bin_dir.resolve())

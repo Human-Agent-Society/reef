@@ -59,6 +59,8 @@ def floor_tasks_note(metrics: Mapping[str, Any]) -> str | None:
     """For a step that answered a request under a floor: its floor tasks were set before the request and check that
     the changed harness still passes them, not what the request asks for, which only the review reads; ``None``
     for any other step."""
+    if metrics.get("reefine_evaluation"):
+        return None
     selection = metrics.get("selection")
     if not isinstance(metrics.get("training_request"), Mapping) or not isinstance(selection, Mapping):
         return None

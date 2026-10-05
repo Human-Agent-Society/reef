@@ -26,6 +26,7 @@ dependencies = [
     "alembic>=1.13,<2",
     "huggingface_hub",
     "pyyaml",
+    "rich>=15.0,<16",
     "reef-client>=0.2.0",
     # Harbor and reef-eval: the terminus runner, the task player and the generator service play Harbor tasks.
     "reef-eval[harbor]>=0.1.1",
@@ -125,7 +126,7 @@ namespaces = true
 include = ["reef", "reef.*"]
 
 [tool.setuptools.package-data]
-reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/harness_facts.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "harness/adapters/codex/default_instructions.md", "harness/adapters/codex/bundled_models.json", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "recipe/reefine/agent_tools.ts", "recipe/reefine/trial_driver.mjs", "recipe/reefine/health/instruction.md", "recipe/reefine/health/task.toml", "recipe/reefine/health/environment/Dockerfile", "recipe/reefine/health/tests/test.sh"]
+reef = ["harness/adapters/*/descriptor.yaml", "harness/adapters/*/harness_facts.yaml", "harness/adapters/*/version_check.ts", "harness/adapters/*/requests.ts", "harness/adapters/*/pi_extension_api.md", "harness/adapters/codex/default_instructions.md", "harness/adapters/codex/bundled_models.json", "service/profiles/*.yaml", "recipe/reefine/agent_rules.md", "train/reefine/agent_tools.ts", "train/reefine/trial_driver.mjs", "recipe/reefine/health/instruction.md", "recipe/reefine/health/task.toml", "recipe/reefine/health/environment/Dockerfile", "recipe/reefine/health/tests/test.sh"]
 
 [tool.isort]
 profile = "black"  # black-compatible

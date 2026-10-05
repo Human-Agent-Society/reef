@@ -1408,6 +1408,11 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
                     "step": int(prepared.state["steps"]),
                     "mutations": [_mutation_record(mutation) for mutation in candidate.mutations],
                     "reason": decision.reason,
+                    **(
+                        {"feedback": decision.metrics["reefine_feedback"]}
+                        if "reefine_feedback" in decision.metrics
+                        else {}
+                    ),
                 }
             )
             state["rejected_proposals"] = rejected[-self._max_rejected_history :]
