@@ -341,7 +341,15 @@ jobs:
           }
           # reef-eval[harbor] is core: the terminus runner, the task player and the generator play Harbor tasks.
           expected_core = {
-              "aiohttp", "alembic", "huggingface-hub", "pyyaml", "reef-client", "reef-eval", "sqlalchemy", "tomli-w"
+              "aiohttp",
+              "alembic",
+              "huggingface-hub",
+              "pyyaml",
+              "reef-client",
+              "reef-eval",
+              "rich",
+              "sqlalchemy",
+              "tomli-w",
           }
           assert core == expected_core, core
           slime = {
