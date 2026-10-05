@@ -23,6 +23,7 @@ from reef.storage.records import RecordStore
 from reef.storage.scenario import ScenarioStore
 from reef.surface.base import Surface
 from reef.train.backend import StepExecution
+from reef.train.cordis_backend.contracts import ServedComposition, ServedCompositionConsumer
 from reef.train.trainer import ComponentTrainer, Trainer
 from reef.train.types import TrainingBatch, TrainStepResult
 
@@ -215,7 +216,17 @@ class Scenario:
         """
         trainer = self.trainer_for(component)
         with self._committer.lock if len(self.component_trainers) == 1 else nullcontext():
-            return trainer.run_once(self.scenario_step, base_release_id=self.current_artifact_ref().release_id)
+            release_id = self.current_artifact_ref().release_id
+            backend = trainer.candidate_backend
+            if isinstance(backend, ServedCompositionConsumer):
+                entries = self.entries_for_version(release_id)
+                if entries is None:
+                    harness = self.surface.harness
+                    if harness is None:
+                        raise ValueError("served composition requires a harness surface")
+                    entries = harness.seed_entries
+                backend.set_served_composition(ServedComposition(release_id, entries))
+            return trainer.run_once(self.scenario_step, base_release_id=release_id)
 
     def reserve_training_batch(self, component: str | None = None) -> TrainingBatch | None:
         """Reserve one backend-training batch while excluding rollback and commit."""

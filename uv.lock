@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.15' and sys_platform == 'win32'",
@@ -4045,6 +4045,7 @@ dependencies = [
     { name = "pyyaml" },
     { name = "reef-client" },
     { name = "reef-eval", extra = ["harbor"] },
+    { name = "rich" },
     { name = "sqlalchemy" },
     { name = "tomli-w" },
 ]
@@ -4150,6 +4151,7 @@ requires-dist = [
     { name = "requests", marker = "extra == 'sglang'" },
     { name = "requests", marker = "extra == 'slime'" },
     { name = "requests", marker = "extra == 'vllm'" },
+    { name = "rich", specifier = ">=15.0,<16" },
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.16.9" },
     { name = "safetensors", marker = "extra == 'slime'" },
     { name = "sglang-router", marker = "extra == 'sglang'", specifier = ">=0.3.2" },

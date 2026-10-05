@@ -278,6 +278,59 @@ instance. A ``CandidateEvaluationPlugin`` must both evaluate and select;
 a selector alone is insufficient. Keep publication in the candidate
 selection flow so Reef can revert a rejected change.
 
+Reefine evaluation
+~~~~~~~~~~~~~~~~~~
+
+Reefine binds ``reef.train.reefine`` proposal execution to
+``reef.train.evaluation.reefine.ReefineEvaluation``. Recipe-owned prompts,
+defaults and configuration live in ``reef.recipe.reefine``. Neither component
+is rendered into the delivered harness. MetaHarness and GEPA keep their own
+method policy in ``recipes/`` and continue to use their existing plugins.
+
+The evaluator implements the existing ``CandidateEvaluationPlugin`` contract:
+``evaluate`` returns measurements and ``decide`` returns select or reject.
+``ReefineCandidate`` adds the original ``TrainingRequest``, the admitted
+client requirements that will be delivered, and a snapshot of the current
+serving composition. Reviewers inspect those requirements as artifact
+metadata, without the proposer's design notes or conversations. Scenario preparation freezes that snapshot
+from the published release, excluding pending candidates. Re-evaluation
+refreshes it and admits the same mutations against the new head.
+
+The report under ``EvaluationResult.metrics.reefine_evaluation`` has a version,
+request and release IDs, model and scorer identity, task version, a protected
+suite checksum, the request plan and check rows. Each row records its group,
+target, status, expected and observed behavior, scores, reason, duration and
+optional record directory. Check statuses are ``pending``, ``running``,
+``pass``, ``fail``, ``invalid`` and ``not_run``; the selection contract remains
+select or reject. Every required group and row must pass.
+
+``RequestVerifier`` is an optional operator-owned ABC. Implement
+``verify(result: EpisodeResult, workspace: Path) -> VerificationResult``.
+It reads the retained application output and returns a boolean and reason.
+Keep trusted test definitions outside the candidate's writable workspace.
+The bug-fix tutorial checks the output against separate arithmetic assertions,
+and checks the actual test/edit/review order in the trajectory.
+
+``run_episode`` accepts optional ``workspace_files``, ``initialize_git``,
+``keep_workspace``, ``online`` and ``task_environment`` inputs. Defaults preserve existing episode
+behavior. Reefine request and protected-task episodes explicitly enable online
+pi execution; the health episode retains ``PI_OFFLINE``. Online runs retain
+extensions and put the configured pi binary directory on ``PATH`` so child
+sessions use the same install. Retention skips symlinks and Git metadata and
+rejects output above 1000 files or 50 MiB. Unavailable trajectories and model
+responses are invalid, and cannot approve publication.
+Operator-selected environment variables are forwarded explicitly, separately
+from the harness relocation environment, and are not included in review inputs.
+
+``StepProgress.checks`` supplies live rows; the selection record persists the
+final report. HTTP progress, terminal and page rendering read these values.
+Older records without a report retain their existing presentation. Request
+failure feedback is recorded separately from the incumbent failure manifest;
+protected-task transcripts are not passed to the proposer.
+
+Configuration and operational limits are described in the
+`Reefine guide <../user-guide/recipes/reefine.rst#independent-evaluation>`__.
+
 Untrusted input
 ~~~~~~~~~~~~~~~
 

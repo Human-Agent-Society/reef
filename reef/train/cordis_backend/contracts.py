@@ -51,6 +51,7 @@ class StepProgress:
     step_record: str | None
     episodes_total: int | None = None
     activity: tuple[Mapping[str, Any], ...] = ()
+    checks: tuple[Mapping[str, object], ...] = ()
 
 
 class StepProgressReader(ABC):
@@ -63,3 +64,16 @@ class StepProgressReader(ABC):
 
 # Compatibility for adapters that implement the earlier interface name.
 ProposalGate = ProposalValidator
+
+
+@dataclass(frozen=True)
+class ServedComposition:
+    release_id: str
+    entries: tuple[Mapping[str, object], ...]
+
+
+class ServedCompositionConsumer(ABC):
+    """Receive the actual serving head before preparation, including stale re-evaluation."""
+
+    @abstractmethod
+    def set_served_composition(self, composition: ServedComposition) -> None: ...

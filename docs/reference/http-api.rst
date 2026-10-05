@@ -1034,7 +1034,13 @@ step holds this request, ``started_at``, ``episodes_total``,
 ``step_record`` and ``activity`` (the Activity lines oldest first, each
 ``{at, kind, text}`` with ``failed: true`` on a failed one; ``kind`` is
 ``model``, ``agent``, ``check``, ``trial``, ``provider`` or ``proposer``;
-empty otherwise) from the backend's progress. The phase is what the pi
+empty otherwise) from the backend's progress. ``checks`` contains live
+structured evaluation rows, or an empty list when the backend supplies none.
+A settled row also includes ``evaluation`` with the final Reefine report,
+or null for a step without that report. Request and release pages display
+the same checks and selection reason. See the
+`Reefine evaluation contract <../developer-guide/write-a-harness-method.rst#reefine-evaluation>`__
+for row fields and statuses. The phase is what the pi
 extension's spinner names while the step runs, and opening the spinner lists
 the latest four activity lines. Unlike the two pages this is
 an ordinary route: it reads the headers alone, and a ``?key=`` is HTTP

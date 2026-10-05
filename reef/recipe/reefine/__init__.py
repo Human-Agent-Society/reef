@@ -20,13 +20,18 @@ from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.requests import ships_requests
 from reef.harness.episodes.version_check import ships_version_check
+from reef.observability import ExperimentLogger
 from reef.recipe.config_fields import config_field
-from reef.recipe.cordis import CordisRecipe
+from reef.recipe.cordis import CordisRecipe, _ScenarioModels
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.reefine.agent import AgentProposer
+from reef.recipe.reefine.evaluation import evaluation_factory
 from reef.recipe.reefine.evolution import EXTENSION_ADAPTER, HEALTH_TASK_DIRECTORY
 from reef.recipe.reefine.multimodal import MultimodalProvider, MultimodalSettings, ProviderRelay
 from reef.runtime.interfaces import MultimodalRelay
+from reef.storage.records import RecordStore
+from reef.train.reefine.backend import ReefineBackend
+from reef.train.trainer import Trainer
 
 logger = logging.getLogger(__name__)
 
@@ -41,14 +46,9 @@ class ReefineRecipe(CordisRecipe):
     ``evolution.multimodal`` names a gateway for images, embeddings, speech and
     decisions: Reef relays the harness's calls to it with its key, unrecorded,
     and the agent's trials reach the same one.
-    Selection is ``floor``: the evaluation runs the candidate alone on the
-    profile's health task and publishes it when every task scores at least
-    ``evolution.floor_score``. The floor checks that the tree still works
-    (the model binding, the tools, the extensions load), not that the
-    requested change does; the step's design and review notes and the
-    person judge that. Override ``evolution.selection`` to compare scores
-    against the current release, and ``training-mode`` to learn from
-    reports too.
+    Selection defaults to independent Reefine evaluation: request behavior,
+    health, protected tasks and a fresh model review must all pass. Explicit
+    legacy selection policies retain their existing scoring behavior.
     """
 
     name: str = field(default="reefine", kw_only=True)
@@ -93,7 +93,7 @@ class ReefineRecipe(CordisRecipe):
             "requests": True,
             "version_check": True,
             "review_kinds": ["code_extension"],
-            "selection": "floor",
+            "selection": "reefine",
         }
         merged = {**defaults, **evolution}
         try:
@@ -130,9 +130,41 @@ class ReefineRecipe(CordisRecipe):
             # The agent proposer answers requests on pi alone (reef.recipe.reefine.agent); on another adapter the text
             # proposer does, so no agent is built, jailed or warned about.
             merged["proposer_agent"] = None
+        selection = merged["selection"]
+        evaluation = merged.pop("evaluation", None)
+        if selection == "reefine":
+            merged.setdefault("on_stale", "reevaluate")
+            if merged["on_stale"] == "merge":
+                raise RecipeConfigError("Reefine evaluation requires on_stale: reevaluate or refuse")
+            merged["selection"] = "floor"
         kwargs = super()._recipe_kwargs({**settings, "evolution": merged}, values)
+        if selection == "reefine":
+            factory = evaluation_factory(evaluation, tuple(kwargs["tasks"]))
+            if factory.settings.reviewer_model != "served" and factory.settings.reviewer_model not in kwargs["models"]:
+                raise RecipeConfigError("evaluation.reviewer_model must name served or an evolution.models binding")
+            kwargs["candidate_plugin"] = factory
         try:
             kwargs["multimodal"] = MultimodalSettings.from_config(evolution.get("multimodal"), values)
         except ValueError as exc:
             raise RecipeConfigError(f"evolution.{exc}") from exc
         return kwargs
+
+    def build(
+        self,
+        scenario: str,
+        records: RecordStore,
+        *,
+        algorithm_state: Mapping[str, object] | None = None,
+        experiment_logger: ExperimentLogger | None = None,
+    ) -> Trainer:
+        kwargs = self._backend_kwargs(scenario)
+        if self.scenario_model is not None:
+            kwargs["model_resolver"] = _ScenarioModels(self.scenario_model, self, scenario, self.models)
+        if kwargs["step_record_dir"] is not None:
+            from pathlib import Path
+
+            kwargs["step_record_dir"] = Path(kwargs["step_record_dir"]).expanduser().resolve() / scenario
+        backend = ReefineBackend(**kwargs, proposals_dir=self.proposals_path(scenario))
+        return self._build_trainer(
+            scenario, records, backend, algorithm_state=algorithm_state, experiment_logger=experiment_logger
+        )

@@ -8,7 +8,7 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
               for it at once
     step    - the service proposer designs the change, writes it and
               reviews it; the evaluation runs the candidate on the recipe's
-              health task and the floor decides; the catalog row carries
+              health, request, protected-task and independent review checks; the catalog row carries
               the result, the notes and the request it answered under
               ``metrics.training_request``
     promote - a release that touches a code_extension waits as pending; its
@@ -23,7 +23,7 @@ One demo (``./run.sh bugfix`` or ``./run.sh research``):
 The measurement (``./run.sh measure``) posts a fixed list of requests one
 after another, each once the step of the one before it settled, and prints
 one row per request and the counts: filed, answered, admitted, won (met the
-floor), published, pending. The won count is the first of the two things
+required checks), published, pending. The won count is the first of the two things
 RFC #310's stage 6 asks for (requests that passed the checks); the held out
 shapes are not here.
 
@@ -45,6 +45,7 @@ from pathlib import Path
 
 from reef_client import ReefClient, ReefClientError
 
+from reef.harness.client.check_display import CheckDisplay
 from reef.harness.client.wrapper import wrapper_directory
 
 SERVICE_URL = "http://127.0.0.1:8901"  # deployment.yaml's port
@@ -52,12 +53,12 @@ SCENARIO = "reefine-demo"  # this workload's isolated lane; the install bakes it
 TOKEN = os.environ.get("REEF_TOKEN", "reef-local")  # matches deployment.yaml
 MODEL = os.environ.get("REEF_UPSTREAM_MODEL", "gemma4:26b")  # run.sh exports the same default
 # A local model reads the API skill and writes the change, then six pi episodes score it.
-STEP_TIMEOUT_S = 1800.0
+STEP_TIMEOUT_S = 2400.0
 POLL_S = 5.0
 
 HERE = Path(__file__).resolve().parent
 REPO = HERE.parents[1]
-WORK = HERE / "work"
+WORK = Path(os.environ.get("REEF_DEMO_WORK_DIR", str(HERE / "work"))).resolve()
 # The install script writes the tree and release metadata here, and the reef-pi wrapper outside it, in
 # ~/.reef/installs.
 INSTALL_ROOT = WORK / "harness"
@@ -67,7 +68,7 @@ RELEASE_FILE = ".reef-harness-release"
 
 SHOW_PROMPTS = {
     "bugfix": "fix the bug in adder.py",
-    "research": "what is the best known lower bound for sorting by comparisons, with a source",
+    "research": "what is the lower bound for sorting by comparisons, with a source? Start by checking the relevant arXiv paper at https://arxiv.org/abs/2202.01446, download its PDF and read the text before answering.",
 }
 
 #: The measurement's requests: short harness changes a skill or a rules entry answers, no extension.
@@ -200,6 +201,12 @@ def tally_parts(metrics):
     it, the score comparison selector recorded the three counts and
     ``selection: always`` only the per task scores of both sides, so on those
     rows the counts come from comparing the scores."""
+    report = metrics.get("reefine_evaluation")
+    if isinstance(report, dict) and isinstance(report.get("checks"), list):
+        checks = report["checks"]
+        return sum(check.get("status") == "pass" for check in checks), sum(
+            check.get("status") != "pass" for check in checks
+        )
     if all(isinstance(metrics.get(key), int) for key in ("passed", "failed")):
         return metrics["passed"], metrics["failed"]
     if all(isinstance(metrics.get(key), int) for key in ("wins", "losses", "ties")):
@@ -286,7 +293,7 @@ def install(release_id=None):
     WORK.mkdir(parents=True, exist_ok=True)
     path = WORK / "install.sh"
     path.write_text(script, encoding="utf-8")
-    say(f"install: bash {path.relative_to(HERE)} {INSTALL_ROOT.relative_to(HERE)}")
+    say(f"install: bash {path} {INSTALL_ROOT}")
     done = subprocess.run(["bash", str(path), str(INSTALL_ROOT)], env=_wrapper_env(), capture_output=True, text=True)
     for line in (done.stdout + done.stderr).splitlines():
         print("  " + line, flush=True)
@@ -314,18 +321,25 @@ def ask(text):
     return match.group(1)
 
 
-def wait_for_step(client, text, before, deadline):
-    """The catalog and the training row whose request is ``text``, once that step settled; every new row is
+def wait_for_step(client, request_id, before, deadline):
+    with CheckDisplay() as display:
+        return wait_with_display(client, request_id, before, deadline, display)
+
+
+def wait_with_display(client, request_id, before, deadline, display):
+    """The catalog and the training row whose request has ``request_id``, once that step settled; every new row is
     printed as it lands. ``(rows, None)`` at the deadline.
 
     Manual mode answers the accepted instructions oldest first, so a request
     a stopped run left queued gets its step before ours; that row is printed
     as an earlier request's and the wait goes on for the row carrying our
-    text."""
+    id. Repeated requests can carry the same text."""
     shown = before
     rows = []
     while time.monotonic() < deadline:
         try:
+            progress = client.get(f"/reef/harness/requests/{request_id}/progress", extra_headers=_scenario_headers())
+            display.update(progress.get("state", "running"), progress.get("checks"), progress.get("activity"))
             rows = _rows(client)
             error = client.get("/reef/status").get("error")
         except (TimeoutError, OSError) as exc:
@@ -341,12 +355,16 @@ def wait_for_step(client, text, before, deadline):
         steps = _training_rows(rows)
         for row in steps[shown:]:
             metrics = row.get("metrics") or {}
-            whose = "" if _request_text_of(row) in (None, text) else "; an earlier request's step"
+            answered_request_id = (metrics.get("training_request") or {}).get("id")
+            whose = "" if answered_request_id == request_id else "; an earlier request's step"
             release = str(row.get("release_id"))[:12]
             say(f"step {metrics.get('steps', '?')}: {result_of(row)} (release {release}){whose}")
         shown = max(shown, len(steps))
         for row in steps[before:]:
-            if _request_text_of(row) == text:
+            if ((row.get("metrics") or {}).get("training_request") or {}).get("id") == request_id:
+                display.update(
+                    result_of(row), ((row.get("metrics") or {}).get("reefine_evaluation") or {}).get("checks")
+                )
                 return rows, row
         time.sleep(POLL_S)
     return rows, None
@@ -358,7 +376,7 @@ def promote(client, rows, row, run_dir):
     page = f"/reef/harness/releases/{step}/page"
     saved = run_dir / f"step-{step}.html"
     saved.write_text(_fetch_text(page), encoding="utf-8")
-    say(f"pending: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved.relative_to(HERE)})")
+    say(f"pending: the page says why and what changed: {SERVICE_URL}{page} (saved as {saved})")
     say("promote: the demo is scripted; a person reads the page first")
     answer, _ = client.post(f"/reef/scenarios/{SCENARIO}/promote", SCENARIO, {"release_id": row["release_id"]})
     say(f"promoted: the head is {answer['release_id']}")
@@ -435,19 +453,41 @@ def _take_show_spool(started_ns, run_dir):
 def show(mode, run_dir):
     """One session on the installed tree in the mode's workspace; the tool calls in order and the final answer.
 
-    The calls come from the receipts the wrapper's proxy captured, spooled at
-    exit: pi's own session file lands under its default directory, outside
-    the install root, so the spool is the record this driver reads."""
+    Captured provider responses supply the tool-call summary. Native pi session
+    files supply verification, including tool errors and child review sessions."""
     workspace = run_dir / "workspace"
     if mode == "bugfix":
         # A copy: the session edits adder.py, and the committed fixture must fail again next time.
         shutil.copytree(DEMOS / "workspace", workspace)
+        for command in (
+            ["git", "init", "-q"],
+            ["git", "add", "."],
+            [
+                "git",
+                "-c",
+                "user.name=Reef demo",
+                "-c",
+                "user.email=reef@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-qm",
+                "Fixture",
+            ],
+        ):
+            subprocess.run(command, cwd=workspace, check=True, capture_output=True)
     else:
         workspace.mkdir(parents=True)
     prompt = SHOW_PROMPTS[mode]
-    say(f"show: reef-pi -p {prompt!r} in {workspace.relative_to(HERE)}")
+    say(f"show: reef-pi -p {prompt!r} in {workspace}")
     started_ns = time.time_ns()
     done = reef_pi(["-p", prompt], cwd=workspace)
+    sessions = INSTALL_ROOT / "pi-agent" / "sessions"
+    for session in sessions.rglob("*.jsonl"):
+        if session.stat().st_mtime_ns >= started_ns:
+            target = run_dir / "show-sessions" / session.relative_to(sessions)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(session, target)
     turns = _take_show_spool(started_ns, run_dir)
     calls = _tool_calls(turns)
     answer = done.stdout.strip() or _last_answer(turns)
@@ -467,7 +507,7 @@ def show(mode, run_dir):
 
 def _write_record(path, record):
     path.write_text(json.dumps(record, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
-    say(f"record: {path.relative_to(HERE)}")
+    say(f"record: {path}")
 
 
 def _print_table(headers, rows):
@@ -519,11 +559,16 @@ def demo(mode):
     before = len(_training_rows(_rows(client)))
     started = time.monotonic()
     record["request_id"] = ask(text)
-    rows, row = wait_for_step(client, text, before, started + STEP_TIMEOUT_S)
+    rows, row = wait_for_step(client, record["request_id"], before, started + STEP_TIMEOUT_S)
     record["rows"] = rows
     if row is None:
         _write_record(record_path, record)
         raise SystemExit(f"no step settled the request within {STEP_TIMEOUT_S:.0f} s; check work/reef.log")
+    for name, path in (
+        ("request.html", f"/reef/harness/requests/{record['request_id']}/page"),
+        ("release.html", f"/reef/harness/releases/{rows.index(row)}/page"),
+    ):
+        (run_dir / name).write_text(_fetch_text(path), encoding="utf-8")
     metrics = row.get("metrics") or {}
     selection_result = result_of(row)
     mutations = mutations_of(metrics)
@@ -556,9 +601,20 @@ def demo(mode):
     else:
         say(f"the head did not move: release {installed_before} stays installed")
         installed = installed_before
+    if selection_result != "selected" and not promoted:
+        record["result"] = {**result, "installed": installed, "reason": (metrics.get("selection") or {}).get("reason")}
+        _write_record(record_path, record)
+        raise SystemExit("candidate was not selected; read the check results and evolve again")
     # From the evolve call to the end of the install, or to the result when nothing new installed.
     seconds = round(time.monotonic() - started, 1)
     shown = show(mode, run_dir)
+    record["show"] = shown
+    verification = verify_show(mode, shown, run_dir)
+    record["show_verification"] = {"passed": verification.passed, "reason": verification.reason}
+    if not verification.passed:
+        record["result"] = result
+        _write_record(record_path, record)
+        raise SystemExit("show failed: " + verification.reason)
     result.update(
         {
             "installed": installed,
@@ -591,7 +647,7 @@ def measure(n):
         except SystemExit as exc:
             results.append({"request": text, "filed": False, "result": str(exc)})
             continue
-        _, row = wait_for_step(client, text, before, started + STEP_TIMEOUT_S)
+        _, row = wait_for_step(client, request_id, before, started + STEP_TIMEOUT_S)
         seconds = round(time.monotonic() - started, 1)
         if row is None:
             results.append({"request": text, "id": request_id, "filed": True, "result": "no step", "seconds": seconds})
@@ -634,6 +690,50 @@ def measure(n):
     _print_table(("Filed", "Answered", "Admitted", "Won", "Published", "Pending"), [tuple(totals.values())])
 
 
+def prepare(mode):
+    import yaml
+
+    config = yaml.safe_load((HERE / "configs" / "deployment.yaml").read_text(encoding="utf-8"))
+    config["reef"]["run-dir"] = str(WORK / "deployment" / "stack")
+    for name, directory in (
+        ("agent-record-dir", "agent-record"),
+        ("artifact-repository", "artifacts.git"),
+        ("artifact-work-dir", "artifact-work"),
+        ("artifact-cache-dir", "artifact-cache"),
+    ):
+        config["storage"][name] = str(WORK / "deployment" / directory)
+    evolution = config["recipe"]["config"]["evolution"]
+    evolution["step_record_dir"] = str(WORK / "deployment" / "steps")
+    evolution["proposals_dir"] = str(WORK / "deployment" / "proposals")
+    context = {"prompt": SHOW_PROMPTS.get(mode, ""), "version": "1"}
+    if mode == "bugfix":
+        context.update(
+            {
+                "fixture_dir": str(DEMOS / "workspace"),
+                "initialize_git": True,
+                "verifier": "tutorials.reefine.checks:BugfixVerifier",
+            }
+        )
+    elif mode == "research":
+        context["verifier"] = "tutorials.reefine.checks:ResearchVerifier"
+    evolution["evaluation"]["request_context"] = context
+    WORK.mkdir(parents=True, exist_ok=True)
+    (WORK / "deployment.yaml").write_text(yaml.safe_dump(config, sort_keys=False), encoding="utf-8")
+
+
+def verify_show(mode, shown, run_dir):
+    from tutorials.reefine.checks import BugfixVerifier, ResearchVerifier
+
+    from reef.harness.episodes.run import EpisodeResult
+    from reef.harness.episodes.trajectory import reader_for
+
+    # Native sessions preserve isError and tool details, which provider messages can omit.
+    trajectory = reader_for("pi-session-jsonl")(run_dir / "show-sessions")
+    episode = EpisodeResult(shown["exit"], shown["answer"], "", trajectory, ())
+    verifier = BugfixVerifier() if mode == "bugfix" else ResearchVerifier()
+    return verifier.verify(episode, run_dir / "workspace")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="run.py",
@@ -645,12 +745,16 @@ def main(argv=None):
     modes.add_parser("research", help="the research loop demo: demos/research.md")
     measured = modes.add_parser("measure", help="file the fixed request list and count what passed the checks")
     measured.add_argument("--n", type=int, default=10, help="how many of the fixed requests to file (default 10)")
+    prepared = modes.add_parser("prepare", help="write demo evaluation configuration")
+    prepared.add_argument("demo", choices=("bugfix", "research", "measure"))
     args = parser.parse_args(argv)
     if args.mode == "install":
         if install() is None:
             raise SystemExit(2)
     elif args.mode == "measure":
         measure(args.n)
+    elif args.mode == "prepare":
+        prepare(args.demo)
     else:
         demo(args.mode)
 

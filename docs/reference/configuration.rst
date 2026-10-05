@@ -943,6 +943,10 @@ Harness evolution keys
 ``batch_size`` goes under ``data:``; the rest goes under
 ``evolution:``. `Evolve your harness
 <../user-guide/evolve-your-harness.rst>`__ describes what each one changes.
+The built-in Reefine recipe instead defaults to ``selection: reefine``;
+see its `independent evaluation configuration
+<../user-guide/recipes/reefine.rst#independent-evaluation>`__ for request
+contexts, protected tasks and reviewer bindings.
 
 .. config::
 

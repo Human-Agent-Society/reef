@@ -1008,6 +1008,8 @@ class RequestService:
                 "episodes_total": None,
                 "step_record": None,
                 "activity": [],
+                "checks": ((rows[step].get("metrics") or {}).get("reefine_evaluation") or {}).get("checks", []),
+                "evaluation": (rows[step].get("metrics") or {}).get("reefine_evaluation"),
             }
         backend = self.files_trainer(scenario).candidate_backend
         progress = backend.step_progress if isinstance(backend, StepProgressReader) else None
@@ -1027,6 +1029,7 @@ class RequestService:
             "step_record": None if mine is None else mine.step_record,
             # What the proposer has done so far, oldest first: {at, kind, text, failed?}.
             "activity": [] if mine is None else [dict(line) for line in mine.activity],
+            "checks": [] if mine is None else [dict(check) for check in mine.checks],
         }
 
     def harness_install_script(

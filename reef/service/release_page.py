@@ -34,6 +34,7 @@ from reef.harness.step_result import (
     reef_installs,
     unscored_failures,
 )
+from reef.service.check_page import evaluation_html
 from reef.service.page_chrome import document, escape, requires_table, stamp, status_label, status_span, tone
 
 #: The evaluation numbers the Result section lists, in this order, when the row carries them: a comparison writes
@@ -535,7 +536,7 @@ def result_html(row: Mapping[str, Any], metrics: Mapping[str, Any], rows: Sequen
     if isinstance(failure, str) and failure.strip():
         # Why the proposer produced nothing: a failed model call, a reply with no entry.
         listed += f'<div class="failure"><h3>Proposer failure</h3><p>{escape(failure)}</p></div>'
-    return summary + grid + listed
+    return summary + grid + listed + evaluation_html(metrics)
 
 
 def _scrolled(table: str, label: str) -> str:

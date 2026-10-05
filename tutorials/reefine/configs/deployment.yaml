@@ -1,7 +1,7 @@
 # Run from the repository root:
 # reef serve -c tutorials/reefine/configs/deployment.yaml
 # The built-in Reefine recipe with its state under tutorials/reefine/work/,
-# training_mode manual and the evaluation's selection set to floor. ./run.sh starts it,
+# training_mode manual and independent Reefine evaluation. ./run.sh starts it,
 # installs the served tree and runs run.py <demo>.
 schema-version: 2
 reef:
@@ -26,10 +26,16 @@ recipe:
       version_check: true
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]
-      # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
-      # that the tree still works (the model binding, the tools, the extensions load), not that the requested
-      # change does; the step page's design and review notes and the person judge the change itself.
-      selection: floor
+      # Formal checks run independently from proposal generation.
+      selection: reefine
+      evaluation:
+        reviewer_model: served  # Same model for the demo, with a fresh review context.
+        timeout_s: 900
+        # Episodes start with a minimal environment. Forward proxies explicitly when the host needs them.
+        env_from: [HTTP_PROXY, HTTPS_PROXY, ALL_PROXY, NO_PROXY, http_proxy, https_proxy, all_proxy, no_proxy]
+        protected_tasks:
+          - 'Use your shell tool to run `printf protected-ok` and report its exact output.'
+          - 'Use your write tool to create note.txt containing `protected-note`, then use your read tool to read it and report the content.'
       # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
       step_record_dir: tutorials/reefine/work/deployment/steps
       # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.

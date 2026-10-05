@@ -20,7 +20,8 @@ from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY, evaluate
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend.backend import FloorPluginFactory, ScoreComparisonPluginFactory
+from reef.train.cordis_backend.backend import ScoreComparisonPluginFactory
+from reef.train.evaluation.reefine import ReefinePluginFactory
 
 
 def test_dotted_recipe_defaults_and_config_are_independent() -> None:
@@ -33,9 +34,9 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.training_mode == "manual"
     assert built.propose.reads_requests
     assert built.review_kinds == ("code_extension",)
-    # The floor: the candidate alone must pass every evaluation task; the current release is not run.
-    assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
-    assert built.candidate_plugin.floor_score == 1.0
+    # Independent evaluation decides whether the requested change and protected capabilities pass.
+    assert isinstance(built.candidate_plugin, ReefinePluginFactory)
+    assert built.candidate_plugin.settings.reviewer_model == "served"
     assert [entry["id"] for entry in built.seed] == [
         "reef-version-check",
         "reef-requests",
@@ -109,7 +110,7 @@ recipe = build_named_recipe('reefine', os.environ, config_directory=path.parent,
 assert isinstance(recipe, ReefineRecipe)
 assert recipe.training_mode == 'manual' and recipe.propose.reads_requests
 assert len(recipe.tasks) == 1 and recipe.tasks[0].startswith('[health] ')
-assert type(recipe.candidate_plugin).__name__ == 'FloorPluginFactory'
+assert type(recipe.candidate_plugin).__name__ == 'ReefinePluginFactory'
 assert recipe.base_artifact_files()
 assert recipe.model_binding().model == 'test-model'
 """

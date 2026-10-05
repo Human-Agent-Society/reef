@@ -712,3 +712,29 @@ def test_a_config_entry_reads_as_text_and_how_to_use_starts_with_a_capital() -> 
     shown = html.unescape(version.split("<script", 1)[0])
     assert "Only search the web \u2014 nothing else." in shown and "\\u2014" not in shown and "\\n" not in shown
     assert "Open a new session and type /chat." in version
+
+
+def test_live_and_settled_pages_show_independent_checks_and_escape_model_text() -> None:
+    checks = [{"id": "request-behavior", "group": "request", "status": "running", "expected": "<script>"}]
+    progress = StepProgress(RECORD_ID, "evaluating", 1_000.0, None, checks=tuple(checks))
+    live = build_request_page(_record(), [CREATION], progress=progress, now=1_100.0)
+    assert "Independent evaluation" in live and "request-behavior" in live
+    assert "&lt;script&gt;" in live and "<script>" not in live
+    other = build_request_page(_record(), [CREATION], progress=replace(progress, request_id="other"))
+    assert "Independent evaluation" not in other
+    checks[0].update(status="not_run", reason="request plan unavailable")
+    report = {"checks": checks, "reviewer_model": "local-model", "same_model": True, "current_release_id": "rel-0"}
+    row = _row(_answered(selected=False, reefine_evaluation=report, selection={"reason": "request check failed"}))
+    for page in (build_request_page(_record(), [CREATION, row]), build_release_page(1, [CREATION, row])):
+        assert "not_run" in page and "request plan unavailable" in page
+        assert "same model ID, fresh context" in page and "request check failed" in page
+        assert "&lt;script&gt;" in page
+
+
+def test_long_check_results_expand_without_hiding_or_inserting_model_html() -> None:
+    from reef.service.check_page import checks_html
+
+    reason = "Observed <script> content. " * 15
+    rendered = checks_html([{"id": "request", "status": "fail", "reason": reason}])
+    assert "<details><summary>" in rendered and html.escape(reason) in rendered
+    assert "<script>" not in rendered

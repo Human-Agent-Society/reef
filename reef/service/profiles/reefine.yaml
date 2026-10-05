@@ -36,10 +36,10 @@ recipe:
       version_check: true
       # An evolved extension runs in pi's process with your privileges, so it waits for a promote.
       review_kinds: [code_extension]
-      # The floor runs the candidate alone on the health task and publishes it when the task passes: it checks
-      # that the tree still works (the model binding, the tools, the extensions load), not that the requested
-      # change does; the step page's design and review notes and the person judge the change itself.
-      selection: floor
+      # Independent request, health, protected-task and review checks decide publication.
+      # The served model is reused by default in a fresh reviewer context; configure
+      # evolution.models and evolution.evaluation.reviewer_model for another model.
+      selection: reefine
       # Every step's proposer calls, parsed proposal and evaluation episodes, so a row can be read back.
       step_record_dir: .reef/reefine/steps
       # The proposal inbox of POST /reef/harness/proposals; the default is .reef/proposals under the service's directory.
