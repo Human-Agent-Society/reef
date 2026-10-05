@@ -8,7 +8,7 @@ The person promotes what runs as code. A release that touches a `code_extension`
 
 ## Built-in recipe
 
-Reefine ships in `reef-infra` as `reef.recipe.reefine:ReefineRecipe`, including its proposer and evaluator. Start it from an installed package with `reef serve --recipe reefine --model ollama/gemma4:26b`; the profile listens on `127.0.0.1:8901`, uses token `reef-local`, and stores state under `.reef/reefine/`. The demos below use their own state under `tutorials/reefine/work/`. The recipe defaults to manual training, requests and update notices enabled, extension review, and `selection: reefine`. All request, health, protected-task and independent review checks must pass. Set `evolution.evaluation` for the application workspace, protected tasks and reviewer binding. Explicit `selection: floor` retains the legacy health-only policy.
+Reefine ships in `reef-infra` as `reef.recipe.reefine:ReefineRecipe`, including its proposer and evaluator. Start it from an installed package with `reef serve --recipe reefine --model ollama/gemma4:26b`; the profile listens on `127.0.0.1:8901` and stores state under `.reef/reefine/`. Its token comes from `REEF_TOKEN`: the loopback service is unauthenticated when that variable is unset and requires a Bearer token when it is set. The demos below use `configs/deployment.yaml`, which sets the token `reef-local` and keeps state under `tutorials/reefine/work/`. The recipe defaults to manual training, requests and update notices enabled, extension review, and `selection: reefine`. All request, health, protected-task and independent review checks must pass. Set `evolution.evaluation` for the application workspace, protected tasks and reviewer binding. Explicit `selection: floor` retains the legacy health-only policy.
 
 The directory was previously named `tutorials/harness-requests`. Historical measurements below are unchanged; existing runs can be retained by moving their `work/` directory and retaining their original scenario name in `run.py`.
 
@@ -39,6 +39,8 @@ reefine/
 
 ## Quick start
 
+Use the checkout's Python environment. Git LFS must be available on PATH in the same shell: check that `git lfs version` succeeds before starting Reef.
+
 ```bash
 cd tutorials/reefine
 uv pip install -e .       # reef-infra and reef-client for the demos
@@ -58,7 +60,7 @@ The request, from [demos/bugfix.md](demos/bugfix.md): when I ask you to fix a bu
 
 ### Research loop
 
-The request, from [demos/research.md](demos/research.md), asks the harness to search arXiv, download and read at least one relevant paper, and answer with citations to what it read. Asking for a source triggers the workflow even for a familiar fact. It specifies HTTPS and `curl -fLsS` with a timeout so redirects are followed and HTTP errors are visible; Semantic Scholar is optional. The arXiv path needs network access and no API key, with `curl` and `pdftotext` available for downloading and reading PDFs. The proposal declares required tools under `requires`, and setup checks them before installation. The steps are the bug fix flow's; the show session still asks `what is the best known lower bound for sorting by comparisons, with a source`. Inspect its tool results and the papers and extracted text saved under the run's `workspace/research/`: a search attempt or a citation alone does not demonstrate that a paper was read. The current publication evaluation checks harness health; the show session demonstrates whether the requested research behavior actually runs.
+The request, from [demos/research.md](demos/research.md), asks the harness to find relevant papers on arXiv, download and read at least one, and answer with citations to what it read. Asking for a source triggers the workflow even for a familiar fact; Semantic Scholar is optional. The arXiv path needs network access and no API key, with `curl` and `pdftotext` available for downloading and reading PDFs. The proposal declares these tools under `requires`, and setup checks them before installation. Formal evaluation runs the research task and checks the PDF, extracted and observed text, and citation, alongside health, protected-task comparisons and independent review. After installation, the show session repeats the task in a fresh workspace. It asks for the comparison-sorting lower bound and supplies `https://arxiv.org/abs/2202.01446` as a starting paper, avoiding dependence on an open-ended search endpoint. Inspect the tool results and files under the run's `workspace/research/`. A failed evaluation or show verification stops the demo with an error and saves the result.
 
 ## The measurement
 
