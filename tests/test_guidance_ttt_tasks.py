@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import ast
 import importlib.util
 import json
 import math
+import subprocess
+import sys
 import threading
 from dataclasses import replace
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -16,6 +19,81 @@ from recipes.tttd.examples.guidance_ttt.harness.agent import prepare_library
 from recipes.tttd.examples.guidance_ttt.harness.bootstrap import prepare_seed
 from recipes.tttd.examples.guidance_ttt.harness.config import EXAMPLE_DIR, TASKS, RunConfig
 from recipes.tttd.examples.guidance_ttt.harness.scorer import JudgeScorer, JudgeUnavailableError
+
+
+def test_paper_programs_match_manifest_and_reported_results():
+    solution_dir = EXAMPLE_DIR / "solutions"
+    manifest = json.loads((solution_dir / "manifest.json").read_text())
+    paper = json.loads((EXAMPLE_DIR / "results/paper/results.json").read_text())
+    paper_results = {record["task"]: record for record in paper["results"]}
+    assert set(manifest["solutions"]) == set(paper_results) == set(TASKS)
+    for task, record in manifest["solutions"].items():
+        source = (solution_dir / record["file"]).read_bytes()
+        assert source
+        assert record["reported_result"] == paper_results[task]["result"]
+        assert record["direction"] == paper_results[task]["direction"]
+        if record["file"].endswith(".py"):
+            ast.parse(source)
+        if "evaluation" in record:
+            assert record["evaluation"]["repeats"] > 0
+
+
+def test_fixed_program_loader_reads_listed_file(tmp_path):
+    spec = importlib.util.spec_from_file_location("evaluate_paper_solution", EXAMPLE_DIR / "evaluate_solution.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    (tmp_path / "manifest.json").write_text(json.dumps({"solutions": {"example": {"file": "solution.py"}}}))
+    with pytest.raises(FileNotFoundError):
+        module.load_solution("example", tmp_path)
+    (tmp_path / "solution.py").write_text("program contents", encoding="utf-8")
+    assert module.load_solution("example", tmp_path) == "program contents"
+
+
+@pytest.mark.parametrize("task", TASKS)
+def test_fixed_program_evaluation_cli(task, judge_endpoint):
+    url, replies, submissions = judge_endpoint
+    replies["result"].update(score=1.5, scoreUnbounded=1000)
+    result = subprocess.run(
+        [sys.executable, str(EXAMPLE_DIR / "evaluate_solution.py"), task, "--judge-url", url, "--repeats", "2"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    records = [json.loads(line) for line in result.stdout.splitlines()]
+    assert [record["repeat"] for record in records] == [1, 2]
+    assert all(record["result"]["score"] == 1.5 for record in records)
+    assert all(record["result"]["artifacts"]["score_unbounded"] == 1000 for record in records)
+    contract = json.loads((EXAMPLE_DIR / "harbor" / task / "contract.json").read_text())
+    assert all(f'\r\n\r\n{contract["judge_problem_id"]}\r\n' in submission for submission in submissions)
+    manifest = json.loads((EXAMPLE_DIR / "solutions/manifest.json").read_text())
+    source = (EXAMPLE_DIR / "solutions" / manifest["solutions"][task]["file"]).read_text()
+    assert len(submissions) == 2
+    assert all(source in submission for submission in submissions)
+
+
+@pytest.mark.parametrize(
+    ("response", "exit_status"),
+    [
+        ({"status": "done", "score": 0, "scoreUnbounded": 0, "valid": False}, 1),
+        ({"status": "environment_error", "message": "evaluator unavailable"}, 2),
+    ],
+)
+def test_fixed_program_cli_distinguishes_invalid_from_infrastructure(judge_endpoint, response, exit_status):
+    url, replies, submissions = judge_endpoint
+    replies["result"] = response
+    result = subprocess.run(
+        [sys.executable, str(EXAMPLE_DIR / "evaluate_solution.py"), "lasso_path", "--judge-url", url],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == exit_status
+    assert len(submissions) == 1
+    if exit_status == 2:
+        assert not result.stdout
+        assert "Judge infrastructure error" in result.stderr
+    else:
+        assert json.loads(result.stdout)["result"]["valid"] is False
 
 
 @pytest.fixture
