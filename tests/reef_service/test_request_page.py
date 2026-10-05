@@ -731,6 +731,21 @@ def test_live_and_settled_pages_show_independent_checks_and_escape_model_text() 
         assert "&lt;script&gt;" in page
 
 
+@pytest.mark.parametrize("settled", [False, True])
+def test_long_clarified_requests_keep_evaluation_before_the_full_request(settled: bool) -> None:
+    request_text = "Add a capability.\nClarifications:\n" + "A detailed answer to an open question. " * 100
+    checks = [{"id": "request-behavior", "group": "request", "status": "pass", "observed": "Task completed"}]
+    if settled:
+        row = _row(_answered(selected=True, reefine_evaluation={"checks": checks}))
+        page = build_request_page(_record(request_text), [CREATION, row])
+    else:
+        progress = StepProgress(RECORD_ID, "evaluating", 1_000.0, None, checks=tuple(checks))
+        page = build_request_page(_record(request_text), [CREATION], progress=progress, now=1_100.0)
+    assert page.index("<h2>Independent evaluation</h2>") < page.index("<h2>Request</h2>")
+    assert html.escape(request_text) in page
+    assert page.count("<h2>Independent evaluation</h2>") == 1
+
+
 def test_long_failed_check_results_remain_visible_and_escape_model_html() -> None:
     from reef.service.check_page import checks_html
 

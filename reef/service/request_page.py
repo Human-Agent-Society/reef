@@ -58,6 +58,7 @@ border-radius:50%;font:11px ui-monospace,SFMono-Regular,Menlo,monospace}.stage-c
 .journey .done .stage-icon{color:var(--good);background:var(--good-bg);border-color:transparent}
 .journey .current{color:var(--status)}.journey .current .stage-icon{background:var(--status-bg);border-color:var(--status)}
 .layout{display:grid;grid-template-columns:minmax(0,1.5fr) minmax(300px,1fr);gap:24px;align-items:start}
+.evaluation-card{margin-bottom:24px}
 .request-card{grid-column:1;grid-row:1}.outcome-card{grid-column:2;grid-row:1 / span 3}
 .changes-card,.review-card,.design-card,.usage-card{grid-column:1}
 .design-card p,.usage-card p{white-space:pre-wrap;overflow-wrap:anywhere;font-size:14px;line-height:1.7;margin:0}
@@ -416,9 +417,10 @@ def build_request_page(
     state = result_of(rows[step], rows) if step is not None else request_state(record, progress, consumed)
     head = "" if step is not None else f'<meta http-equiv="refresh" content="{REFRESH_SECONDS}">\n'
     if step is None:
+        evaluation = ""
         body = f'<section class="card outcome-card">\n<h2>Progress</h2>\n{progress_html(record, state, progress, now)}</section>\n'
         if progress is not None and progress.request_id == record_id:
-            body += checks_html(progress.checks)
+            evaluation = checks_html(progress.checks)
             body += (
                 f'<section class="card activity-card">\n<h2>Activity</h2>\n{activity_html(progress, now)}</section>\n'
             )
@@ -427,10 +429,10 @@ def build_request_page(
     else:
         metrics = rows[step].get("metrics")
         metrics = metrics if isinstance(metrics, Mapping) else {}
+        evaluation = evaluation_html(metrics, result=state)
         change_label = "Proposed changes" if state in ("pending", "rejected", "skipped", "failed") else "What changed"
         body = (
             f'<section class="card outcome-card">\n<h2>Result</h2>\n{result_html(step, rows, link_query, adapter, record_id)}</section>\n'
-            f"{evaluation_html(metrics, result=state)}"
             f'<section class="card changes-card">\n<h2>{change_label}</h2>\n{what_changed(metrics)}</section>\n'
             f"{review_html(metrics, rejected=state == 'rejected')}{design_html(metrics)}"
         )
@@ -469,8 +471,11 @@ def build_request_page(
         home="" if served is None else step_href(served, link_query),
         head=head,
         body=(
-            '<ol class="journey" aria-label="Request progress">' + "".join(journey) + "</ol>\n"
-            '<div class="layout"><section class="card request-card">\n'
+            '<ol class="journey" aria-label="Request progress">'
+            + "".join(journey)
+            + "</ol>\n"
+            + evaluation
+            + '<div class="layout"><section class="card request-card">\n'
             f"<h2>Request</h2>\n{request_html(record)}</section>\n"
             f"{body}</div>"
         ),
