@@ -1,0 +1,45 @@
+{
+  "schema_version": 1,
+  "description": "Discovered solutions, reported results, and evaluation settings.",
+  "solutions": {
+    "polyomino_packing": {
+      "file": "polyomino_qwen3_8b.cpp",
+      "reported_result": 91.89,
+      "unit": "packing score",
+      "direction": "max",
+      "suite": "70 FrontierCS cases"
+    },
+    "lasso_path": {
+      "file": "lasso_qwen3_8b.py",
+      "reported_result": 0.1739,
+      "unit": "inverse geometric-mean solve time (1/ms)",
+      "direction": "max",
+      "suite": "17 synthetic cases from the SimpleTES Lasso evaluator",
+      "evaluation": {
+        "repeats": 5,
+        "aggregation": "Arithmetic mean across repeats",
+        "environment": "AMD EPYC 9745; single-thread evaluation"
+      }
+    },
+    "ahc058": {
+      "file": "ahc058_qwen3_14b.cpp",
+      "reported_result": 850082731,
+      "unit": "AtCoder score",
+      "direction": "max",
+      "suite": "Official AtCoder submission",
+      "note": "The local judge reports a 150-case public mean, not the official AtCoder score."
+    },
+    "trimul": {
+      "file": "trimul_qwen3_14b.py",
+      "reported_result": 1129,
+      "unit": "geometric-mean latency (microseconds)",
+      "direction": "min",
+      "suite": "Seven H100 timing cases after correctness checks",
+      "evaluation": {
+        "repeats": 3,
+        "aggregation": "Arithmetic mean across repeats",
+        "environment": "H100 80GB PCIe; CUDA 12.8; PyTorch 2.7.1; Triton 3.3.1"
+      }
+    }
+  }
+}

@@ -346,6 +346,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Zhenting Qi](https://github.com/zhentingqi),
 [Ao Qu](https://github.com/quao627),
 [Mingruo Qu](https://github.com/workhardforcoding),
+[Yihong Tang](https://github.com/YihongT),
 [Zhaokai Wang](https://github.com/wzk1015),
 [Xuezhi Yan](https://github.com/yanxz),
 [Hanfei Yu](https://github.com/hanfeiyu),

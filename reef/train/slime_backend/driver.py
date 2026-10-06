@@ -227,6 +227,7 @@ def create_training_plan(
         args,
         preparation=prepared,
         loss_family_config=loss_family_config,
+        train_rpc_timeout_s=config.get("reef", {}).get("train_timeout_s"),
     )
     return TrainingDeploymentPlan(
         resources=SlimeDeploymentResources(

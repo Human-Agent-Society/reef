@@ -301,6 +301,7 @@ Reef 汇聚了一群探索 Agent 如何从经验中学习、持续进化的人�
 [Zhenting Qi](https://github.com/zhentingqi),
 [Ao Qu](https://github.com/quao627),
 [Mingruo Qu](https://github.com/workhardforcoding),
+[Yihong Tang](https://github.com/YihongT),
 [Zhaokai Wang](https://github.com/wzk1015),
 [Xuezhi Yan](https://github.com/yanxz),
 [Hanfei Yu](https://github.com/hanfeiyu),
