@@ -28,8 +28,7 @@ identifier as SGLang's served model name. Startup has a one-hour readiness
 deadline for SGLang and 30 seconds for Reef. On failure or interruption,
 Reef cleans up both processes. Logs live under ``.reef/run/``.
 Local ``--inference.model-path`` cannot be combined with upstream URL/model selection;
-``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below. Training
-still requires an explicit stack file.
+``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below.
 
 An external-provider deployment also needs no YAML file:
 

@@ -32,7 +32,7 @@ Read the release chain
 
 Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``promote``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Content can be live (``content_kind: live_weights``: the engine has the weights, the repository has only the record) or saved (``content_kind: saved_artifact``, a Git LFS commit).
 
-For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics, and a rejected or skipped step is listed too. Neither is served to a session until a ``promote`` names one.
+For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
 
 Read the proposal inbox
 -----------------------
