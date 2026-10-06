@@ -93,6 +93,8 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"training.options.sglang-context-length": "1024"}, "configures inference"),
         ({"training.options.sglang-config": "engines.yaml"}, "configures inference"),
         ({"training.options.rollout-external": "true"}, "configures inference"),
+        ({"training.options.engine-port-base": "16000"}, "configures inference"),
+        ({"training.options.reef-engine-port-base": "16000"}, "configures inference"),
         ({"inference.options.config": "engines.yaml"}, "managed by Reef"),
         ({"inference.options.pp-size": "2"}, "managed by Reef"),
         ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
@@ -328,7 +330,12 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
         {
             "num-gpus": 2,
             "tensor-parallel-size": 1,
-            "options": {"mem_fraction_static": 0.8, "router-port": 30000, "disable-cuda-graph": True},
+            "options": {
+                "mem_fraction_static": 0.8,
+                "router-port": 30000,
+                "engine-port-base": 20000,
+                "disable-cuda-graph": True,
+            },
         }
     )
     raw["training"]["options"].update(mode.get("options", {}))
@@ -338,6 +345,7 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
         "inference.num-gpus": "4",
         "inference.tensor-parallel-size": "2",
         "inference.options.mem-fraction-static": "0.6",
+        "inference.options.engine-port-base": "16000",
         "inference.options.disable-cuda-graph": "false",
     }
     config, _ = resolve_deployment_config(raw, overrides, tmp_path / "serve.yaml")
@@ -349,7 +357,12 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
         {
             "num-gpus": 4,
             "tensor-parallel-size": 2,
-            "options": {"mem-fraction-static": "0.6", "router-port": 30000, "disable-cuda-graph": False},
+            "options": {
+                "mem-fraction-static": "0.6",
+                "router-port": 30000,
+                "engine-port-base": "16000",
+                "disable-cuda-graph": False,
+            },
         }
     )
     file_only, _ = resolve_deployment_config(equivalent, None, tmp_path / "other.yaml")
@@ -359,6 +372,8 @@ def test_inference_cli_over_yaml_reaches_driver_without_polluting_training(tmp_p
     assert "--rollout-num-gpus-per-engine=2" in argv
     assert "--sglang-mem-fraction-static=0.6" in argv
     assert "--sglang-router-port=30000" in argv
+    assert "--reef-engine-port-base=16000" in argv
+    assert "--reef-engine-port-base=20000" not in argv
     assert "--sglang-disable-cuda-graph" not in argv
     assert all(not key.startswith(("rollout-num", "sglang-")) for key in config["reef"]["training_backend_options"])
     assert raw["inference"]["num-gpus"] == 2

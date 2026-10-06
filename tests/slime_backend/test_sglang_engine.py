@@ -344,6 +344,7 @@ def _training_inference_values(**options):
                 "actor_num_gpus_per_node": 1,
                 "colocate": False,
                 "disjoint_prefix_sharing": False,
+                "reef_engine_port_base": 15000,
                 **options,
             },
         )
@@ -358,6 +359,10 @@ def test_training_inference_forces_the_flags_reef_serving_relies_on():
     assert config.options["incremental_streaming_output"] is True
     opted_out = _training_inference_config(colocate=True, offload_rollout=True, sglang_disable_radix_cache=True)
     assert opted_out.options["disable_radix_cache"] is True, "a launch may always opt out of sharing"
+
+
+def test_training_inference_carries_the_engine_port_base():
+    assert _training_inference_config(reef_engine_port_base=20000).engine_port_base == 20000
 
 
 def test_inference_engine_does_not_inherit_or_patch_slime(monkeypatch):

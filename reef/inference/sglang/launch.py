@@ -81,7 +81,8 @@ class SGLangEngineGroup:
         """Launch an actor for every empty slot; return the pending ``init`` calls.
 
         ``cursors`` tracks the next free port range per host across groups so
-        engines on one node never race for the same ports.
+        engines on one node never race for the same ports; probing starts at the
+        configured ``engine_port_base``, which stacks sharing a host must set apart.
         """
         created = [index for index, engine in enumerate(self.all_engines) if engine is None]
         for index in created:
@@ -158,9 +159,11 @@ class SGLangEngineGroup:
         width = 34 + int(self.group.options.get("dp_size", self.config.options.get("dp_size")) or 1)
         for index in created:
             actor = self.all_engines[index]
-            host, _ = ray.get(actor._get_current_node_ip_and_free_port.remote())
+            host, _ = ray.get(actor._get_current_node_ip_and_free_port.remote(start_port=self.config.engine_port_base))
             _, port = ray.get(
-                actor._get_current_node_ip_and_free_port.remote(start_port=cursors.get(host, 15000), consecutive=width)
+                actor._get_current_node_ip_and_free_port.remote(
+                    start_port=cursors.get(host, self.config.engine_port_base), consecutive=width
+                )
             )
             cursors[host] = port + width
             addresses[index] = {

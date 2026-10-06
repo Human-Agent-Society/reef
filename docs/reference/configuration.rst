@@ -191,6 +191,19 @@ not stored in ``training.options``. Router bind settings use ``router-ip`` and
 ``router-port``; other supported router flags retain their native ``router-*``
 names. The standalone engine launcher does not include a router.
 
+``inference.options.engine-port-base`` (Slime-integrated inference only,
+default 15000) is where engine port probing starts on each host. A probe
+reserves nothing until the engine binds, so stacks that share a host network
+need bases far enough apart.
+Each SGLang engine takes 35 consecutive ports: a second stack's base must be at
+least the first stack's base plus 35 times the first stack's engines on that
+host. For example, bases 22000 and 23000 leave room for 28 engines of the first
+stack and stay outside the default worker ports of ``ray start`` (10002-19999)
+and the port range Slime's trainer probes for its rendezvous (20000-21000).
+Such stacks also need distinct ``router-port`` values of 4000 or higher, well
+apart (for example 30000 and 31000), because each router's metrics port is the
+first free port after its router port.
+
 Migration from the previous version 2 training configuration:
 
 .. list-table::

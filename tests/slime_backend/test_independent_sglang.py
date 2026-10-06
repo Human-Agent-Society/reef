@@ -178,6 +178,62 @@ def test_group_preserves_shared_gpu_placement_and_multinode_rendezvous(monkeypat
     assert model.engine_parallel_configs == [{"tp_size": 8, "pp_size": 1, "ep_size": 1, "moe_dp_size": 1}]
 
 
+def test_stacks_on_one_host_start_engine_ports_at_their_own_base(monkeypatch):
+    from reef.inference.sglang import launch
+
+    class Remote:
+        def __init__(self, fn):
+            self.remote = fn
+
+    probed_ports = []
+
+    def probe(start_port=15000, consecutive=1):
+        # Nothing is bound yet, so the bind-then-close probe returns its start port to every stack.
+        probed_ports.append(start_port)
+        return "host", start_port
+
+    class Actor:
+        def __init__(self):
+            self._get_current_node_ip_and_free_port = Remote(probe)
+            self.init = Remote(lambda **kwargs: kwargs)
+
+    class ActorClass:
+        def options(self, **kwargs):
+            return self
+
+        def remote(self, config, **kwargs):
+            return Actor()
+
+    monkeypatch.setattr(launch.ray, "remote", lambda cls: ActorClass())
+    monkeypatch.setattr(launch.ray, "get", lambda value: value)
+
+    def engine_addresses(config):
+        # Each stack is its own driver process, with its own port cursors.
+        probed_ports.clear()
+        group = SGLangEngineGroup(
+            config, SGLangGroupConfig("regular", 2, 1), (object(), [0, 1], [0, 1]), 0, ("router", 3000)
+        )
+        addresses = group.start_engines({})
+        # Host discovery probes from the base too, so a stack never touches ports below it.
+        assert min(probed_ports) == config.engine_port_base
+        return addresses
+
+    default = engine_addresses(SGLangConfig("model", 2, 1, 2))
+    first = engine_addresses(SGLangConfig("model", 2, 1, 2, engine_port_base=20000))
+    second = engine_addresses(SGLangConfig("model", 2, 1, 2, engine_port_base=21000))
+    assert [engine["port"] for engine in default] == [15000, 15035]
+    assert [engine["port"] for engine in first] == [20000, 20035]
+    assert [engine["dist_init_addr"] for engine in second] == ["host:21003", "host:21038"]
+
+
+def test_engine_port_base_leaves_room_for_one_engine_range():
+    for base in (1, 65500):
+        assert SGLangConfig("model", 1, 1, 1, engine_port_base=base).engine_port_base == base
+    for base in (0, 65501):
+        with pytest.raises(ValueError, match="engine_port_base"):
+            SGLangConfig("model", 1, 1, 1, engine_port_base=base)
+
+
 def test_group_rejects_noncontiguous_gpu_reservations_before_launch(monkeypatch):
     config = SGLangConfig("model", 2, 2, 4)
     group = SGLangEngineGroup(

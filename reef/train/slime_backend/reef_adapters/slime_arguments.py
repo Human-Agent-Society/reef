@@ -27,6 +27,12 @@ def add_reef_slime_arguments(parser: argparse.ArgumentParser) -> argparse.Argume
         help="SGLang rollout executor: auto (currently ray), ray, or a Slime-compatible Executor import path.",
     )
     parser.add_argument(
+        "--reef-engine-port-base",
+        type=int,
+        default=15000,
+        help="Where SGLang engine port probing starts on each host; stacks sharing a host need distinct bases.",
+    )
+    parser.add_argument(
         "--megatron-to-hf-mode",
         choices=["raw", "bridge"],
         default="raw",
