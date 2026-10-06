@@ -97,21 +97,88 @@ rules:
 - every named template must contain ``{name}``.
 
 An adapter may also declare a ``quirks`` module to further customize the
-rendering process. Specifically, the module's ``finalize_render`` gets the last
-word. Rendering hands it the whole result as root-relative paths to text, and
-whatever it returns is the rendered tree, so it may rewrite a file, convert
-one, add one, or drop one.
+rendering process. The module defines one subclass of ``AdapterRenderer``
+from ``reef.harness.adapters.descriptor``; the loader finds it in the module.
+The render calls its steps in this order, and each step is given only its own
+files:
 
-Examples of conversion:
+.. list-table::
+   :header-rows: 1
 
-- Codex's quirks emit ``config.toml``.
-- Hermes's emit ``config.yaml``.
-- dsh's turn an object keyed by plugin id into the YAML patch list dsh actually
-  loads, a shape no deep merge could produce directly.
+   * - Step
+     - Given
+     - Use it to
+   * - ``process_config``
+     - One merged config file, as a JSON object
+     - Refuse or adjust config, such as a setting the tree must keep
+   * - ``process_skill``
+     - The text of one ``skill`` file
+     - Add or check skill frontmatter
+   * - ``process_command``
+     - The text of one ``agent_command`` file
+     - Add or check command frontmatter
+   * - ``check_model_route``
+     - The processed config files, skill files and command files
+     - Refuse the model routes the harness reads beyond the binding's keys,
+       such as a fallback model or a second provider
+   * - ``finalize_render``
+     - Every rendered file as text, each config file already written in its
+       format
+     - Work that spans several files, or a config file its suffix's format
+       does not fit; it parses a config file again to change it
 
-In ``quirks`` an adapter may also refuse a tree for its own reasons, such as
-Codex's refusal of ``code_extension``; those rejections raise the same error as
-the engine's and far outnumber them.
+Each step defaults to leaving its input unchanged, so an adapter overrides only
+the ones it needs. A step refuses a tree by raising ``RenderError``.
+
+.. important::
+
+   Prefer the narrow steps over ``finalize_render``. A ``process_*`` step sees
+   one file of one kind, and ``check_model_route`` only reads, so a reader can
+   tell what each one may change and a reviewer can check it in isolation.
+   ``finalize_render`` sees and may rewrite every file, including config files
+   it has to parse again, so its effects are hard to follow and easy to break
+   when the render changes. Use it only for work no narrow step can do:
+   output that depends on several files, or a file layout its suffix's format
+   cannot produce. Keep what it does small, and move a check into a narrow
+   step whenever that step sees everything the check needs.
+
+Every model call must go to Reef. Before any step, the render refuses a tree
+that sets a key the descriptor's ``model_binding`` writes, unless the binding's
+credential (the value holding ``{api_key}``) is set beside it. The binding is
+merged after the tree and wins every key it writes, so only a tree rendered
+without the binding, as admission renders a proposal, can set one; admission
+refuses an inline credential, so the credential tells the two apart. No
+adapter can turn this check off. Each adapter's ``check_model_route`` refuses
+the other routes its harness reads.
+
+Every step is a static method, and defining one as an ordinary method fails
+when the class is created. The render uses the class without making an
+instance, so a step's output depends only on its arguments and no step passes
+state to a later one. Keep module-level state out of the steps as well.
+
+Before ``finalize_render``, the render writes each config file in the format
+its suffix names: ``.json`` as JSON, ``.toml`` as TOML (Codex's
+``config.toml``), ``.yaml`` or ``.yml`` as YAML (Hermes's ``config.yaml``), and
+``.env`` as ``KEY=value`` lines; any other suffix is written as JSON. An
+adapter whose file needs another layout writes it again in ``finalize_render``.
+
+Examples:
+
+- dsh's ``finalize_render`` turns an object keyed by plugin id into the YAML
+  patch list dsh actually loads, a shape no deep merge could produce directly,
+  and adds the rendered extensions to that list, since only the rendered files
+  name them.
+- Codex writes ``models.json`` and points ``config.toml`` at it in
+  ``finalize_render``, since that spans two config files. It refuses
+  ``code_extension`` there too; refusals like this far outnumber the engine's
+  own.
+
+A quirks module written before ``AdapterRenderer`` may still define a
+module-level ``finalize_render(files)`` instead. This is deprecated and loading
+such a module warns: it runs in place of the ``finalize_render`` step. Its
+config files arrive in the format their suffix names, so a ``.toml``,
+``.yaml`` or ``.env`` file is no longer JSON. Define an ``AdapterRenderer``
+subclass instead.
 
 Note that ``native`` declares no ``quirks`` and runs on the engine's rules
 alone.
@@ -122,9 +189,8 @@ Seaming engine and adapter together
 - The merge rule is the engine's. It recurses into objects and replaces
   everything else, lists included, so an agent whose configuration appends to a
   list cannot say so in the descriptor; its quirks rebuild the list instead.
-- ``finalize_render`` receives only paths and text. It cannot see which entry
-  produced what, so a projection needing that detail re-reads the file the
-  engine just wrote.
+- The renderer steps receive paths, text, and config objects. They cannot see
+  which entry produced what.
 - One rules file is mandatory. An agent reading rules from several needs its
   quirks to split the concatenated text apart again.
 
