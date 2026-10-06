@@ -74,14 +74,12 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
             options["offload-train"] = True
     for name, value in expand_option_references(config, reef.get("inference_options", {})).items():
         # Slime has dedicated router bind flags and passes other router flags
-        # directly to RouterArgs. Engine flags are all prefixed by Slime; Reef
-        # owns the engine port base.
-        if name == "engine-port-base":
-            flag = "reef-" + name
-        elif name.startswith("router-") and name not in {"router-ip", "router-port", "router-request-timeout-secs"}:
-            flag = name
-        else:
-            flag = "sglang-" + name
+        # directly to RouterArgs. Engine flags are all prefixed by Slime.
+        flag = (
+            name
+            if name.startswith("router-") and name not in {"router-ip", "router-port", "router-request-timeout-secs"}
+            else "sglang-" + name
+        )
         options[flag] = value
     return [*arguments, *native_arguments(options)]
 

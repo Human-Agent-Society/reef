@@ -49,8 +49,6 @@ class SGLangConfig:
     router_host: str | None = None
     router_port: int | None = None
     router_options: dict[str, Any] = field(default_factory=dict)
-    #: Where each engine's port range probe starts on its host; stacks sharing a host need distinct bases.
-    engine_port_base: int = 15000
     env_vars: dict[str, str] = field(default_factory=dict)
     offload: bool = False
     shared_gpus: int = 0
@@ -80,9 +78,6 @@ class SGLangConfig:
             raise ValueError("SGLang GPU capacities must be positive")
         if self.request_timeout <= 0 or self.startup_timeout <= 0:
             raise ValueError("SGLang timeouts must be positive")
-        # Leave room for one engine's range: 34 ports plus at least one data parallel rank.
-        if not 1 <= self.engine_port_base <= 65500:
-            raise ValueError("engine_port_base must be a port between 1 and 65500")
         if self.external_engines:
             return
         groups = [group for model in self.resolved_models for group in model.groups]

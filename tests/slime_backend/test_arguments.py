@@ -42,19 +42,15 @@ def slime_args(**overrides):
 def test_reef_slime_argument_hook_owns_only_reef_options() -> None:
     parser = add_reef_slime_arguments(argparse.ArgumentParser())
 
-    args = parser.parse_args(
-        ["--megatron-to-hf-mode=bridge", "--megatron-lora-rank=4", "--use-critic", "--reef-engine-port-base=20000"]
-    )
+    args = parser.parse_args(["--megatron-to-hf-mode=bridge", "--megatron-lora-rank=4", "--use-critic"])
 
     assert args.megatron_to_hf_mode == "bridge"
-    assert args.reef_engine_port_base == 20000
     assert args.megatron_lora_rank == 4
     assert args.use_critic is True
     assert args.check_lora_weight_equal is True
     assert args.verify_lora_base_weights is True
     assert args.reef_executor_backend == "auto"
     assert args.reef_rollout_executor_backend == "auto"
-    assert parser.parse_args([]).reef_engine_port_base == 15000
 
 
 @pytest.mark.unit

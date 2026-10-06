@@ -53,7 +53,6 @@ class SlimeArguments(Namespace):
     finetune: bool
     ckpt_step: int | None
     reef_executor_backend: str
-    reef_engine_port_base: int
     advantage_estimator: str
     reef_rollout_tensor_dtypes: dict[str, str]
     reef_external_batch_keys: tuple[str, ...]

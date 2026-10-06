@@ -191,18 +191,15 @@ not stored in ``training.options``. Router bind settings use ``router-ip`` and
 ``router-port``; other supported router flags retain their native ``router-*``
 names. The standalone engine launcher does not include a router.
 
-``inference.options.engine-port-base`` (Slime-integrated inference only,
-default 15000) is where engine port probing starts on each host. A probe
-reserves nothing until the engine binds, so stacks that share a host network
-need bases far enough apart.
-Each SGLang engine takes 35 consecutive ports: a second stack's base must be at
-least the first stack's base plus 35 times the first stack's engines on that
-host. For example, bases 22000 and 23000 leave room for 28 engines of the first
-stack and stay outside the default worker ports of ``ray start`` (10002-19999)
-and the port range Slime's trainer probes for its rendezvous (20000-21000).
-Such stacks also need distinct ``router-port`` values of 4000 or higher, well
-apart (for example 30000 and 31000), because each router's metrics port is the
-first free port after its router port.
+In Slime-integrated inference, and for the local SGLang engines that the
+Tinker backend starts, each engine probes free ports on its host at startup.
+A probe reserves nothing, so another process, such as another stack on the
+same host network, can bind a probed port first. If the engine then fails to
+start and another process holds one of its ports, Reef stops the engine and
+starts it again on new ports. Reef does the same when another process listens
+on the engine's HTTP port and answers the readiness check. Reef makes at most
+three startup attempts per engine. Other startup failures, and any failure of
+an encoder engine, stop the launch.
 
 Migration from the previous version 2 training configuration:
 
@@ -272,8 +269,10 @@ control routes: ``/pause?mode=keep`` (a retracting pause adds
 ``/collective_rpc reload_weights`` and the ``/v1/load_lora_adapter`` routes.
 Engines are single-node; more than one engine needs ``router_url``. Each
 engine takes one port, probed upward from ``engine_port_base`` (default
-15000) on its host; two stacks on one host must set bases far enough apart,
-since a probe reserves nothing until the server binds. Engine
+15000) on its host. If the engine then fails to start and another process
+holds that port, or another process listens on that port when the engine
+becomes ready, Reef stops the engine and starts it again on a new port, with
+at most three startup attempts per engine. Engine
 options use vLLM's engine-argument names; Reef sets ``model``, ``host``,
 ``port``, ``tensor_parallel_size`` and ``enable_sleep_mode`` itself, defaults
 ``generation_config`` to ``vllm`` so the model's own generation defaults cannot

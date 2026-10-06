@@ -39,7 +39,6 @@ def inference_config(args: Any) -> dict[str, Any]:
             for key, value in vars(args).items()
             if key.startswith("sglang_router_") and key not in _ROUTER_BIND_OPTIONS
         },
-        "engine_port_base": args.reef_engine_port_base,
         "env_vars": env,
         "offload": bool(getattr(args, "offload_rollout", False)),
         "shared_gpus": args.actor_num_nodes * args.actor_num_gpus_per_node if colocate else 0,

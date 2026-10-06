@@ -290,7 +290,6 @@ def test_local_engine_topology_rejects_conflicting_inputs_before_starting(tmp_pa
         ({"training": {"colocate": True}}, "training.colocate"),
         ({"inference": {"backend": "vllm"}}, "inference.backend: sglang"),
         ({"inference": {"options": {"enable-lora": True}}}, "set from training.options"),
-        ({"inference": {"options": {"engine_port_base": 16000}}}, "engine-port-base requires training.backend: slime"),
         ({"training": {"options": {"lora-rank": 0}}}, "training.options"),
     ):
         raw = _local_engine_config(tmp_path)

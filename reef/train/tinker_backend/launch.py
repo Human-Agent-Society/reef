@@ -74,9 +74,6 @@ class TinkerDeployment(InProcessTrainingDeployment):
         for name in ("enable-lora", "max-lora-rank", "max-loaded-loras", "max-loras-per-batch"):
             if name in engine_options or name.replace("-", "_") in engine_options:
                 raise DeployConfigError(f"inference.options.{name} is set from training.options for Tinker adapters")
-        if "engine-port-base" in engine_options:
-            # Tinker's engines always probe from the default base; fail instead of ignoring the setting.
-            raise DeployConfigError("inference.options.engine-port-base requires training.backend: slime")
         config["reef"].update(
             training_backend_options=options,
             ray_namespace=settings["ray_namespace"] or DEFAULT_NAMESPACE,

@@ -9,6 +9,7 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from reef.inference.process import EngineGroup, EngineStartup
 from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
@@ -38,7 +39,7 @@ def engine_environment(config: SGLangConfig) -> dict[str, str]:
     }
 
 
-class SGLangEngineGroup:
+class SGLangEngineGroup(EngineGroup):
     """Logical replicas, each backed by one actor per participating node."""
 
     def __init__(
@@ -61,6 +62,7 @@ class SGLangEngineGroup:
         count = 1 if external else group.num_gpus // local_width
         self.all_engines: list[Any] = [] if group.worker_type == "placeholder" else [None] * count
         self.num_new_engines = 0
+        self.port_ranges: dict[int, tuple[str, range]] = {}
         self.needs_offload = bool(config.offload and gpu_offset < config.shared_gpus and not external)
 
     @property
@@ -77,24 +79,26 @@ class SGLangEngineGroup:
             "moe_dp_size": int(options.get("moe_dp_size") or 1),
         }
 
-    def start_engines(self, cursors: dict[str, int]) -> list[Any]:
-        """Launch an actor for every empty slot; return the pending ``init`` calls.
+    def start_engines(self, cursors: dict[str, int]) -> dict[int, Any]:
+        """Launch an actor for every empty slot; return each new slot's pending ``init`` call.
 
         ``cursors`` tracks the next free port range per host across groups so
-        engines on one node never race for the same ports; probing starts at the
-        configured ``engine_port_base``, which stacks sharing a host must set apart.
+        engines on one node never race for the same ports.
         """
         created = [index for index, engine in enumerate(self.all_engines) if engine is None]
         for index in created:
             self.all_engines[index] = self._launch_actor(index)
         self.num_new_engines = len(created)
-        addresses = self._addresses(created, cursors)
-        return [
-            self.all_engines[index].init.remote(
+        return self.init_engines(created, cursors)
+
+    def init_engines(self, slots: list[int], cursors: dict[str, int]) -> dict[int, Any]:
+        addresses = self._addresses(slots, cursors)
+        return {
+            index: self.all_engines[index].init.remote(
                 **addresses[index], router_ip=self.router[0], router_port=self.router[1]
             )
-            for index in created
-        ]
+            for index in slots
+        }
 
     def _launch_actor(self, index: int) -> Any:
         options: dict[str, Any] = {
@@ -141,7 +145,7 @@ class SGLangEngineGroup:
         )
         return base_gpu, strategy
 
-    def _addresses(self, created: list[int], cursors: dict[str, int]) -> dict[int, dict[str, Any]]:
+    def _addresses(self, slots: list[int], cursors: dict[str, int]) -> dict[int, dict[str, Any]]:
         """Per-actor ``init`` addresses; every node of a multi-node engine meets at node zero's."""
         if self.external:
             host, port = self.external["host"], self.external["port"]
@@ -153,26 +157,25 @@ class SGLangEngineGroup:
                     "dist_init_addr": f"{host}:{port}",
                     "disaggregation_bootstrap_port": self.external.get("disaggregation_bootstrap_port"),
                 }
-                for index in created
+                for index in slots
             }
         addresses: dict[int, dict[str, Any]] = {}
         width = 34 + int(self.group.options.get("dp_size", self.config.options.get("dp_size")) or 1)
-        for index in created:
+        for index in slots:
             actor = self.all_engines[index]
-            host, _ = ray.get(actor._get_current_node_ip_and_free_port.remote(start_port=self.config.engine_port_base))
+            host, _ = ray.get(actor._get_current_node_ip_and_free_port.remote())
             _, port = ray.get(
-                actor._get_current_node_ip_and_free_port.remote(
-                    start_port=cursors.get(host, self.config.engine_port_base), consecutive=width
-                )
+                actor._get_current_node_ip_and_free_port.remote(start_port=cursors.get(host, 15000), consecutive=width)
             )
             cursors[host] = port + width
+            self.port_ranges[index] = (host, range(port, port + width))
             addresses[index] = {
                 "host": host,
                 "port": port,
                 "nccl_port": port + 1,
                 "disaggregation_bootstrap_port": port + 2,
             }
-        for index in created:
+        for index in slots:
             root = addresses[index - index % self.nodes_per_engine]
             addresses[index]["dist_init_addr"] = f"{root['host']}:{root['port'] + 3}"
         return addresses
@@ -245,14 +248,21 @@ class SGLangModel:
         return self.onload(["kv_cache", "cuda_graph"])
 
     def recover(self) -> None:
-        cursors: dict[str, int] = {}
         missing = [
             (group, [i for i, engine in enumerate(group.all_engines) if engine is None])
             for group in self.server_groups
         ]
-        pending = [ref for group in self.server_groups for ref in group.start_engines(cursors)]
-        if pending:
-            ray.get(pending)
+        startup = EngineStartup()
+        pending_without_retry: list[ray.ObjectRef] = []
+        for group in self.server_groups:
+            if group.worker_type == "encoder" or group.external:
+                # A failed blocking encoder launch leaves no process to stop, and Reef does not launch
+                # external engines, so neither is relaunched.
+                pending_without_retry.extend(group.start_engines(startup.cursors).values())
+            else:
+                startup.start(group)
+        ray.get(pending_without_retry)
+        startup.wait()
         engines = [
             group.all_engines[index]
             for group, indices in missing
@@ -307,8 +317,7 @@ class SGLangCluster:
             self._attach_external()
             return
         gpu_offset = 0
-        cursors: dict[str, int] = {}
-        pending = []
+        startup = EngineStartup()
         for index, model_config in enumerate(self.config.resolved_models):
             router = self._router(
                 index, any(group.worker_type in {"prefill", "decode"} for group in model_config.groups)
@@ -325,7 +334,8 @@ class SGLangCluster:
             encoder_urls = []
             for group in model.server_groups:
                 if group.worker_type == "encoder":
-                    ray.get(group.start_engines(cursors))
+                    # A failed blocking encoder launch leaves no process to stop, so it is never relaunched.
+                    ray.get(list(group.start_engines(startup.cursors).values()))
                     encoder_urls.extend(ray.get([engine.get_url.remote() for engine in group.engines]))
             for group in model.server_groups:
                 if group.worker_type == "encoder":
@@ -333,9 +343,8 @@ class SGLangCluster:
                 if encoder_urls and group.worker_type in {"regular", "prefill"}:
                     group.group.options.setdefault("language_only", True)
                     group.group.options.setdefault("encoder_urls", encoder_urls)
-                pending.extend(group.start_engines(cursors))
-        if pending:
-            ray.get(pending)
+                startup.start(group)
+        startup.wait()
 
     def _attach_external(self) -> None:
         router = self._router(
@@ -345,13 +354,13 @@ class SGLangCluster:
         model = SGLangModel()
         self.servers["default"] = model
         offset = 0
-        pending = []
+        pending: list[ray.ObjectRef] = []
         for info in self.config.external_engines:
             group_config = SGLangGroupConfig(
                 info["worker_type"], info["num_gpus"], info["num_gpus"], info.get("server_info", {})
             )
             group = SGLangEngineGroup(self.config, group_config, None, offset, router, external=info)
             model.server_groups.append(group)
-            pending.extend(group.start_engines({}))
+            pending.extend(group.start_engines({}).values())
             offset += info["num_gpus"]
         ray.get(pending)

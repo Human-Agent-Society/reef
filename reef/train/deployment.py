@@ -32,8 +32,6 @@ INFERENCE_LAUNCH_OPTIONS = frozenset(
         "rollout-external",
         "rollout-external-engine-addrs",
         "prefill-num-servers",
-        "engine-port-base",
-        "reef-engine-port-base",
     }
 )
 # Colocation is Reef's placement decision (training.colocate); its native
