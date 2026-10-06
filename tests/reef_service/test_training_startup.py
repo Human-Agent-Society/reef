@@ -98,6 +98,49 @@ def test_cli_and_yaml_share_selected_recipe_and_native_option_parsing(tmp_path):
         ({"inference.options.sglang-context-length": "1024"}, "without the sglang- prefix"),
         ({"execution.training.backend": "uni"}, "requires execution.training.backend: ray"),
         ({"recipe.config.batch-szie": "2"}, "unknown configuration flag"),
+        ({"inference.backend": "vllm"}, "update-weight-transport: disk"),
+        (
+            {
+                "inference.backend": "vllm",
+                "training.options.update-weight-transport": "disk",
+                "training.options.update-weight-mode": "delta",
+            },
+            "update-weight-mode: full",
+        ),
+        (
+            {
+                "inference.backend": "vllm",
+                "training.options.update-weight-transport": "disk",
+                "training.options.update-weight-local-checkpoint-dir": "/nvme/checkpoint",
+            },
+            "update-weight-local-checkpoint-dir",
+        ),
+        (
+            {
+                "inference.backend": "vllm",
+                "training.options.update-weight-transport": "disk",
+                "training.options.megatron-lora-rank": "8",
+            },
+            "LoRA",
+        ),
+        (
+            {
+                "inference.backend": "vllm",
+                "training.options.update-weight-transport": "disk",
+                "training.options.check-weight-update-equal": "true",
+            },
+            "weights checker",
+        ),
+        (
+            {
+                "inference.backend": "vllm",
+                "training.options.update-weight-transport": "disk",
+                "inference.num-gpus": "2",
+                "inference.tensor-parallel-size": "1",
+            },
+            "one engine per stack",
+        ),
+        ({"inference.backend": "tinker-engine"}, "sglang or vllm"),
     ],
 )
 def test_invalid_training_inputs_fail_before_downloads_and_processes(tmp_path, monkeypatch, capsys, override, match):
@@ -426,3 +469,25 @@ def test_managed_driver_cannot_override_resolved_inference_with_direct_flags(tmp
     monkeypatch.setattr(slime_driver, "_parse_slime_args", unexpected)
     with pytest.raises(RuntimeError, match="pass options through reef serve"):
         slime_driver.create_training_plan(config, ["--rollout-num-gpus=999"], loss_family="sao")
+
+
+def test_vllm_receiver_pairs_with_the_disk_weight_transport_without_sglang_flags(tmp_path):
+    from reef.train.slime_backend.launch import driver_arguments
+
+    overrides = {
+        "recipe.implementation": RECIPE,
+        "inference.model-path": "/models/demo",
+        "inference.backend": "vllm",
+        "inference.options.max-model-len": "4096",
+        "training.options.update-weight-transport": "disk",
+        "training.options.update-weight-disk-dir": "/shared/weights",
+    }
+    config, _ = resolve_deployment_config(training_config(), overrides, tmp_path / "serve.yaml")
+    reef = config["reef"]
+    assert reef["inference_backend"] == "vllm"
+    assert reef["inference_options"] == {"max-model-len": "4096"}
+    argv = driver_arguments(config)
+    assert "--update-weight-transport=disk" in argv
+    assert "--rollout-num-gpus=1" in argv
+    assert "--rollout-num-gpus-per-engine=1" in argv
+    assert not any(argument.startswith("--sglang-") for argument in argv)

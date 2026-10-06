@@ -23,7 +23,8 @@ def test_sglang_imports_with_training_packages_blocked():
 import sys
 sys.modules.update(dict.fromkeys(('slime', 'megatron', 'reef.train.slime_backend')))
 from reef.inference.sglang import chat, config, control, engine, executor, health, launch, plugin, service
-assert engine.ReefSGLangEngine.__bases__ == (object,)
+from reef.runtime.interfaces import InferenceEngine
+assert engine.ReefSGLangEngine.__bases__ == (InferenceEngine,)
 assert not any(name.startswith('slime.') or name.startswith('reef.train.slime_backend.') for name in sys.modules)
 """,
         ],

@@ -18,7 +18,7 @@ import requests
 from reef.inference.process import node_address_and_port, wait_ready
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.process import EngineProcess, launch_server
-from reef.runtime.interfaces import InferenceMemoryOperations
+from reef.runtime.interfaces import InferenceEngine, InferenceMemoryOperations
 from reef.runtime.scheduler import InferenceMemory
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ MEMORY_REGIONS = ("weights", "kv_cache", "cuda_graph")
 RELEASED_TOGETHER = frozenset({"weights", "kv_cache"})
 
 
-class ReefVLLMEngine:
+class ReefVLLMEngine(InferenceEngine):
     """Own one native vLLM server on this node's reserved GPUs."""
 
     def __init__(self, config: VLLMConfig, rank: int, gpu_ids: Sequence[int]) -> None:
@@ -122,7 +122,7 @@ class ReefVLLMEngine:
 
     # -- Generation barrier -------------------------------------------------------
 
-    def pause_generation(self, mode: str = "in_place") -> dict[str, Any]:
+    def pause_generation(self, mode: str) -> dict[str, Any]:
         """Stop scheduling with requests kept in place.
 
         ``retract`` additionally frees every in-flight request's KV and resets
@@ -152,7 +152,7 @@ class ReefVLLMEngine:
 
     # -- Weights and adapters -----------------------------------------------------
 
-    def update_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> dict[str, Any]:
+    def update_weights_from_disk(self, model_path: str, *, runtime_load_id: str | None = None) -> dict[str, Any]:
         result = self._post(
             "collective_rpc", body={"method": "reload_weights", "kwargs": {"weights_path": model_path}}
         )

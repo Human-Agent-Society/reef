@@ -223,11 +223,14 @@ def create_training_plan(
     prepared = prepare_bridge(args, retention=retention, loss_family=loss_family)
     from reef.train.slime_backend.inference import inference_config
 
+    reef = config.get("reef", {})
+    inference_backend = reef.get("inference_backend") or "sglang"
     training = SlimeTrainingService(
         args,
         preparation=prepared,
         loss_family_config=loss_family_config,
-        train_rpc_timeout_s=config.get("reef", {}).get("train_timeout_s"),
+        inference_backend=inference_backend,
+        train_rpc_timeout_s=reef.get("train_timeout_s"),
     )
     return TrainingDeploymentPlan(
         resources=SlimeDeploymentResources(
@@ -236,7 +239,7 @@ def create_training_plan(
             namespace=namespace,
             runtime_env=_job_runtime_env(),
         ),
-        inference_config=inference_config(args),
+        inference_config=inference_config(args, inference_backend, reef.get("inference_options")),
         training=training,
         coordinator=_coordinator_config(args, actor_name=actor_name, namespace=namespace),
         monitor_components=not getattr(args, "rollout_external", False),

@@ -270,9 +270,19 @@ releases the KV cache only together with the weights, so
 ``keep-lora-base-resident`` is unavailable on it, and it resumes scheduling by
 itself once every region is resident, so the engine restores the KV cache
 when Reef resumes generation rather than when the coordinator calls
-``onload_kv``: generation stays paused until the coordinator's commit. The Slime and Tinker
-backends still produce SGLang engine options, so their managed launches keep
-``inference.backend: sglang`` until they select options per backend.
+``onload_kv``: generation stays paused until the coordinator's commit.
+
+The Slime backend pairs with ``inference.backend: vllm`` through the disk
+weight path: ``training.options.update-weight-transport: disk`` in full mode,
+with no ``update-weight-local-checkpoint-dir``, no LoRA rank and no
+``check-weight-update-equal``, since Slime's other transports call SGLang-only
+engine routes. The trainer writes each checkpoint under
+``update-weight-disk-dir`` and the engines reload it with their weight version.
+Engine options come from ``inference.options`` in vLLM's own names and never
+pass through Slime's parser. One engine per stack: ``inference.num-gpus`` must
+equal ``inference.tensor-parallel-size`` until Slime can name a ``router_url``.
+The Tinker backend still produces SGLang engine options and keeps
+``inference.backend: sglang``.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
