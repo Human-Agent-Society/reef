@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from typing import Any
 
 from reef.runtime.deployment import DeploymentResources, TrainingService, WeightTransferSession
@@ -13,6 +14,7 @@ from reef.train.slime_backend.reef_adapters.bridge import (
     create_train_groups,
     create_training_backend,
 )
+from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S
 from reef.train.slime_backend.resources import SlimeDeploymentResources
 
 
@@ -27,7 +29,18 @@ class SlimeTrainingService(TrainingService):
         *,
         preparation: BridgePreparation,
         loss_family_config: object | None,
+        train_rpc_timeout_s: float | None = None,
     ) -> None:
+        if train_rpc_timeout_s is None:
+            train_rpc_timeout_s = DEFAULT_TRAIN_RPC_TIMEOUT_S
+        elif (
+            isinstance(train_rpc_timeout_s, bool)
+            or not isinstance(train_rpc_timeout_s, (int, float))
+            or not math.isfinite(train_rpc_timeout_s)
+            or train_rpc_timeout_s <= 0
+        ):
+            raise ValueError("training.timeout-s must be a positive finite number")
+        self.train_rpc_timeout_s = train_rpc_timeout_s
         self.args = args
         self.preparation = preparation
         self.loss_family_config = loss_family_config
@@ -45,7 +58,10 @@ class SlimeTrainingService(TrainingService):
             raise ValueError("Slime training requires its supplied model reservations")
         self._started = True
         self._actor_group, self._critic_group = create_train_groups(
-            self.args, resources.placement_groups, rollout_manager=None
+            self.args,
+            resources.placement_groups,
+            rollout_manager=None,
+            train_rpc_timeout_s=self.train_rpc_timeout_s,
         )
         # Ongoing observation belongs to the backend in the coordinator
         # process. Watching these driver-side handles would report intentional
@@ -82,6 +98,7 @@ class SlimeTrainingService(TrainingService):
                 self._critic_group,
                 preparation=self.preparation,
                 loss_family_config=self.loss_family_config,
+                train_rpc_timeout_s=self.train_rpc_timeout_s,
             )
         return self._backend
 

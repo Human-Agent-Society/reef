@@ -44,7 +44,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
     validate_bridge_args,
 )
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
-from reef.train.slime_backend.reef_adapters.train_groups import SlimeTrainGroup
+from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S, SlimeTrainGroup
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
     CheckpointStorage,
     RetentionConfig,
@@ -52,12 +52,10 @@ from reef.train.slime_backend.reef_adapters.training_job.storage import (
 )
 from reef.train.slime_backend.score_centering import ScoreCenteringSettings, settings_from_args
 
-# One training step (train + checkpoint + publish) legitimately takes hours;
-# this bounds a single Ray RPC from the bridge to its workers.
-_TRAIN_RPC_TIMEOUT_S = 14_400
 
-
-def create_train_groups(args, placement_groups, rollout_manager):
+def create_train_groups(
+    args, placement_groups, rollout_manager, *, train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S
+):
     from reef.train.slime_backend.reef_adapters.megatron.train_actor import ReefMegatronTrainRayActor
     from reef.train.slime_backend.reef_adapters.train_groups import create_train_groups as implementation
 
@@ -66,6 +64,7 @@ def create_train_groups(args, placement_groups, rollout_manager):
         placement_groups,
         rollout_manager,
         actor_cls=ReefMegatronTrainRayActor,
+        train_rpc_timeout_s=train_rpc_timeout_s,
     )
 
 
@@ -110,7 +109,9 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         loss_family_config: object | None = None,
         loss_runtime: SlimeAlgorithm | None = None,
         score_centering: ScoreCenteringSettings | None = None,
+        train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
     ) -> None:
+        self.train_rpc_timeout_s = train_rpc_timeout_s
         self._worker_failure: ExecutorFailure | None = None
         self._score_centering = score_centering
         self._group = actor_group
@@ -265,7 +266,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             job.packed,
             actor_group=self._group,
             critic_group=self._critic_group,
-            resolve=self._get,
+            resolve=self.resolve_training_result,
         )
         durable_metrics = {
             **training.durable_metrics,
@@ -275,7 +276,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             (dict(result) for result in training.worker_results if isinstance(result, Mapping) and result),
             {},
         )
-        train_metrics.update(self._get(self._group.async_pop_rank0_metrics()))
+        train_metrics.update(self.resolve_training_result(self._group.async_pop_rank0_metrics()))
         train_metrics.update(job.algorithm_metrics)
         return TrainingMetrics(training=train_metrics, durable=durable_metrics)
 
@@ -308,7 +309,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         return self.current_runtime_load_id()
 
     def current_runtime_load_id(self) -> str:
-        return str(self._get(self._group.async_get_rank0_runtime_load_id()))
+        return str(self.resolve_training_result(self._group.async_get_rank0_runtime_load_id()))
 
     def initialize_version(self, runtime_load_id: str) -> None:
         self._group.initialize_runtime_load_id(runtime_load_id)
@@ -364,9 +365,8 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             raise RuntimeError("slime args.save_hf is not set")
         return self._save_hf_template.format(rollout_id=rollout_id)
 
-    @staticmethod
-    def _get(value: Any) -> Any:
-        return resolve(value, timeout=_TRAIN_RPC_TIMEOUT_S)
+    def resolve_training_result(self, value: Any) -> Any:
+        return resolve(value, timeout=self.train_rpc_timeout_s)
 
 
 class _SlimePreparedTrainingJob(PreparedTrainingJob):
@@ -440,6 +440,7 @@ def create_training_backend(
     *,
     preparation: BridgePreparation,
     loss_family_config: object | None = None,
+    train_rpc_timeout_s: float = DEFAULT_TRAIN_RPC_TIMEOUT_S,
 ) -> SlimeTrainingBackend:
     """Build a training-only adapter around already-started Slime workers."""
     from reef.train.slime_backend.reef_adapters.megatron.lora import lora_engine_slots
@@ -465,4 +466,5 @@ def create_training_backend(
         loss_family=preparation.loss_family,
         loss_family_config=loss_family_config,
         score_centering=settings_from_args(args),
+        train_rpc_timeout_s=train_rpc_timeout_s,
     )

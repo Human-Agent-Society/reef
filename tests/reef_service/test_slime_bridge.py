@@ -461,7 +461,7 @@ class _DurableGroup(_FakeGroup):
             (self.megatron_root / "latest_checkpointed_iteration.txt").write_text(str(rollout_id), encoding="utf-8")
 
 
-def _durable_actor(tmp_path):
+def _durable_actor(tmp_path, **training_options):
     template = str(tmp_path / "checkpoint-{rollout_id}")
     group = _DurableGroup(template)
     actor = build_slime_coordinator(
@@ -469,6 +469,7 @@ def _durable_actor(tmp_path):
         _FakeRolloutManager(["packed"]),
         batch_processor=_FakeRolloutManager(["packed"]),
         save_hf_template=template,
+        **training_options,
     )
     payload = _payload(loss="sft")
     payload.update(scenario_step=0, expected_runtime_load_id="v1", parent_release_id="parent-0")
@@ -2137,3 +2138,69 @@ def test_startup_reconstruction_failure_aborts_supplied_inference(tmp_path, fail
     assert manager.lifecycle_calls == ["pause_generation"]
     assert group.update_calls == 0
     assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "COMPLETE"
+
+
+@pytest.mark.parametrize(
+    "options,expected", [({}, 14400), ({"train_rpc_timeout_s": 43200}, 43200), ({"train_rpc_timeout_s": 0.5}, 0.5)]
+)
+def test_training_backend_factory_passes_timeout_to_worker_results(monkeypatch, options, expected):
+    from reef.runtime.executor import ExecutorFuture, base
+
+    waits = []
+
+    class TrainingResult(ExecutorFuture):
+        def result(self, timeout=None):
+            waits.append(timeout)
+            return {"loss": 0.1}
+
+    group = _FakeGroup()
+    group.train_parallel_config = {"dp_size": 1}
+    backend = bridge.create_training_backend(
+        bridge_args(
+            save=None, start_rollout_id=0, critic_steps_per_actor=None, num_critic_only_steps=0, score_centering=False
+        ),
+        group,
+        None,
+        preparation=bridge.BridgePreparation(retention=RetentionConfig(), loss_family=None, lora=False),
+        **options,
+    )
+    monkeypatch.setattr(base, "monotonic", lambda: 100.0)
+    monkeypatch.setattr(backend._batch_processor, "prepare_external_train_data", lambda data: "packed")
+    monkeypatch.setattr(group, "async_train", lambda *args, **kwargs: [TrainingResult()])
+    with backend.prepare(_payload(loss="sft"), job_id="job", scenario_step=0, prior_marker=None) as job:
+        result = job.train()
+    assert result.training["loss"] == 0.1
+    assert waits == [expected]
+
+
+@pytest.mark.parametrize("phase", ["train", "save"])
+def test_slime_runtime_explains_timeout_without_committing_or_replaying(tmp_path, monkeypatch, phase):
+    from reef.runtime.executor.connection import ExecutorCoordinatorClient
+    from reef.runtime.executor.uniproc import UniProcExecutor
+    from reef.train.slime_backend.runtime import SlimeTrainingRuntime
+
+    actor, group, payload = _durable_actor(tmp_path, train_rpc_timeout_s=43200)
+    original = TimeoutError(f"{phase} wait expired")
+    attempts = []
+
+    def fail(*args, **kwargs):
+        attempts.append(phase)
+        raise original
+
+    monkeypatch.setattr(group, "async_train" if phase == "train" else "save_model", fail)
+    executor = UniProcExecutor.from_workers([actor])
+    client = ExecutorCoordinatorClient(executor, timeout_s=43200)
+    monkeypatch.setattr("reef.train.slime_backend.runtime.connect_ray_coordinator", lambda **kwargs: client)
+    runtime = SlimeTrainingRuntime(train_timeout_s=43200)
+    try:
+        with pytest.raises(TimeoutError, match=r"training\.timeout-s") as error:
+            runtime.execute_training_job(payload)
+        assert str(original) in str(error.value)
+        assert "training workers may still be running" in str(error.value)
+        assert error.value.__cause__ is original
+        assert attempts == [phase]
+        assert len(group.train_calls) == (0 if phase == "train" else 1)
+        assert read_marker(tmp_path / ".reef-latest-job.json")["status"] == "RUNNING"
+        assert not (tmp_path / "checkpoint-0").exists()
+    finally:
+        runtime.shutdown()
