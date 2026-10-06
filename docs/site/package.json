@@ -15,25 +15,25 @@
     "@fontsource-variable/dm-sans": "5.3.0",
     "@fontsource-variable/source-serif-4": "5.3.0",
     "@fontsource/dm-mono": "5.3.0",
-    "@shikijs/langs": "4.4.3",
+    "@shikijs/langs": "4.5.0",
     "github-slugger": "^2.0.0",
     "html-react-parser": "^6.1.8",
-    "lucide-react": "^1.48.0",
+    "lucide-react": "^1.49.0",
     "mermaid": "^12.0.0",
-    "next": "^16.3.6",
+    "next": "^16.3.8",
     "react": "^19.3.0",
     "react-dom": "^19.3.0",
     "rst-compiler": "^0.5.9",
-    "shiki": "4.4.3"
+    "shiki": "4.5.0"
   },
   "devDependencies": {
     "@eslint/compat": "^2.1.1",
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.4",
     "@types/react": "^19.3.0",
     "@types/react-dom": "^19.3.0",
     "@typescript/native": "npm:typescript@^7.0.2",
     "eslint": "^10.11.0",
-    "eslint-config-next": "^16.3.6",
+    "eslint-config-next": "^16.3.8",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "overrides": {
