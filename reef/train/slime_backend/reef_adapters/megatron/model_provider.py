@@ -29,7 +29,13 @@ def provide_actor_model(pre_process: bool = True, post_process: bool = True, vp_
             model = provider(pre_process=pre_process, post_process=post_process, vp_stage=vp_stage)
         finally:
             args.custom_model_provider_path = current_path
-    return apply_megatron_lora(model, args)
+    model = apply_megatron_lora(model, args)
+    initial_adapter = args.megatron_lora_init
+    if initial_adapter:
+        from reef.train.slime_backend.reef_adapters.megatron.lora_initialization import load_initial_adapter
+
+        load_initial_adapter(model, initial_adapter, rank=args.megatron_lora_rank, alpha=args.megatron_lora_alpha)
+    return model
 
 
 __all__ = ["provide_actor_model"]

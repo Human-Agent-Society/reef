@@ -685,3 +685,25 @@ def test_lora_sender_does_not_recover_receiver_with_native_fault_tolerance_enabl
         get_updatable_engines_and_lock=types.SimpleNamespace(remote=lambda: ([], None, 0, [], [], [])),
     )
     actor._with_lora_engines(lambda: pytest.fail("no receiver is available"))
+
+
+@pytest.mark.parametrize("tag", ["ref", "distill_teacher", "actor"])
+@pytest.mark.parametrize("enabled", [True, False])
+def test_external_checkpoint_clears_student_adapter_only_for_frozen_roles(monkeypatch, tag, enabled):
+    module = _load_reef_train_actor_adapter(monkeypatch)
+    actor = object.__new__(module.ReefMegatronTrainRayActor)
+    actor.args = types.SimpleNamespace()
+    actor.model = object()
+    calls = []
+    base = module.ReefMegatronTrainRayActor.__mro__[1]
+    monkeypatch.setattr(
+        base, "load_other_checkpoint", lambda self, role, path: calls.append(("load", role)), raising=False
+    )
+    monkeypatch.setattr(module, "megatron_lora_enabled", lambda args: enabled)
+    monkeypatch.setattr(module, "zero_megatron_lora_adapters", lambda model: calls.append(("zero", model)))
+    actor.weights_backuper = types.SimpleNamespace(backup=lambda role: calls.append(("backup", role)))
+    actor.load_other_checkpoint(tag, "/teacher")
+    expected = [("load", tag)]
+    if enabled and tag in ("ref", "distill_teacher"):
+        expected += [("zero", actor.model), ("backup", tag)]
+    assert calls == expected

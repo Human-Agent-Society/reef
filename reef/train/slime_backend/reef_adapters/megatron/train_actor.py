@@ -18,6 +18,7 @@ from slime.utils.reloadable_process_group import destroy_process_groups, reload_
 from slime.utils.timer import Timer, timer
 from torch_memory_saver import torch_memory_saver
 
+from reef.train.slime_backend.distill.teacher import TEACHER_TAG
 from reef.train.slime_backend.reef_adapters.megatron.adapter_slots import AdapterSlotSwitcher
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
@@ -377,9 +378,9 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
 
     def load_other_checkpoint(self, model_tag: str, path: str) -> None:
         super().load_other_checkpoint(model_tag, path)
-        if model_tag == "ref" and megatron_lora_enabled(self.args):
+        if model_tag in ("ref", TEACHER_TAG) and megatron_lora_enabled(self.args):
             zero_megatron_lora_adapters(self.model)
-            self.weights_backuper.backup("ref")
+            self.weights_backuper.backup(model_tag)
 
 
 __all__ = ["ReefMegatronTrainRayActor"]
