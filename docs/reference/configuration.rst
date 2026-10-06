@@ -28,8 +28,7 @@ identifier as SGLang's served model name. Startup has a one-hour readiness
 deadline for SGLang and 30 seconds for Reef. On failure or interruption,
 Reef cleans up both processes. Logs live under ``.reef/run/``.
 Local ``--inference.model-path`` cannot be combined with upstream URL/model selection;
-``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below. Training
-still requires an explicit stack file.
+``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below.
 
 An external-provider deployment also needs no YAML file:
 
@@ -139,6 +138,24 @@ support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/32
 this extension contract alone does not install or implement MLX.
 ``training.ready-timeout`` controls bridge startup (default 3600 seconds);
 ``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
+
+``training.timeout-s`` sets the training coordinator RPC wait in seconds. With
+Slime, it also sets the internal worker RPC waits for training, checkpoint saves,
+weight export and publication. For example, set ``training: {timeout-s: 43200}`` in
+YAML or pass ``--training.timeout-s 43200`` to allow waits of up to 12 hours.
+The value must be a positive finite number. If omitted, the coordinator wait
+follows ``inference.timeout-s`` (default 300 seconds), while Slime's internal
+worker waits retain their four-hour default. Worker initialization keeps its
+existing timeout independently of this setting.
+
+Each RPC has its own wait budget. The outer coordinator call still bounds the
+combined training and checkpoint-save wait; giving each internal RPC 12 hours
+does not allow those phases to take 12 hours each inside the same outer call.
+A timeout stops waiting, not worker execution, and does not automatically retry
+the job or save an intermediate checkpoint. A job left in ``RUNNING`` needs
+operator recovery before it can be replayed; see
+`Training-step coordination <../developer-guide/executors.rst#training-step-coordination>`__.
+
 Slime-integrated inference uses the same ``inference`` fields as standalone
 serving. ``inference.num-gpus`` is the total inference GPU budget;
 ``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
@@ -279,7 +296,8 @@ Managed engine launches use one generic builder. A backend definition supplies
 its command template, public parameter bindings, reserved aliases and HTTP
 health path. Adding an engine with this launch contract does not require a
 backend-specific deploy module or a second process lifecycle implementation.
-Currently only the SGLang definition is supplied.
+Reef supplies the SGLang and vLLM definitions; ``--inference.backend`` selects
+one.
 
 The launcher translates public paths to the existing internal service and
 recipe contracts before starting children. Config references such as

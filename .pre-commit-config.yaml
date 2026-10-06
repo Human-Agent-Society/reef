@@ -17,6 +17,7 @@ exclude: |
       skillclaw/harbor/(environment/workspace/|tests/grade\.py)
       |tttd/examples/tttd/harbor/circle_packing_[^/]+/environment/score\.py
       |tttd/examples/tttd/results/.*/best_solution\.py
+      |tttd/examples/guidance_ttt/solutions/(lasso_qwen3_8b|trimul_qwen3_14b)\.py$
       |meta_harness/results/reef_harness\.py$
     )
     |tests/reef_service/data/harness_goldens/

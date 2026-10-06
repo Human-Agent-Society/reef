@@ -10,7 +10,7 @@ from typing import Any
 from reef.core.config import config_option
 from reef.runtime.deployment import RayRuntimeConfig, RuntimeConfigError, RuntimeFactory, RuntimeRegistry, runtime_pair
 from reef.runtime.executor.connection import DEFAULT_ACTOR_NAME, DEFAULT_NAMESPACE, connect_ray_coordinator
-from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
+from reef.runtime.interfaces import InferenceRuntime, TrainingJobResult, TrainingRuntime
 from reef.train.runtime import ExecutorTrainingRuntime
 
 #: Coordinator connection keys forwarded verbatim to :class:`SlimeTrainingRuntime`.
@@ -54,6 +54,14 @@ class SlimeTrainingRuntime(ExecutorTrainingRuntime):
             ),
             max_staleness=max_staleness,
         )
+
+    def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
+        try:
+            return super().execute_training_job(payload)
+        except TimeoutError as exc:
+            raise TimeoutError(
+                f"{exc}; training.timeout-s controls RPC waits; training workers may still be running"
+            ) from exc
 
 
 @dataclass(frozen=True)

@@ -102,10 +102,22 @@ def designer_prompt(request: DesignerRequest) -> str:
     if request.experience_text.strip():
         parts.append(request.experience_text.strip())
     if request.grounding is not None:
+        grounding = request.grounding.strip()
+        kept = grounding[:GROUNDING_CHARS]
+        dropped = len(grounding) - len(kept)
+        # Said outside the fence, so it is the prompt speaking and not the document.
+        cut = (
+            f" The document did not fit: the last {dropped} of its {len(grounding)} characters were cut, "
+            "so it ends mid way."
+            if dropped
+            else ""
+        )
         parts.append(
             "GROUNDING: the environment must make the agent execute a technique or operate a system from this "
-            "document. Never mention the document in the environment's text.\n"
-            + untrusted_text(request.grounding.strip()[:GROUNDING_CHARS], "reference document")
+            "document. Never mention the document in the environment's text."
+            + cut
+            + "\n"
+            + untrusted_text(kept, "reference document")
         )
     parts.extend([HARBOR_RULES_TEXT.format(turn_limit=request.turn_limit), HARBOR_OUTPUT_TEXT])
     return "\n\n".join(parts)

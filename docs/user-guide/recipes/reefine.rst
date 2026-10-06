@@ -123,7 +123,10 @@ Behavior and configuration
   account) is a ``requires`` item, ``{name, kind, check?, prompt?}``, whose
   ``prompt`` is one sentence of at most 200 characters that setup shows when
   it asks for the item; the Setup table of the step's page has a prompt
-  column. On pi an ``env`` item's value is read at run time from
+  column. A proposal may require at most eight distinct items, including
+  those added by the proposer. Exceeding this limit skips the proposal with
+  an explanation and publishes no change; split the request into smaller
+  changes before retrying. On pi an ``env`` item's value is read at run time from
   ``process.env.NAME``: the proposer is told that an extension never asks
   you for it in the session, never stores it in a file of its own and never
   hardcodes it, and its review lists a value the extension asks for or

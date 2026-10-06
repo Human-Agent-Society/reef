@@ -230,6 +230,7 @@ def create_training_plan(
         preparation=prepared,
         loss_family_config=loss_family_config,
         inference_backend=inference_backend,
+        train_rpc_timeout_s=reef.get("train_timeout_s"),
     )
     return TrainingDeploymentPlan(
         resources=SlimeDeploymentResources(

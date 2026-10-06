@@ -91,6 +91,16 @@ def test_a_long_grounding_is_cut() -> None:
     assert "x" * 6000 in text and "x" * 6001 not in text
 
 
+def test_a_cut_grounding_says_so_outside_the_fence() -> None:
+    """A document that did not fit is announced, so the designer does not read a truncated
+    document as a whole one. The notice is the prompt's own text, so it sits before the fence."""
+    text = designer_prompt(request(grounding="x" * 7000))
+    assert "The document did not fit: the last 1000 of its 7000 characters were cut" in text
+    assert text.index("did not fit") < text.index("[BEGIN reference document")
+    # a document that fits is not announced
+    assert "did not fit" not in designer_prompt(request(grounding="Dijkstra."))
+
+
 @pytest.mark.parametrize(
     ("overrides", "message"),
     [

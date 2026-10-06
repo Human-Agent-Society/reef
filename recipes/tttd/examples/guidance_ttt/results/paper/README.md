@@ -1,29 +1,34 @@
-# Four paper results
+# Paper Results and Search Trajectories
 
-`results.json` transcribes the main table in `sections/case_study.tex` from
-[paper commit 709c405](https://github.com/Chonghe-Jiang/Guidance-ttt-paper/tree/709c405).
-It records models, metric units, evaluation suites, budgets, baselines, and source SHA-256 checksums.
-The values retain the paper's displayed precision.
+This directory contains the reported results and search trajectories for the four Guidance-TTT tasks.
+The [solutions directory](../../solutions/README.md) provides complete programs, a result overview, and evaluation commands.
 
-These results are historical measurements. They do not establish that this
-new port reproduces those values. Baseline models and budgets differ.
+## Available Data
 
-| Task | Guidance / frozen executor | Final reported result |
-|---|---|---|
-| Polyomino Packing | Qwen3-8B / GLM-5.2 | 91.89, 70-case score |
-| Lasso Path | Qwen3-8B / GLM-5.2 | 0.1739, inverse geometric-mean solve time |
-| AHC058 | Qwen3-14B / GLM-5.2 | 850,082,731, AtCoder score |
-| TriMul | Qwen3-14B / GLM-5.2 | 1,129 microseconds, geometric-mean H100 latency |
+| File | Contents |
+|---|---|
+| [results.json](results.json) | Main results, baseline comparisons, models, metrics, evaluation suites, and search budgets |
+| [polyomino_score_trajectory.csv](polyomino_score_trajectory.csv) | Polyomino scores across training updates |
+| [trimul_14b_frontier.csv](trimul_14b_frontier.csv) | TriMul best-so-far latency during search |
+| [search_histories.csv](search_histories.csv) | Lasso and AHC best-so-far search scores |
 
-The [guide's four-panel figure](../../../../../../docs/assets/guidance-ttt/best-solution-trajectories.png)
-is the paper's original `figures/best_solution_trajectories.png`, copied without changes.
-It annotates algorithm changes and distinguishes search scores from final reported results.
-`polyomino_score_trajectory.csv` and `trimul_14b_frontier.csv` preserve the numerical
-histories available beside that paper figure. Lasso and AHC histories are in `search_histories.csv`.
+The [four-task trajectory figure](../../../../../../docs/assets/guidance-ttt/best-solution-trajectories.png)
+shows score progression and selected algorithm changes.
 
-Lasso's search peak is about 0.21259, not its final 0.1739 result.
-AHC058's search figure uses the total over 150 public cases, not the final AtCoder score.
-TriMul's search curve and fixed-kernel measurements are separate observations.
-The earlier files under the parent `results/` directory describe different Reef runs.
+## Read the Metrics
 
-CSV files use LF line endings. Source checksums refer to the original paper files, before newline normalization.
+Search trajectories record evaluation results during optimization. Final results use the paper's fixed-program evaluations or official submissions.
+
+- **Polyomino:** higher packing scores are better.
+- **Lasso:** the search peak is about 0.21259. The final five-evaluation mean is 0.1739.
+- **AHC058:** the search figure uses the total over 150 public cases. The final result is the official AtCoder score.
+- **TriMul:** lower latency is better. Search-time latency and final repeated measurements describe different evaluation runs.
+
+Baseline entries retain their source models and budgets, as recorded in `results.json`.
+The [earlier Reef runs](../README.md) use different configurations and remain separate from these paper results.
+
+## Source Records
+
+The main-result data follows [paper revision 709c405](https://github.com/Chonghe-Jiang/Guidance-ttt-paper/tree/709c405).
+`results.json` records the source checksums and displayed precision.
+CSV files use LF line endings. Source checksums refer to the original files before newline normalization.

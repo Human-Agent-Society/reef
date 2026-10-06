@@ -39,7 +39,7 @@ sglang = ["httpx", "requests", "ray[default]", "sglang-router>=0.3.2", "psutil>=
 # Python-side vLLM adapter; install native vLLM in its GPU environment.
 vllm = ["httpx", "requests", "ray[default]", "psutil>=5.9"]
 tinker = [
-    "tinker==0.30.1",
+    "tinker==0.31.0",
     # Converts Tinker checkpoints into PEFT adapters for a local engine (pulls torch).
     "tinker-cookbook==0.5.7",
     "jinja2>=3.1.0",
@@ -87,7 +87,7 @@ dev = [
     "pytest",
     # CI measures coverage against the [tool.coverage.report] floor below.
     "pytest-cov",
-    "ruff==0.16.9",
+    "ruff==0.16.10",
 ]
 
 [dependency-groups]
