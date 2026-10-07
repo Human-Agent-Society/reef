@@ -17,6 +17,9 @@ import pytest
 from aiohttp.test_utils import TestServer
 from reef_client.client import ReefClientError
 
+from recipes.beta.spade import SpadeProcessor
+from reef.core import AgentRecord, RequestType
+from reef.core.artifact_ref import LiveWeightArtifactRef
 from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
 from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset import (
@@ -40,8 +43,18 @@ from reef.record2dataset import (
     readiness_probes,
 )
 from reef.record2dataset.service import CLOSE_GRACE_S, DockerProbe, HarborProbe, ModuleProbe
-from reef.record2dataset.wire import WireError, play_document, play_from_document, task_document, task_from_document
+from reef.record2dataset.wire import (
+    WireError,
+    designer_request_document,
+    play_document,
+    play_from_document,
+    source_records_from_document,
+    task_document,
+    task_from_document,
+)
 from reef.service.deploy.generator import generator_settings
+from reef.train.processors.task_generation import TaskGenerationRequest
+from reef.train.types import ProcessorContext
 
 pytestmark = pytest.mark.unit
 
@@ -616,3 +629,119 @@ def test_the_generator_section_is_parsed_in_either_spelling_and_unknown_fields_a
             generator_settings(section)
     with pytest.raises(ValueError, match="must be an object"):
         generator_settings("tasks")  # type: ignore[arg-type]
+
+
+def source_records() -> tuple[AgentRecord, ...]:
+    return (
+        AgentRecord.create(
+            agent_record_id="original-inference",
+            scenario="spade",
+            request_type=RequestType.INFERENCE,
+            payload={"messages": [{"role": "user", "content": "Recover the service port from its state file."}]},
+            created_at=123.0,
+            artifact_ref=LiveWeightArtifactRef("content", "release", None, "runtime"),
+        ),
+        AgentRecord.create(
+            agent_record_id="original-report",
+            scenario="spade",
+            request_type=RequestType.REPORT,
+            payload={"score": 1, "feedback": "The port was recovered."},
+            references=("original-inference",),
+            created_at=124.0,
+        ),
+    )
+
+
+def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(tmp_path: Path) -> None:
+    built, designer, checks, plays = service(tmp_path)
+    material = tmp_path / "selected-snapshot"
+    (material / "state").mkdir(parents=True)
+    (material / "state" / "app.port").write_text("8472\n")
+    sources = source_records()
+    generation_request = TaskGenerationRequest(sources, "Rebuild this port recovery task", (material,))
+
+    async def body(generator: HttpGenerator) -> None:
+        processor = SpadeProcessor(ProcessorContext("spade", {"rollouts_per_task": 2}), generator=generator)
+        task = await processor.generate(generation_request)
+        assert task.source_agent_record_ids == ("original-inference", "original-report")
+        assert task.metadata["designer_record_id"] == "designer-1"
+        written = await processor.write(task)
+        assert (await processor.validate(written.path)).is_valid
+        assert read_harbor_task(written.path).source_agent_record_ids == task.source_agent_record_ids
+        proposal, measure = await processor.proposed(3, 1, None, request=generation_request)
+        assert measure is not None
+        assert proposal.designer_record_id == "designer-2"
+        assert proposal.task_name == "harbor-00003-001"
+
+    run_with(built, body)
+    prompt = designer.calls[0]["messages"][1]["content"]
+    assert "Recover the service port from its state file." in prompt
+    assert "The port was recovered." in prompt
+    assert "asset-0/state/app.port" in prompt and "8472" in prompt
+    assert str(material) not in prompt
+    assert "before the task was solved" in prompt
+    assert len(checks.calls) == 2 and len(plays.calls) == 2
+    assert [report["record_id"] for report in designer.reports] == ["designer-2"]
+
+
+def test_source_record_wire_roundtrip_preserves_payload_and_version() -> None:
+    sources = source_records()
+    document = designer_request_document(DesignerRequest("rebuild", source_records=sources))
+    assert source_records_from_document(document, scenario="spade") == sources
+
+
+@pytest.mark.parametrize("invalid", ["cross-scenario", "duplicate", "payload", "timestamp", "asset-path", "size"])
+def test_invalid_sources_are_refused_before_the_designer_call(tmp_path: Path, invalid: str) -> None:
+    built, designer, _, _ = service(tmp_path)
+    fields = designer_request_document(DesignerRequest("rebuild", source_records=source_records()))
+    if invalid == "cross-scenario":
+        fields["source_records"][0]["scenario"] = "another-scenario"
+    elif invalid == "duplicate":
+        fields["source_records"].append(fields["source_records"][0])
+    elif invalid == "payload":
+        fields["source_records"][0]["payload"] = "not an object"
+    elif invalid == "timestamp":
+        fields["source_records"][0]["created_at"] = "yesterday"
+    elif invalid == "asset-path":
+        fields["asset_files"] = {"../outside.txt": "text"}
+    else:
+        fields["source_records"][0]["payload"] = {"text": "x" * (512 * 1024)}
+
+    async def body(generator: HttpGenerator) -> None:
+        status, result = await generator.request("POST", "/proposals", body={"scenario": "spade", "request": fields})
+        assert status == 400 and result["error"]
+
+    run_with(built, body)
+    assert designer.calls == []
+
+
+def test_source_based_refusal_reports_the_designer_receipt(tmp_path: Path) -> None:
+    built, designer, _, _ = service(tmp_path, designer=StandInDesigner(["Missing original input files."]))
+
+    async def body(generator: HttpGenerator) -> None:
+        processor = SpadeProcessor(ProcessorContext("spade", {}), generator=generator)
+        proposal, measure = await processor.proposed(
+            0, 0, None, request=TaskGenerationRequest(source_records(), "rebuild")
+        )
+        assert measure is None and proposal.designer_record_id == "designer-1"
+        assert proposal.refusal
+
+    run_with(built, body)
+    assert designer.reports[0]["record_id"] == "designer-1"
+    assert designer.reports[0]["score"] == 0
+
+
+def test_legacy_proposal_without_source_fields_still_works(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> None:
+        result = await generator.job_result(
+            await generator.call(
+                "POST", "/proposals", body={"scenario": "spade", "request": {"target": "shell inspection"}}
+            )
+        )
+        task = task_from_document(result["task"])
+        assert task.source_agent_record_ids == (result["record_id"],)
+        assert "designer_record_id" not in task.metadata
+
+    run_with(built, body)

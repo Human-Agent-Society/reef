@@ -36,6 +36,7 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from aiohttp import web
@@ -71,8 +72,10 @@ from reef.record2dataset.wire import (
     WireError,
     checked_object,
     checked_string,
+    checked_text_files,
     oracle_document,
     play_document,
+    source_records_from_document,
     task_document,
     task_from_document,
 )
@@ -313,6 +316,12 @@ class ProposalJob(Job):
             )
         except (DesignerReplyError, ValueError) as exc:
             return {"record_id": answer.record_id, "task": None, "refusal": f"reply refused: {exc}"}
+        if self.request.source_records:
+            task = replace(
+                task,
+                source_agent_record_ids=tuple(record.agent_record_id for record in self.request.source_records),
+                metadata={**task.metadata, "designer_record_id": answer.record_id},
+            )
         return {"record_id": answer.record_id, "task": task_document(task), "refusal": ""}
 
 
@@ -562,6 +571,7 @@ class GeneratorService:
         try:
             body = await self.body_of(request)
             fields = checked_object(body.get("request"), "request")
+            scenario = checked_string(body, "scenario", label="a proposal")
             skill = fields.get("skill")
             grounding = fields.get("grounding")
             designer_request = DesignerRequest(
@@ -573,11 +583,13 @@ class GeneratorService:
                 ),
                 grounding=grounding if isinstance(grounding, str) else None,
                 experience_text=str(fields.get("experience_text", "")),
+                source_records=source_records_from_document(fields, scenario=scenario),
+                asset_files=checked_text_files(fields, "asset_files", label="request"),
             )
             job = ProposalJob(
                 self.designer,
                 designer_request,
-                scenario=checked_string(body, "scenario", label="a proposal"),
+                scenario=scenario,
                 model=self.designer_model or self.model_for(body),
                 generation=checked_count(body.get("generation", 0), "generation"),
                 index=checked_count(body.get("index", 0), "index"),

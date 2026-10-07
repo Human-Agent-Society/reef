@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import dataclasses
 import json
 import time
 from abc import ABC, abstractmethod
@@ -21,6 +20,7 @@ from reef.record2dataset.wire import (
     WireError,
     checked_object,
     checked_string,
+    designer_request_document,
     oracle_from_document,
     play_from_document,
     task_document,
@@ -188,12 +188,14 @@ class HttpGenerator(Generator):
         tags: Mapping[str, str],
         model: str | None = None,
     ) -> ProposedTask:
+        if any(record.scenario != scenario for record in request.source_records):
+            raise GeneratorError("source records must belong to the proposal's scenario")
         body: dict[str, object] = {
             "scenario": scenario,
             "generation": generation,
             "index": index,
             "tags": dict(tags),
-            "request": dataclasses.asdict(request),
+            "request": designer_request_document(request),
         }
         if model is not None:
             body["model"] = model

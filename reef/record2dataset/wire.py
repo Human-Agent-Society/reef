@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Mapping
 from pathlib import Path
 
+from reef.core.artifact_ref import decode_artifact_ref
+from reef.core.records_types import AgentRecord, RequestType
 from reef.core.tasks import HarborTask, HarborTaskError
 from reef.harness.client.tasks import TaskPlay
+from reef.record2dataset.designer import DesignerRequest
 from reef.record2dataset.harbor import OracleResult
+from reef.record2dataset.inputs import record_document
 
 
 class WireError(ValueError):
@@ -48,6 +53,50 @@ def checked_tables(document: Mapping[str, object], key: str, *, label: str) -> d
     if not isinstance(value, Mapping) or any(not isinstance(table, Mapping) for table in value.values()):
         raise WireError(f"{label}: {key!r} must map table names to objects")
     return {str(name): {str(field): item for field, item in table.items()} for name, table in value.items()}
+
+
+def designer_request_document(request: DesignerRequest) -> dict[str, object]:
+    """Serialize designer inputs without exposing caller-local filesystem paths."""
+    return {
+        "target": request.target,
+        "skill": request.skill,
+        "difficulty": request.difficulty,
+        "turn_limit": request.turn_limit,
+        "grounding": request.grounding,
+        "experience_text": request.experience_text,
+        "source_records": [record_document(record) for record in request.source_records],
+        "asset_files": dict(request.asset_files),
+    }
+
+
+def source_records_from_document(fields: Mapping[str, object], *, scenario: str) -> tuple[AgentRecord, ...]:
+    """Read complete source records and reject sources from another scenario."""
+    sources = fields.get("source_records", [])
+    if not isinstance(sources, list):
+        raise WireError("source_records must be a list of record objects")
+    records: list[AgentRecord] = []
+    for source in sources:
+        record = checked_object(source, "a source record")
+        if checked_string(record, "scenario", label="a source record") != scenario:
+            raise WireError("source records must belong to the proposal's scenario")
+        created_at = record.get("created_at")
+        if isinstance(created_at, bool) or not isinstance(created_at, (int, float)) or not math.isfinite(created_at):
+            raise WireError("a source record's created_at must be a finite number")
+        artifact = record.get("artifact_ref")
+        records.append(
+            AgentRecord(
+                agent_record_id=checked_string(record, "agent_record_id", label="a source record"),
+                scenario=scenario,
+                request_type=RequestType(checked_string(record, "request_type", label="a source record")),
+                payload=checked_object(record.get("payload"), "a source record's payload"),
+                created_at=float(created_at),
+                references=tuple(checked_string_list(record, "references", label="a source record")),
+                artifact_ref=(
+                    decode_artifact_ref(checked_object(artifact, "artifact_ref")) if artifact is not None else None
+                ),
+            )
+        )
+    return tuple(records)
 
 
 def task_document(task: HarborTask) -> dict[str, object]:

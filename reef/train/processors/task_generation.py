@@ -15,8 +15,9 @@ from reef.train.processors.base import DataProcessor
 class TaskGenerationRequest:
     """One task's source records, requirements, and optional local assets.
 
-    Assets are files or directories accessible to the generator, such as a
-    repository snapshot or verifier fixtures. Construction does not read them.
+    Assets are local files or directories, such as a repository snapshot or
+    verifier fixtures. Construction does not read them. Each processor defines
+    how it reads or transfers them to its generator.
     Method-specific settings belong to the processor's configuration. A method
     that writes tasks from the description alone, such as a designer prompted
     with a target, passes no source records.

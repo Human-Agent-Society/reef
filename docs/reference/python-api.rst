@@ -767,7 +767,9 @@ pairs them with the reported-feedback engine and the generator service
 tuple of distinct ``AgentRecord`` values from one scenario (empty for a method
 that generates from the description alone), non-empty requirements text, and
 optional ``Path`` values for local generation assets. The generated task must
-preserve the source record ids in order.
+preserve the source record ids in order. A processor defines how it reads or
+transfers assets; constructing the request does not read them. SPADE sends
+selected UTF-8 file contents and source records to the generator over HTTP.
 ``TaskValidationResult(errors=())`` exposes ``is_valid``; each error is a
 non-empty explanation of a task defect. Check execution failures raise instead.
 Generation and validation must run outside the synchronous trainer-lock path.

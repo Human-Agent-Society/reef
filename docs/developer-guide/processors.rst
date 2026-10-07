@@ -205,10 +205,11 @@ methods on the processor itself:
   rather than reporting that the task is invalid.
 
 Import the ABC from ``reef.train.processors`` and the request/result types
-from ``reef.train.processors.task_generation``. Asset paths name generator-accessible files or
-directories, such as repository snapshots or verifier fixtures; constructing
-a request does not read them. Method-specific prompts and settings belong to
-the processor configuration.
+from ``reef.train.processors.task_generation``. Asset paths name local files or
+directories, such as repository snapshots or verifier fixtures. Constructing
+a request does not read them; the processor defines how it transfers them to
+its generator. Method-specific prompts and settings belong to the processor
+configuration.
 
 The ABC supplies no lifecycle: implementing the two hooks does not start a
 worker or make batches ready, and the inherited lifecycle is the no-update
@@ -219,7 +220,7 @@ must keep: both hooks run outside the trainer lock, and ``ingest``,
 The first implementation is SPADE (``recipes/beta/spade/processor.py``),
 which pairs the ABC with the reported-feedback engine. A private worker (the
 computed engine's ``JudgingWorker``) runs one generation at a time:
-``generate`` asks the designer for a task, the task is written, ``validate``
+the designer proposes a task, the task is written, ``validate``
 runs Harbor's oracle check on it, the task is played, and the episodes come
 back as reports the reported half groups and batches; the next generation
 starts after a configured number of batches was acknowledged, and a restart
@@ -230,6 +231,19 @@ deployment's ``generator`` section (see `the generator section
 <../reference/configuration.rst#the-generator-section>`__), and the processor
 drives it over HTTP. Conversion of generated tasks into ``TaskItem`` batches
 for a rollout-capable backend remains future work.
+
+SPADE's ``generate`` also accepts selected historical records and materials.
+It reads the materials on the caller's machine and sends their UTF-8 contents
+with the records over HTTP. The Designer receives them as source material for
+reconstructing the original task. The resulting ``HarborTask`` preserves the
+ordered source ids; its ``metadata.designer_record_id`` identifies the new
+Designer call. Feedback uses that new receipt. Description-only requests keep
+the Designer receipt as their task source, as before.
+
+The automatic SPADE loop still generates from its configured description and
+previous task scores. Callers select historical records explicitly; see the
+`SPADE example <https://github.com/Human-Agent-Society/reef/blob/main/recipes/beta/spade/README.md#generate-from-selected-records>`__
+for the input limits and usage.
 
 A record's path to a batch
 --------------------------
