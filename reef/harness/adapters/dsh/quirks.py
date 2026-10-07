@@ -52,12 +52,13 @@ read the value."""
 
 from __future__ import annotations
 
-import json
 import re
+from collections.abc import Mapping
 from typing import Any, ClassVar
 
 import yaml
 
+from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
 #: Each profile's patch layer and the directory its inserts name an extension under, relative to the profile.
@@ -69,8 +70,6 @@ PROFILE_PATCHES = {
 WEB_MANIFEST = "dsh/profiles/web/package.json"
 _ENV = "dsh/.env"
 _EXTENSIONS = "dsh/profiles/headless/extensions/"
-_SKILLS = "dsh/skills/"
-_COMMANDS = "dsh-agents/skills/"
 _JS = "!!js "
 #: dsh lists a skill only under a name of lowercase letters and digits, in words joined by single hyphens.
 SKILL_NAME = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*")
@@ -249,11 +248,11 @@ def holds_js(value: object) -> bool:
     return False
 
 
-def check_binding_entry(plugin: str, entry: dict[str, Any], bound: bool) -> None:
-    """``llm-pi-ai`` holds only the binding's route and ``agent-default-model`` selects it, beside the binding's key."""
+def check_binding_entry(plugin: str, entry: dict[str, Any]) -> None:
+    """``llm-pi-ai`` holds only the binding's route and ``agent-default-model`` selects it."""
     refusal = f"dsh composition must not set {plugin}: Reef's model binding writes it"
     config = entry.get("config")
-    if not bound or set(entry) != {"config"} or not isinstance(config, dict):
+    if set(entry) != {"config"} or not isinstance(config, dict):
         raise RenderError(refusal)
     if plugin == "agent-default-model":
         if set(config) != {"model", "provider"} or config["provider"] != BINDING_ROUTE:
@@ -267,10 +266,8 @@ def check_binding_entry(plugin: str, entry: dict[str, Any], bound: bool) -> None
         raise RenderError(refusal)
 
 
-def check_model_route(entries: dict[str, Any], env: dict[str, Any]) -> None:
+def check_model_route(entries: dict[str, Any]) -> None:
     """Refuse a model route, an endpoint, a credential or a model the binding did not write."""
-    credential = env.get(BINDING_KEY_ENV)
-    bound = isinstance(credential, str) and bool(credential.strip())
     refusal = "Reef's model binding chooses the provider, the endpoint, the credential and the model"
     for plugin, entry in entries.items():
         if not isinstance(entry, dict):
@@ -278,7 +275,7 @@ def check_model_route(entries: dict[str, Any], env: dict[str, Any]) -> None:
         if "name" in entry:
             raise RenderError(f"dsh composition must not set {plugin}.name: a patch entry keeps its own package")
         if plugin in BINDING_PLUGINS:
-            check_binding_entry(plugin, entry, bound)
+            check_binding_entry(plugin, entry)
         elif plugin in UNBOUND_ADAPTERS and set(entry) - {"disabled"}:
             raise RenderError(f"dsh composition must not configure {plugin}: {refusal}")
         elif plugin in MODEL_ROUTE_KEYS:
@@ -295,32 +292,52 @@ def check_model_route(entries: dict[str, Any], env: dict[str, Any]) -> None:
                         raise RenderError(f"dsh composition must not set {plugin} {where}: {refusal}")
 
 
-def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    extensions = sorted(
-        path[len(_EXTENSIONS) : -len(".mjs")]
-        for path in files
-        if path.startswith(_EXTENSIONS) and path.endswith(".mjs") and "/" not in path[len(_EXTENSIONS) :]
-    )
-    for patch_path, directory in PROFILE_PATCHES.items():
-        entries = json.loads(files[patch_path])
-        for plugin, entry in entries.items():
+class DshAdapterRenderer(AdapterRenderer):
+    @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        if path == WEB_MANIFEST:
+            if config.get("dsh", {}).get("profile", {}).get("patchReload") != "startup":
+                raise RenderError(f"dsh composition must keep dsh.profile.patchReload startup in {WEB_MANIFEST}")
+            return config
+        if path not in PROFILE_PATCHES:
+            return config
+        for plugin, entry in config.items():
             if not isinstance(entry, dict):
                 raise RenderError(f"dsh patch entry {plugin!r} must be an object holding config, disabled, or inject")
-        if entries.get("session-persistence-jsonl", {}).get("config", {}).get("compression") != "none":
+        if config.get("session-persistence-jsonl", {}).get("config", {}).get("compression") != "none":
             raise RenderError(
-                f"dsh composition must keep the session log uncompressed (compression: none) in {patch_path}: "
+                f"dsh composition must keep the session log uncompressed (compression: none) in {path}: "
                 "Reef reads it, and the profiles share one sessions root"
             )
         for plugin in ("session-telemetry-otel", "session-title-llm"):
-            if entries.get(plugin, {}).get("disabled") is not True:
-                raise RenderError(f"dsh composition must keep {plugin} disabled in {patch_path}")
-        check_model_route(entries, json.loads(files[_ENV]))
-        files[patch_path] = _patch(entries, extensions, directory)
-    if json.loads(files[WEB_MANIFEST]).get("dsh", {}).get("profile", {}).get("patchReload") != "startup":
-        raise RenderError(f"dsh composition must keep dsh.profile.patchReload startup in {WEB_MANIFEST}")
-    files[_ENV] = "".join(f"{key}={value}\n" for key, value in sorted(json.loads(files[_ENV]).items()))
-    for path, text in list(files.items()):
-        for root, user_only in ((_SKILLS, False), (_COMMANDS, True)):
-            if path.startswith(root) and path.endswith("/SKILL.md"):
-                files[path] = _with_frontmatter(path, text, user_only)
-    return files
+            if config.get(plugin, {}).get("disabled") is not True:
+                raise RenderError(f"dsh composition must keep {plugin} disabled in {path}")
+        return config
+
+    @staticmethod
+    def process_skill(path: str, text: str) -> str:
+        return _with_frontmatter(path, text, False)
+
+    @staticmethod
+    def process_command(path: str, text: str) -> str:
+        # A command is a skill in the second root that only the person invokes.
+        return _with_frontmatter(path, text, True)
+
+    @staticmethod
+    def check_model_route(
+        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
+    ) -> None:
+        for patch_path in PROFILE_PATCHES:
+            check_model_route(dict(configs[patch_path]))
+
+    @staticmethod
+    def finalize_render(files: dict[str, str]) -> dict[str, str]:
+        # A patch layer is a list of plugin entries, not plain YAML, and inserts the rendered extensions.
+        extensions = sorted(
+            path[len(_EXTENSIONS) : -len(".mjs")]
+            for path in files
+            if path.startswith(_EXTENSIONS) and path.endswith(".mjs") and "/" not in path[len(_EXTENSIONS) :]
+        )
+        for patch_path, directory in PROFILE_PATCHES.items():
+            files[patch_path] = _patch(yaml.safe_load(files[patch_path]), extensions, directory)
+        return files

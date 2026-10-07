@@ -41,9 +41,9 @@ everything the shared engines need to drive one harness binary:
   under the home directory, which Docker's VM shares with the host.
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
-the declared one and its ``finalize_render`` callable gets the last word on
-the rendered tree (the seam that enforces adapter traps such as opencode's
-``autoupdate: false``). External adapters register through the
+the declared one and the :class:`AdapterRenderer` subclass it defines adds the
+adapter's own render steps (the seam that enforces adapter traps such as
+opencode's ``autoupdate: false``). External adapters register through the
 ``reef.harness_adapters`` entry point group, each entry resolving to an
 ``AdapterDescriptor`` or a zero-argument callable returning one.
 """
@@ -52,10 +52,12 @@ from __future__ import annotations
 
 import importlib
 import re
+import warnings
 from abc import ABC, abstractmethod
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
+from types import ModuleType
 from typing import Any
 
 import yaml
@@ -69,6 +71,109 @@ class ExecutionValidator(ABC):
 
     @abstractmethod
     def __call__(self, files: Mapping[str, str], executor: EpisodeExecutor) -> None: ...
+
+
+class AdapterRenderer:
+    """An adapter's own render steps, each given only the files of its concern.
+
+    The shared render runs them in a fixed order: ``process_config`` for each config file, ``process_skill`` and
+    ``process_command`` for each skill and command file, ``check_model_route``, then ``finalize_render`` after the
+    render has written each config file as text in the format its suffix names. Before any of them, the render
+    refuses a tree that sets a key Reef's model binding writes without the binding's credential;
+    ``check_model_route`` refuses the other model routes the harness reads.
+
+    Although ``finalize_render`` is an omnipower API that gives the users the maximum freedom for customization,
+    it is a last resort since that method has a large impact surface and make it hard to maintain. So instead users
+    should try using ``process_config``, ``process_skill`` and ``process_command`` whenever possible.
+
+    Each default leaves its input unchanged, so an adapter overrides only the steps it needs. A step refuses a tree
+    by raising ``RenderError``.
+
+    The render uses the class itself and never makes an instance, and every step is a static method, which
+    ``__init_subclass__`` checks: a step's output depends only on its arguments, so no step can pass state to a
+    later one or to another render. Keep module level state out of the steps too; the check cannot see it.
+    """
+
+    #: The steps a subclass may override, each as a static method.
+    STEPS = (
+        "process_config",
+        "process_skill",
+        "process_command",
+        "check_model_route",
+        "finalize_render",
+    )
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        for step in AdapterRenderer.STEPS:
+            if step in vars(cls) and not isinstance(vars(cls)[step], staticmethod):
+                raise TypeError(f"{cls.__name__}.{step} must be a static method, so render steps keep no state")
+
+    @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        """Check and adjust one merged config file, the tree's config entries over the descriptor's defaults.
+
+        ``path`` is the file's root-relative path, such as ``codex/config.toml``; the returned config is written
+        there in the format its suffix names.
+
+        A config is the file's content as a JSON object: its values are only ``dict``, ``list``, ``str``, ``int``,
+        ``float``, ``bool`` or ``None``, nested to any depth. It is typed ``Any`` because a precise recursive JSON type
+        would make every nested read (``config.get("env", {}).get(name)``) need an ``isinstance`` check first; a step
+        checks the type of a value before it relies on it instead.
+        """
+        return config
+
+    @staticmethod
+    def process_skill(path: str, text: str) -> str:
+        """Check and adjust one file a ``skill`` node renders."""
+        return text
+
+    @staticmethod
+    def process_command(path: str, text: str) -> str:
+        """Check and adjust one file an ``agent_command`` node renders."""
+        return text
+
+    @staticmethod
+    def check_model_route(
+        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
+    ) -> None:
+        """Refuse a model route the harness reads beyond the keys Reef's model binding writes, such as a fallback
+        model or a second provider.
+
+        ``configs`` maps each config file's path to its content after ``process_config``. ``skills`` and
+        ``commands`` map the path of each ``skill`` and ``agent_command`` file to its text after ``process_skill``
+        and ``process_command``, for a harness that reads a model from their frontmatter. The render has already
+        refused a tree that sets one of the binding's own keys without the binding's credential.
+
+        A config is the file's content as a JSON object: its values are only ``dict``, ``list``, ``str``, ``int``,
+        ``float``, ``bool`` or ``None``, nested to any depth. It is typed ``Any`` because a precise recursive JSON type
+        would make every nested read (``config.get("env", {}).get(name)``) need an ``isinstance`` check first; a step
+        checks the type of a value before it relies on it instead.
+        """
+
+    @staticmethod
+    def finalize_render(files: dict[str, str]) -> dict[str, str]:
+        """Work that spans several files, and any config file the format of its suffix does not fit.
+
+        ``files`` holds every rendered file as text, each config file already written in the format its suffix
+        names; a change to a config file reads that text again. The returned mapping is the rendered tree.
+        """
+        return files
+
+
+def legacy_adapter_renderer(module: ModuleType) -> type[AdapterRenderer]:
+    """The renderer of a quirks module that defines only the older module level ``finalize_render(files)``.
+
+    Deprecated: such a module should define an ``AdapterRenderer`` subclass instead. This will be removed.
+    """
+
+    class ModuleRenderer(AdapterRenderer):
+        @staticmethod
+        def finalize_render(files: dict[str, str]) -> dict[str, str]:
+            rendered: dict[str, str] = module.finalize_render(files)
+            return rendered
+
+    return ModuleRenderer
 
 
 ENTRY_POINT_GROUP = "reef.harness_adapters"
@@ -192,7 +297,8 @@ class AdapterDescriptor:
     trajectory_path: str
     cleanup_whitelist: tuple[str, ...] = ()
     writable_paths: tuple[str, ...] = ()
-    finalize_render: Callable[[dict[str, str]], dict[str, str]] | None = None
+    #: The adapter's own render steps; the base class changes nothing.
+    renderer: type[AdapterRenderer] = AdapterRenderer
     install: InstallSpec | None = None
     #: True when the adapter isolates episodes itself; nesting is refused
     #: unless validate_execution checks a compatible configuration.
@@ -332,7 +438,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     client_version_args = _str_list(data.get("client_version_args", []), f"{where} 'client_version_args'")
     client_tools = _parse_client_tools(data.get("client_tools"), where)
     client_state = _parse_client_state(data.get("client_state"), where)
-    finalize, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
+    renderer, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
     descriptor = AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
@@ -344,7 +450,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         trajectory_path=_require_str(trajectory, "path", f"{where} trajectory"),
         cleanup_whitelist=whitelist + quirk_whitelist,
         writable_paths=writable_paths,
-        finalize_render=finalize,
+        renderer=renderer,
         install=_parse_install(data.get("install"), where),
         self_isolating=self_isolating,
         is_prompt_task_directory=is_prompt_task_directory,
@@ -511,25 +617,51 @@ def _parse_client_state(value: Any, where: str) -> tuple[ClientState, ...]:
 
 def _load_quirks(
     module_name: Any, where: str
-) -> tuple[Callable[[dict[str, str]], dict[str, str]] | None, tuple[str, ...], ExecutionValidator | None]:
+) -> tuple[type[AdapterRenderer], tuple[str, ...], ExecutionValidator | None]:
     if module_name is None:
-        return None, (), None
+        return AdapterRenderer, (), None
     if not isinstance(module_name, str):
         raise DescriptorError(f"{where} 'quirks' must be a dotted module name")
     try:
         module = importlib.import_module(module_name)
     except ImportError as exc:
         raise DescriptorError(f"{where} cannot import quirks module {module_name!r}: {exc}") from exc
+    # The renderer is the one AdapterRenderer subclass the module defines.
+    renderers = [
+        value
+        for value in vars(module).values()
+        if isinstance(value, type) and issubclass(value, AdapterRenderer) and value.__module__ == module.__name__
+    ]
+    if len(renderers) > 1:
+        names = ", ".join(sorted(renderer.__name__ for renderer in renderers))
+        raise DescriptorError(f"{where} quirks module defines more than one AdapterRenderer subclass: {names}")
     finalize = getattr(module, "finalize_render", None)
+
+    # Backward compatibility to support bare finalize_render.
+    if renderers and finalize is not None:
+        raise DescriptorError(f"{where} quirks must define an AdapterRenderer subclass or finalize_render, not both")
     if finalize is not None and not callable(finalize):
         raise DescriptorError(f"{where} quirks finalize_render must be callable")
+    if renderers:
+        renderer = renderers[0]
+    elif finalize is not None:
+        # An external quirks module written before AdapterRenderer: its function still gets the last word.
+        warnings.warn(
+            f"{where} quirks module {module_name!r} defines finalize_render, which is deprecated; "
+            "define an AdapterRenderer subclass instead",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        renderer = legacy_adapter_renderer(module)
+    else:
+        renderer = AdapterRenderer
     whitelist = tuple(getattr(module, "cleanup_whitelist", ()))
     if not all(isinstance(item, str) and item for item in whitelist):
         raise DescriptorError(f"{where} quirks cleanup_whitelist must contain non-empty strings")
     validate_execution = getattr(module, "validate_execution", None)
     if validate_execution is not None and not isinstance(validate_execution, ExecutionValidator):
         raise DescriptorError(f"{where} quirks validate_execution must inherit ExecutionValidator")
-    return finalize, whitelist, validate_execution
+    return renderer, whitelist, validate_execution
 
 
 def external_descriptors() -> dict[str, AdapterDescriptor]:

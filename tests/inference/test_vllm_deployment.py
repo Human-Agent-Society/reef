@@ -114,7 +114,8 @@ from reef.inference.vllm.deployment import create_inference
 service = create_inference(dict(model_path='model', num_gpus=1, gpus_per_engine=1, gpus_per_node=1))
 assert service.config.options['kv_transfer_config']['kv_connector'] == 'ReefConnector'
 from reef.inference.vllm import backend, control, engine, launch, service as service_module, worker
-assert engine.ReefVLLMEngine.__bases__ == (object,)
+from reef.runtime.interfaces import InferenceEngine
+assert engine.ReefVLLMEngine.__bases__ == (InferenceEngine,)
 assert not any(name.startswith(('slime.', 'reef.train.slime_backend.', 'reef.inference.sglang')) for name in sys.modules)
 service.close()
 """,

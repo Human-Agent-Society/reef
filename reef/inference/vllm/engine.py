@@ -15,10 +15,10 @@ from typing import Any
 
 import requests
 
-from reef.inference.process import node_address_and_port, wait_ready
+from reef.inference.process import check_server_owner, node_address_and_port, ports_in_use, wait_ready
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.process import EngineProcess, launch_server
-from reef.runtime.interfaces import InferenceMemoryOperations
+from reef.runtime.interfaces import InferenceEngine, InferenceMemoryOperations
 from reef.runtime.scheduler import InferenceMemory
 
 logger = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ MEMORY_REGIONS = ("weights", "kv_cache", "cuda_graph")
 RELEASED_TOGETHER = frozenset({"weights", "kv_cache"})
 
 
-class ReefVLLMEngine:
+class ReefVLLMEngine(InferenceEngine):
     """Own one native vLLM server on this node's reserved GPUs."""
 
     def __init__(self, config: VLLMConfig, rank: int, gpu_ids: Sequence[int]) -> None:
@@ -51,12 +51,15 @@ class ReefVLLMEngine:
         """This actor's node address and a free serving port, chosen where the server will bind."""
         return node_address_and_port(start_port=start_port)
 
+    ports_in_use = staticmethod(ports_in_use)
+
     def init(self, host: str, port: int) -> None:
         self.server_host, self.server_port = host, port
         self.process = launch_server(
             self.config.model_path, self.server_arguments(host, port), self.server_environment()
         )
         wait_ready(self.get_url(), self.process, self.config.startup_timeout, path="/health")
+        check_server_owner(host, port, self.process.pid)
         logger.info("vLLM engine %d serves %s on GPUs %s", self.rank, self.get_url(), list(self.gpu_ids))
 
     def server_arguments(self, host: str, port: int) -> list[str]:
@@ -122,7 +125,7 @@ class ReefVLLMEngine:
 
     # -- Generation barrier -------------------------------------------------------
 
-    def pause_generation(self, mode: str = "in_place") -> dict[str, Any]:
+    def pause_generation(self, mode: str) -> dict[str, Any]:
         """Stop scheduling with requests kept in place.
 
         ``retract`` additionally frees every in-flight request's KV and resets
@@ -152,7 +155,7 @@ class ReefVLLMEngine:
 
     # -- Weights and adapters -----------------------------------------------------
 
-    def update_weights_from_disk(self, model_path: str, runtime_load_id: str | None = None) -> dict[str, Any]:
+    def update_weights_from_disk(self, model_path: str, *, runtime_load_id: str | None = None) -> dict[str, Any]:
         result = self._post(
             "collective_rpc", body={"method": "reload_weights", "kwargs": {"weights_path": model_path}}
         )

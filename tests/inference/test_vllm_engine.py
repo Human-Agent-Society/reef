@@ -207,7 +207,7 @@ def test_server_process_stays_in_the_actor_session_and_shutdown_kills_the_tree(m
 
 def test_init_launches_the_server_and_waits_for_its_health_route(monkeypatch):
     launched = []
-    process = SimpleNamespace(is_alive=lambda: True)
+    process = SimpleNamespace(is_alive=lambda: True, pid=4321)
     monkeypatch.setattr(
         engine_module,
         "launch_server",
@@ -217,9 +217,10 @@ def test_init_launches_the_server_and_waits_for_its_health_route(monkeypatch):
     monkeypatch.setattr(
         engine_module, "wait_ready", lambda url, proc, timeout, path: waited.append((url, proc, timeout, path))
     )
+    monkeypatch.setattr(engine_module, "check_server_owner", lambda *args: waited.append(args))
     engine = ReefVLLMEngine(VLLMConfig("model", 1, 1, 1, startup_timeout=7), rank=0, gpu_ids=(0,))
     engine.init("10.0.0.5", 18900)
     assert engine.get_url() == "http://10.0.0.5:18900"
     assert launched[0][0] == "model" and launched[0][2]["CUDA_VISIBLE_DEVICES"] == "0"
-    assert waited == [("http://10.0.0.5:18900", process, 7, "/health")]
+    assert waited == [("http://10.0.0.5:18900", process, 7, "/health"), ("10.0.0.5", 18900, 4321)]
     assert engine.process is process

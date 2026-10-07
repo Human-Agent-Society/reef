@@ -55,7 +55,7 @@ class VLLMConfig:
     options: dict[str, Any] = field(default_factory=dict)
     #: The endpoint that balances across engines; required when more than one engine serves.
     router_url: str | None = None
-    #: Where each engine's port probe starts on its host; stacks sharing a host need distinct bases.
+    #: Where each engine's port probe starts on its host.
     engine_port_base: int = 15000
     env_vars: dict[str, str] = field(default_factory=dict)
     offload: bool = False

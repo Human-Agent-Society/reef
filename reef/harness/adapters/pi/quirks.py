@@ -32,11 +32,12 @@ of the keys pi may not change never refuses pi's own rewrite.
 
 from __future__ import annotations
 
-import json
+from collections.abc import Mapping
 from typing import Any
 
 import yaml
 
+from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
 cleanup_whitelist = (
@@ -44,14 +45,12 @@ cleanup_whitelist = (
     "pi-agent/auth.json",
 )
 
-_SKILLS = "pi-agent/skills/"
 SETTINGS_PATH = "pi-agent/settings.json"
 MODELS_PATH = "pi-agent/models.json"
 
-#: The provider Reef's binding writes and its keys, among them its credential, and the settings that select it.
+#: The provider Reef's binding writes and its keys.
 BINDING_PROVIDER = "reef"
 BINDING_PROVIDER_KEYS = frozenset({"api", "apiKey", "baseUrl", "models"})
-BINDING_SETTINGS = ("defaultModel", "defaultProvider")
 #: settings.json keys that choose the models a run may use, or send every call through a proxy.
 MODEL_ROUTE_SETTINGS = ("enabledModels", "httpProxy")
 
@@ -72,12 +71,10 @@ def check_model_route(settings: dict[str, Any], models: dict[str, Any]) -> None:
     if providers is not None and (not isinstance(providers, dict) or set(providers) - {BINDING_PROVIDER}):
         raise RenderError(f"pi composition must not configure a provider other than {BINDING_PROVIDER!r}: {refusal}")
     provider = (providers or {}).get(BINDING_PROVIDER)
-    credential = provider.get("apiKey") if isinstance(provider, dict) else None
-    bound = isinstance(credential, str) and bool(credential.strip())
-    if provider is not None and (not bound or set(provider) != BINDING_PROVIDER_KEYS):
+    if provider is not None and (not isinstance(provider, dict) or set(provider) != BINDING_PROVIDER_KEYS):
         raise RenderError(f"pi composition must not configure provider {BINDING_PROVIDER!r}: {refusal}")
-    for key in (*BINDING_SETTINGS, *MODEL_ROUTE_SETTINGS):
-        if key in settings and (key in MODEL_ROUTE_SETTINGS or not bound):
+    for key in MODEL_ROUTE_SETTINGS:
+        if key in settings:
             raise RenderError(f"pi composition must not set {key}: {refusal}")
 
 
@@ -99,14 +96,19 @@ def migrated_settings(settings: dict[str, object]) -> dict[str, object]:
     return settings
 
 
-def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    """Keep every model call on the binding, give every skill the frontmatter pi requires when its text has none, and
-    write pi's settings in the form pi keeps."""
-    check_model_route(json.loads(files[SETTINGS_PATH]), json.loads(files[MODELS_PATH]))
-    for path, text in list(files.items()):
-        if path.startswith(_SKILLS) and path.endswith("/SKILL.md"):
-            files[path] = _with_frontmatter(path, text)
-    settings = json.loads(files[SETTINGS_PATH])
-    if isinstance(settings, dict):
-        files[SETTINGS_PATH] = json.dumps(migrated_settings(settings), indent=2, sort_keys=True) + "\n"
-    return files
+class PiAdapterRenderer(AdapterRenderer):
+    @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        # Write pi's settings in the form pi keeps.
+        return migrated_settings(config) if path == SETTINGS_PATH else config
+
+    @staticmethod
+    def process_skill(path: str, text: str) -> str:
+        # Give every skill the frontmatter pi requires when its text has none.
+        return _with_frontmatter(path, text)
+
+    @staticmethod
+    def check_model_route(
+        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
+    ) -> None:
+        check_model_route(dict(configs[SETTINGS_PATH]), dict(configs[MODELS_PATH]))

@@ -16,7 +16,7 @@ from reef.runtime.recovery import (
     EngineHealthMonitor,
     HealthMonitorConfig,
     InferenceControl,
-    InferenceEngines,
+    InferenceEngineGroup,
     InferenceMonitor,
     WeightUpdateConnection,
 )
@@ -114,7 +114,7 @@ class SGLangWorker:
 
     def _create_control(self) -> InferenceControl:
         return InferenceControl(
-            _SGLangInferenceEngines(self), _SGLangWeightUpdateConnection(self), _SGLangInferenceMonitor(self)
+            _SGLangEngineGroup(self), _SGLangWeightUpdateConnection(self), _SGLangInferenceMonitor(self)
         )
 
     def pause_generation_for_update(self):
@@ -253,7 +253,7 @@ class SGLangWorker:
         self._routers = []
 
 
-class _SGLangInferenceEngines(InferenceEngines):
+class _SGLangEngineGroup(InferenceEngineGroup):
     """Ray fan-out and SGLang engine replacement behind Reef's control contract."""
 
     def __init__(self, worker: SGLangWorker) -> None:

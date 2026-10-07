@@ -12,7 +12,6 @@ PYD002|reef/train/cordis_backend/strategies.py|_CallableEpisodeScorer.__init__|f
 PYD002|reef/train/cordis_backend/strategies.py|_CallableProposer.__init__|fn
 PYD002|reef/train/processors/computed.py|JudgingWorker.__init__|judge
 PYD002|reef/train/slime_backend/reef_adapters/training_job/storage.py|CheckpointStorage.__init__|measure,disk_usage
-PYD003|reef/harness/adapters/descriptor.py|AdapterDescriptor|finalize_render
 PYD003|reef/harness/tree/nodes.py|<module>|NODE_KINDS
 PYD003|reef/scenario/registry.py|ScenarioRegistry|self._on_training_scenario_resolved
 PYD003|reef/harness/compose/events.py|Hook|callback

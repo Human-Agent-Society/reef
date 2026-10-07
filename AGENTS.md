@@ -208,6 +208,25 @@ Prefer concrete names over metaphors in code, UI text, logs, and documentation:
   spreading them through new code or displayed labels.
 - Keep standard technical names such as neural-network gates and third-party identifiers.
 
+## Writing style
+
+Use an [ASD-STE100](https://www.asd-ste100.org/)-inspired style for replies,
+documentation, comments, docstrings, and issue and pull request text.
+Aim for "80% of the way to ASD-STE100": clear technical writing, without
+requiring the full controlled dictionary or claiming formal compliance.
+
+- Use short sentences, familiar words, and active voice. Make the actor and
+  action clear. Give each instruction its own sentence.
+- For English, aim for at most 20 words per instruction and 25 per descriptive
+  sentence. Treat these as guidelines; preserve meaning and natural phrasing.
+- Use the same term for the same concept. Preserve necessary technical terms,
+  code identifiers, commands, and literal values.
+- Keep conditions, exceptions, technical details, and uncertainty explicit.
+  Split complex sentences instead of deleting information to shorten them.
+- Keep each paragraph focused on one topic. Remove filler and repetition.
+- For Chinese and other languages, apply the clarity principles without
+  imposing English word counts or vocabulary restrictions.
+
 ## Documentation review checklist
 
 Apply this checklist to documentation changes in `docs/`, READMEs, recipes,

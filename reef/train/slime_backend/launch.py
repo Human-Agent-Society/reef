@@ -72,6 +72,10 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
         options["offload-rollout"] = True
         if "offload-train" not in training_options:
             options["offload-train"] = True
+    if reef.get("inference_backend") == "vllm":
+        # vLLM engine options reach the driver through the resolved config;
+        # Slime's parser only knows SGLang's names.
+        return [*arguments, *native_arguments(options)]
     for name, value in expand_option_references(config, reef.get("inference_options", {})).items():
         # Slime has dedicated router bind flags and passes other router flags
         # directly to RouterArgs. Engine flags are all prefixed by Slime.
@@ -84,6 +88,31 @@ def driver_arguments(config: Mapping[str, Any]) -> list[str]:
     return [*arguments, *native_arguments(options)]
 
 
+def require_vllm_weight_transport(options: Mapping[str, Any]) -> None:
+    """Admit only the Slime weight path a vLLM engine can receive: a full checkpoint reloaded from disk.
+
+    Slime's NCCL and tensor transports, delta sync and LoRA publication call
+    SGLang-only engine routes; ``check-weight-update-equal`` needs SGLang's
+    weights checker.
+    """
+    if options.get("update-weight-transport") != "disk":
+        raise DeployConfigError(
+            "inference.backend: vllm requires training.options.update-weight-transport: disk; "
+            "the NCCL and tensor transports reach SGLang engines only"
+        )
+    if options.get("update-weight-mode", "full") != "full":
+        raise DeployConfigError("inference.backend: vllm requires training.options.update-weight-mode: full")
+    if options.get("update-weight-local-checkpoint-dir"):
+        raise DeployConfigError(
+            "inference.backend: vllm cannot use training.options.update-weight-local-checkpoint-dir; "
+            "vLLM engines reload the published checkpoint directly"
+        )
+    if int(options.get("megatron-lora-rank") or 0) > 0:
+        raise DeployConfigError("inference.backend: vllm does not publish LoRA adapters yet; use full weights")
+    if str(options.get("check-weight-update-equal", False)).lower() in ("true", "1"):
+        raise DeployConfigError("inference.backend: vllm has no weights checker; drop check-weight-update-equal")
+
+
 class SlimeDeployment(TrainingDeployment):
     """Describe Slime components for the Reef driver and connect HTTP to their bridge."""
 
@@ -93,13 +122,22 @@ class SlimeDeployment(TrainingDeployment):
             raise DeployConfigError(
                 "automatic weight training discovers its runtime and inference connection from the bridge"
             )
-        if settings["inference_backend"] not in (None, "sglang"):
-            raise DeployConfigError("Slime weight transfer currently requires inference.backend: sglang")
+        if settings["inference_backend"] not in (None, "sglang", "vllm"):
+            raise DeployConfigError("Slime weight transfer requires inference.backend: sglang or vllm")
 
         require_ray_roles(config, "training", "rollout", backend="Slime")
         options = normalize_native_options(settings["training_backend_options"])
         native_arguments(options, reserved={"ready-file"})
+        if settings["inference_backend"] == "vllm":
+            require_vllm_weight_transport(options)
         prepare_inference_config(config, settings, options)
+        reef = config["reef"]
+        if settings["inference_backend"] == "vllm" and reef["inference_num_gpus"] != reef["tensor_parallel_size"]:
+            # Slime cannot name a router_url, and vLLM ships no router of its own.
+            raise DeployConfigError(
+                "inference.backend: vllm serves one engine per stack; "
+                "set inference.num-gpus equal to inference.tensor-parallel-size"
+            )
         checkpoint = options.get("hf-checkpoint")
         if checkpoint is not None and (
             not isinstance(checkpoint, str)
@@ -108,7 +146,6 @@ class SlimeDeployment(TrainingDeployment):
             raise DeployConfigError("training.options.hf-checkpoint must match inference.model-path")
         # Resolve/download the model once; both HTTP and Slime read that same path.
         options["hf-checkpoint"] = "${reef.model_path}"
-        reef = config["reef"]
         reef.update(
             training_backend_options=options,
             ray_namespace=settings["ray_namespace"] or DEFAULT_NAMESPACE,
