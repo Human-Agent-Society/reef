@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+from dataclasses import dataclass
+
 from reef.core import AgentRecord, RequestType
 from reef.core.training_request import TrainingRequest
 from reef.core.trajectories import make_trajectory
@@ -44,6 +47,21 @@ class CordisProcessor(ReportedFeedbackProcessor):
         return TrainingBatch(f"{self.scenario}:harness_evolve:{batch_number}", items)
 
 
+@dataclass(frozen=True, kw_only=True)
+class RecordUnit(ExperienceUnit):
+    """One inference record in the experience buffer; ``unit_id`` is the record's ID."""
+
+    record: AgentRecord
+
+
+def record_units(units: Sequence[ExperienceUnit]) -> tuple[RecordUnit, ...]:
+    """Return buffer units as record units. The record-driven engine puts only record units in its buffer."""
+    selected = tuple(unit for unit in units if isinstance(unit, RecordUnit))
+    if len(selected) != len(units):
+        raise TypeError("the record-driven experience buffer must hold only record units")
+    return selected
+
+
 class RecordDrivenTraceProcessor(DataProcessor):
     """Batch recorded inference traffic every ``batch_size`` requests, unscored.
 
@@ -72,7 +90,7 @@ class RecordDrivenTraceProcessor(DataProcessor):
     def __init__(self, context: ProcessorContext) -> None:
         super().__init__(context)
         # Each inference record is one unit.
-        self.experience_buffer: ExperienceBuffer[str, AgentRecord] = ExperienceBuffer(self.selection_policy())
+        self.experience_buffer = ExperienceBuffer(self.selection_policy())
         self._released: set[str] = set()
 
     def selection_policy(self) -> SelectionPolicy:
@@ -84,7 +102,7 @@ class RecordDrivenTraceProcessor(DataProcessor):
             super().ingest(item)
         elif item.request_type is RequestType.INFERENCE:
             index = self.experience_buffer.next_arrival_index()
-            self.experience_buffer.put(ExperienceUnit(item.agent_record_id, (item,), index))
+            self.experience_buffer.put(RecordUnit(unit_id=item.agent_record_id, arrival_index=index, record=item))
         else:
             self._released.add(item.agent_record_id)
 
@@ -92,16 +110,18 @@ class RecordDrivenTraceProcessor(DataProcessor):
         return len(self.experience_buffer)
 
     def _make_pending(self, batch_number: int) -> TrainingBatch:
-        selected = self.experience_buffer.reserve(self._batch_size)
+        selected = record_units(self.experience_buffer.reserve(self._batch_size))
         return TrainingBatch(
             f"{self.scenario}:harness_evolve:{batch_number}",
-            tuple(make_trajectory(unit.members) for unit in selected),
+            tuple(make_trajectory((unit.record,)) for unit in selected),
         )
 
     def _consume_pending(self) -> frozenset[str]:
         if self.experience_buffer.reserved is None:
             raise RuntimeError("no pending trace batch to consume")
-        consumed = frozenset(unit.unit_id for unit in self.experience_buffer.consume_reserved())
+        consumed = frozenset(
+            unit.record.agent_record_id for unit in record_units(self.experience_buffer.consume_reserved())
+        )
         self._released |= consumed
         return consumed
 

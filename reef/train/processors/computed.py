@@ -35,7 +35,7 @@ import logging
 import queue
 import time
 from abc import ABC, abstractmethod
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from threading import Lock, Thread
 from typing import Any
@@ -66,6 +66,22 @@ class SupportsReceipt:
 @dataclass(frozen=True)
 class Failed(SupportsReceipt):
     """The worker's answer for a job whose judgment never finished."""
+
+
+@dataclass(frozen=True, kw_only=True)
+class CandidateUnit(ExperienceUnit):
+    """A judged record's sample in the experience buffer; ``unit_id`` is the record's receipt."""
+
+    receipt: str
+    sample: TrajectoryItem
+
+
+def candidate_units(units: Sequence[ExperienceUnit]) -> tuple[CandidateUnit, ...]:
+    """Return buffer units as candidate units. The computed-feedback engine puts only candidate units in its buffer."""
+    selected = tuple(unit for unit in units if isinstance(unit, CandidateUnit))
+    if len(selected) != len(units):
+        raise TypeError("the computed-feedback experience buffer must hold only candidate units")
+    return selected
 
 
 class JudgingWorker:
@@ -204,7 +220,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         self._tracked: dict[str, AgentRecord] = {}
         self._in_flight: dict[str, AgentRecord] = {}
         #: Candidates by receipt, and the reserved batch.
-        self.experience_buffer: ExperienceBuffer[str, TrajectoryItem] = ExperienceBuffer(self.selection_policy())
+        self.experience_buffer = ExperienceBuffer(self.selection_policy())
         #: Terminal receipts: retired or trained, both releasable and never
         #: distinguished by anything that reads them.
         self._terminal: set[str] = set()
@@ -325,15 +341,20 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
             #    reshuffle under an emitted-but-unacknowledged batch, whose
             #    samples reference the pending candidates.
             buffer = self.experience_buffer
-            buffer.put(ExperienceUnit(judgment.receipt, (sample,), buffer.next_arrival_index()))
+            receipt = judgment.receipt
+            buffer.put(
+                CandidateUnit(
+                    unit_id=receipt, arrival_index=buffer.next_arrival_index(), receipt=receipt, sample=sample
+                )
+            )
             if self._pending is None:
-                candidates = buffer.units()
-                newest = max(candidates, key=lambda unit: self._arrival_order[unit.unit_id])
-                newest_version = newest.members[0].training.get("runtime_load_id")
+                candidates = candidate_units(buffer.units())
+                newest = max(candidates, key=lambda unit: self._arrival_order[unit.receipt])
+                newest_version = newest.sample.training.get("runtime_load_id")
                 for unit in candidates:
-                    if unit.members[0].training.get("runtime_load_id") != newest_version:
+                    if unit.sample.training.get("runtime_load_id") != newest_version:
                         buffer.remove(unit.unit_id)
-                        self.retire(unit.unit_id)
+                        self.retire(unit.receipt)
 
     # ----------------------------------------------------------- batch cycle
     #
@@ -350,11 +371,11 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         return len(self.experience_buffer)
 
     def _make_pending(self, batch_number: int) -> TrainingBatch:
-        units = self.experience_buffer.reserve(self._batch_size)
-        return self.make_batch(tuple(unit.members[0] for unit in units), batch_number)
+        units = candidate_units(self.experience_buffer.reserve(self._batch_size))
+        return self.make_batch(tuple(unit.sample for unit in units), batch_number)
 
     def _consume_pending(self) -> frozenset[str]:
-        consumed = frozenset(unit.unit_id for unit in self.experience_buffer.consume_reserved())
+        consumed = frozenset(unit.receipt for unit in candidate_units(self.experience_buffer.consume_reserved()))
         for receipt in consumed:
             self._arrival_order.pop(receipt, None)
             self._terminal.add(receipt)
@@ -374,7 +395,8 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     # ---------------------------------------------------------- buffer release
 
     def releasable_record_ids(self) -> frozenset[str]:
-        protected = frozenset(self._tracked) | frozenset(self._in_flight) | frozenset(self.experience_buffer.units_by_id)
+        candidates = frozenset(unit.receipt for unit in candidate_units(self.experience_buffer.units()))
+        protected = frozenset(self._tracked) | frozenset(self._in_flight) | candidates
         return frozenset(self._terminal) - protected
 
     def release_records(self, agent_record_ids: frozenset[str]) -> None:

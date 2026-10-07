@@ -9,20 +9,22 @@ import pytest
 
 from reef.core import AgentRecord, RequestType
 from reef.train.experience import ArrivalOrder, ExperienceBuffer, ExperienceUnit, GroupKeyOrder, SelectionPolicy
-from reef.train.experience.selection import KeyT, MemberT
 from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor
 from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch
 
 
-def unit(unit_id: str, arrival_index: int, group_key: int | None = None) -> ExperienceUnit[str, str]:
-    return ExperienceUnit(unit_id, (unit_id,), arrival_index, group_key)
+def unit(unit_id: str, arrival_index: int, group_key: int | None = None) -> ExperienceUnit:
+    return ExperienceUnit(unit_id=unit_id, arrival_index=arrival_index, group_key=group_key)
 
 
 class NewestFirst(SelectionPolicy):
-    def select(
-        self, candidates: Sequence[ExperienceUnit[KeyT, MemberT]], max_unit_count: int
-    ) -> tuple[ExperienceUnit[KeyT, MemberT], ...]:
+    def select(self, candidates: Sequence[ExperienceUnit], max_unit_count: int) -> tuple[ExperienceUnit, ...]:
         return tuple(sorted(candidates, key=lambda candidate: -candidate.arrival_index)[:max_unit_count])
+
+
+class ForeignUnit(SelectionPolicy):
+    def select(self, candidates: Sequence[ExperienceUnit], max_unit_count: int) -> tuple[ExperienceUnit, ...]:
+        return (unit("not-held", 1),)
 
 
 def test_arrival_order_takes_the_oldest_units_up_to_the_maximum_count() -> None:
@@ -37,7 +39,7 @@ def test_group_key_order_takes_ungrouped_units_before_groups_in_key_order() -> N
 
 
 def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
-    buffer: ExperienceBuffer[str, str] = ExperienceBuffer()
+    buffer = ExperienceBuffer()
     for name in ("a", "b", "c"):
         buffer.put(unit(name, buffer.next_arrival_index()))
     reserved = buffer.reserve(2)
@@ -50,11 +52,13 @@ def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
     assert buffer.reserved_units() == ()
 
 
-def test_a_unit_needs_a_member_and_a_reservation_needs_a_non_negative_count() -> None:
-    with pytest.raises(ValueError, match="at least one member"):
-        ExperienceUnit("empty", (), 1)
+def test_a_reservation_refuses_a_negative_count_and_units_the_buffer_does_not_hold() -> None:
     with pytest.raises(ValueError, match="max_unit_count must not be negative"):
-        ExperienceBuffer[str, str]().reserve(-1)
+        ExperienceBuffer().reserve(-1)
+    buffer = ExperienceBuffer(ForeignUnit())
+    buffer.put(unit("held", buffer.next_arrival_index()))
+    with pytest.raises(ValueError, match="does not hold"):
+        buffer.reserve(1)
 
 
 def test_a_processor_changes_its_batch_order_through_selection_policy() -> None:

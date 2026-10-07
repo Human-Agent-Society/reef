@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from typing import Generic
+from collections.abc import Hashable
 
-from reef.train.experience.selection import ArrivalOrder, ExperienceUnit, KeyT, MemberT, SelectionPolicy
+from reef.train.experience.selection import ArrivalOrder, ExperienceUnit, SelectionPolicy
 
 
-class ExperienceBuffer(Generic[KeyT, MemberT]):
+class ExperienceBuffer:
     """Hold the units that a processor can batch, and its reserved batch.
 
     The processor adds and removes units. It also decides what a consumed unit
@@ -19,14 +19,14 @@ class ExperienceBuffer(Generic[KeyT, MemberT]):
 
     def __init__(self, selection: SelectionPolicy | None = None) -> None:
         self.selection = ArrivalOrder() if selection is None else selection
-        self.units_by_id: dict[KeyT, ExperienceUnit[KeyT, MemberT]] = {}
-        self.reserved: tuple[ExperienceUnit[KeyT, MemberT], ...] | None = None
+        self.units_by_id: dict[Hashable, ExperienceUnit] = {}
+        self.reserved: tuple[ExperienceUnit, ...] | None = None
         self.arrival_count = 0
 
     def __len__(self) -> int:
         return len(self.units_by_id)
 
-    def __contains__(self, unit_id: KeyT) -> bool:
+    def __contains__(self, unit_id: Hashable) -> bool:
         return unit_id in self.units_by_id
 
     def next_arrival_index(self) -> int:
@@ -34,34 +34,34 @@ class ExperienceBuffer(Generic[KeyT, MemberT]):
         self.arrival_count += 1
         return self.arrival_count
 
-    def put(self, unit: ExperienceUnit[KeyT, MemberT]) -> None:
+    def put(self, unit: ExperienceUnit) -> None:
         """Add the unit. If the buffer holds a unit with the same ``unit_id``, replace that unit."""
         self.units_by_id[unit.unit_id] = unit
 
-    def remove(self, unit_id: KeyT) -> ExperienceUnit[KeyT, MemberT] | None:
+    def remove(self, unit_id: Hashable) -> ExperienceUnit | None:
         """Remove the unit and return it. Return None if the buffer does not hold it."""
         return self.units_by_id.pop(unit_id, None)
 
-    def units(self) -> tuple[ExperienceUnit[KeyT, MemberT], ...]:
+    def units(self) -> tuple[ExperienceUnit, ...]:
         """Return all units, in the order that the buffer received them."""
         return tuple(self.units_by_id.values())
 
-    def ordered_units(self) -> tuple[ExperienceUnit[KeyT, MemberT], ...]:
+    def ordered_units(self) -> tuple[ExperienceUnit, ...]:
         """Return all units, in the order of the selection policy."""
-        return self.selection.select(self.units(), len(self.units_by_id))
+        return self.select(len(self.units_by_id))
 
-    def reserved_units(self) -> tuple[ExperienceUnit[KeyT, MemberT], ...]:
+    def reserved_units(self) -> tuple[ExperienceUnit, ...]:
         """Return the reserved units. Return an empty tuple if no batch is reserved."""
         return () if self.reserved is None else self.reserved
 
-    def reserve(self, max_unit_count: int) -> tuple[ExperienceUnit[KeyT, MemberT], ...]:
+    def reserve(self, max_unit_count: int) -> tuple[ExperienceUnit, ...]:
         """Select at most ``max_unit_count`` units as the next batch, and keep them reserved."""
         if max_unit_count < 0:
             raise ValueError("max_unit_count must not be negative")
-        self.reserved = self.selection.select(self.units(), max_unit_count)
+        self.reserved = self.select(max_unit_count)
         return self.reserved
 
-    def consume_reserved(self) -> tuple[ExperienceUnit[KeyT, MemberT], ...]:
+    def consume_reserved(self) -> tuple[ExperienceUnit, ...]:
         """Remove the reserved units from the buffer, clear the reservation, and return the units.
 
         The result also includes a reserved unit that the processor removed
@@ -72,3 +72,13 @@ class ExperienceBuffer(Generic[KeyT, MemberT]):
             self.units_by_id.pop(unit.unit_id, None)
         self.reserved = None
         return consumed
+
+    def select(self, max_unit_count: int) -> tuple[ExperienceUnit, ...]:
+        """Apply the selection policy, and make sure that it returned held units only, each one time."""
+        selected = self.selection.select(self.units(), max_unit_count)
+        selected_ids = [unit.unit_id for unit in selected]
+        if len(selected) > max_unit_count or len(set(selected_ids)) != len(selected_ids):
+            raise ValueError(f"{type(self.selection).__name__} returned too many units or a unit more than one time")
+        if any(self.units_by_id.get(unit.unit_id) is not unit for unit in selected):
+            raise ValueError(f"{type(self.selection).__name__} returned a unit that the buffer does not hold")
+        return selected
