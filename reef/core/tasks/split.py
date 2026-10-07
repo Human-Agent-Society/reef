@@ -167,8 +167,9 @@ def assign_splits(
     lists in ``parents``: one split, they take it; more than one, they are
     left out of every split; none, :func:`hashed_split` of the group's first
     name decides. A group with a parent no task among ``tasks`` has is left
-    out too, since that parent may be an eval or test task. So a task that
-    shares no source record goes where its own name hashes, known before play,
+    out too, since that parent may be an eval or test task. A group with a
+    parent already left out is also left out, so exclusion follows descendants.
+    Otherwise, a task that shares no source record goes where its own name hashes, known before play,
     while a task not yet pinned can move when a task sharing its records
     arrives. A pinned name that is not among ``tasks`` is not listed.
     """
@@ -213,7 +214,7 @@ def assign_splits(
             imposed = {placed[name] for name in group if name in placed} | {
                 placed[name] for name in parent_names if placed[name] in ("eval", "test")
             }
-            if len(imposed) > 1:
+            if any(placed[name] is None for name in parent_names) or len(imposed) > 1:
                 split: SplitName | None = None
             elif imposed:
                 split = imposed.pop()

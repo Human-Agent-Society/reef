@@ -384,6 +384,54 @@ def test_a_pinned_name_that_is_not_among_the_tasks_is_not_listed() -> None:
     assert split.eval == ("t1",) and split.train == ()
 
 
+@pytest.mark.parametrize("excluded_reason", ["unknown_ancestor", "conflicting_sources"])
+def test_an_excluded_parent_keeps_its_descendants_and_their_source_groups_out(excluded_reason: str) -> None:
+    train, held = harbor_task("train", ("train-record",)), harbor_task("held", ("held-record",))
+    pinned = TaskSplit((train.name,), (held.name,), 0, 0)
+    if excluded_reason == "unknown_ancestor":
+        outside = harbor_task("outside")
+        parent = harbor_task("parent", parents=(outside.digest,))
+    else:
+        parent = harbor_task("parent", ("train-record", "held-record"))
+    child = harbor_task("child", ("child-record",), parents=(parent.digest,))
+    sibling = harbor_task("sibling", ("child-record",))
+    grandchild = harbor_task("grandchild", parents=(child.digest,))
+    tasks = [train, held, parent, child, sibling, grandchild]
+    # With no held-out fraction, falling back to any descendant's hash would expose it to training.
+    for ordered in (tasks, list(reversed(tasks))):
+        split = assign_splits(ordered, seed=0, eval_fraction=0, pinned=pinned)
+        assert split.train == ("train",) and split.eval == ("held",) and split.test == ()
+        assert all(split.split_of(task.name) is None for task in (parent, child, sibling, grandchild))
+
+
+@pytest.mark.parametrize("pinned_side", ["train", "eval", "test"])
+def test_an_excluded_parent_preserves_pinned_descendants_only(pinned_side: str) -> None:
+    outside = harbor_task("outside")
+    parent = harbor_task("parent", parents=(outside.digest,))
+    child = harbor_task("child", ("child-record",), parents=(parent.digest,))
+    sibling = harbor_task("sibling", ("child-record",))
+    pinned = TaskSplit(
+        ("child",) if pinned_side == "train" else (),
+        ("child",) if pinned_side == "eval" else (),
+        0,
+        0,
+        ("child",) if pinned_side == "test" else (),
+    )
+    split = assign_splits([parent, child, sibling], seed=0, eval_fraction=0, pinned=pinned)
+    assert split.split_of("child") == pinned_side
+    assert split.split_of("parent") is None and split.split_of("sibling") is None
+
+
+def test_an_excluded_parent_overrides_a_held_out_parent() -> None:
+    outside, held = harbor_task("outside"), harbor_task("held")
+    parent = harbor_task("parent", parents=(outside.digest,))
+    child = harbor_task("child", parents=(parent.digest, held.digest))
+    pinned = TaskSplit((), ("held",), 0, 0)
+    split = assign_splits([parent, held, child], seed=0, eval_fraction=0, pinned=pinned)
+    assert split.train == () and split.eval == ("held",)
+    assert split.split_of("child") is None
+
+
 @pytest.mark.parametrize(
     ("tasks", "arguments", "message"),
     [
