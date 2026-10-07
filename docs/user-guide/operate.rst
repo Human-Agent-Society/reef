@@ -79,10 +79,14 @@ A request sent to ``POST /reef/train`` may name what its change needs from the p
 
 The install script refuses a release with an item ``setup`` does not meet: it prints the setup list and the newest release in the chain that requires nothing, the one that installs on a machine with nothing set up (``?release_id=<id>``; install it, run ``reef-<adapter> setup`` for the head's list, then install the head), and exits 1 before it installs the binary or makes a directory. ``reef-<adapter> setup`` is the only thing that runs a check, after the person read it and confirmed; ``reef-<adapter> setup --mark <name>`` records a check off by hand, and ``reef-<adapter> setup --release <id>`` checks off a pending release's items before its promote and install. A release metadata file the stdlib client pull or an older install wrote carries neither key, which reads as nothing required and nothing checked off.
 
-Pin a version
--------------
+Choose a starting release
+-------------------------
 
-A client that must keep answering from one version sends ``x-reef-release-id: <id>`` with its requests. Pinning is per request and changes nothing on the server; a pin that conflicts with the scenario's binding is refused with 409.
+Inference always answers from the scenario's current release. No request header keeps a client on an older release.
+
+A request can carry ``x-reef-release-id: <id>``. If the request creates the scenario, Reef binds the new scenario to that starting release. On a scenario that already exists, the header must name the bound starting release. Otherwise, Reef refuses the request with HTTP 409. `Headers <../reference/http-api.rst#headers>`__ in the HTTP API lists this header.
+
+To install a specific harness release, add ``?release_id=<id>`` to the harness manifest or install route. To serve an earlier release again, see the next section, Roll back. It also says which releases can be restored.
 
 Roll back
 ---------
