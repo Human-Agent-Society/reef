@@ -3,7 +3,7 @@
 - Durable files: atomic JSON writes, the training-job marker and its state
   machine, and the per-scenario publication history.
 - Inference supervision: the hooks an integration implements
-  (:class:`InferenceEngines`, :class:`InferenceMonitor`,
+  (:class:`InferenceEngineGroup`, :class:`InferenceMonitor`,
   :class:`WeightUpdateConnection`, :class:`EngineHealthChecks`), and the
   objects that drive them: :class:`InferenceControl` pauses and recovers
   engines around weight updates; :class:`EngineHealthMonitor` probes them in
@@ -421,8 +421,8 @@ def _parse_history(value: Mapping[str, Any], path: Path) -> dict[str, dict[str, 
 # probe, recover and replace its engines without importing the integration.
 
 
-class InferenceEngines(ABC):
-    """Concrete operations on the inference engines attached to a trainer."""
+class InferenceEngineGroup(ABC):
+    """Concrete operations on the group of inference engines attached to a trainer."""
 
     @property
     @abstractmethod
@@ -442,6 +442,10 @@ class InferenceEngines(ABC):
     @abstractmethod
     def terminate(self) -> int:
         """Retire owned engines after an uncertain update; never kill borrowed engines."""
+
+
+#: Legacy name of :class:`InferenceEngineGroup`, kept for integrations written against it.
+InferenceEngines = InferenceEngineGroup
 
 
 class InferenceMonitor(ABC):
@@ -496,7 +500,7 @@ class InferenceControl:
 
     def __init__(
         self,
-        engines: InferenceEngines,
+        engines: InferenceEngineGroup,
         connection: WeightUpdateConnection,
         monitor: InferenceMonitor,
     ) -> None:

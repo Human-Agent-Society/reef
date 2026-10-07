@@ -37,20 +37,18 @@ task container alone does not isolate evolved Python in the outer runner.
 
 from __future__ import annotations
 
-import json
 import re
 from collections.abc import Mapping
 from typing import Any
 
 import yaml
 
-from reef.harness.adapters.descriptor import ExecutionValidator
+from reef.harness.adapters.descriptor import AdapterRenderer, ExecutionValidator
 from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
 from reef.harness.tree.render import RenderError
 
 _CONFIG = "terminus/config.json"
-_SKILL_ROOTS = ("terminus/skills/", "terminus-commands/")
 
 #: Terminus 2 constructor arguments a tree may set. Verified against harbor
 #: 0.20.0, which reef-eval 0.1.1 resolves; a bump should re-check the signature.
@@ -94,56 +92,57 @@ def _with_frontmatter(path: str, text: str) -> str:
     return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
-def _validate_config(config: dict[str, Any]) -> None:
-    unknown = sorted(set(config) - _ALLOWED_KNOBS - _BINDING_KNOBS)
-    if unknown:
-        raise RenderError(f"terminus config sets keys that are not Terminus 2 arguments: {', '.join(unknown)}")
-    llm_kwargs = config.get("llm_kwargs")
-    credential = llm_kwargs.get("api_key") if isinstance(llm_kwargs, dict) else None
-    bound = isinstance(credential, str) and bool(credential.strip())
-    refusal = "Reef's model binding chooses the endpoint, the credential and the model"
-    binding_knobs = sorted(_BINDING_KNOBS & set(config))
-    if binding_knobs and not bound:
-        raise RenderError(f"terminus config must not set {', '.join(binding_knobs)}: {refusal}")
-    if isinstance(llm_kwargs, dict) and set(llm_kwargs) - BINDING_LLM_KWARGS:
-        extra = ", ".join(sorted(set(llm_kwargs) - BINDING_LLM_KWARGS))
-        raise RenderError(f"terminus config must not set llm_kwargs {extra}: {refusal}")
-    call_kwargs = config.get("llm_call_kwargs")
-    if call_kwargs is not None and not isinstance(call_kwargs, dict):
-        raise RenderError("terminus config llm_call_kwargs must be an object")
-    routed = sorted(key for key in call_kwargs or {} if MODEL_ROUTE_KWARGS.search(key))
-    if routed:
-        raise RenderError(f"terminus config must not set llm_call_kwargs {', '.join(routed)}: {refusal}")
-    body = (call_kwargs or {}).get("extra_body")
-    if body is not None and not isinstance(body, dict):
-        raise RenderError("terminus config llm_call_kwargs extra_body must be an object")
-    named = sorted(set(body or {}) & BODY_MODEL_KEYS)
-    if named:
-        raise RenderError(f"terminus config must not set llm_call_kwargs extra_body {', '.join(named)}: {refusal}")
-    turns = config.get("max_turns")
-    if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
-        raise RenderError("terminus config max_turns must be a positive integer")
+class TerminusAdapterRenderer(AdapterRenderer):
+    @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        unknown = sorted(set(config) - _ALLOWED_KNOBS - _BINDING_KNOBS)
+        if unknown:
+            raise RenderError(f"terminus config sets keys that are not Terminus 2 arguments: {', '.join(unknown)}")
+        call_kwargs = config.get("llm_call_kwargs")
+        if call_kwargs is not None and not isinstance(call_kwargs, dict):
+            raise RenderError("terminus config llm_call_kwargs must be an object")
+        body = (call_kwargs or {}).get("extra_body")
+        if body is not None and not isinstance(body, dict):
+            raise RenderError("terminus config llm_call_kwargs extra_body must be an object")
+        turns = config.get("max_turns")
+        if turns is not None and (isinstance(turns, bool) or not isinstance(turns, int) or turns < 1):
+            raise RenderError("terminus config max_turns must be a positive integer")
+        return config
 
+    @staticmethod
+    def process_skill(path: str, text: str) -> str:
+        return _with_frontmatter(path, text)
 
-def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    try:
-        config = json.loads(files[_CONFIG])
-    except (KeyError, json.JSONDecodeError) as exc:
-        raise RenderError("terminus primary config must be a JSON object") from exc
-    if not isinstance(config, dict):
-        raise RenderError("terminus primary config must be an object")
-    _validate_config(config)
+    @staticmethod
+    def process_command(path: str, text: str) -> str:
+        # A command is a skill under the second root, so it needs the same frontmatter.
+        return _with_frontmatter(path, text)
 
-    try:
-        extension_source(files)
-    except TerminusTreeError as exc:
-        raise RenderError(str(exc)) from exc
+    @staticmethod
+    def check_model_route(
+        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
+    ) -> None:
+        config = configs[_CONFIG]
+        llm_kwargs = config.get("llm_kwargs")
+        refusal = "Reef's model binding chooses the endpoint, the credential and the model"
+        if isinstance(llm_kwargs, dict) and set(llm_kwargs) - BINDING_LLM_KWARGS:
+            extra = ", ".join(sorted(set(llm_kwargs) - BINDING_LLM_KWARGS))
+            raise RenderError(f"terminus config must not set llm_kwargs {extra}: {refusal}")
+        call_kwargs = config.get("llm_call_kwargs") or {}
+        routed = sorted(key for key in call_kwargs if MODEL_ROUTE_KWARGS.search(key))
+        if routed:
+            raise RenderError(f"terminus config must not set llm_call_kwargs {', '.join(routed)}: {refusal}")
+        named = sorted(set(call_kwargs.get("extra_body") or {}) & BODY_MODEL_KEYS)
+        if named:
+            raise RenderError(f"terminus config must not set llm_call_kwargs extra_body {', '.join(named)}: {refusal}")
 
-    for path, text in list(files.items()):
-        if path.startswith(_SKILL_ROOTS) and path.endswith("/SKILL.md"):
-            files[path] = _with_frontmatter(path, text)
-
-    return files
+    @staticmethod
+    def finalize_render(files: dict[str, str]) -> dict[str, str]:
+        try:
+            extension_source(files)
+        except TerminusTreeError as exc:
+            raise RenderError(str(exc)) from exc
+        return files
 
 
 class TerminusExecutionValidator(ExecutionValidator):

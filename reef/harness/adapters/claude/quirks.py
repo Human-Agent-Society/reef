@@ -6,7 +6,7 @@ feature-gate cache, per-session ``todos/`` lists, and ``shell-snapshots/``.
 The descriptor whitelists those so the episode inverse tolerates them and
 reports anything else as residue.
 
-``finalize_render`` enforces the traps a mutated ``settings.json`` could
+``process_config`` enforces the traps a mutated ``settings.json`` could
 reopen; a composition that breaks one is rejected at render, the same check
 that rejects an invalid node. Claude Code copies ``settings.env`` over its
 own environment. The episode env turns telemetry and non-essential traffic
@@ -46,9 +46,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Mapping
+from typing import Any
 
 import yaml
 
+from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
 _CONFIG_PATH = "claude/settings.json"
@@ -59,9 +62,8 @@ _CONFIG_PATH = "claude/settings.json"
 _HERMETIC_ENV = ("DISABLE_TELEMETRY", "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC")
 _FALSEY = {"0", "false", "off", "no", ""}
 
-#: The env names Reef's model binding writes, and among them its credential.
+#: The env names Reef's model binding writes.
 BINDING_ENV = ("ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_BASE_URL", "ANTHROPIC_MODEL")
-BINDING_CREDENTIAL = "ANTHROPIC_AUTH_TOKEN"
 #: The env names Claude Code 2.1.257 reads to choose the endpoint, the provider, the credential or the model of a
 #: model call: every ANTHROPIC_ name, the cloud providers and their credentials, the provider switches, proxies,
 #: endpoints, sockets, credential helpers and files, and model names. Matched without case, as Windows reads env.
@@ -95,8 +97,6 @@ MODEL_ROUTE_SETTINGS = (
     "proxyAuthHelper",
     "switchModelsOnFlag",
 )
-#: Where commands and skills render; Claude Code reads a ``model`` in their frontmatter.
-MARKDOWN_ROOTS = ("claude/commands/", "claude/skills/")
 #: Claude Code's frontmatter block: after a byte order mark, an opening --- line, then the text up to the next ---.
 FRONTMATTER_BLOCK = re.compile(r"---\s*\n([\s\S]*?)---\s*\n?")
 #: A plain ``key: value`` line and the value characters Claude Code quotes when its YAML reader refuses the block.
@@ -175,51 +175,59 @@ def extra_body_names_model(value: object) -> bool:
     return not isinstance(body, dict) or any(key in body for key in BODY_MODEL_KEYS)
 
 
-def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    config = json.loads(files[_CONFIG_PATH])
-    if config.get("includeCoAuthoredBy") is True:
-        raise RenderError("claude composition must keep includeCoAuthoredBy false for benchmark episodes")
-    if config.get("disableDeepLinkRegistration") != "disable":
-        raise RenderError(
-            'claude composition must keep disableDeepLinkRegistration "disable" so a reef-claude session '
-            "leaves the person's claude-cli:// handler alone"
-        )
-    env = config.get("env")
-    if isinstance(env, dict):
-        # The episode env and reef-claude set the updater switches, and a tree value other than 1, true, yes or on
-        # would turn the updater back on. Windows matches env names in any case.
-        for key in env:
-            if key.upper() in ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES"):
-                raise RenderError(
-                    f"claude composition must not set {key} in settings.env: the episode env and reef-claude "
-                    "set it so Claude Code keeps the pinned version"
-                )
-        for key in _HERMETIC_ENV:
-            if key in env and str(env[key]).strip().lower() in _FALSEY:
-                raise RenderError(f"claude composition must not re-enable {key} for benchmark episodes")
-        credential = env.get(BINDING_CREDENTIAL)
-        bound = isinstance(credential, str) and bool(credential.strip())
-        for name in env:
-            if bound and name in BINDING_ENV:
-                continue
-            if MODEL_ROUTE_ENV.search(name):
-                raise RenderError(
-                    f"claude composition must not set env {name}: Reef's model binding chooses the endpoint, "
-                    "the credential and the model"
-                )
-            if name.upper() == EXTRA_BODY_ENV and extra_body_names_model(env[name]):
-                raise RenderError(
-                    f"claude composition env {name} must be a JSON object without model or models: "
-                    "Reef's model binding chooses the model"
-                )
-    for key in MODEL_ROUTE_SETTINGS:
-        if key in config:
+class ClaudeAdapterRenderer(AdapterRenderer):
+    @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        if config.get("includeCoAuthoredBy") is True:
+            raise RenderError("claude composition must keep includeCoAuthoredBy false for benchmark episodes")
+        if config.get("disableDeepLinkRegistration") != "disable":
             raise RenderError(
-                f"claude composition must not set {key}: Reef's model binding chooses the model and its credential"
+                'claude composition must keep disableDeepLinkRegistration "disable" so a reef-claude session '
+                "leaves the person's claude-cli:// handler alone"
             )
-    for path, text in files.items():
-        if path.startswith(MARKDOWN_ROOTS) and path.endswith(".md") and frontmatter_chooses_model(text):
-            raise RenderError(
-                f"claude {path} must not set model in its frontmatter: Reef's model binding chooses the model"
-            )
-    return files
+        env = config.get("env")
+        if isinstance(env, dict):
+            # The episode env and reef-claude set the updater switches, and a tree value other than 1, true, yes or
+            # on would turn the updater back on. Windows matches env names in any case.
+            for key in env:
+                if key.upper() in ("DISABLE_AUTOUPDATER", "DISABLE_UPDATES"):
+                    raise RenderError(
+                        f"claude composition must not set {key} in settings.env: the episode env and reef-claude "
+                        "set it so Claude Code keeps the pinned version"
+                    )
+            for key in _HERMETIC_ENV:
+                if key in env and str(env[key]).strip().lower() in _FALSEY:
+                    raise RenderError(f"claude composition must not re-enable {key} for benchmark episodes")
+        return config
+
+    @staticmethod
+    def check_model_route(
+        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
+    ) -> None:
+        config = configs[_CONFIG_PATH]
+        env = config.get("env")
+        if isinstance(env, dict):
+            for name in env:
+                # The render refuses the binding's names from a tree without the binding's token.
+                if name in BINDING_ENV:
+                    continue
+                if MODEL_ROUTE_ENV.search(name):
+                    raise RenderError(
+                        f"claude composition must not set env {name}: Reef's model binding chooses the endpoint, "
+                        "the credential and the model"
+                    )
+                if name.upper() == EXTRA_BODY_ENV and extra_body_names_model(env[name]):
+                    raise RenderError(
+                        f"claude composition env {name} must be a JSON object without model or models: "
+                        "Reef's model binding chooses the model"
+                    )
+        for key in MODEL_ROUTE_SETTINGS:
+            if key in config:
+                raise RenderError(
+                    f"claude composition must not set {key}: Reef's model binding chooses the model and its credential"
+                )
+        for path, text in {**skills, **commands}.items():
+            if frontmatter_chooses_model(text):
+                raise RenderError(
+                    f"claude {path} must not set model in its frontmatter: Reef's model binding chooses the model"
+                )

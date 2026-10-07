@@ -20,7 +20,7 @@ Check health and status
 
 ``/healthz`` answers as soon as the HTTP service is up; it says nothing about training. ``/reef/status`` is the training side: the last asynchronous error, model preload failures, and for every scenario its step counter, latest committed step outcome, runtime load ID being served, checkpoint storage state, whether a batch is waiting, the processor's state, and whether inference is admitted or paused for a weight update. The committed outcome includes the recipe-owned metrics, so a skipped or rejected update is distinguishable from one that is still running. It is the first place to look when requests keep being served by an old version.
 
-The service and every process ``reef serve`` started write logs under ``run_dir`` (``/tmp/reef-stack/`` by default), one ``<service>.log`` and one ``<service>.pid`` each.
+The service and every process ``reef serve`` started write logs under ``run_dir`` (``.reef/run/`` by default; a legacy ``/tmp/reef-stack`` stack keeps its own directory), one ``<service>.log`` and one ``<service>.pid`` each.
 
 Read the release chain
 ----------------------
@@ -30,9 +30,9 @@ Read the release chain
    curl -sS -H "Authorization: Bearer $REEF_TOKEN" \
      "$REEF_URL/reef/scenarios/code-repair/releases"
 
-Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Content can be live (``content_kind: live_weights``: the engine has the weights, the repository has only the record) or saved (``content_kind: saved_artifact``, a Git LFS commit).
+Newest first. Each row names the release, its parent and content, whether it is a durable checkpoint (``checkpoint``, ``restorable``), what produced it (``operation``: ``creation``, ``training``, ``rollback``, ``promote``, ``recovery``), whether it is the one currently served, and for training rows the step's ``metrics``. Content can be live (``content_kind: live_weights``: the engine has the weights, the repository has only the record) or saved (``content_kind: saved_artifact``, a Git LFS commit).
 
-For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree.
+For harness scenarios, ``GET /reef/harness/releases`` lists the same chain oldest first with each step's gate metrics, and ``GET /reef/harness?release_id=<id>`` returns any listed tree. The catalog also carries steps that published no release: under ``evolution.publish: review`` a pending release sits in the catalog with its evaluation metrics and is not served to a session until a ``promote`` names it. A rejected or skipped step is listed too, but it publishes no candidate artifact and keeps the existing release ID, so promoting that ID cannot publish the rejected change.
 
 Read the proposal inbox
 -----------------------
@@ -94,7 +94,7 @@ Roll back
      -d '{"release_id": "<id>"}' \
      "$REEF_URL/reef/scenarios/code-repair/rollback"
 
-Rollback republishes the target as a new commit and makes it current; history is not rewritten, and the step counter keeps increasing. Only versions marked ``restorable`` qualify: durable checkpoints. Live runtime load IDs that were never checkpointed cannot be restored, and the bundled Ray/Slime runtime does not implement checkpoint restoration, so rollback currently applies to harness artifacts; for weights, redeploy from the checkpoint you want.
+Rollback republishes the target as a new commit and makes it current; history is not rewritten, and the step counter keeps increasing. Only versions marked ``restorable`` qualify: durable checkpoints. Live runtime load IDs that were never checkpointed cannot be restored, and the bundled Ray/Slime runtime does not implement checkpoint restoration, so rollback restores weights only under the ``tinker`` backend and otherwise applies to harness artifacts; for Ray/Slime weights, redeploy from the checkpoint you want.
 
 Set the checkpoint cadence
 --------------------------

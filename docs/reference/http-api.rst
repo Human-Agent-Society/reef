@@ -161,6 +161,7 @@ Scenario model settings
 ``POST /reef/scenarios`` accepts an optional ``model`` object with ``url``,
 ``model``, ``api`` and ``api_key``. It applies only when creating a new
 scenario. Existing scenarios retain their settings on repeated creation.
+The creation response carries the scenario's ``model`` view.
 ``POST /reef/scenarios/{scenario}/update`` accepts ``model`` alongside the
 existing ``training_mode`` field. Send ``model: null`` to restore deployment
 defaults. Responses redact the API key and report ``has_api_key`` instead.

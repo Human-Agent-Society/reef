@@ -28,8 +28,7 @@ identifier as SGLang's served model name. Startup has a one-hour readiness
 deadline for SGLang and 30 seconds for Reef. On failure or interruption,
 Reef cleans up both processes. Logs live under ``.reef/run/``.
 Local ``--inference.model-path`` cannot be combined with upstream URL/model selection;
-``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below. Training
-still requires an explicit stack file.
+``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below.
 
 An external-provider deployment also needs no YAML file:
 
@@ -283,9 +282,19 @@ releases the KV cache only together with the weights, so
 ``keep-lora-base-resident`` is unavailable on it, and it resumes scheduling by
 itself once every region is resident, so the engine restores the KV cache
 when Reef resumes generation rather than when the coordinator calls
-``onload_kv``: generation stays paused until the coordinator's commit. The Slime and Tinker
-backends still produce SGLang engine options, so their managed launches keep
-``inference.backend: sglang`` until they select options per backend.
+``onload_kv``: generation stays paused until the coordinator's commit.
+
+The Slime backend pairs with ``inference.backend: vllm`` through the disk
+weight path: ``training.options.update-weight-transport: disk`` in full mode,
+with no ``update-weight-local-checkpoint-dir``, no LoRA rank and no
+``check-weight-update-equal``, since Slime's other transports call SGLang-only
+engine routes. The trainer writes each checkpoint under
+``update-weight-disk-dir`` and the engines reload it with their weight version.
+Engine options come from ``inference.options`` in vLLM's own names and never
+pass through Slime's parser. One engine per stack: ``inference.num-gpus`` must
+equal ``inference.tensor-parallel-size`` until Slime can name a ``router_url``.
+The Tinker backend still produces SGLang engine options and keeps
+``inference.backend: sglang``.
 
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
@@ -299,7 +308,8 @@ Managed engine launches use one generic builder. A backend definition supplies
 its command template, public parameter bindings, reserved aliases and HTTP
 health path. Adding an engine with this launch contract does not require a
 backend-specific deploy module or a second process lifecycle implementation.
-Currently only the SGLang definition is supplied.
+Reef supplies the SGLang and vLLM definitions; ``--inference.backend`` selects
+one.
 
 The launcher translates public paths to the existing internal service and
 recipe contracts before starting children. Config references such as

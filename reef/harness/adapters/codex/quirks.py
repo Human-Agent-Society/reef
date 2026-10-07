@@ -1,8 +1,8 @@
 """Codex adapter quirks: TOML, skill metadata, and safety invariants.
 
 Reef config nodes are JSON objects for every adapter, while Codex reads user
-configuration as TOML. ``finalize_render`` validates the benchmark invariants
-and performs that final serialization. Codex skills require ``name`` and
+configuration as TOML. ``process_config`` validates the benchmark invariants,
+and the render writes ``config.toml`` as TOML by its suffix. Codex skills require ``name`` and
 ``description`` frontmatter, synthesized when an evolved skill omits it; an
 agent_command renders as a skill in the same root, so it gets the same
 frontmatter. ``web_search`` may take any value Codex reads, because the
@@ -12,7 +12,7 @@ never, and a reef-codex session keeps Codex's on-request default, so the
 person approves each command that leaves the sandbox.
 
 Codex can run lifecycle hooks, but hook subprocesses do not share Codex's
-inner command sandbox. The finalizer therefore rejects ``code_extension``
+inner command sandbox. ``finalize_render`` therefore rejects ``code_extension``
 nodes until Reef can run them behind a separate isolation boundary.
 """
 
@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import re
+import tomllib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -28,24 +29,23 @@ import tomli_w
 import yaml
 
 from reef.core.model_metadata import ModelMetadata
+from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
 CONFIG = "codex/config.toml"
+MODELS = "codex/models.json"
 EXTENSIONS = "codex/extensions/"
-SKILLS = "codex/skills/"
 WEB_SEARCH_MODES = ("disabled", "cached", "indexed", "live")
 
+#: The config.toml keys a tree may set.
 ALLOWED_CONFIG_KEYS = {
     "analytics",
     "check_for_update_on_startup",
     "features",
     "feedback",
-    "model",
     "model_auto_compact_token_limit",
     "model_auto_compact_token_limit_scope",
     "model_context_window",
-    "model_provider",
-    "model_providers",
     "model_reasoning_effort",
     "model_reasoning_summary",
     "model_verbosity",
@@ -54,6 +54,8 @@ ALLOWED_CONFIG_KEYS = {
     "tool_output_token_limit",
     "web_search",
 }
+#: The config.toml keys Reef's model binding writes; the render refuses each from a tree without the binding.
+BINDING_CONFIG_KEYS = {"model", "model_provider", "model_providers"}
 ALLOWED_FEATURES = {
     "apps",
     "enable_request_compression",
@@ -93,7 +95,7 @@ def validate_config(config: dict[str, Any]) -> None:
             "codex composition may not set approval_policy: episodes pin never, and a reef-codex session keeps"
             " on-request so the person approves each command that leaves the sandbox"
         )
-    extra = sorted(set(config) - ALLOWED_CONFIG_KEYS)
+    extra = sorted(set(config) - ALLOWED_CONFIG_KEYS - BINDING_CONFIG_KEYS)
     if extra:
         raise RenderError(f"codex config keys are not admitted for benchmark episodes: {', '.join(extra)}")
     if config.get("web_search") not in WEB_SEARCH_MODES:
@@ -125,18 +127,6 @@ def validate_config(config: dict[str, Any]) -> None:
         raise RenderError("codex composition contains unadmitted sandbox_workspace_write fields")
     if sandbox.get("writable_roots"):
         raise RenderError("codex composition may not add sandbox_workspace_write.writable_roots")
-    providers = config.get("model_providers")
-    if isinstance(providers, dict):
-        extra_providers = sorted(set(providers) - {"reef"})
-        if extra_providers:
-            raise RenderError(
-                f"codex composition may only configure the Reef model provider: {', '.join(extra_providers)}"
-            )
-        for name, provider in providers.items():
-            if not isinstance(provider, dict) or set(provider) - ALLOWED_PROVIDER_KEYS:
-                raise RenderError(f"codex model provider {name!r} contains unadmitted fields")
-    if config.get("model_provider") not in (None, "reef"):
-        raise RenderError("codex composition must use the Reef model provider")
 
 
 def bundled_model_catalog() -> dict[str, dict[str, object]]:
@@ -164,25 +154,10 @@ def native_model_config(model: str, catalog: Mapping[str, dict[str, object]]) ->
     return None
 
 
-def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    try:
-        config = json.loads(files[CONFIG])
-    except (KeyError, json.JSONDecodeError) as exc:
-        raise RenderError("codex primary config must be a JSON object before TOML rendering") from exc
-    if not isinstance(config, dict):
-        raise RenderError("codex primary config must be an object")
-
-    if any(path.startswith(EXTENSIONS) for path in files):
-        raise RenderError(
-            "codex code_extension is not supported safely because native hooks run outside the command sandbox"
-        )
-    validate_config(config)
-    metadata_config = json.loads(files.pop("codex/models.json", "{}"))
-    if not isinstance(metadata_config, dict) or set(metadata_config) - {"models"}:
-        raise RenderError("codex models config accepts only models")
-    metadata_models = metadata_config.get("models", {})
-    if not isinstance(metadata_models, dict):
-        raise RenderError("codex models must map model names to metadata")
+def get_model_catalog(metadata_models: Mapping[object, object]) -> dict[str, dict[str, object]]:
+    """The models.json catalog Codex reads, by model slug: the pinned CLI's bundled models, then one entry per
+    model in ``metadata_models`` (model name to Reef model metadata); empty when ``metadata_models`` is.
+    """
     # A catalog replaces Codex's built-ins, including when the user later selects another model.
     bundled_models = bundled_model_catalog() if metadata_models else {}
     catalog = dict(bundled_models)
@@ -227,17 +202,55 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
             supports_reasoning_summary_parameter=metadata.reasoning,
         )
         catalog[model] = model_config
-    if catalog:
-        files["codex/models.json"] = json.dumps({"models": list(catalog.values())}, indent=2) + "\n"
-        # Codex resolves this relative to config.toml, including in a relocated client session.
-        config["model_catalog_json"] = "models.json"
-    try:
-        files[CONFIG] = tomli_w.dumps(config)
-    except (TypeError, ValueError) as exc:
-        raise RenderError(f"codex config cannot be represented as TOML: {exc}") from exc
+    return catalog
 
-    for path, text in list(files.items()):
-        if path.startswith(SKILLS) and path.endswith("/SKILL.md"):
-            files[path] = with_frontmatter(path, text)
 
-    return files
+class CodexAdapterRenderer(AdapterRenderer):
+    @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        if path == CONFIG:
+            validate_config(config)
+            return config
+        if set(config) - {"models"}:
+            raise RenderError("codex models config accepts only models")
+        metadata_models = config.get("models", {})
+        if not isinstance(metadata_models, dict):
+            raise RenderError("codex models must map model names to metadata")
+        return {"models": list(get_model_catalog(metadata_models).values())}
+
+    @staticmethod
+    def process_skill(path: str, text: str) -> str:
+        # An agent_command renders to the same path template, so it is processed here too.
+        return with_frontmatter(path, text)
+
+    @staticmethod
+    def check_model_route(
+        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
+    ) -> None:
+        config = configs[CONFIG]
+        providers = config.get("model_providers")
+        if isinstance(providers, dict):
+            extra_providers = sorted(set(providers) - {"reef"})
+            if extra_providers:
+                raise RenderError(
+                    f"codex composition may only configure the Reef model provider: {', '.join(extra_providers)}"
+                )
+            for name, provider in providers.items():
+                if not isinstance(provider, dict) or set(provider) - ALLOWED_PROVIDER_KEYS:
+                    raise RenderError(f"codex model provider {name!r} contains unadmitted fields")
+        if config.get("model_provider") not in (None, "reef"):
+            raise RenderError("codex composition must use the Reef model provider")
+
+    @staticmethod
+    def finalize_render(files: dict[str, str]) -> dict[str, str]:
+        if any(path.startswith(EXTENSIONS) for path in files):
+            raise RenderError(
+                "codex code_extension is not supported safely because native hooks run outside the command sandbox"
+            )
+        if json.loads(files[MODELS])["models"]:
+            # Codex resolves this relative to config.toml, including in a relocated client session.
+            files[CONFIG] = tomli_w.dumps({**tomllib.loads(files[CONFIG]), "model_catalog_json": "models.json"})
+        else:
+            # A catalog replaces Codex's built-ins, so none is written without model metadata.
+            files.pop(MODELS)
+        return files

@@ -18,10 +18,12 @@ from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RP
 from reef.train.slime_backend.resources import SlimeDeploymentResources
 
 
+#: The receiver control protocol Slime's updaters attach to, per inference backend.
+WEIGHT_TRANSFER_PROTOCOLS = {"sglang": "slime-sglang-control-v2", "vllm": "reef-vllm-control-v1"}
+
+
 class SlimeTrainingService(TrainingService):
     """Own actor/critic workers and a sender attachment, never the coordinator."""
-
-    weight_transfer_protocol = "slime-sglang-control-v2"
 
     def __init__(
         self,
@@ -29,8 +31,14 @@ class SlimeTrainingService(TrainingService):
         *,
         preparation: BridgePreparation,
         loss_family_config: object | None,
+        inference_backend: str = "sglang",
         train_rpc_timeout_s: float | None = None,
     ) -> None:
+        if inference_backend not in WEIGHT_TRANSFER_PROTOCOLS:
+            raise ValueError(
+                f"Slime weight transfer has no receiver protocol for inference backend {inference_backend!r}"
+            )
+        self._weight_transfer_protocol = WEIGHT_TRANSFER_PROTOCOLS[inference_backend]
         if train_rpc_timeout_s is None:
             train_rpc_timeout_s = DEFAULT_TRAIN_RPC_TIMEOUT_S
         elif (
@@ -50,6 +58,10 @@ class SlimeTrainingService(TrainingService):
         self._session_id: str | None = None
         self._started = False
         self._closed = False
+
+    @property
+    def weight_transfer_protocol(self) -> str:
+        return self._weight_transfer_protocol
 
     def start(self, resources: DeploymentResources) -> None:
         if self._started or self._closed:
