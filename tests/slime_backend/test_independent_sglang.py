@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from dataclasses import make_dataclass
@@ -218,6 +219,50 @@ def test_native_launch_maps_physical_placement_to_visible_gpu(monkeypatch, visib
 
     monkeypatch.setenv("CUDA_VISIBLE_DEVICES", visible)
     assert local_gpu_id(physical) == expected
+
+
+@pytest.mark.parametrize(
+    "encoder_only,server_module",
+    [(True, "sglang.srt.disaggregation.encode_server"), (False, "sglang.srt.entrypoints.http_server")],
+)
+def test_engine_process_starts_the_server_of_its_worker_type(monkeypatch, encoder_only, server_module):
+    from reef.inference.sglang import process as module
+
+    started = []
+    for name in ("sglang.srt.disaggregation.encode_server", "sglang.srt.entrypoints.http_server"):
+        monkeypatch.setitem(
+            sys.modules, name, SimpleNamespace(launch_server=lambda args, name=name: started.append((name, args)))
+        )
+    monkeypatch.setitem(sys.modules, "sglang.srt.server_args", SimpleNamespace(ServerArgs=lambda **options: options))
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+    monkeypatch.setenv("PYTORCH_ALLOC_CONF", "expandable_segments:True")
+    options = {"model_path": "model", "encoder_only": encoder_only}
+    module._run_engine(options)
+    assert started == [(server_module, options)]
+    assert "PYTORCH_CUDA_ALLOC_CONF" not in os.environ
+    assert "PYTORCH_ALLOC_CONF" not in os.environ
+
+
+def test_encoder_engine_starts_in_its_own_spawned_process(monkeypatch):
+    from reef.inference.sglang import process as module
+
+    events = []
+
+    class Process:
+        def __init__(self, target, args):
+            events.append((target, args))
+
+        def start(self):
+            events.append("start")
+
+    monkeypatch.setattr(
+        module.multiprocessing, "get_context", lambda method: events.append(method) or SimpleNamespace(Process=Process)
+    )
+    # At the pinned SGLang commit, encode_server defines launch_server only.
+    monkeypatch.setitem(sys.modules, "sglang.srt.disaggregation.encode_server", SimpleNamespace(launch_server=print))
+    options = {"model_path": "model", "encoder_only": True}
+    assert isinstance(module.launch_engine(options), Process)
+    assert events == ["spawn", (module._run_engine, (options,)), "start"]
 
 
 def test_sglang_enables_capture_plugin_without_training_preflight(monkeypatch):

@@ -256,8 +256,8 @@ class SGLangModel:
         pending_without_retry: list[ray.ObjectRef] = []
         for group in self.server_groups:
             if group.worker_type == "encoder" or group.external:
-                # A failed blocking encoder launch leaves no process to stop, and Reef does not launch
-                # external engines, so neither is relaunched.
+                # Encoder groups are not relaunched on a port conflict yet, and Reef does not launch external
+                # engines.
                 pending_without_retry.extend(group.start_engines(startup.cursors).values())
             else:
                 startup.start(group)
@@ -334,7 +334,8 @@ class SGLangCluster:
             encoder_urls = []
             for group in model.server_groups:
                 if group.worker_type == "encoder":
-                    # A failed blocking encoder launch leaves no process to stop, so it is never relaunched.
+                    # The other groups need the encoder URLs, so encoder groups start first. They are not
+                    # relaunched on a port conflict yet.
                     ray.get(list(group.start_engines(startup.cursors).values()))
                     encoder_urls.extend(ray.get([engine.get_url.remote() for engine in group.engines]))
             for group in model.server_groups:

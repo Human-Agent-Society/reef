@@ -13,18 +13,17 @@ def _run_engine(options: dict[str, Any]) -> None:
     # The inference allocator must not inherit training's expandable segments.
     os.environ.pop("PYTORCH_CUDA_ALLOC_CONF", None)
     os.environ.pop("PYTORCH_ALLOC_CONF", None)
-    from sglang.srt.entrypoints.http_server import launch_server
     from sglang.srt.server_args import ServerArgs
 
+    if options.get("encoder_only"):
+        # SGLang's own launcher starts an encoder-only server through this module.
+        from sglang.srt.disaggregation.encode_server import launch_server
+    else:
+        from sglang.srt.entrypoints.http_server import launch_server
     launch_server(ServerArgs(**options))
 
 
 def launch_engine(options: dict[str, Any]) -> Any:
-    if options.get("encoder_only"):
-        from sglang.srt.disaggregation.encode_server import launch_server_process
-        from sglang.srt.server_args import ServerArgs
-
-        return launch_server_process(ServerArgs(**options), start_method="spawn", wait_for_server=True)
     process = multiprocessing.get_context("spawn").Process(target=_run_engine, args=(options,))
     process.start()
     return process
