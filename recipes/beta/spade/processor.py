@@ -326,7 +326,10 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
     async def generate(
         self, request: TaskGenerationRequest, *, skill: str | None = None, index: int = 0
     ) -> HarborTask:
-        """One Designer proposal through the generator service; a reply that is no task raises :class:`ProposalRefused`."""
+        """Generate one task through the generator service.
+
+        Raise :class:`ProposalRefused` if the Designer reply contains no usable task.
+        """
         proposed = await self.propose_task(request, skill=skill, index=index)
         if proposed.task is None:
             raise ProposalRefused(proposed.refusal, proposed.record_id)
@@ -418,7 +421,10 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
     async def proposed(
         self, generation: int, index: int, skill: str | None, *, request: TaskGenerationRequest | None = None
     ) -> tuple[ProposalRecord, TaskMeasure | None]:
-        """One proposal from the Designer's call to its report: the task measured, or the refusal."""
+        """Run one proposal through generation, validation, play, and feedback.
+
+        Return the proposal record and any task measurement.
+        """
         if self.generator is None:
             raise GeneratorError("this processor has no generator service to ask")
         if request is None:

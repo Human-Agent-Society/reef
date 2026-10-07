@@ -757,28 +757,32 @@ Task generation
 
 ``TaskGenerationProcessor`` extends ``DataProcessor`` with two abstract methods:
 ``async generate(request: TaskGenerationRequest) -> HarborTask`` and
-``async validate(task_path: Path) -> TaskValidationResult``. Both must be
-implemented by subclasses. The ABC supplies no task execution lifecycle;
-a method pairs the hooks with an engine and a worker of its own, as SPADE
-pairs them with the reported-feedback engine and the generator service
-(``reef.record2dataset``).
+``async validate(task_path: Path) -> TaskValidationResult``. Subclasses must
+implement both methods. The ABC supplies no task execution lifecycle.
+Each recipe supplies the lifecycle that runs these methods.
+SPADE uses the reported-feedback engine and the generator service,
+``reef.record2dataset``.
 
-``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``
-is defined in ``reef.core.tasks.generation`` and exported by ``reef.core.tasks``.
-It carries distinct ``AgentRecord`` values from one scenario and non-empty
-requirements text. Use an empty record tuple for description-only generation.
-Materials are either a tuple of local ``Path`` values in ``assets`` or a mapping
-of relative file names to UTF-8 text in ``asset_files``. Supplying both is an
-error. Construction validates fields without reading files.
+``reef.core.tasks.generation`` defines
+``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``.
+``reef.core.tasks`` exports this type.
+It carries source records and non-empty requirements text.
+Each ``AgentRecord`` must have a distinct ID and belong to the same scenario.
+Use an empty record tuple for description-only generation.
+For local materials, pass a tuple of ``Path`` values in ``assets``.
+For materials in memory, use ``asset_files`` to map relative file names to
+UTF-8 text. Supplying both fields is an error. The constructor validates
+fields without reading files.
 
 Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 ...)``. Its HTTP client reads local materials and sends their contents. The
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
-task preserves source record ids in order. The former import from
+task preserves source record IDs in order. The former import from
 ``reef.train.processors.task_generation`` remains supported.
 
-``TaskValidationResult(errors=())`` exposes ``is_valid``; each error is a
-non-empty explanation of a task defect. Check execution failures raise instead.
+``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
+non-empty explanation of a task defect. Failures to execute the checks raise
+exceptions instead.
 Generation and validation must run outside the synchronous trainer-lock path.
 See `Processors <../developer-guide/processors.rst#task-generation-contract>`__
 for lifecycle requirements.

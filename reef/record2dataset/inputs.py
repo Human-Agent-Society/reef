@@ -30,8 +30,8 @@ def read_asset_files(paths: Sequence[Path]) -> dict[str, str]:
     """Read selected UTF-8 files or directories on the caller's machine.
 
     Names are relative to each selected directory, prefixed with ``asset-N/``.
-    No symlinks or special files are followed. Missing, unreadable, binary, or
-    oversized inputs raise ValueError; no content is silently omitted.
+    The reader rejects symlinks and special files. Missing, unreadable, binary,
+    or oversized inputs raise ValueError. The reader does not omit content.
     """
     files: dict[str, str] = {}
     byte_count = 0
