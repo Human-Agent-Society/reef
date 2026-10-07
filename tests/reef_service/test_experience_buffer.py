@@ -1,0 +1,89 @@
+"""Experience buffer contracts: selection order, reservations, and the processor selection hook."""
+
+from __future__ import annotations
+
+from collections.abc import Sequence
+from pathlib import Path
+
+import pytest
+
+from reef.core import AgentRecord, RequestType
+from reef.train.experience import ArrivalOrder, ExperienceBuffer, ExperienceUnit, GroupKeyOrder, SelectionPolicy
+from reef.train.experience.selection import KeyT, MemberT
+from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor
+from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch
+
+
+def unit(unit_id: str, arrival_index: int, group_key: int | None = None) -> ExperienceUnit[str, str]:
+    return ExperienceUnit(unit_id, (unit_id,), arrival_index, group_key)
+
+
+class NewestFirst(SelectionPolicy):
+    def select(
+        self, candidates: Sequence[ExperienceUnit[KeyT, MemberT]], max_unit_count: int
+    ) -> tuple[ExperienceUnit[KeyT, MemberT], ...]:
+        return tuple(sorted(candidates, key=lambda candidate: -candidate.arrival_index)[:max_unit_count])
+
+
+def test_arrival_order_takes_the_oldest_units_up_to_the_maximum_count() -> None:
+    candidates = (unit("c", 3), unit("a", 1), unit("b", 2))
+    assert [selected.unit_id for selected in ArrivalOrder().select(candidates, 2)] == ["a", "b"]
+
+
+def test_group_key_order_takes_ungrouped_units_before_groups_in_key_order() -> None:
+    candidates = (unit("late-group", 1, group_key=2), unit("single", 3), unit("early-group", 2, group_key=1))
+    selected = GroupKeyOrder().select(candidates, 3)
+    assert [chosen.unit_id for chosen in selected] == ["single", "early-group", "late-group"]
+
+
+def test_a_reservation_does_not_change_until_it_is_consumed() -> None:
+    buffer: ExperienceBuffer[str, str] = ExperienceBuffer()
+    for name in ("a", "b", "c"):
+        buffer.put(unit(name, buffer.next_arrival_index()))
+    reserved = buffer.reserve(2)
+    buffer.remove("a")
+    buffer.put(unit("d", buffer.next_arrival_index()))
+    assert buffer.reserved_units() == reserved
+    # The consumed batch includes a reserved unit that was removed after the reservation.
+    assert [consumed.unit_id for consumed in buffer.consume_reserved()] == ["a", "b"]
+    assert [remaining.unit_id for remaining in buffer.units()] == ["c", "d"]
+    assert buffer.reserved_units() == ()
+
+
+def test_a_unit_needs_a_member_and_a_reservation_needs_a_non_negative_count() -> None:
+    with pytest.raises(ValueError, match="at least one member"):
+        ExperienceUnit("empty", (), 1)
+    with pytest.raises(ValueError, match="max_unit_count must not be negative"):
+        ExperienceBuffer[str, str]().reserve(-1)
+
+
+def test_a_processor_changes_its_batch_order_through_selection_policy() -> None:
+    class NewestFirstProcessor(ReportedFeedbackProcessor):
+        def selection_policy(self) -> SelectionPolicy:
+            return NewestFirst()
+
+        def make_sample(self, context: ReportContext) -> TrainDataItem:
+            return TaskItem(Path(context.report.agent_record_id))
+
+        def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+            return TrainingBatch(f"batch:{batch_number}", items)
+
+    processor = NewestFirstProcessor(ProcessorContext("math", {"batch_size": 2}))
+    for index in (1, 2, 3):
+        processor.ingest(
+            AgentRecord.create(
+                scenario="math", request_type=RequestType.INFERENCE, payload={}, agent_record_id=f"i{index}"
+            )
+        )
+        processor.ingest(
+            AgentRecord.create(
+                scenario="math",
+                request_type=RequestType.REPORT,
+                payload={"score": 1.0, "references": [f"i{index}"]},
+                agent_record_id=f"r{index}",
+            )
+        )
+    batch = processor.build_batch()
+    assert [str(item.task_path) for item in batch.items] == ["r3", "r2"]
+    assert processor.acknowledge(batch.batch_id) == {"r3", "r2", "i3", "i2"}
+    assert processor.status()["ready_units"] == 1
