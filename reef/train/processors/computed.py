@@ -41,7 +41,14 @@ from threading import Lock, Thread
 from typing import Any
 
 from reef.core.records_types import AgentRecord
-from reef.train.experience import ArrivalOrder, ExperienceBuffer, ExperienceUnit, SelectionPolicy
+from reef.train.experience import (
+    ArrivalOrder,
+    EligibilityCheck,
+    ExperienceBuffer,
+    ExperienceUnit,
+    NewestVersionCheck,
+    SelectionPolicy,
+)
 from reef.train.processors.base import DataProcessor
 from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem
 
@@ -202,7 +209,8 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     deadlock the FIFO.
 
     Candidates wait in an :class:`~reef.train.experience.ExperienceBuffer`.
-    ``selection_policy`` sets their batch order.
+    ``selection_policy`` sets their batch order, and ``eligibility_checks``
+    sets which candidates are dropped.
 
     The line, in reading order: the recipe's ``ingest`` (catch_up →
     dispatch → track), its ``judge`` on the worker, then here —
@@ -220,7 +228,7 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         self._tracked: dict[str, AgentRecord] = {}
         self._in_flight: dict[str, AgentRecord] = {}
         #: Candidates by receipt, and the reserved batch.
-        self.experience_buffer = ExperienceBuffer(self.selection_policy())
+        self.experience_buffer = ExperienceBuffer(self.selection_policy(), self.eligibility_checks())
         #: Terminal receipts: retired or trained, both releasable and never
         #: distinguished by anything that reads them.
         self._terminal: set[str] = set()
@@ -247,6 +255,14 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
         candidates in the order that their judgments arrived.
         """
         return ArrivalOrder()
+
+    def eligibility_checks(self) -> tuple[EligibilityCheck, ...]:
+        """Return the checks that drop candidates when no batch is out.
+
+        The constructor calls this method one time. The default keeps only the
+        candidates of the newest runtime load ID, by record arrival.
+        """
+        return (NewestVersionCheck(),)
 
     @abstractmethod
     def ingest(self, item: AgentRecord) -> None:
@@ -336,25 +352,25 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
             if sample is None:
                 self.retire(judgment.receipt)
                 continue
-            # 3. The record is a batch candidate now. Only the newest weight
-            #    version (by record arrival) keeps its place — but never
-            #    reshuffle under an emitted-but-unacknowledged batch, whose
-            #    samples reference the pending candidates.
+            # 3. The record is a batch candidate now. The eligibility checks
+            #    drop candidates (by default, all but the newest weight version
+            #    by record arrival) — but never under an emitted-but-unacknowledged
+            #    batch, whose samples reference the pending candidates.
             buffer = self.experience_buffer
             receipt = judgment.receipt
             buffer.put(
                 CandidateUnit(
-                    unit_id=receipt, arrival_index=buffer.next_arrival_index(), receipt=receipt, sample=sample
+                    unit_id=receipt,
+                    arrival_index=buffer.next_arrival_index(),
+                    runtime_load_id=sample.training.get("runtime_load_id"),
+                    source_index=self._arrival_order[receipt],
+                    receipt=receipt,
+                    sample=sample,
                 )
             )
             if self._pending is None:
-                candidates = candidate_units(buffer.units())
-                newest = max(candidates, key=lambda unit: self._arrival_order[unit.receipt])
-                newest_version = newest.sample.training.get("runtime_load_id")
-                for unit in candidates:
-                    if unit.sample.training.get("runtime_load_id") != newest_version:
-                        buffer.remove(unit.unit_id)
-                        self.retire(unit.receipt)
+                for unit in candidate_units(tuple(dropped.unit for dropped in buffer.drop_ineligible())):
+                    self.retire(unit.receipt)
 
     # ----------------------------------------------------------- batch cycle
     #

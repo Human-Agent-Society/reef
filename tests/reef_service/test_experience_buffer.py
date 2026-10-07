@@ -1,4 +1,4 @@
-"""Experience buffer contracts: selection order, reservations, and the processor selection hook."""
+"""Experience buffer contracts: selection order, reservations, eligibility checks, and the processor hooks."""
 
 from __future__ import annotations
 
@@ -8,7 +8,16 @@ from pathlib import Path
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.train.experience import ArrivalOrder, ExperienceBuffer, ExperienceUnit, GroupKeyOrder, SelectionPolicy
+from reef.train.experience import (
+    ArrivalOrder,
+    EligibilityCheck,
+    ExperienceBuffer,
+    ExperienceUnit,
+    GroupKeyOrder,
+    IneligibleUnit,
+    NewestVersionCheck,
+    SelectionPolicy,
+)
 from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor
 from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch
 
@@ -91,3 +100,27 @@ def test_a_processor_changes_its_batch_order_through_selection_policy() -> None:
     assert [str(item.task_path) for item in batch.items] == ["r3", "r2"]
     assert processor.acknowledge(batch.batch_id) == {"r3", "r2", "i3", "i2"}
     assert processor.status()["ready_units"] == 1
+
+
+def test_newest_version_check_keeps_the_version_of_the_last_source_record() -> None:
+    # The unit that arrived last in the buffer is not the newest: its source record arrived first.
+    late_judgment = ExperienceUnit(unit_id="late", arrival_index=3, runtime_load_id="v1", source_index=1)
+    newest = ExperienceUnit(unit_id="newest", arrival_index=2, runtime_load_id="v2", source_index=3)
+    same_version = ExperienceUnit(unit_id="same", arrival_index=1, runtime_load_id="v2", source_index=2)
+    dropped = NewestVersionCheck().ineligible_units((late_judgment, newest, same_version))
+    assert [(result.unit.unit_id, result.reason) for result in dropped] == [("late", "older_runtime_load_id")]
+
+
+def test_drop_ineligible_removes_and_returns_the_units_that_fail_each_check() -> None:
+    buffer = ExperienceBuffer(checks=(NewestVersionCheck(),))
+    for name, version in (("old", "v1"), ("new", "v2")):
+        buffer.put(ExperienceUnit(unit_id=name, arrival_index=buffer.next_arrival_index(), runtime_load_id=version))
+    assert [result.unit.unit_id for result in buffer.drop_ineligible()] == ["old"]
+    assert [held.unit_id for held in buffer.units()] == ["new"]
+
+    class ForeignCheck(EligibilityCheck):
+        def ineligible_units(self, units: Sequence[ExperienceUnit]) -> tuple[IneligibleUnit, ...]:
+            return (IneligibleUnit(unit("not-held", 1), "foreign"),)
+
+    with pytest.raises(ValueError, match="does not hold"):
+        ExperienceBuffer(checks=(ForeignCheck(),)).drop_ineligible()

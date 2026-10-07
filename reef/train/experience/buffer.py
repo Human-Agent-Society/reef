@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import Hashable
+from collections.abc import Hashable, Sequence
 
+from reef.train.experience.eligibility import EligibilityCheck, IneligibleUnit
 from reef.train.experience.selection import ArrivalOrder, ExperienceUnit, SelectionPolicy
 
 
@@ -11,14 +12,16 @@ class ExperienceBuffer:
     """Hold the units that a processor can batch, and its reserved batch.
 
     The processor adds and removes units. It also decides what a consumed unit
-    releases. The buffer orders units only through its ``SelectionPolicy``.
+    releases. The buffer orders units only through its ``SelectionPolicy``, and
+    removes unusable units only through its eligibility checks.
     A reservation does not change until the processor consumes it or reserves
     again. Thus the processor can return the same batch until the trainer
     acknowledges it.
     """
 
-    def __init__(self, selection: SelectionPolicy | None = None) -> None:
+    def __init__(self, selection: SelectionPolicy | None = None, checks: Sequence[EligibilityCheck] = ()) -> None:
         self.selection = ArrivalOrder() if selection is None else selection
+        self.checks = tuple(checks)
         self.units_by_id: dict[Hashable, ExperienceUnit] = {}
         self.reserved: tuple[ExperienceUnit, ...] | None = None
         self.arrival_count = 0
@@ -45,6 +48,21 @@ class ExperienceBuffer:
     def units(self) -> tuple[ExperienceUnit, ...]:
         """Return all units, in the order that the buffer received them."""
         return tuple(self.units_by_id.values())
+
+    def drop_ineligible(self) -> tuple[IneligibleUnit, ...]:
+        """Run the eligibility checks in order, remove the units that fail, and return them.
+
+        Each check sees the units that the earlier checks kept. The processor
+        calls this method when no batch is out, and releases the returned units.
+        """
+        dropped: list[IneligibleUnit] = []
+        for check in self.checks:
+            for result in check.ineligible_units(self.units()):
+                if self.units_by_id.get(result.unit.unit_id) is not result.unit:
+                    raise ValueError(f"{type(check).__name__} returned a unit that the buffer does not hold")
+                self.units_by_id.pop(result.unit.unit_id)
+                dropped.append(result)
+        return tuple(dropped)
 
     def ordered_units(self) -> tuple[ExperienceUnit, ...]:
         """Return all units, in the order of the selection policy."""

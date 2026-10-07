@@ -716,6 +716,12 @@ and return a ``reef.train.experience.SelectionPolicy`` subclass. The constructor
 calls this method one time. The computed-feedback engine has the same hook for
 its candidates.
 
+The computed-feedback engine also has ``eligibility_checks()``. It returns the
+``reef.train.experience.EligibilityCheck`` objects that drop candidates while no
+batch is out. The default is ``NewestVersionCheck``, which keeps only the
+candidates of the newest runtime load ID, by record arrival. Dropped candidates
+are released and never batched.
+
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
 Reference validation runs at admission; incomplete groups wait for more valid
 samples. Training input violations raise instead of silently filtering reports.
