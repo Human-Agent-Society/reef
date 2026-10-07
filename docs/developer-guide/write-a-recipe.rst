@@ -149,12 +149,14 @@ Switch methods within a run
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 By default every job trains ``training_spec().objective`` at the backend's
-configured learning rate. A recipe that runs several phases in one continuing
-run, such as supervised training followed by policy training with a lower rate
-and a fresh warmup, overrides ``training_method_selector``. Reef calls the
-selector's ``select(batch, algorithm_state)`` once for each job, with the
-batch and the committed algorithm state, and trains the job with the
-``TrainingMethod`` it returns:
+configured learning rate. Some recipes run several phases in one continuing
+run. For example, supervised training can come first, and then policy
+training with a lower rate and a new warmup. To do this, override
+``training_method_selector``.
+
+Reef calls the selector's ``select(batch, algorithm_state)`` once for each job.
+It passes the batch and the committed algorithm state. Reef then trains the job
+with the ``TrainingMethod`` that ``select`` returns:
 
 .. code:: python
 
@@ -163,44 +165,45 @@ batch and the committed algorithm state, and trains the job with the
    from reef.runtime.interfaces import LearningRateSchedule, TrainingMethod
    from reef.train.runtime_backend import TrainingMethodSelector
 
-   WARMUP = LearningRateSchedule(
-       "warmup", 2e-5, warmup_steps=20, decay_style="cosine", decay_steps=500, min_learning_rate=2e-6
+   SUPERVISED = LearningRateSchedule(
+       "supervised", 2e-5, warmup_steps=20, decay_style="cosine", decay_steps=500, min_learning_rate=2e-6
    )
    POLICY = LearningRateSchedule("policy", 1e-6, warmup_steps=10)
 
 
-   class WarmupThenPolicy(TrainingMethodSelector):
-       def __init__(self, warmup_jobs: int) -> None:
-           self.warmup_jobs = warmup_jobs
+   class SupervisedThenPolicy(TrainingMethodSelector):
+       def __init__(self, supervised_jobs: int) -> None:
+           self.supervised_jobs = supervised_jobs
 
        def select(self, batch, algorithm_state):
-           if algorithm_state.get("steps", 0) < self.warmup_jobs:
-               return TrainingMethod("my_pkg.objectives:WarmupObjective", WARMUP)
+           if algorithm_state.get("steps", 0) < self.supervised_jobs:
+               return TrainingMethod("my_pkg.objectives:SupervisedObjective", SUPERVISED)
            return TrainingMethod("my_pkg.objectives:PolicyObjective", POLICY)
 
 
    @dataclass(frozen=True)
    class MyMethodRecipe(WeightTrainingRecipe):
-       warmup_jobs: int = config_field(200)
+       supervised_jobs: int = config_field(200)
 
        def training_method_selector(self):
-           return WarmupThenPolicy(self.warmup_jobs)
+           return SupervisedThenPolicy(self.supervised_jobs)
 
 When to switch, and which data each phase trains on, is the recipe's logic.
 Reef does not ask for the list of objectives in advance.
 
 - ``select`` must depend only on its arguments. A retry calls it again with
-  the same batch and state, and the method is part of the job's identity. The
-  ``steps`` counter that the shipped objectives keep (``next_steps``) is a
-  convenient switch point. Each objective returns the whole next state, so
-  after a switch only what the new objective carries forward remains.
+  the same batch and state, and the method is part of the job's identity.
+- You can use the ``steps`` counter that the shipped objectives keep
+  (``next_steps``) to decide when to switch. Each objective returns the
+  complete next state. After a switch, the state holds only the keys that the
+  new objective returns.
 - Name an objective from another package by its dotted reference. The
   training backend resolves the objective in its own process, where a short
   name is known only if its package was imported.
 - The backend validates each selected method before that job trains and
   refuses one it cannot train. ``training_spec().objective`` is the startup
   objective: Slime starts its workers with that objective's loss family and
-  driver options. `Per-job loss families
+  driver options. `Per-job families
   <loss-families.rst#per-job-families>`__ lists what a later family may
   change on Slime; `Train with Tinker <../user-guide/tinker.rst>`__ lists what
   Tinker supports.
@@ -221,11 +224,16 @@ with its training state:
 - Starting a schedule changes the rate only. It does not reset the optimizer
   state.
 
-Each job's metrics include ``training_method``: its objective and requested
-schedule. While a schedule is active, a job that took optimizer steps also
-reports ``learning_rate``, the rate of its last step, and
-``learning_rate_schedule``, the schedule's name and completed steps. Tinker
-reports ``learning_rate`` for every job.
+Each job reports these metrics:
+
+- ``training_method``: the job's objective and requested schedule. Every job
+  reports it.
+- ``learning_rate``: the rate of the job's last optimizer step.
+- ``learning_rate_schedule``: the active schedule's name and completed steps.
+
+A job reports ``learning_rate`` and ``learning_rate_schedule`` while a
+schedule is active and the job took optimizer steps. Tinker also reports
+``learning_rate`` when no schedule is active.
 
 Gate a candidate
 ~~~~~~~~~~~~~~~~

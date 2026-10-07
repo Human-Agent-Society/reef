@@ -140,12 +140,12 @@ loss cannot train.
 Training method
 ---------------
 
-The objective one training job trains with, and optionally the learning-rate
-schedule it selects: a ``TrainingMethod``. A recipe's
-``training_method_selector`` picks one for every job, so one run can switch
-objectives or restart its learning-rate schedule; by default every job trains
-the recipe's ``training_spec()`` objective. The method is part of the job's
-identity. See `Write a recipe
+A ``TrainingMethod``: the objective of one training job and an optional
+learning-rate schedule for that job. A recipe's ``training_method_selector``
+picks one for every job, so one run can switch objectives or start a new
+learning-rate schedule. By default every job trains the recipe's
+``training_spec()`` objective. The method is part of the job's identity. See
+`Write a recipe
 <../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__.
 
 Loss family

@@ -927,7 +927,7 @@ the committed algorithm state. The default ``FixedTrainingMethod`` trains every
 job with ``training_spec().objective``. ``RuntimeCandidateBackend`` calls the
 selector before each job and passes the method to
 ``TrainingRuntime.prepare_training_step``. The backend resolves the objective
-and records the method in the job payload, so the method takes part in the
+and records the method in the job payload, so the method is part of the
 job's identity. `Write a recipe
 <../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__
 describes selection and schedule semantics.
@@ -957,13 +957,25 @@ Migration: move the former ``StepPreparer.__call__`` body to
 ``WeightTrainingSpec(objective=..., scheduling=...)``, and ``StepSignal`` no
 longer carries ``scheduling``. Declare ``supports_multiple_epochs = True`` on
 an objective whose loss is clipped for off-policy passes. Plain function
-references are replaced by objective class/instance references. The second
-argument of every ``prepare_training_step``, including the coordinator RPC, is
-the job's ``TrainingMethod``, followed by the recipe's ``scheduling``; read the
-objective reference from ``method.objective``. Update custom runtimes and upgrade coordinators
-and workers together. Experiment backend metadata now uses ``objective`` and
-``scheduling`` instead of ``step_preparer``; committed algorithm state,
-training payloads, checkpoints and artifact formats are unchanged.
+references are replaced by objective class/instance references. Experiment
+backend metadata now uses ``objective`` and ``scheduling`` instead of
+``step_preparer``. This migration left committed algorithm state, training
+payloads, checkpoints and artifact formats unchanged.
+
+Migration to per-job training methods: the second argument of every
+``prepare_training_step``, including the coordinator RPC, is now the job's
+``TrainingMethod`` instead of the objective string. Read the objective
+reference from ``method.objective``. ``RuntimeCandidateBackend`` takes a
+``TrainingMethodSelector`` instead of the objective string. Update custom
+runtimes, and upgrade coordinators and workers together. These formats change:
+
+- Training payloads gain a ``method`` entry, so the same rows produce a
+  different job id. Finish or reject the jobs in flight before you upgrade.
+- Tinker checkpoint manifests and ``incumbent.json`` gain an optional
+  ``learning_rate_schedule`` entry after a recipe selects a schedule.
+  Older manifests load unchanged.
+- The Slime bridge writes ``reef_learning_rate_schedules.json`` beside the job
+  marker after a recipe selects a schedule.
 
 Harness method
 --------------
