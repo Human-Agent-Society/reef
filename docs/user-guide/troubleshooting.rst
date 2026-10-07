@@ -76,7 +76,9 @@ Reports and training
 
 Reef keeps no copy of the settled marker that ``RUNNING`` replaced. So recovery is manual. The checkpoint root is the directory that holds the HF and Megatron checkpoint directories, the marker, and ``.reef-retention``. Unless all the conditions below hold, restore the checkpoint root from a copy. Use a copy from a time when no job ran and the marker said ``COMPLETE``. That is after the last committed job and before the next job started.
 
-The preflight also refuses a copy whose marker says ``REJECTED``. So if the job before this one was rejected, the copy must be older than that job. For a first job, the copy is an empty checkpoint root. Reef does not take these copies. Automatic recovery is tracked in `#333 <https://github.com/Human-Agent-Society/reef/issues/333>`__.
+The preflight also refuses a copy whose marker says ``REJECTED``. So if the job before this one was rejected, the copy must be older than that job. Reef does not take these copies. Automatic recovery is tracked in `#333 <https://github.com/Human-Agent-Society/reef/issues/333>`__.
+
+For a first job, restore an empty checkpoint root. This reset discards the interrupted job's batch. No marker existed before the first job, so Reef starts under a new runtime load ID, as on a first start. In a full-weight run, Reef then drops the batch as stale. The reset also removes the Megatron checkpoint, the scenario history and the adapter snapshots, so no weights keep the job's step.
 
 *Full-weight run, the job saved nothing.* Recover by hand only when all of these hold:
 
@@ -110,7 +112,7 @@ Then replace the marker with the settled marker of rollout ``P``. For example, w
 
 The preflight then accepts the checkpoint directories. Reef does not count the interrupted job's batch as trained. Do not use the interrupted job's ID as ``job_id``. If you do, Reef takes its batch as already trained.
 
-Do not delete the marker to get past the error. In a full-weight run without a marker, Reef serves under a new runtime load ID. It then drops the interrupted job's batch as stale.
+Do not delete the marker to get past the error. The checkpoint directories stay, so the trainer loads the iteration that the tracker names. In a full-weight run without a marker, Reef publishes these weights under a new runtime load ID. They can be a rejected candidate, or they can already hold the interrupted job's step. Reef also drops the interrupted job's batch as stale. The empty-root reset for a first job loses that batch too. But it leaves no checkpoint, so Reef starts as on a first start.
 
 In a per-scenario LoRA run, admission compares the batch with the scenario's publications in ``reef_scenarios.json``. It does not compare the batch with the serving runtime load ID. So Reef admits the batch again. The batch can then train on an adapter snapshot that already holds the job's step.
 
