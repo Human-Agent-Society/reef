@@ -761,7 +761,10 @@ do not publish inference weights.
 
 Preparation failure is retryable without a new job identity. Once ``RUNNING``
 is recorded, a training/save failure is ambiguous and requires operator
-recovery; automatic retry must not repeat a possible optimizer step. A
+recovery; automatic retry must not repeat a possible optimizer step. For
+Slime, the startup preflight's error lists what the job left on disk, and
+`Troubleshooting <../user-guide/troubleshooting.rst#reports-and-training>`__
+gives the recovery. A
 checkpointed or completed job replays without preparing or training again.
 Resource cleanup failure after ``CHECKPOINT`` also replays the recorded result.
 A job's identity is its batch and admission fence: the scenario step is not
