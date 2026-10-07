@@ -45,6 +45,7 @@ from reef_client.client import ReefClientError
 from reef.core.tasks import (
     HarborTaskConflict,
     HarborTaskError,
+    TaskGenerationRequest,
     read_harbor_task,
     write_harbor_task,
     write_split_manifest,
@@ -316,10 +317,10 @@ class ProposalJob(Job):
             )
         except (DesignerReplyError, ValueError) as exc:
             return {"record_id": answer.record_id, "task": None, "refusal": f"reply refused: {exc}"}
-        if self.request.source_records:
+        if self.request.inputs.source_records:
             task = replace(
                 task,
-                source_agent_record_ids=tuple(record.agent_record_id for record in self.request.source_records),
+                source_agent_record_ids=tuple(record.agent_record_id for record in self.request.inputs.source_records),
                 metadata={**task.metadata, "designer_record_id": answer.record_id},
             )
         return {"record_id": answer.record_id, "task": task_document(task), "refusal": ""}
@@ -575,7 +576,11 @@ class GeneratorService:
             skill = fields.get("skill")
             grounding = fields.get("grounding")
             designer_request = DesignerRequest(
-                target=checked_string(fields, "target", label="request"),
+                inputs=TaskGenerationRequest(
+                    source_records=source_records_from_document(fields, scenario=scenario),
+                    description=checked_string(fields, "target", label="request"),
+                    asset_files=checked_text_files(fields, "asset_files", label="request"),
+                ),
                 skill=skill if isinstance(skill, str) else None,
                 difficulty=str(fields.get("difficulty", "medium")),
                 turn_limit=checked_count(
@@ -583,8 +588,6 @@ class GeneratorService:
                 ),
                 grounding=grounding if isinstance(grounding, str) else None,
                 experience_text=str(fields.get("experience_text", "")),
-                source_records=source_records_from_document(fields, scenario=scenario),
-                asset_files=checked_text_files(fields, "asset_files", label="request"),
             )
             job = ProposalJob(
                 self.designer,

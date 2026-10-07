@@ -6,41 +6,9 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from reef.core.records_types import AgentRecord
 from reef.core.tasks import HarborTask
+from reef.core.tasks.generation import TaskGenerationRequest as TaskGenerationRequest
 from reef.train.processors.base import DataProcessor
-
-
-@dataclass(frozen=True)
-class TaskGenerationRequest:
-    """One task's source records, requirements, and optional local assets.
-
-    Assets are local files or directories, such as a repository snapshot or
-    verifier fixtures. Construction does not read them. Each processor defines
-    how it reads or transfers them to its generator.
-    Method-specific settings belong to the processor's configuration. A method
-    that writes tasks from the description alone, such as a designer prompted
-    with a target, passes no source records.
-    """
-
-    source_records: tuple[AgentRecord, ...]
-    description: str
-    assets: tuple[Path, ...] = ()
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.source_records, tuple):
-            raise ValueError("source_records must be a tuple of AgentRecord values")
-        if any(not isinstance(record, AgentRecord) for record in self.source_records):
-            raise TypeError("source_records must contain AgentRecord values")
-        if len({record.scenario for record in self.source_records}) > 1:
-            raise ValueError("source_records must belong to one scenario")
-        record_ids = [record.agent_record_id for record in self.source_records]
-        if any(not record_id for record_id in record_ids) or len(set(record_ids)) != len(record_ids):
-            raise ValueError("source_records must have distinct non-empty record ids")
-        if not isinstance(self.description, str) or not self.description.strip():
-            raise ValueError("description must be non-empty text")
-        if not isinstance(self.assets, tuple) or any(not isinstance(path, Path) for path in self.assets):
-            raise TypeError("assets must be a tuple of pathlib.Path values")
 
 
 @dataclass(frozen=True)

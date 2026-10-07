@@ -61,9 +61,8 @@ from pathlib import Path
 
 from recipes.beta.spade import SpadeProcessor
 from reef.core import AgentRecord
-from reef.core.tasks import HarborTask
+from reef.core.tasks import HarborTask, TaskGenerationRequest
 from reef.record2dataset import HttpGenerator
-from reef.train.processors.task_generation import TaskGenerationRequest
 from reef.train.types import ProcessorContext
 
 
@@ -86,6 +85,8 @@ With source records, this returns a task with the original record IDs in `source
 
 Materials can be UTF-8 files or directories on the caller's machine. They travel as file contents over HTTP; the service does not need a shared filesystem. A selected directory keeps its relative paths under `asset-0/`, `asset-1/`, and so on; a selected file uses `asset-N/<filename>`. Use a prepared snapshot containing only the materials the Designer should see. Symlinks, special files, non-text files, and unreadable files are refused. Limits are 128 files, 256 KiB of file contents, and 512 KiB of JSON for records and files combined. Oversized inputs fail before a Designer call; they are not truncated.
 
-Use matching client and generator versions for these inputs. Direct generator callers can pass `DesignerRequest(target="...", source_records=..., asset_files=...)`, where `asset_files` maps relative names to text. The HTTP request carries the same fields under `request`; each source record retains its payload, type, timestamp, references, and artifact version.
+The input contract is `TaskGenerationRequest` in `reef.core.tasks`. Both SPADE and record2dataset use this type. For materials already in memory, pass `asset_files={"state.txt": "file contents"}` instead of `assets`. The old import from `reef.train.processors.task_generation` remains supported.
+
+Direct generator callers use `DesignerRequest(inputs=request, difficulty="hard")`, then call `HttpGenerator.propose(...)`. `DesignerRequest` holds the shared input and adds Designer settings. The HTTP client reads local `assets` into `asset_files`; the service reconstructs the same input type. Each source record retains its payload, type, timestamp, references, and artifact version. Existing `DesignerRequest(target="...")` calls still work for description-only generation. Use matching client and generator versions for historical inputs.
 
 The automatic generation loop still uses the configured description and previous task scores. Selecting historical sessions is the caller's responsibility. The Designer still makes one model call; it does not yet inspect files with tools or revise a task after a failed check. Passing the oracle check does not establish that the reconstruction is faithful to the original task.

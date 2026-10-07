@@ -20,7 +20,7 @@ from reef_client.client import ReefClientError
 from recipes.beta.spade import SpadeProcessor
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import LiveWeightArtifactRef
-from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
+from reef.core.tasks import HarborTask, TaskGenerationRequest, read_harbor_task, read_split_manifest
 from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset import (
     Designer,
@@ -53,7 +53,6 @@ from reef.record2dataset.wire import (
     task_from_document,
 )
 from reef.service.deploy.generator import generator_settings
-from reef.train.processors.task_generation import TaskGenerationRequest
 from reef.train.types import ProcessorContext
 
 pytestmark = pytest.mark.unit
@@ -686,14 +685,14 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
 
 def test_source_record_wire_roundtrip_preserves_payload_and_version() -> None:
     sources = source_records()
-    document = designer_request_document(DesignerRequest("rebuild", source_records=sources))
+    document = designer_request_document(DesignerRequest(TaskGenerationRequest(sources, "rebuild")))
     assert source_records_from_document(document, scenario="spade") == sources
 
 
 @pytest.mark.parametrize("invalid", ["cross-scenario", "duplicate", "payload", "timestamp", "asset-path", "size"])
 def test_invalid_sources_are_refused_before_the_designer_call(tmp_path: Path, invalid: str) -> None:
     built, designer, _, _ = service(tmp_path)
-    fields = designer_request_document(DesignerRequest("rebuild", source_records=source_records()))
+    fields = designer_request_document(DesignerRequest(TaskGenerationRequest(source_records(), "rebuild")))
     if invalid == "cross-scenario":
         fields["source_records"][0]["scenario"] = "another-scenario"
     elif invalid == "duplicate":
@@ -745,3 +744,75 @@ def test_legacy_proposal_without_source_fields_still_works(tmp_path: Path) -> No
         assert "designer_record_id" not in task.metadata
 
     run_with(built, body)
+
+
+@pytest.mark.parametrize("failure", ["missing", "binary", "symlink", "oversized"])
+def test_invalid_materials_fail_before_proposing(tmp_path: Path, failure: str) -> None:
+    built, designer, _, _ = service(tmp_path)
+    material = tmp_path / "material"
+    if failure == "binary":
+        material.write_bytes(b"\xff\x00")
+    elif failure == "symlink":
+        material.mkdir()
+        (material / "outside").symlink_to(tmp_path, target_is_directory=True)
+    elif failure == "oversized":
+        material.write_bytes(b"x" * (256 * 1024 + 1))
+
+    async def body(generator: HttpGenerator) -> None:
+        with pytest.raises(ValueError, match="asset"):
+            await generator.propose(
+                DesignerRequest(TaskGenerationRequest((), "rebuild", (material,))),
+                scenario="spade",
+                generation=0,
+                index=0,
+                tags={},
+            )
+
+    run_with(built, body)
+    assert designer.calls == []
+
+
+def test_a_snapshot_with_too_many_files_is_not_partially_forwarded(tmp_path: Path) -> None:
+    built, designer, _, _ = service(tmp_path)
+    snapshot = tmp_path / "snapshot"
+    snapshot.mkdir()
+    for index in range(129):
+        (snapshot / f"input-{index}.txt").write_text("text")
+
+    async def body(generator: HttpGenerator) -> None:
+        with pytest.raises(ValueError, match="128 files"):
+            await generator.propose(
+                DesignerRequest(TaskGenerationRequest((), "rebuild", (snapshot,))),
+                scenario="spade",
+                generation=0,
+                index=0,
+                tags={},
+            )
+
+    run_with(built, body)
+    assert designer.calls == []
+
+
+@pytest.mark.parametrize("material_form", ["paths", "contents"])
+def test_generator_accepts_the_shared_request_without_a_processor(tmp_path: Path, material_form: str) -> None:
+    built, designer, _, _ = service(tmp_path)
+    if material_form == "paths":
+        material = tmp_path / "state.txt"
+        material.write_text("The service port is 8472.")
+        inputs = TaskGenerationRequest(source_records(), "Recover the port", (material,))
+    else:
+        inputs = TaskGenerationRequest(
+            source_records(), "Recover the port", asset_files={"state.txt": "The service port is 8472."}
+        )
+
+    async def body(generator: HttpGenerator) -> None:
+        proposal = await generator.propose(
+            DesignerRequest(inputs, difficulty="hard"), scenario="spade", generation=0, index=0, tags={}
+        )
+        assert proposal.task.source_agent_record_ids == ("original-inference", "original-report")
+        assert proposal.task.metadata["difficulty"] == "hard"
+
+    run_with(built, body)
+    prompt = designer.calls[0]["messages"][1]["content"]
+    assert "The service port is 8472." in prompt
+    assert inputs.assets or inputs.asset_files

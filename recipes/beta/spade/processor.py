@@ -24,7 +24,6 @@ processor tells them apart (``metadata.role``, the episode's ``arm`` label) and 
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from collections.abc import Hashable, Mapping
 from dataclasses import dataclass, replace
@@ -48,7 +47,7 @@ from recipes.beta.spade.generation import (
     write_generation_report,
 )
 from reef.core import AgentRecord
-from reef.core.tasks import HarborTask
+from reef.core.tasks import HarborTask, TaskGenerationRequest
 from reef.record2dataset.client import (
     DuplicateTask,
     Generator,
@@ -59,10 +58,9 @@ from reef.record2dataset.client import (
     WrittenTask,
 )
 from reef.record2dataset.designer import DesignerRequest
-from reef.record2dataset.inputs import read_asset_files
 from reef.train.processors.computed import Failed, JudgingWorker, SupportsReceipt
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
-from reef.train.processors.task_generation import TaskGenerationProcessor, TaskGenerationRequest, TaskValidationResult
+from reef.train.processors.task_generation import TaskGenerationProcessor, TaskValidationResult
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
@@ -350,14 +348,12 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         if generation is None:
             generation = self._generation
         designer_request = DesignerRequest(
-            target=request.description,
+            inputs=request,
             skill=skill,
             difficulty=self.difficulty,
             turn_limit=self.turn_limit,
             grounding=self.grounding,
             experience_text=experience_text(experience_for(self._experience, skill)),
-            source_records=request.source_records,
-            asset_files=await asyncio.to_thread(read_asset_files, request.assets),
         )
         tags = {"role": "designer", "generation": str(generation), **skill_tag(skill)}
         return await self.generator.propose(

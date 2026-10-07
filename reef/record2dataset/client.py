@@ -7,7 +7,7 @@ import json
 import time
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import aiohttp
@@ -16,6 +16,7 @@ from reef.core.tasks import HarborTask
 from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset.designer import DesignerRequest
 from reef.record2dataset.harbor import OracleResult
+from reef.record2dataset.inputs import read_asset_files
 from reef.record2dataset.wire import (
     WireError,
     checked_object,
@@ -188,8 +189,11 @@ class HttpGenerator(Generator):
         tags: Mapping[str, str],
         model: str | None = None,
     ) -> ProposedTask:
-        if any(record.scenario != scenario for record in request.source_records):
+        if any(record.scenario != scenario for record in request.inputs.source_records):
             raise GeneratorError("source records must belong to the proposal's scenario")
+        if request.inputs.assets:
+            asset_files = await asyncio.to_thread(read_asset_files, request.inputs.assets)
+            request = replace(request, inputs=replace(request.inputs, assets=(), asset_files=asset_files))
         body: dict[str, object] = {
             "scenario": scenario,
             "generation": generation,

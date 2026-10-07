@@ -750,9 +750,9 @@ Task generation
 
 .. code:: python
 
-   from reef.core.tasks import HarborTask
+   from reef.core.tasks import HarborTask, TaskGenerationRequest
    from reef.train.processors.task_generation import (
-       TaskGenerationProcessor, TaskGenerationRequest, TaskValidationResult,
+       TaskGenerationProcessor, TaskValidationResult,
    )
 
 ``TaskGenerationProcessor`` extends ``DataProcessor`` with two abstract methods:
@@ -763,13 +763,20 @@ a method pairs the hooks with an engine and a worker of its own, as SPADE
 pairs them with the reported-feedback engine and the generator service
 (``reef.record2dataset``).
 
-``TaskGenerationRequest(source_records, description, assets=())`` carries a
-tuple of distinct ``AgentRecord`` values from one scenario (empty for a method
-that generates from the description alone), non-empty requirements text, and
-optional ``Path`` values for local generation assets. The generated task must
-preserve the source record ids in order. A processor defines how it reads or
-transfers assets; constructing the request does not read them. SPADE sends
-selected UTF-8 file contents and source records to the generator over HTTP.
+``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``
+is defined in ``reef.core.tasks.generation`` and exported by ``reef.core.tasks``.
+It carries distinct ``AgentRecord`` values from one scenario and non-empty
+requirements text. Use an empty record tuple for description-only generation.
+Materials are either a tuple of local ``Path`` values in ``assets`` or a mapping
+of relative file names to UTF-8 text in ``asset_files``. Supplying both is an
+error. Construction validates fields without reading files.
+
+Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
+...)``. Its HTTP client reads local materials and sends their contents. The
+service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
+task preserves source record ids in order. The former import from
+``reef.train.processors.task_generation`` remains supported.
+
 ``TaskValidationResult(errors=())`` exposes ``is_valid``; each error is a
 non-empty explanation of a task defect. Check execution failures raise instead.
 Generation and validation must run outside the synchronous trainer-lock path.

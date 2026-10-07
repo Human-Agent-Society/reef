@@ -15,12 +15,11 @@ import json
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass, field
-from pathlib import PurePosixPath
+from dataclasses import dataclass
 
 from reef_client.client import ReefClient, ReefClientError
 
-from reef.core.records_types import AgentRecord
+from reef.core.tasks.generation import TaskGenerationRequest
 from reef.core.tasks.harbor import HarborTaskError, checked_files
 from reef.record2dataset.inputs import MAX_ASSET_BYTES, MAX_ASSET_FILES, record_document
 from reef.train.cordis_backend.strategies import untrusted_text
@@ -48,28 +47,58 @@ class DesignerError(RuntimeError):
     """A designer call or report did not go through."""
 
 
-@dataclass(frozen=True)
+@dataclass(frozen=True, init=False)
 class DesignerRequest:
-    """One designer call with optional source records and selected UTF-8 file contents.
+    """Shared task inputs plus Designer settings.
 
-    Records retain their original payloads and IDs. Files are text snapshots,
-    not service-local paths. Inputs that exceed the transport limits are refused.
+    Pass TaskGenerationRequest as inputs. The legacy target string and
+    target keyword remain supported for description-only callers.
     """
 
-    target: str
+    inputs: TaskGenerationRequest
     skill: str | None = None
     difficulty: str = "medium"
     turn_limit: int = DEFAULT_TURN_LIMIT
     grounding: str | None = None
     experience_text: str = ""
-    source_records: tuple[AgentRecord, ...] = ()
-    asset_files: Mapping[str, str] = field(default_factory=dict)
+
+    def __init__(
+        self,
+        inputs: TaskGenerationRequest | str | None = None,
+        skill: str | None = None,
+        difficulty: str = "medium",
+        turn_limit: int = DEFAULT_TURN_LIMIT,
+        grounding: str | None = None,
+        experience_text: str = "",
+        *,
+        target: str | None = None,
+    ) -> None:
+        if target is not None:
+            if inputs is not None:
+                raise ValueError("supply inputs or the legacy target, not both")
+            inputs = target
+        if isinstance(inputs, str):
+            if not inputs.strip():
+                raise ValueError("target must be non-empty text")
+            inputs = TaskGenerationRequest((), inputs)
+        if not isinstance(inputs, TaskGenerationRequest):
+            raise ValueError("inputs must be TaskGenerationRequest, or supply a non-empty target")
+        object.__setattr__(self, "inputs", inputs)
+        object.__setattr__(self, "skill", skill)
+        object.__setattr__(self, "difficulty", difficulty)
+        object.__setattr__(self, "turn_limit", turn_limit)
+        object.__setattr__(self, "grounding", grounding)
+        object.__setattr__(self, "experience_text", experience_text)
+        self.__post_init__()
+
+    @property
+    def target(self) -> str:
+        """Compatibility alias for the shared input's description."""
+        return self.inputs.description
 
     def __post_init__(self) -> None:
         if self.skill is not None and (not isinstance(self.skill, str) or not SKILL_PATTERN.fullmatch(self.skill)):
             raise ValueError(f"skill {self.skill!r} must match {SKILL_PATTERN.pattern}")
-        if not isinstance(self.target, str) or not self.target.strip():
-            raise ValueError("target must be non-empty text")
         if self.difficulty not in DIFFICULTIES:
             raise ValueError(f"difficulty must be one of {DIFFICULTIES}")
         if isinstance(self.turn_limit, bool) or not isinstance(self.turn_limit, int) or self.turn_limit < 2:
@@ -78,37 +107,16 @@ class DesignerRequest:
             raise ValueError("grounding must be non-empty text when set")
         if not isinstance(self.experience_text, str):
             raise ValueError("experience_text must be text")
-        if not isinstance(self.source_records, tuple) or any(
-            not isinstance(record, AgentRecord) for record in self.source_records
-        ):
-            raise ValueError("source_records must be a tuple of AgentRecord values")
-        record_ids = [record.agent_record_id for record in self.source_records]
-        if any(not isinstance(record_id, str) or not record_id for record_id in record_ids) or len(
-            set(record_ids)
-        ) != len(record_ids):
-            raise ValueError("source_records must have distinct non-empty record ids")
-        if len({record.scenario for record in self.source_records}) > 1:
-            raise ValueError("source_records must belong to one scenario")
-        if not isinstance(self.asset_files, Mapping) or any(
-            not isinstance(name, str) or not isinstance(text, str) for name, text in self.asset_files.items()
-        ):
-            raise ValueError("asset_files must map relative file names to UTF-8 text")
-        for name, text in self.asset_files.items():
-            path = PurePosixPath(name)
-            if not name or name == "." or path.is_absolute() or ".." in path.parts or "\\" in name or "\x00" in name:
-                raise ValueError("asset_files must use relative file names without parent traversal")
-            if "\x00" in text:
-                raise ValueError("asset_files must contain UTF-8 text without NUL bytes")
         if (
-            len(self.asset_files) > MAX_ASSET_FILES
-            or sum(len(text.encode("utf-8")) for text in self.asset_files.values()) > MAX_ASSET_BYTES
+            len(self.inputs.asset_files) > MAX_ASSET_FILES
+            or sum(len(text.encode("utf-8")) for text in self.inputs.asset_files.values()) > MAX_ASSET_BYTES
         ):
             raise ValueError(f"assets exceed {MAX_ASSET_FILES} files or {MAX_ASSET_BYTES} bytes")
         try:
             source_json = json.dumps(
                 {
-                    "source_records": [record_document(record) for record in self.source_records],
-                    "asset_files": dict(self.asset_files),
+                    "source_records": [record_document(record) for record in self.inputs.source_records],
+                    "asset_files": dict(self.inputs.asset_files),
                 },
                 allow_nan=False,
             )
@@ -136,7 +144,9 @@ def designer_messages(request: DesignerRequest) -> list[dict[str, str]]:
 
 def designer_prompt(request: DesignerRequest) -> str:
     """The user turn of a designer call: the target, the method's experience text, the grounding, the rules, the output."""
-    target = request.target.strip()
+    if request.inputs.assets:
+        raise ValueError("local assets must be read by HttpGenerator before building the Designer prompt")
+    target = request.inputs.description.strip()
     if request.skill is not None:
         target = f"{request.skill} ({target})"
     parts = [
@@ -148,10 +158,10 @@ def designer_prompt(request: DesignerRequest) -> str:
     ]
     if request.experience_text.strip():
         parts.append(request.experience_text.strip())
-    if request.source_records or request.asset_files:
+    if request.inputs.source_records or request.inputs.asset_files:
         sources = {
-            "source_records": [record_document(record) for record in request.source_records],
-            "asset_files": dict(request.asset_files),
+            "source_records": [record_document(record) for record in request.inputs.source_records],
+            "asset_files": dict(request.inputs.asset_files),
         }
         parts.append(
             "SOURCE MATERIAL: reconstruct a runnable task from these records and files. Preserve the original "

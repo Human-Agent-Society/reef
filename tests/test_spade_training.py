@@ -19,6 +19,7 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import (
     HarborTask,
     HarborTaskConflict,
+    TaskGenerationRequest,
     read_harbor_task,
     read_split_manifest,
     write_harbor_task,
@@ -42,7 +43,6 @@ from reef.record2dataset import (
 from reef.train.algos.registry import resolve_objective
 from reef.train.processors.computed import Failed, JudgingWorker, SupportsReceipt
 from reef.train.processors.reported import GroupDecision
-from reef.train.processors.task_generation import TaskGenerationRequest
 from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem, trajectory_groups
 
 # ------------------------------------------------------------------------------------------- the reported half
@@ -534,10 +534,10 @@ def test_generate_forwards_records_and_materials(tmp_path: Path) -> None:
     material = tmp_path / "requirements.txt"
     material.write_text("Use the port recorded in /var/run/app.port.")
     records = (inference("source-1"),)
-    asyncio.run(built.generate(TaskGenerationRequest(records, "Rebuild the port task", (material,))))
+    request = TaskGenerationRequest(records, "Rebuild the port task", (material,))
+    asyncio.run(built.generate(request))
     sent = generator.proposals[0]["request"]
-    assert sent.source_records == records
-    assert sent.asset_files == {"asset-0/requirements.txt": material.read_text()}
+    assert sent.inputs is request
 
 
 def test_the_first_look_for_a_batch_runs_generation_zero_end_to_end(tmp_path: Path) -> None:
@@ -801,36 +801,9 @@ def test_the_real_worker_runs_a_generation_off_the_trainers_thread(tmp_path: Pat
         p.close()
 
 
-@pytest.mark.parametrize("failure", ["missing", "binary", "symlink", "oversized"])
-def test_invalid_materials_fail_before_proposing(tmp_path: Path, failure: str) -> None:
-    built, generator = generating(tmp_path)
-    material = tmp_path / "material"
-    if failure == "binary":
-        material.write_bytes(b"\xff\x00")
-    elif failure == "symlink":
-        material.mkdir()
-        (material / "outside").symlink_to(tmp_path, target_is_directory=True)
-    elif failure == "oversized":
-        material.write_bytes(b"x" * (256 * 1024 + 1))
-    with pytest.raises(ValueError, match="asset"):
-        asyncio.run(built.generate(TaskGenerationRequest((), "rebuild", (material,))))
-    assert generator.proposals == []
-
-
 def test_history_from_another_scenario_is_not_forwarded(tmp_path: Path) -> None:
     built, generator = generating(tmp_path)
     source = AgentRecord.create(scenario="other", request_type=RequestType.INFERENCE, payload={})
     with pytest.raises(ValueError, match="processor's scenario"):
         asyncio.run(built.generate(TaskGenerationRequest((source,), "rebuild")))
-    assert generator.proposals == []
-
-
-def test_a_snapshot_with_too_many_files_is_not_partially_forwarded(tmp_path: Path) -> None:
-    built, generator = generating(tmp_path)
-    snapshot = tmp_path / "snapshot"
-    snapshot.mkdir()
-    for index in range(129):
-        (snapshot / f"input-{index}.txt").write_text("text")
-    with pytest.raises(ValueError, match="128 files"):
-        asyncio.run(built.generate(TaskGenerationRequest((), "rebuild", (snapshot,))))
     assert generator.proposals == []

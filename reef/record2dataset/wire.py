@@ -57,15 +57,17 @@ def checked_tables(document: Mapping[str, object], key: str, *, label: str) -> d
 
 def designer_request_document(request: DesignerRequest) -> dict[str, object]:
     """Serialize designer inputs without exposing caller-local filesystem paths."""
+    if request.inputs.assets:
+        raise WireError("local assets must be read by HttpGenerator before serialization")
     return {
-        "target": request.target,
+        "target": request.inputs.description,
         "skill": request.skill,
         "difficulty": request.difficulty,
         "turn_limit": request.turn_limit,
         "grounding": request.grounding,
         "experience_text": request.experience_text,
-        "source_records": [record_document(record) for record in request.source_records],
-        "asset_files": dict(request.asset_files),
+        "source_records": [record_document(record) for record in request.inputs.source_records],
+        "asset_files": dict(request.inputs.asset_files),
     }
 
 

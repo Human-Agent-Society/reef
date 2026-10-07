@@ -204,12 +204,18 @@ methods on the processor itself:
   non-empty errors reject the task. Infrastructure failures raise exceptions
   rather than reporting that the task is invalid.
 
-Import the ABC from ``reef.train.processors`` and the request/result types
-from ``reef.train.processors.task_generation``. Asset paths name local files or
-directories, such as repository snapshots or verifier fixtures. Constructing
-a request does not read them; the processor defines how it transfers them to
-its generator. Method-specific prompts and settings belong to the processor
-configuration.
+Import ``TaskGenerationRequest`` from ``reef.core.tasks``. It is the shared
+input contract for processors and record2dataset. Import the processor ABC
+from ``reef.train.processors`` and ``TaskValidationResult`` from
+``reef.train.processors.task_generation``. The old request import from that
+module remains a compatibility alias.
+
+A request carries source records, a description, and either local ``assets``
+paths or ``asset_files`` containing relative names and UTF-8 text. Constructing
+a request performs no file reads. Record2dataset wraps this same object in
+``DesignerRequest(inputs=request, ...)`` and adds Designer settings.
+``HttpGenerator`` reads local paths before transmission. The service rebuilds
+the shared request with file contents, without accessing the caller's paths.
 
 The ABC supplies no lifecycle: implementing the two hooks does not start a
 worker or make batches ready, and the inherited lifecycle is the no-update
@@ -233,9 +239,9 @@ drives it over HTTP. Conversion of generated tasks into ``TaskItem`` batches
 for a rollout-capable backend remains future work.
 
 SPADE's ``generate`` also accepts selected historical records and materials.
-It reads the materials on the caller's machine and sends their UTF-8 contents
-with the records over HTTP. The Designer receives them as source material for
-reconstructing the original task. The resulting ``HarborTask`` preserves the
+It forwards the shared request to ``HttpGenerator``, which reads local materials
+and sends their UTF-8 contents with the records over HTTP. The Designer uses
+these inputs to reconstruct the original task. The resulting ``HarborTask`` preserves the
 ordered source ids; its ``metadata.designer_record_id`` identifies the new
 Designer call. Feedback uses that new receipt. Description-only requests keep
 the Designer receipt as their task source, as before.
