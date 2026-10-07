@@ -105,7 +105,10 @@ def test_a_processor_changes_its_batch_order_through_selection_policy() -> None:
 def test_staleness_check_keeps_units_within_the_window_of_the_last_source_record() -> None:
     def version(unit_id: str, runtime_load_id: str, source_index: int) -> ExperienceUnit:
         return ExperienceUnit(
-            unit_id=unit_id, arrival_index=10 - source_index, runtime_load_id=runtime_load_id, source_index=source_index
+            unit_id=unit_id,
+            arrival_index=10 - source_index,
+            runtime_load_id=runtime_load_id,
+            source_index=source_index,
         )
 
     # The reference is the last source record ("newest", e:5), not the last unit in the buffer.
@@ -125,7 +128,9 @@ def test_staleness_check_keeps_units_within_the_window_of_the_last_source_record
         "unparsed": "malformed_producing_runtime_load_id",
     }
     # Window 0 keeps only the reference version.
-    assert {result.unit.unit_id for result in StalenessCheck().ineligible_units(units)} == set(reasons) | {"one-behind"}
+    assert {result.unit.unit_id for result in StalenessCheck().ineligible_units(units)} == set(reasons) | {
+        "one-behind"
+    }
 
 
 def test_staleness_check_compares_non_canonical_ids_by_equality() -> None:
