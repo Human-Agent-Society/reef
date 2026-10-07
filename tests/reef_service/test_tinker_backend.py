@@ -33,7 +33,7 @@ from reef.surface.weights import WeightLoader
 from reef.train.algos import StepScheduling, StepSignal
 from reef.train.algos.objective import TrainingObjective
 from reef.train.algos.registry import register_objective, unregister_objective
-from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
 from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
@@ -129,7 +129,7 @@ class Deployment:
     def backend(self, objective):
         return RuntimeCandidateBackend(
             self.training,
-            FixedTrainingMethod(TrainingMethod(objective.name)),
+            FixedTrainingMethodSelector(TrainingMethod(objective.name)),
             SCHEDULING,
             inference_runtime=self.inference,
         )
@@ -701,7 +701,7 @@ def test_a_schedule_counts_optimizer_steps_across_jobs_rejections_and_restarts(r
     assert first.training_metrics["learning_rate"] == pytest.approx(5e-5)
     assert first.training_metrics["learning_rate_schedule"] == {"name": "warmup", "completed_steps": 3}
     manifest = TinkerCheckpoint.read(Path(first.checkpoint_path))
-    assert manifest.learning_rate_schedule == LearningRateScheduleState(WARMUP, 3)
+    assert manifest.learning_rate_schedule_state == LearningRateScheduleState(WARMUP, 3)
 
     # A rejected job leaves the incumbent and its progress: the next job repeats the same rates.
     value.training.reject_candidate(first, decision(False))
@@ -713,7 +713,7 @@ def test_a_schedule_counts_optimizer_steps_across_jobs_rejections_and_restarts(r
     value.shutdown()
     restarted = Deployment(value.config, client)
     try:
-        assert restarted.training.incumbent.learning_rate_schedule == LearningRateScheduleState(WARMUP, 3)
+        assert restarted.training.incumbent.learning_rate_schedule_state == LearningRateScheduleState(WARMUP, 3)
         continued = restarted.training.train_candidate(scheduled(restarted, objective, WARMUP, step=2))
         assert client.learning_rates[-1] == pytest.approx((7.5e-5, 1e-4, 1e-4))
         restarted.training.commit_candidate(continued.training_job_id)
@@ -739,8 +739,8 @@ def test_without_a_selected_schedule_every_step_uses_the_configured_rate(runtime
     assert "learning_rate_schedule" not in candidate.training_metrics
     value.training.commit_candidate(candidate.training_job_id)
     # A checkpoint without a schedule keeps its manifest in the earlier shape.
-    assert "learning_rate_schedule" not in json.loads((Path(candidate.checkpoint_path) / MANIFEST).read_text())
-    assert "learning_rate_schedule" not in json.loads((Path(value.config.state_dir) / INCUMBENT).read_text())
+    assert "learning_rate_schedule_state" not in json.loads((Path(candidate.checkpoint_path) / MANIFEST).read_text())
+    assert "learning_rate_schedule_state" not in json.loads((Path(value.config.state_dir) / INCUMBENT).read_text())
 
 
 def test_each_job_trains_the_loss_of_its_selected_objective(runtime, objective, second_objective):

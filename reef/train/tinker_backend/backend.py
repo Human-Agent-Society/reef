@@ -168,8 +168,8 @@ class TinkerTrainingBackend(TrainingBackend):
         if not batches or any(not rows for rows in batches):
             raise ValueError("a Tinker training job needs at least one non-empty optimizer batch")
         incumbent = self._incumbent(scenario)[0]
-        learning_rates, schedule = job_learning_rates(
-            incumbent.learning_rate_schedule,
+        learning_rates, schedule_state = job_learning_rates(
+            incumbent.learning_rate_schedule_state,
             method.learning_rate_schedule,
             len(batches),
             self._config.learning_rate,
@@ -181,14 +181,14 @@ class TinkerTrainingBackend(TrainingBackend):
             batches=batches,
             loss=loss,
             learning_rates=learning_rates,
-            schedule=schedule,
+            schedule_state=schedule_state,
         )
 
     def train_job(self, job: _TinkerPreparedJob) -> TrainingMetrics:
         checkpoint, metrics = self.client.train(job.incumbent, job.batches, job.loss, job.learning_rates)
         checkpoint.validate_model(self._model, self._config.lora_rank)
-        job.result = replace(checkpoint, learning_rate_schedule=job.schedule)
-        return TrainingMetrics(training={**metrics, **learning_rate_metrics(job.learning_rates, job.schedule)})
+        job.result = replace(checkpoint, learning_rate_schedule_state=job.schedule_state)
+        return TrainingMetrics(training={**metrics, **learning_rate_metrics(job.learning_rates, job.schedule_state)})
 
     def save_job_checkpoint(self, job: _TinkerPreparedJob) -> None:
         """Materialize the trained adapter beside its manifest; the job is durable only after this."""
@@ -279,7 +279,7 @@ class _TinkerPreparedJob(PreparedTrainingJob):
         batches: Sequence[Sequence[TokenRow]],
         loss: TinkerLoss,
         learning_rates: tuple[float, ...],
-        schedule: LearningRateScheduleState | None,
+        schedule_state: LearningRateScheduleState | None,
     ) -> None:
         self._backend = backend
         self._checkpoint = checkpoint
@@ -287,7 +287,7 @@ class _TinkerPreparedJob(PreparedTrainingJob):
         self.batches = batches
         self.loss = loss
         self.learning_rates = learning_rates
-        self.schedule = schedule
+        self.schedule_state = schedule_state
         self.result: TinkerCheckpoint | None = None
 
     @property

@@ -21,7 +21,7 @@ from reef.train.algos.helpers import next_steps
 from reef.train.slime_backend.algorithm import SlimeAlgorithm, TrainResult
 from reef.train.slime_backend.loss_families import register_loss_family, unregister_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.slime_backend.reef_adapters.batches import TRAINING_METHOD_KEY
+from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY
 from reef.train.slime_backend.reef_adapters.training_job.storage import LEARNING_RATE_SCHEDULES_FILENAME
 from reef.train.types import TrainingBatch, trajectories
 
@@ -135,9 +135,9 @@ class Stack:
         self.coordinator.acknowledge_training_commit(result.training_job_id)
         return published
 
-    def activation(self, job: int) -> Mapping[str, Any] | None:
+    def worker_switch(self, job: int) -> Mapping[str, Any] | None:
         """What the job's data told the actor workers to switch to, if anything."""
-        return self.manager.calls[job].get(TRAINING_METHOD_KEY)
+        return self.manager.calls[job].get(WORKER_SWITCH_KEY)
 
 
 @pytest.mark.unit
@@ -145,7 +145,7 @@ def test_a_single_method_job_leaves_the_workers_as_they_started(tmp_path) -> Non
     stack = Stack(tmp_path)
     stack.run(TrainingMethod("sft"), step=0)
     stack.run(TrainingMethod("sft"), step=1)
-    assert [stack.activation(job) for job in (0, 1)] == [None, None]
+    assert [stack.worker_switch(job) for job in (0, 1)] == [None, None]
     assert len(stack.group.train_calls) == 2
     assert not (tmp_path / LEARNING_RATE_SCHEDULES_FILENAME).exists()
 
@@ -158,14 +158,14 @@ def test_a_job_of_another_family_switches_the_actor_workers_and_back(tmp_path) -
     stack.run(TrainingMethod(REWARD_OBJECTIVE), step=2)
     stack.run(TrainingMethod("sft"), step=3)
 
-    policy = stack.activation(1)
+    policy = stack.worker_switch(1)
     assert policy is not None
-    assert policy["learning_rate_schedule"] is None
+    assert policy["learning_rate_schedule_state"] is None
     assert policy["loss_family_args"]["loss_family"] == "pg"
     assert policy["loss_family_args"]["loss_type"] == "policy_loss"
     # The workers already run the policy family for the next job.
-    assert stack.activation(2) is None
-    supervised = stack.activation(3)
+    assert stack.worker_switch(2) is None
+    supervised = stack.worker_switch(3)
     assert supervised is not None
     assert supervised["loss_family_args"]["loss_family"] == "sft"
     assert supervised["loss_family_args"]["loss_type"] == "sft_loss"
@@ -182,10 +182,10 @@ def test_a_method_the_workers_cannot_train_is_refused_before_a_job_exists(tmp_pa
 
         stack = Stack(tmp_path)
         with pytest.raises(RuntimeError, match="requires driver options"):
-            stack.bridge.loss_algorithm("test-needs-options")
+            stack.bridge.algorithm_for_loss_family("test-needs-options")
         # A family that configures the critic started with the workers or not at all.
         with pytest.raises(RuntimeError, match="configures the critic"):
-            stack.bridge.loss_algorithm("sao")
+            stack.bridge.algorithm_for_loss_family("sao")
     finally:
         unregister_loss_family("test-needs-options")
 
@@ -193,25 +193,25 @@ def test_a_method_the_workers_cannot_train_is_refused_before_a_job_exists(tmp_pa
 @pytest.mark.unit
 def test_a_run_distils_with_one_distillation_family(tmp_path) -> None:
     stack = Stack(tmp_path)
-    stack.bridge.loss_algorithm("sdft")
+    stack.bridge.algorithm_for_loss_family("sdft")
     with pytest.raises(RuntimeError, match="second distillation family"):
-        stack.bridge.loss_algorithm("sdpo")
+        stack.bridge.algorithm_for_loss_family("sdpo")
 
 
 @pytest.mark.unit
 def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tmp_path) -> None:
     stack = Stack(tmp_path)
     first = stack.run(TrainingMethod("sft", WARMUP), step=0)
-    activation = stack.activation(0)
-    assert activation is not None
-    assert activation["learning_rate_schedule"] == LearningRateScheduleState(WARMUP, 0).to_dict()
+    worker_switch = stack.worker_switch(0)
+    assert worker_switch is not None
+    assert worker_switch["learning_rate_schedule_state"] == LearningRateScheduleState(WARMUP, 0).to_dict()
     # Two samples, one optimizer step each: the job's last step ran at the rate of step 1.
     assert first.metrics["learning_rate"] == pytest.approx(2.5e-5)
     assert first.metrics["learning_rate_schedule"] == {"name": "warmup", "completed_steps": 2}
     stack.run(TrainingMethod("sft", WARMUP), step=1)
-    second = stack.activation(1)
+    second = stack.worker_switch(1)
     assert second is not None
-    assert second["learning_rate_schedule"]["completed_steps"] == 2
+    assert second["learning_rate_schedule_state"]["completed_steps"] == 2
     # The progress is written with the checkpoint, beside the job marker.
     record = json.loads((tmp_path / LEARNING_RATE_SCHEDULES_FILENAME).read_text())
     assert record == {"schedules": {"": {"rollout_id": 1, **LearningRateScheduleState(WARMUP, 4).to_dict()}}}
@@ -219,14 +219,14 @@ def test_a_schedule_advances_by_optimizer_steps_and_continues_after_a_restart(tm
     # Workers that loaded the second checkpoint continue the warmup where it stopped.
     restarted = Stack(tmp_path, start_rollout_id=2)
     restarted.run(TrainingMethod("sft", WARMUP), step=2)
-    continued = restarted.activation(0)
+    continued = restarted.worker_switch(0)
     assert continued is not None
-    assert continued["learning_rate_schedule"]["completed_steps"] == 4
+    assert continued["learning_rate_schedule_state"]["completed_steps"] == 4
     # A job that selects no schedule keeps the active one.
     restarted.run(TrainingMethod("sft"), step=3)
-    kept = restarted.activation(1)
+    kept = restarted.worker_switch(1)
     assert kept is not None
-    assert kept["learning_rate_schedule"]["completed_steps"] == 6
+    assert kept["learning_rate_schedule_state"]["completed_steps"] == 6
 
 
 @pytest.mark.unit
@@ -237,9 +237,9 @@ def test_a_job_dropped_before_training_leaves_the_schedule_where_it_was(tmp_path
     assert stack.group.train_calls == []
     # The retried batch starts the warmup at step 0, as the dropped attempt would have.
     stack.run(TrainingMethod("sft", WARMUP), step=0)
-    retried = stack.activation(0)
+    retried = stack.worker_switch(0)
     assert retried is not None
-    assert retried["learning_rate_schedule"]["completed_steps"] == 0
+    assert retried["learning_rate_schedule_state"]["completed_steps"] == 0
 
 
 @pytest.mark.unit
@@ -267,9 +267,9 @@ def test_a_critic_only_step_leaves_the_actor_schedule_where_it_was(tmp_path) -> 
     result = stack.run(TrainingMethod("sft", WARMUP), step=0)
     assert "learning_rate" not in (result.metrics or {})
     assert not (tmp_path / LEARNING_RATE_SCHEDULES_FILENAME).exists()
-    # The actor never fetched the job's data, so the next job carries the activation again.
+    # The actor never fetched the job's data, so the next job carries the worker switch again.
     stack.run(TrainingMethod("sft", WARMUP), step=1)
-    assert stack.activation(1) == stack.activation(0)
+    assert stack.worker_switch(1) == stack.worker_switch(0)
 
 
 @pytest.mark.unit

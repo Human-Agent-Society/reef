@@ -243,7 +243,7 @@ def _load_reef_train_actor_adapter(monkeypatch: pytest.MonkeyPatch):
     hooks.record_worker_metrics = lambda _metrics: None  # type: ignore[attr-defined]
     hooks.reef_node_ip_and_free_port = lambda: ("127.0.0.1", 1234)  # type: ignore[attr-defined]
     hooks._loss_family_spec = lambda _args: None  # type: ignore[attr-defined]
-    hooks.activate_loss_family = lambda _args: None  # type: ignore[attr-defined]
+    hooks.switch_loss_family = lambda _args: None  # type: ignore[attr-defined]
     hooks.resolve_tensor_dtype = lambda name: name  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "reef.train.slime_backend.reef_adapters.worker_hooks", hooks)
 
@@ -697,18 +697,18 @@ def test_an_actor_switches_to_a_jobs_family_and_initializes_it_once(monkeypatch:
     actor = object.__new__(module.ReefMegatronTrainRayActor)
     actor.args = types.SimpleNamespace(loss_family="sft", loss_type="sft_loss", reef_actor_init_hook_path=None)
     actor.initialized_loss_families = {"sft"}
-    schedule = {"schedule": {"name": "rl"}, "completed_steps": 4}
-    activation = {
+    schedule_state = {"schedule": {"name": "rl"}, "completed_steps": 4}
+    worker_switch = {
         "loss_family_args": {"loss_family": "pg", "loss_type": "policy_loss", "reef_actor_init_hook_path": "pg.init"},
-        "learning_rate_schedule": schedule,
+        "learning_rate_schedule_state": schedule_state,
     }
 
-    actor.activate_training_method(activation)
-    actor.activate_training_method(activation)
+    actor.switch_training_method(worker_switch)
+    actor.switch_training_method(worker_switch)
 
     assert (actor.args.loss_family, actor.args.loss_type) == ("pg", "policy_loss")
-    assert actor.args.reef_learning_rate_schedule == schedule
+    assert actor.args.reef_learning_rate_schedule_state == schedule_state
     # A family's actor init hook runs when the actor first trains it, not on every switch.
     assert initialized == ["pg.init"]
-    actor.activate_training_method({**activation, "learning_rate_schedule": None})
-    assert actor.args.reef_learning_rate_schedule is None
+    actor.switch_training_method({**worker_switch, "learning_rate_schedule_state": None})
+    assert actor.args.reef_learning_rate_schedule_state is None

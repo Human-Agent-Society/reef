@@ -923,7 +923,7 @@ trains with, plus an optional ``LearningRateSchedule``.
 ``WeightTrainingRecipe.training_method_selector()`` returns a
 ``TrainingMethodSelector`` (``reef.train.runtime_backend``), whose
 ``select(batch, algorithm_state)`` picks each job's method from the batch and
-the committed algorithm state. The default ``FixedTrainingMethod`` trains every
+the committed algorithm state. The default ``FixedTrainingMethodSelector`` trains every
 job with ``training_spec().objective``. ``RuntimeCandidateBackend`` calls the
 selector before each job and passes the method to
 ``TrainingRuntime.prepare_training_step``. The backend resolves the objective
@@ -972,7 +972,7 @@ runtimes, and upgrade coordinators and workers together. These formats change:
 - Training payloads gain a ``method`` entry, so the same rows produce a
   different job id. Finish or reject the jobs in flight before you upgrade.
 - Tinker checkpoint manifests and ``incumbent.json`` gain an optional
-  ``learning_rate_schedule`` entry after a recipe selects a schedule.
+  ``learning_rate_schedule_state`` entry after a recipe selects a schedule.
   Older manifests load unchanged.
 - The Slime bridge writes ``reef_learning_rate_schedules.json`` beside the job
   marker after a recipe selects a schedule.

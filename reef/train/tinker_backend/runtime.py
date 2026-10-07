@@ -132,11 +132,14 @@ class TinkerTrainingRuntime(TrainingRuntime):
         loss = resolve_tinker_loss(payload["loss"])
         method = TrainingMethod.from_dict(payload["method"])
         batches = [[row_from_payload(row) for row in batch] for batch in payload["batches"]]
-        learning_rates, schedule = job_learning_rates(
-            incumbent.learning_rate_schedule, method.learning_rate_schedule, len(batches), self._config.learning_rate
+        learning_rates, schedule_state = job_learning_rates(
+            incumbent.learning_rate_schedule_state,
+            method.learning_rate_schedule,
+            len(batches),
+            self._config.learning_rate,
         )
         checkpoint, metrics = self._client.train(incumbent, batches, loss, learning_rates)
-        checkpoint = replace(self._validated(checkpoint), learning_rate_schedule=schedule)
+        checkpoint = replace(self._validated(checkpoint), learning_rate_schedule_state=schedule_state)
         directory = self._candidate_directory(identity)
         checkpoint.write(directory)
         candidate = ModelCandidate(
@@ -144,7 +147,7 @@ class TinkerTrainingRuntime(TrainingRuntime):
             training_job_id=identity,
             checkpoint_path=str(directory),
             current_runtime_load_id=payload.get("source_runtime_load_id"),
-            training_metrics={**metrics, **learning_rate_metrics(learning_rates, schedule)},
+            training_metrics={**metrics, **learning_rate_metrics(learning_rates, schedule_state)},
             metadata={"scenario_step": payload["scenario_step"]},
         )
         with self._lock:

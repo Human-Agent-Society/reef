@@ -24,7 +24,7 @@ from reef.service.runtime import connect_executor_runtimes
 from reef.train import CandidateBackend
 from reef.train.algos import StepScheduling
 from reef.train.runtime import ExecutorTrainingRuntime
-from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
 
 from .test_executor_runtime import Coordinator
 
@@ -73,7 +73,7 @@ def test_existing_backend_keeps_receiver_paused_until_matching_durable_commit(co
         control = Coordinator(colocate=colocate)
         training, inference = connect_executor_runtimes(train_group_handle=control)
         backend = RuntimeCandidateBackend(
-            training, FixedTrainingMethod(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+            training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
         )
         assert isinstance(training, ExecutorTrainingRuntime)
         assert isinstance(inference, ExecutorInferenceRuntime)
@@ -125,7 +125,7 @@ def test_recovery_retargets_only_the_inference_component():
     control = Coordinator(inference_url="http://old-engine")
     training, inference = connect_executor_runtimes(train_group_handle=control)
     backend = RuntimeCandidateBackend(
-        training, FixedTrainingMethod(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
     )
     control.inference_url = "http://replacement-engine/"
     backend.recover_pending_step(0)
@@ -154,7 +154,7 @@ def test_attached_receiver_waits_for_coordinator_recovery():
     training, inference = connect_executor_runtimes(train_group_handle=control)
     assert not inference.inference_admission_status["open"]
     RuntimeCandidateBackend(
-        training, FixedTrainingMethod(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
     )
     assert inference.inference_admission_status["open"]
     training.shutdown()

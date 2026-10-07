@@ -13,7 +13,7 @@ from reef.runtime.interfaces import (
     LearningRateScheduleState,
     PreparedTrainingStep,
     TrainingMethod,
-    resolve_learning_rate_schedule,
+    resolve_learning_rate_schedule_state,
 )
 from reef.train.algos.registry import resolve_objective
 from reef.train.algos.schedule import batch_schedule_seed, materialize_schedule
@@ -95,17 +95,20 @@ def prepare_tinker_step(
 
 
 def job_learning_rates(
-    incumbent: LearningRateScheduleState | None,
+    incumbent_schedule_state: LearningRateScheduleState | None,
     requested: LearningRateSchedule | None,
     optimizer_steps: int,
     configured_learning_rate: float,
 ) -> tuple[tuple[float, ...], LearningRateScheduleState | None]:
-    """The rate of each optimizer step of a job branched from ``incumbent``, and the schedule state it leaves.
+    """The rate of each optimizer step of a job, and the schedule state the job leaves.
+
+    ``incumbent_schedule_state`` is the schedule state of the incumbent that
+    the job branches from.
 
     Every attempt of a job branches from the same incumbent, so a retry trains
     with the same rates; the state the job leaves is recorded in its checkpoint.
     """
-    active = resolve_learning_rate_schedule(incumbent, requested)
-    if active is None:
+    schedule_state = resolve_learning_rate_schedule_state(incumbent_schedule_state, requested)
+    if schedule_state is None:
         return (configured_learning_rate,) * optimizer_steps, None
-    return active.learning_rates(optimizer_steps), active.advanced(optimizer_steps)
+    return schedule_state.learning_rates(optimizer_steps), schedule_state.advanced(optimizer_steps)

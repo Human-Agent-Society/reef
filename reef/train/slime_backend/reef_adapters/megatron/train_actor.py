@@ -19,7 +19,7 @@ from slime.utils.reloadable_process_group import destroy_process_groups, reload_
 from slime.utils.timer import Timer, timer
 from torch_memory_saver import torch_memory_saver
 
-from reef.train.slime_backend.reef_adapters.batches import TRAINING_METHOD_KEY
+from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY
 from reef.train.slime_backend.reef_adapters.megatron.adapter_slots import AdapterSlotSwitcher
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
@@ -31,11 +31,11 @@ from reef.train.slime_backend.reef_adapters.megatron.scheduler_resume import res
 from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
     _loss_family_spec,
-    activate_loss_family,
     drain_worker_metrics,
     record_worker_metrics,
     reef_node_ip_and_free_port,
     resolve_tensor_dtype,
+    switch_loss_family,
 )
 
 
@@ -84,7 +84,7 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             finally:
                 if self.args.offload_train:
                     self.sleep()
-        # The loss families whose actor init hook ran; a job's family runs its hook when first activated.
+        # The loss families whose actor init hook ran; a family runs its hook on its first job.
         self.initialized_loss_families = {args.loss_family}
         if role == "actor":
             init_hook = _loss_family_hook(args, "reef_actor_init_hook_path")
@@ -92,23 +92,23 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
                 init_hook(self)
         return result
 
-    def activate_training_method(self, activation: Mapping[str, Any]) -> None:
+    def switch_training_method(self, worker_switch: Mapping[str, Any]) -> None:
         """Switch this actor to a job's loss family and learning-rate schedule.
 
-        ``loss_family_args`` is the bridge's projection of the family onto the
-        startup arguments; ``learning_rate_schedule`` the job's schedule state,
-        or ``None`` for Slime's configured scheduler.
+        ``loss_family_args`` are the family's job arguments, which the bridge
+        derived from the startup arguments. ``learning_rate_schedule_state`` is
+        the job's schedule state, or ``None`` for Slime's configured scheduler.
         """
-        for name, value in activation["loss_family_args"].items():
+        for name, value in worker_switch["loss_family_args"].items():
             setattr(self.args, name, value)
-        activate_loss_family(self.args)
-        family = self.args.loss_family
-        if family not in self.initialized_loss_families:
+        switch_loss_family(self.args)
+        loss_family = self.args.loss_family
+        if loss_family not in self.initialized_loss_families:
             init_hook = _loss_family_hook(self.args, "reef_actor_init_hook_path")
             if init_hook is not None:
                 init_hook(self)
-            self.initialized_loss_families.add(family)
-        self.args.reef_learning_rate_schedule = activation["learning_rate_schedule"]
+            self.initialized_loss_families.add(loss_family)
+        self.args.reef_learning_rate_schedule_state = worker_switch["learning_rate_schedule_state"]
 
     def set_rollout_manager(self, inference: Any) -> dict[str, Any]:
         """Attach directly to inference and return topology to Reef's trainer."""
@@ -195,12 +195,12 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
         rollout_data = super()._get_rollout_data(rollout_data_ref)
         from slime.backends.megatron_utils.cp_utils import slice_log_prob_with_cp
 
-        # A job whose method differs from the one the workers run carries it;
-        # the actor switches before its family's keys are sliced. The critic
-        # keeps the startup family.
-        activation = rollout_data.pop(TRAINING_METHOD_KEY, None)
-        if activation is not None and self.role == "actor":
-            self.activate_training_method(activation)
+        # A job whose family or schedule state differs from the workers' current
+        # one carries a worker switch; the actor switches before its family's
+        # keys are sliced. The critic keeps the startup family.
+        worker_switch = rollout_data.pop(WORKER_SWITCH_KEY, None)
+        if worker_switch is not None and self.role == "actor":
+            self.switch_training_method(worker_switch)
 
         device = torch.cuda.current_device()
         # Slime's own per-response-token tensors, plus the ones the loss

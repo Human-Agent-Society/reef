@@ -393,6 +393,6 @@ def test_a_schedule_continues_from_the_published_incumbent_after_a_restart(tmp_p
     second = restarted.coordinator.execute_training_job(restarted.payload(objective, step=1, schedule=warmup))
     # The published incumbent carries one completed step: the warmup does not start over.
     assert restarted.client.learning_rates == [(5e-5,)]
-    assert TinkerCheckpoint.read(Path(second.checkpoint_path)).learning_rate_schedule == LearningRateScheduleState(
-        warmup, 2
-    )
+    assert TinkerCheckpoint.read(
+        Path(second.checkpoint_path)
+    ).learning_rate_schedule_state == LearningRateScheduleState(warmup, 2)

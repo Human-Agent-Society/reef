@@ -7,9 +7,9 @@ from typing import Any
 
 import ray
 
-#: The job's loss-family projection and learning-rate schedule state, when the
-#: bridge switches the actor workers for it; every rank receives it whole.
-TRAINING_METHOD_KEY = "reef_training_method"
+#: The loss-family arguments and learning-rate schedule state that the actor
+#: workers switch to before a job; every rank receives it whole.
+WORKER_SWITCH_KEY = "reef_worker_switch"
 
 _PER_SAMPLE_KEYS = (
     "tokens",
@@ -98,7 +98,7 @@ class TrainingBatchProcessor:
             for key in dict.fromkeys(per_sample_keys):
                 if key in data:
                     rollout_data[key] = [data[key][index] for index in partition]
-            for key in ("raw_reward", "total_lengths", TRAINING_METHOD_KEY):
+            for key in ("raw_reward", "total_lengths", WORKER_SWITCH_KEY):
                 if key in data:
                     rollout_data[key] = data[key]
             rollout_data.update(

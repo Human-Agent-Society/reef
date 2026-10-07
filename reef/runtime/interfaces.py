@@ -136,7 +136,7 @@ LEARNING_RATE_DECAY_STYLES: tuple[LearningRateDecayStyle, ...] = ("constant", "l
 
 def checked_learning_rate(value: object, name: str) -> float:
     if not isinstance(value, Real) or isinstance(value, bool) or not math.isfinite(value) or value < 0:
-        raise ValueError(f"LearningRateSchedule.{name} must be a finite number >= 0, got {value!r}")
+        raise ValueError(f"{name} must be a finite number >= 0, got {value!r}")
     return float(value)
 
 
@@ -178,45 +178,51 @@ class LearningRateSchedule:
     def __post_init__(self) -> None:
         if not isinstance(self.name, str) or not self.name.strip():
             raise ValueError("LearningRateSchedule.name must be a non-empty string")
-        peak = checked_learning_rate(self.peak_learning_rate, "peak_learning_rate")
-        if peak <= 0:
+        peak_learning_rate = checked_learning_rate(self.peak_learning_rate, "LearningRateSchedule.peak_learning_rate")
+        if peak_learning_rate <= 0:
             raise ValueError("LearningRateSchedule.peak_learning_rate must be positive")
-        minimum = checked_learning_rate(self.min_learning_rate, "min_learning_rate")
-        initial = checked_learning_rate(self.initial_learning_rate, "initial_learning_rate")
-        if minimum > peak or initial > peak:
+        min_learning_rate = checked_learning_rate(self.min_learning_rate, "LearningRateSchedule.min_learning_rate")
+        initial_learning_rate = checked_learning_rate(
+            self.initial_learning_rate, "LearningRateSchedule.initial_learning_rate"
+        )
+        if min_learning_rate > peak_learning_rate or initial_learning_rate > peak_learning_rate:
             raise ValueError(
                 "LearningRateSchedule min_learning_rate and initial_learning_rate must not exceed the peak"
             )
-        warmup = checked_step_count(self.warmup_steps, "LearningRateSchedule.warmup_steps")
-        decay = checked_step_count(self.decay_steps, "LearningRateSchedule.decay_steps")
+        warmup_steps = checked_step_count(self.warmup_steps, "LearningRateSchedule.warmup_steps")
+        decay_steps = checked_step_count(self.decay_steps, "LearningRateSchedule.decay_steps")
         if self.decay_style not in LEARNING_RATE_DECAY_STYLES:
             raise ValueError(
                 f"LearningRateSchedule.decay_style must be one of {', '.join(LEARNING_RATE_DECAY_STYLES)}, "
                 f"got {self.decay_style!r}"
             )
-        if self.decay_style == "constant" and decay:
+        if self.decay_style == "constant" and decay_steps > 0:
             raise ValueError("a constant LearningRateSchedule takes no decay_steps")
-        if self.decay_style != "constant" and decay <= 0:
+        if self.decay_style != "constant" and decay_steps <= 0:
             raise ValueError(f"a {self.decay_style} LearningRateSchedule needs positive decay_steps")
-        object.__setattr__(self, "peak_learning_rate", peak)
-        object.__setattr__(self, "min_learning_rate", minimum)
-        object.__setattr__(self, "initial_learning_rate", initial)
-        object.__setattr__(self, "warmup_steps", warmup)
-        object.__setattr__(self, "decay_steps", decay)
+        object.__setattr__(self, "peak_learning_rate", peak_learning_rate)
+        object.__setattr__(self, "min_learning_rate", min_learning_rate)
+        object.__setattr__(self, "initial_learning_rate", initial_learning_rate)
+        object.__setattr__(self, "warmup_steps", warmup_steps)
+        object.__setattr__(self, "decay_steps", decay_steps)
 
-    def learning_rate(self, step: int) -> float:
-        """The rate of the optimizer step that follows ``step`` completed steps of this schedule."""
-        if self.warmup_steps and step <= self.warmup_steps:
-            fraction = step / self.warmup_steps
-            return self.initial_learning_rate + (self.peak_learning_rate - self.initial_learning_rate) * fraction
+    def learning_rate(self, completed_steps: int) -> float:
+        """The rate of the optimizer step that follows ``completed_steps`` steps of this schedule."""
+        if self.warmup_steps and completed_steps <= self.warmup_steps:
+            warmup_fraction = completed_steps / self.warmup_steps
+            learning_rate_range = self.peak_learning_rate - self.initial_learning_rate
+            return self.initial_learning_rate + learning_rate_range * warmup_fraction
         if self.decay_style == "constant":
             return self.peak_learning_rate
-        decayed = step - self.warmup_steps
-        if decayed >= self.decay_steps:
+        steps_since_warmup = completed_steps - self.warmup_steps
+        if steps_since_warmup >= self.decay_steps:
             return self.min_learning_rate
-        ratio = decayed / self.decay_steps
-        coefficient = 1.0 - ratio if self.decay_style == "linear" else 0.5 * (math.cos(math.pi * ratio) + 1.0)
-        return self.min_learning_rate + coefficient * (self.peak_learning_rate - self.min_learning_rate)
+        decay_fraction = steps_since_warmup / self.decay_steps
+        if self.decay_style == "linear":
+            decay_factor = 1.0 - decay_fraction
+        else:
+            decay_factor = 0.5 * (math.cos(math.pi * decay_fraction) + 1.0)
+        return self.min_learning_rate + decay_factor * (self.peak_learning_rate - self.min_learning_rate)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -254,7 +260,7 @@ class TrainingMethod:
             raise TypeError("TrainingMethod.learning_rate_schedule must be a LearningRateSchedule or None")
 
     def to_dict(self) -> dict[str, Any]:
-        """The job payload's record of this method; it takes part in the job's identity."""
+        """The job payload's record of this method; it is part of the job's identity."""
         return asdict(self)
 
     @classmethod
@@ -293,7 +299,7 @@ class LearningRateScheduleState:
         return cls(LearningRateSchedule.from_dict(value["schedule"]), value["completed_steps"])
 
 
-def resolve_learning_rate_schedule(
+def resolve_learning_rate_schedule_state(
     active: LearningRateScheduleState | None, requested: LearningRateSchedule | None
 ) -> LearningRateScheduleState | None:
     """The schedule state a job trains with, given the active state and the job's request.
@@ -307,14 +313,14 @@ def resolve_learning_rate_schedule(
 
 
 def learning_rate_metrics(
-    learning_rates: Sequence[float], schedule: LearningRateScheduleState | None
+    learning_rates: Sequence[float], schedule_state: LearningRateScheduleState | None
 ) -> dict[str, Any]:
     """The metrics every backend reports for a job's rate: its last optimizer step's, and the schedule's progress."""
     metrics: dict[str, Any] = {"learning_rate": learning_rates[-1]}
-    if schedule is not None:
+    if schedule_state is not None:
         metrics["learning_rate_schedule"] = {
-            "name": schedule.schedule.name,
-            "completed_steps": schedule.completed_steps,
+            "name": schedule_state.schedule.name,
+            "completed_steps": schedule_state.completed_steps,
         }
     return metrics
 

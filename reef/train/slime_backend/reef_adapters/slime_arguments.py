@@ -234,22 +234,22 @@ def loss_family_job_args(args: SlimeArguments, spec: SlimeAlgorithm) -> SlimeArg
             f"{source} configures the critic, which starts with the workers; make it the recipe's "
             "training_spec() objective"
         )
-    job = copy.copy(args)
-    job.loss_family_ref = loss_family_refs().get(spec.loss_family)
-    job.loss_type = spec.loss_type
+    job_args = copy.copy(args)
+    job_args.loss_family_ref = loss_family_refs().get(spec.loss_family)
+    job_args.loss_type = spec.loss_type
     if args.reef_configured_advantage_estimator is not None:
-        job.advantage_estimator = args.reef_configured_advantage_estimator
+        job_args.advantage_estimator = args.reef_configured_advantage_estimator
     # Slime's pre-train advantage pass is the family's: the families that keep
     # it need it, the others would have it overwrite their external signals.
-    job.compute_advantages_and_returns = spec.allows_slime_advantage_computation
-    spec.apply_driver_options(job, None)
-    configure_reef_loss_args(job)
-    spec.validate_backend_args(job)
+    job_args.compute_advantages_and_returns = spec.allows_slime_advantage_computation
+    spec.apply_driver_options(job_args, None)
+    configure_reef_loss_args(job_args)
+    spec.validate_backend_args(job_args)
     try:
-        validate_advantage_computation(job, spec)
+        validate_advantage_computation(job_args, spec)
     except ValueError as exc:
         raise RuntimeError(f"{source}: {exc}") from exc
-    return job
+    return job_args
 
 
 __all__ = [

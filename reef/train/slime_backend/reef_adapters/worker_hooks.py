@@ -5,6 +5,7 @@ from __future__ import annotations
 import math
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from reef.runtime.interfaces import LearningRateScheduleState
@@ -28,10 +29,21 @@ _WORKER_STEP_METRICS: list[dict[str, float]] = []
 #: under the ``train/step`` step key; the flat merge above keeps only the
 #: last, this keeps them all for experiment trackers that plot every step.
 WORKER_STEP_METRICS_KEY = "train_steps"
-#: The rate the before-step hook set for the current optimizer step while a
-#: recipe's learning-rate schedule is active. Slime logs its own scheduler's
-#: rate (``train/lr-pg_*``), which that schedule overrides.
-APPLIED_LEARNING_RATE: dict[str, float] = {}
+
+
+@dataclass
+class AppliedLearningRate:
+    """The rate the before-step hook set for the current optimizer step.
+
+    ``value`` is ``None`` while no recipe-selected learning-rate schedule is
+    active. Slime logs its own scheduler's rate (``train/lr-pg_*``), which the
+    schedule overrides.
+    """
+
+    value: float | None = None
+
+
+APPLIED_LEARNING_RATE = AppliedLearningRate()
 
 
 def _loss_family_spec(args) -> SlimeAlgorithm | None:
@@ -158,10 +170,12 @@ def _install_metric_capture() -> None:
         return
 
     def log(args, metrics, step_key):
-        rate = APPLIED_LEARNING_RATE.get("rate")
-        if rate is not None and step_key == "train/step":
+        learning_rate = APPLIED_LEARNING_RATE.value
+        if learning_rate is not None and step_key == "train/step":
             # The recipe's schedule set this step's rate, not Slime's scheduler.
-            metrics = {key: rate if key.startswith("train/lr-pg_") else value for key, value in metrics.items()}
+            metrics = {
+                key: learning_rate if key.startswith("train/lr-pg_") else value for key, value in metrics.items()
+            }
         record_worker_metrics(metrics)
         if step_key == "train/step":
             record_worker_step(metrics)
@@ -391,10 +405,10 @@ def route_score_centered_loss(args) -> None:
         raise RuntimeError(f"score centering adds to a policy-gradient loss, not --loss-type {args.loss_type}")
 
 
-def activate_loss_family(args) -> None:
+def switch_loss_family(args) -> None:
     """Re-point an actor worker's family hooks after a job switched ``args.loss_family``.
 
-    The job's family projection is already on ``args``; this clears the
+    The family's job arguments are already on ``args``; this clears the
     previous family's objective hooks, resolves the new family's, and routes
     score centering onto its loss. Hooks installed at init read ``args`` per
     call and follow.
@@ -409,26 +423,26 @@ def activate_loss_family(args) -> None:
 def apply_learning_rate_schedule(args, rollout_id, step_id, model, optimizer, opt_param_scheduler) -> None:
     """Slime's before-train-step hook: set the step's rate from the schedule the recipe selected.
 
-    ``args.reef_learning_rate_schedule`` is the job's schedule state (the
+    ``args.reef_learning_rate_schedule_state`` is the job's schedule state (the
     schedule and the steps it completed before the job), or ``None`` to leave
     Slime's configured scheduler in charge. ``step_id`` counts the job's
     optimizer steps from 0. Megatron's scheduler keeps its own count, so a
     checkpoint still loads under the startup options.
     """
-    chained = args.reef_chained_before_train_step_hook_path
-    if chained:
+    chained_hook_path = args.reef_chained_before_train_step_hook_path
+    if chained_hook_path:
         from slime.utils.misc import load_function
 
-        load_function(chained)(args, rollout_id, step_id, model, optimizer, opt_param_scheduler)
-    schedule = args.reef_learning_rate_schedule
-    if schedule is None:
-        APPLIED_LEARNING_RATE.clear()
+        load_function(chained_hook_path)(args, rollout_id, step_id, model, optimizer, opt_param_scheduler)
+    schedule_state_record = args.reef_learning_rate_schedule_state
+    if schedule_state_record is None:
+        APPLIED_LEARNING_RATE.value = None
         return
-    state = LearningRateScheduleState.from_dict(schedule)
-    rate = state.schedule.learning_rate(state.completed_steps + step_id)
-    for group in optimizer.param_groups:
-        group["lr"] = rate * group.get("lr_mult", 1.0)
-    APPLIED_LEARNING_RATE["rate"] = rate
+    schedule_state = LearningRateScheduleState.from_dict(schedule_state_record)
+    learning_rate = schedule_state.schedule.learning_rate(schedule_state.completed_steps + step_id)
+    for param_group in optimizer.param_groups:
+        param_group["lr"] = learning_rate * param_group.get("lr_mult", 1.0)
+    APPLIED_LEARNING_RATE.value = learning_rate
 
 
 def record_worker_metrics(metrics: Mapping[str, Any]) -> None:

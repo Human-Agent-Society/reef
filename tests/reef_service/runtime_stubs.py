@@ -16,7 +16,7 @@ from reef.runtime.interfaces import (
     TrainingRuntime,
 )
 from reef.train.algos import StepScheduling
-from reef.train.runtime_backend import FixedTrainingMethod
+from reef.train.runtime_backend import FixedTrainingMethodSelector
 from reef.train.types import TrainingBatch
 
 
@@ -141,7 +141,7 @@ def candidate_backend(value, objective, scheduling, **kwargs):
     bindings = runtime_bindings(value)
     return RuntimeCandidateBackend(
         bindings["training_runtime"],
-        FixedTrainingMethod(TrainingMethod(objective)),
+        FixedTrainingMethodSelector(TrainingMethod(objective)),
         scheduling,
         inference_runtime=bindings["runtime"],
         **kwargs,
@@ -159,7 +159,7 @@ class ExecutorRuntimeFixture(RuntimeCandidateBackend):
 
         training, inference = components if components is not None else connect_executor_runtimes(**kwargs)
         super().__init__(
-            training, FixedTrainingMethod(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
+            training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=inference
         )
 
     @property

@@ -37,7 +37,7 @@ from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
-from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend, TrainingMethodSelector
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.trainer import ComponentTrainer, Trainer
 
 
@@ -414,7 +414,7 @@ class WeightTrainingRecipe(Recipe):
         distillation phase after it) returns its own selector, built from its
         config fields; the backend still starts with the spec's objective.
         """
-        return FixedTrainingMethod(TrainingMethod(type(self).training_spec().objective))
+        return FixedTrainingMethodSelector(TrainingMethod(type(self).training_spec().objective))
 
     def __post_init__(self) -> None:
         super().__post_init__()

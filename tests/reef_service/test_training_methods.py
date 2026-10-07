@@ -14,12 +14,12 @@ from reef.runtime.interfaces import (
     LearningRateScheduleState,
     PreparedTrainingStep,
     TrainingMethod,
-    resolve_learning_rate_schedule,
+    resolve_learning_rate_schedule_state,
 )
 from reef.runtime.scheduler import training_job_id
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.algos import StepScheduling
-from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend, TrainingMethodSelector
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.types import TrainingBatch
 
 from .test_recipe_config_fields import ConfiguredRecipe
@@ -68,14 +68,14 @@ def test_schedule_rejects_invalid_values(values: dict[str, Any], message: str) -
 def test_a_job_continues_the_active_schedule_and_starts_another_at_step_zero() -> None:
     active = LearningRateScheduleState(SFT, completed_steps=6)
     # No request keeps the active schedule (or the backend's configured rate).
-    assert resolve_learning_rate_schedule(active, None) is active
-    assert resolve_learning_rate_schedule(None, None) is None
+    assert resolve_learning_rate_schedule_state(active, None) is active
+    assert resolve_learning_rate_schedule_state(None, None) is None
     # Selecting the active schedule again, as every retry and every restart does, continues it.
-    assert resolve_learning_rate_schedule(active, SFT) is active
+    assert resolve_learning_rate_schedule_state(active, SFT) is active
     # Another schedule starts fresh; the same curve under another name restarts it on purpose.
-    assert resolve_learning_rate_schedule(active, RL) == LearningRateScheduleState(RL, 0)
+    assert resolve_learning_rate_schedule_state(active, RL) == LearningRateScheduleState(RL, 0)
     renamed = LearningRateSchedule.from_dict({**SFT.to_dict(), "name": "sft-again"})
-    assert resolve_learning_rate_schedule(active, renamed) == LearningRateScheduleState(renamed, 0)
+    assert resolve_learning_rate_schedule_state(active, renamed) == LearningRateScheduleState(renamed, 0)
 
     assert active.learning_rates(3) == pytest.approx(tuple(SFT.learning_rate(step) for step in (6, 7, 8)))
     assert active.advanced(3) == LearningRateScheduleState(SFT, 9)
@@ -185,7 +185,7 @@ def test_a_single_method_recipe_trains_every_job_with_its_spec_objective() -> No
     runtime = RecordingRuntime()
     recipe = ConfiguredRecipe(training_runtime=runtime, runtime=runtime.inference)
     selector = recipe.training_method_selector()
-    assert isinstance(selector, FixedTrainingMethod)
+    assert isinstance(selector, FixedTrainingMethodSelector)
     assert selector.select(TrainingBatch("batch"), {"steps": 40}) == TrainingMethod("sft")
     trainer = recipe.build("scenario", SQLiteRecordStore())
     backend = trainer.candidate_backend

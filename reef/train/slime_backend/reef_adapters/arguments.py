@@ -66,7 +66,7 @@ class SlimeArguments(Namespace):
     custom_megatron_before_train_step_hook_path: str | None = None
     reef_chained_before_train_step_hook_path: str | None = None
     reef_configured_advantage_estimator: str | None = None
-    reef_learning_rate_schedule: dict[str, object] | None = None
+    reef_learning_rate_schedule_state: dict[str, object] | None = None
     decoupled_lr: float | None = None
     reef_chained_megatron_init_path: str | None = None
     reef_chained_critic_args_hook_path: str | None = None

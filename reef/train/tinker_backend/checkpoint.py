@@ -29,7 +29,7 @@ class TinkerCheckpoint:
     sampler_path: str
     schema_version: int = 1
     #: ``None`` until a job selects a schedule: the configured learning rate applies.
-    learning_rate_schedule: LearningRateScheduleState | None = None
+    learning_rate_schedule_state: LearningRateScheduleState | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or not self.base_model or self.lora_rank <= 0:
@@ -44,9 +44,9 @@ class TinkerCheckpoint:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        if self.learning_rate_schedule is None:
+        if self.learning_rate_schedule_state is None:
             # Manifests stay as they were until a schedule is selected.
-            value.pop("learning_rate_schedule")
+            value.pop("learning_rate_schedule_state")
         return value
 
     @classmethod
@@ -54,10 +54,12 @@ class TinkerCheckpoint:
         if not isinstance(value, Mapping):
             raise ValueError("Tinker checkpoint manifest must be an object")
         fields = dict(value)
-        schedule = fields.pop("learning_rate_schedule", None)
+        schedule_state = fields.pop("learning_rate_schedule_state", None)
         return cls(
             **fields,
-            learning_rate_schedule=None if schedule is None else LearningRateScheduleState.from_dict(schedule),
+            learning_rate_schedule_state=(
+                None if schedule_state is None else LearningRateScheduleState.from_dict(schedule_state)
+            ),
         )
 
     def write(self, directory: Path) -> None:

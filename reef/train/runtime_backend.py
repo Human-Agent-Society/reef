@@ -5,7 +5,7 @@ weight recipe returns a :class:`TrainingMethodSelector` from
 ``WeightTrainingRecipe.training_method_selector``. Reef calls it once for each
 job, before the backend prepares the batch, with the batch and the committed
 algorithm state; retries of a job reuse the batch and that state, so they
-select the same method. The default :class:`FixedTrainingMethod` trains every
+select the same method. The default :class:`FixedTrainingMethodSelector` trains every
 job with the recipe's ``training_spec().objective``.
 
 When to switch is recipe logic: a selector may read the batch or the
@@ -57,12 +57,12 @@ class TrainingMethodSelector(ABC):
         return {"training_method_selector": f"{type(self).__module__}.{type(self).__qualname__}"}
 
 
-class FixedTrainingMethod(TrainingMethodSelector):
+class FixedTrainingMethodSelector(TrainingMethodSelector):
     """Train every job with one method: a single-method recipe."""
 
     def __init__(self, method: TrainingMethod) -> None:
         if not isinstance(method, TrainingMethod):
-            raise TypeError(f"FixedTrainingMethod requires a TrainingMethod, got {type(method).__name__}")
+            raise TypeError(f"FixedTrainingMethodSelector requires a TrainingMethod, got {type(method).__name__}")
         self.method = method
 
     def select(self, batch: TrainingBatch, algorithm_state: Mapping[str, Any]) -> TrainingMethod:
@@ -79,26 +79,30 @@ class FixedTrainingMethod(TrainingMethodSelector):
 class RuntimeCandidateBackend(CandidateBackend):
     """Map candidate evaluation and selection onto the runtime scheduler.
 
-    ``method_selector`` picks the training method of every job from its batch
-    and the committed algorithm state; the runtime prepares the job with it.
+    ``training_method_selector`` picks the training method of every job from
+    its batch and the committed algorithm state; the runtime prepares the job
+    with it.
     """
 
     def __init__(
         self,
         training_runtime: TrainingRuntime,
-        method_selector: TrainingMethodSelector,
+        training_method_selector: TrainingMethodSelector,
         scheduling: StepScheduling,
         *,
         inference_runtime: InferenceRuntime,
         loss_family: str | None = None,
         scenario: str | None = None,
     ) -> None:
-        if not isinstance(method_selector, TrainingMethodSelector):
-            raise TypeError(f"method_selector must be a TrainingMethodSelector, got {type(method_selector).__name__}")
+        if not isinstance(training_method_selector, TrainingMethodSelector):
+            raise TypeError(
+                "training_method_selector must be a TrainingMethodSelector, "
+                f"got {type(training_method_selector).__name__}"
+            )
         if not isinstance(scheduling, StepScheduling):
             raise TypeError(f"scheduling must be a StepScheduling, got {type(scheduling).__name__}")
         self.scheduler = RuntimeScheduler(training_runtime, inference_runtime)
-        self.method_selector = method_selector
+        self.training_method_selector = training_method_selector
         self.scheduling = scheduling
         self._loss_family = loss_family
         self._scenario = scenario
@@ -122,7 +126,7 @@ class RuntimeCandidateBackend(CandidateBackend):
     def experiment_config(self) -> Mapping[str, Any]:
         return {
             "runtime": type(self.training_runtime).__name__,
-            **self.method_selector.experiment_config(),
+            **self.training_method_selector.experiment_config(),
             "scheduling": asdict(self.scheduling),
             **({"loss_family": self._loss_family} if self._loss_family is not None else {}),
         }
@@ -156,11 +160,10 @@ class RuntimeCandidateBackend(CandidateBackend):
         state: Mapping[str, Any],
         scenario_step: int,
     ) -> PreparedStep:
-        method = self.method_selector.select(batch, state)
+        method = self.training_method_selector.select(batch, state)
         if not isinstance(method, TrainingMethod):
-            raise TypeError(
-                f"{type(self.method_selector).__name__}.select must return a TrainingMethod, got {type(method).__name__}"
-            )
+            selector_name = type(self.training_method_selector).__name__
+            raise TypeError(f"{selector_name}.select must return a TrainingMethod, got {type(method).__name__}")
         prepared = self.prepare_training_step(batch, method, state, self.scheduling, scenario_step)
         next_state = dict(prepared.next_algorithm_state)
         metrics = {**prepared.metrics, "training_method": method.to_dict()}

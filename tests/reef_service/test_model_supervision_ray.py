@@ -17,7 +17,7 @@ import pytest
 from reef.runtime.interfaces import TrainingMethod
 from reef.runtime.recovery import FileTrainingJobStore
 from reef.train.algos import StepScheduling
-from reef.train.runtime_backend import FixedTrainingMethod
+from reef.train.runtime_backend import FixedTrainingMethodSelector
 
 pytest.importorskip("ray", reason="requires the optional Ray runtime")
 
@@ -333,7 +333,7 @@ def test_controller_and_training_crashes_recover_without_recreating_http_runtime
     ray, namespace = deployment.ray, deployment.namespace
     training, runtime = connect_ray_runtime(actor_name="training", namespace=namespace, inference_timeout_s=30)
     RuntimeCandidateBackend(
-        training, FixedTrainingMethod(TrainingMethod("sft")), StepScheduling(), inference_runtime=runtime
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=runtime
     )
     backend = runtime.inference_handler
 
@@ -393,7 +393,7 @@ def test_rebuilt_deployment_keeps_pending_candidate_paused_until_commit(deployme
         actor_name="training", namespace=deployment.namespace, inference_timeout_s=30
     )
     coordinator = RuntimeCandidateBackend(
-        training, FixedTrainingMethod(TrainingMethod("sft")), StepScheduling(), inference_runtime=runtime
+        training, FixedTrainingMethodSelector(TrainingMethod("sft")), StepScheduling(), inference_runtime=runtime
     )
     path = deployment.directory / "job.json"
     marker = read_marker(path)

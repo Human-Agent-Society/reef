@@ -15,7 +15,7 @@ from reef.recipe.base import WeightTrainingRecipe
 from reef.runtime.interfaces import InferenceRuntime, TrainingMethod, TrainingRuntime
 from reef.storage.records import RecordStore
 from reef.train.algos import StepScheduling
-from reef.train.runtime_backend import FixedTrainingMethod, RuntimeCandidateBackend
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend
 from reef.train.trainer import Trainer
 
 from ._threshold_processor import ThresholdProcessor
@@ -67,7 +67,7 @@ class TestPolicyRecipe(WeightTrainingRecipe):
             ),
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
-                FixedTrainingMethod(TrainingMethod("sft")),
+                FixedTrainingMethodSelector(TrainingMethod("sft")),
                 StepScheduling(),
                 inference_runtime=self.runtime,
                 scenario=scenario,

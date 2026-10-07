@@ -225,7 +225,7 @@ def reset_objective_paths(args: Namespace) -> None:
     """Clear every objective hook path a family registered in this worker, before another family resolves its own.
 
     A job of another loss family re-points the worker (see
-    ``worker_hooks.activate_loss_family``); a hook the previous family
+    ``worker_hooks.switch_loss_family``); a hook the previous family
     registered and the next one does not must not stay on ``args``.
     """
     for arg_name in {name for hooks in _objective_registry.values() for name in hooks}:
