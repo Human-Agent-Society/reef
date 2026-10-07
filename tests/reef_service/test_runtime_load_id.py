@@ -49,3 +49,13 @@ def test_runtime_load_id_incarnations_do_not_repeat_across_restarts() -> None:
 def test_runtime_load_id_rejects_ambiguous_or_invalid_parts(incarnation, sequence) -> None:
     with pytest.raises(ValueError):
         RuntimeLoadId(incarnation, sequence)
+
+
+@pytest.mark.unit
+def test_runtime_load_id_lag_counts_versions_within_one_incarnation_only() -> None:
+    serving = RuntimeLoadId("engine-a", 7)
+
+    assert RuntimeLoadId("engine-a", 4).lag_behind(serving) == 3
+    assert RuntimeLoadId("engine-a", 7).lag_behind(serving) == 0
+    assert RuntimeLoadId("engine-a", 9).lag_behind(serving) == -2
+    assert RuntimeLoadId("engine-b", 4).lag_behind(serving) is None
