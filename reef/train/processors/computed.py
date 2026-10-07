@@ -46,8 +46,8 @@ from reef.train.experience import (
     EligibilityCheck,
     ExperienceBuffer,
     ExperienceUnit,
-    NewestVersionCheck,
     SelectionPolicy,
+    StalenessCheck,
 )
 from reef.train.processors.base import DataProcessor
 from reef.train.types import ProcessorContext, TrainingBatch, TrajectoryItem
@@ -203,10 +203,10 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     Every ingested receipt sits in exactly one state: tracked
     (awaiting future traffic) → in-flight (judging) → candidate | terminal
     | trained. Terminal records are released from memory instead of
-    ever entering a batch. Only the newest runtime load ID (by record
-    arrival, not judgment arrival) ever batches: continual serving
-    advances the version every step, and stale pending candidates would
-    deadlock the FIFO.
+    ever entering a batch. By default, only candidates within
+    ``max_staleness`` versions of the newest runtime load ID (by record
+    arrival, not judgment arrival) batch: continual serving advances the
+    version every step, and stale pending candidates would deadlock the FIFO.
 
     Candidates wait in an :class:`~reef.train.experience.ExperienceBuffer`.
     ``selection_policy`` sets their batch order, and ``eligibility_checks``
@@ -259,10 +259,12 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
     def eligibility_checks(self) -> tuple[EligibilityCheck, ...]:
         """Return the checks that drop candidates when no batch is out.
 
-        The constructor calls this method one time. The default keeps only the
-        candidates of the newest runtime load ID, by record arrival.
+        The constructor calls this method one time. The default drops
+        candidates that are more than ``context.max_staleness`` versions behind
+        the newest candidate, by record arrival. With the default
+        ``max_staleness`` 0, only the newest version stays.
         """
-        return (NewestVersionCheck(),)
+        return (StalenessCheck(self.context.max_staleness),)
 
     @abstractmethod
     def ingest(self, item: AgentRecord) -> None:
@@ -353,9 +355,10 @@ class ComputedFeedbackProcessor(DataProcessor, ABC):
                 self.retire(judgment.receipt)
                 continue
             # 3. The record is a batch candidate now. The eligibility checks
-            #    drop candidates (by default, all but the newest weight version
-            #    by record arrival) — but never under an emitted-but-unacknowledged
-            #    batch, whose samples reference the pending candidates.
+            #    drop candidates (by default, those too far behind the newest
+            #    weight version by record arrival) — but never under an
+            #    emitted-but-unacknowledged batch, whose samples reference the
+            #    pending candidates.
             buffer = self.experience_buffer
             receipt = judgment.receipt
             buffer.put(

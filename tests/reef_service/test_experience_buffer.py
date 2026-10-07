@@ -15,8 +15,8 @@ from reef.train.experience import (
     ExperienceUnit,
     GroupKeyOrder,
     IneligibleUnit,
-    NewestVersionCheck,
     SelectionPolicy,
+    StalenessCheck,
 )
 from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor
 from reef.train.types import ProcessorContext, TaskItem, TrainDataItem, TrainingBatch
@@ -102,18 +102,45 @@ def test_a_processor_changes_its_batch_order_through_selection_policy() -> None:
     assert processor.status()["ready_units"] == 1
 
 
-def test_newest_version_check_keeps_the_version_of_the_last_source_record() -> None:
-    # The unit that arrived last in the buffer is not the newest: its source record arrived first.
+def test_staleness_check_keeps_units_within_the_window_of_the_last_source_record() -> None:
+    def version(unit_id: str, runtime_load_id: str, source_index: int) -> ExperienceUnit:
+        return ExperienceUnit(
+            unit_id=unit_id, arrival_index=10 - source_index, runtime_load_id=runtime_load_id, source_index=source_index
+        )
+
+    # The reference is the last source record ("newest", e:5), not the last unit in the buffer.
+    units = (
+        version("newest", "e:5", 6),
+        version("one-behind", "e:4", 5),
+        version("two-behind", "e:3", 4),
+        version("ahead", "e:6", 3),
+        version("other-incarnation", "f:5", 2),
+        version("unparsed", "v1", 1),
+    )
+    reasons = {result.unit.unit_id: result.reason for result in StalenessCheck(1).ineligible_units(units)}
+    assert reasons == {
+        "two-behind": "policy_lag_exceeded",
+        "ahead": "future_producing_runtime_load_id",
+        "other-incarnation": "cross_incarnation",
+        "unparsed": "malformed_producing_runtime_load_id",
+    }
+    # Window 0 keeps only the reference version.
+    assert {result.unit.unit_id for result in StalenessCheck().ineligible_units(units)} == set(reasons) | {"one-behind"}
+
+
+def test_staleness_check_compares_non_canonical_ids_by_equality() -> None:
     late_judgment = ExperienceUnit(unit_id="late", arrival_index=3, runtime_load_id="v1", source_index=1)
     newest = ExperienceUnit(unit_id="newest", arrival_index=2, runtime_load_id="v2", source_index=3)
     same_version = ExperienceUnit(unit_id="same", arrival_index=1, runtime_load_id="v2", source_index=2)
-    dropped = NewestVersionCheck().ineligible_units((late_judgment, newest, same_version))
-    assert [(result.unit.unit_id, result.reason) for result in dropped] == [("late", "older_runtime_load_id")]
+    dropped = StalenessCheck(5).ineligible_units((late_judgment, newest, same_version))
+    assert [(result.unit.unit_id, result.reason) for result in dropped] == [("late", "different_runtime_load_id")]
+    with pytest.raises(ValueError, match="non-negative"):
+        StalenessCheck(-1)
 
 
 def test_drop_ineligible_removes_and_returns_the_units_that_fail_each_check() -> None:
-    buffer = ExperienceBuffer(checks=(NewestVersionCheck(),))
-    for name, version in (("old", "v1"), ("new", "v2")):
+    buffer = ExperienceBuffer(checks=(StalenessCheck(),))
+    for name, version in (("old", "e:1"), ("new", "e:2")):
         buffer.put(ExperienceUnit(unit_id=name, arrival_index=buffer.next_arrival_index(), runtime_load_id=version))
     assert [result.unit.unit_id for result in buffer.drop_ineligible()] == ["old"]
     assert [held.unit_id for held in buffer.units()] == ["new"]

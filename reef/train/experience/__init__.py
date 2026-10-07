@@ -8,7 +8,8 @@ a consumed unit releases. This package supplies only the shared parts:
   to add its own data, such as the sample or the reports of a group.
 * ``ExperienceBuffer``: the units that a processor holds, and its reserved batch.
 * ``EligibilityCheck``: finds held units that can no longer train.
-  ``NewestVersionCheck`` keeps only the units of the newest runtime load ID.
+  ``StalenessCheck`` drops units that are more than ``max_staleness``
+  versions behind the newest held unit.
 * ``SelectionPolicy``: the order in which units go into a batch.
   ``ArrivalOrder`` takes the oldest first; ``GroupKeyOrder`` takes ungrouped
   units, then groups by key.
@@ -18,7 +19,7 @@ the checks, a processor that supports them overrides ``eligibility_checks``.
 """
 
 from reef.train.experience.buffer import ExperienceBuffer
-from reef.train.experience.eligibility import EligibilityCheck, IneligibleUnit, NewestVersionCheck
+from reef.train.experience.eligibility import EligibilityCheck, IneligibleUnit, StalenessCheck
 from reef.train.experience.selection import ArrivalOrder, ExperienceUnit, GroupKeyOrder, SelectionPolicy
 
 __all__ = [
@@ -28,6 +29,6 @@ __all__ = [
     "ExperienceUnit",
     "GroupKeyOrder",
     "IneligibleUnit",
-    "NewestVersionCheck",
     "SelectionPolicy",
+    "StalenessCheck",
 ]

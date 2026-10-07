@@ -718,9 +718,13 @@ its candidates.
 
 The computed-feedback engine also has ``eligibility_checks()``. It returns the
 ``reef.train.experience.EligibilityCheck`` objects that drop candidates while no
-batch is out. The default is ``NewestVersionCheck``, which keeps only the
-candidates of the newest runtime load ID, by record arrival. Dropped candidates
-are released and never batched.
+batch is out. The default is ``StalenessCheck(max_staleness)``. It drops
+candidates that are more than ``max_staleness`` versions behind the newest
+candidate, by record arrival. The recipe's ``max_staleness`` reaches the
+processor as ``ProcessorContext.max_staleness``. With the default value 0, only
+candidates of the newest version stay. Dropped candidates are released and
+never batched. Runtime admission still checks each batch against the serving
+version.
 
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
 Reference validation runs at admission; incomplete groups wait for more valid
