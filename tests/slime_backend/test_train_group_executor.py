@@ -21,6 +21,7 @@ class _Worker:
         self.train_calls = []
         self.save_calls = []
         self.update_calls = []
+        self.published_adapters = []
         self.shutdown_calls = 0
         self.version = "deployment:6"
 
@@ -54,6 +55,12 @@ class _Worker:
     def get_runtime_load_id(self):
         return self.version
 
+    def initialize_runtime_load_id(self, runtime_load_id):
+        self.version = runtime_load_id
+
+    def publish_adapter(self, scenario, lora_name):
+        self.published_adapters.append((scenario, lora_name))
+
     def shutdown(self):
         self.shutdown_calls += 1
 
@@ -62,6 +69,7 @@ class CpuSlimeExecutor(Executor):
     """Custom launcher consumes the real Slime config but runs CPU test workers."""
 
     def _init_executor(self):
+        self.rpc_waits = []
         self.launch_options = dict(self.config.options)
         count = self.launch_options["num_nodes"] * self.launch_options["num_gpus_per_node"]
         self.workers = [self.launch_options["actor_cls"](rank) for rank in range(count)]
@@ -69,9 +77,11 @@ class CpuSlimeExecutor(Executor):
         self.launch_options["args"].launches.append(self)
 
     def collective_rpc(self, method, *, args=(), kwargs=None, timeout=None, non_block=False):
+        self.rpc_waits.append((method, timeout))
         return self._local.collective_rpc(method, args=args, kwargs=kwargs, timeout=timeout, non_block=non_block)
 
     def rpc(self, rank, method, *, args=(), kwargs=None, timeout=None, non_block=False):
+        self.rpc_waits.append((method, timeout))
         return self._local.rpc(rank, method, args=args, kwargs=kwargs, timeout=timeout, non_block=non_block)
 
     def check_health(self, timeout=None):
@@ -85,7 +95,7 @@ class CpuSlimeExecutor(Executor):
 def make_group():
     groups = []
 
-    def make(*, role="actor", **overrides):
+    def make(*, role="actor", train_rpc_timeout_s=14400, **overrides):
         values = {
             "reef_executor_backend": f"{__name__}:CpuSlimeExecutor",
             "update_weight_start_version": 5,
@@ -122,6 +132,7 @@ def make_group():
             num_gpus_per_actor=0.4,
             with_ref=True,
             with_opd_teacher=True,
+            train_rpc_timeout_s=train_rpc_timeout_s,
         )
         groups.append(group)
         return group
@@ -430,10 +441,24 @@ def test_disk_reload_orders_serving_operations_and_checks_published_version(
             return engines, None
 
     attached = []
+    rpc_waits = []
 
     def attach(workers):
         executor = AttachedTestGroup.from_workers(workers)
         attached.append(executor)
+        rpc = executor.rpc
+        collective_rpc = executor.collective_rpc
+
+        def record_rpc(rank, method, **kwargs):
+            rpc_waits.append((method, kwargs.get("timeout")))
+            return rpc(rank, method, **kwargs)
+
+        def record_collective(method, **kwargs):
+            rpc_waits.append((method, kwargs.get("timeout")))
+            return collective_rpc(method, **kwargs)
+
+        monkeypatch.setattr(executor, "rpc", record_rpc)
+        monkeypatch.setattr(executor, "collective_rpc", record_collective)
         return executor
 
     monkeypatch.setattr(train_groups.RayExecutor, "from_workers", staticmethod(attach))
@@ -441,6 +466,7 @@ def test_disk_reload_orders_serving_operations_and_checks_published_version(
         release_train=True,
         update_weight_transport="disk",
         update_weight_disk_dir=str(tmp_path),
+        train_rpc_timeout_s=43200,
         update_weight_local_checkpoint_dir=local_checkpoint,
         offload_rollout=True,
         weight_update_pause_mode="in_place",
@@ -460,6 +486,7 @@ def test_disk_reload_orders_serving_operations_and_checks_published_version(
         phases += ["update", "update", "verify", "verify"]
         if manage_generation and not mismatch:
             phases += ["continue", "continue"]
+        assert rpc_waits and all(timeout == 43200 for method, timeout in rpc_waits)
         assert [event[0] for event in events] == phases
         assert sorted(event for event in events if event[0] == "pull") == [
             ("pull", 0, (6, str(tmp_path), local_checkpoint)),
@@ -521,6 +548,13 @@ def test_prepared_disk_retry_reuses_export_and_recreates_only_before_a_new_prepa
 
     exports = []
     loads = []
+    result_waits = []
+
+    def resolve_export(value, *, timeout):
+        result_waits.append(timeout)
+        return resolve(value, timeout=timeout)
+
+    monkeypatch.setattr(train_groups, "resolve", resolve_export)
 
     def assign(worker, value):
         worker.version = value
@@ -540,6 +574,7 @@ def test_prepared_disk_retry_reuses_export_and_recreates_only_before_a_new_prepa
         update_weight_transport="disk",
         update_weight_disk_dir=str(tmp_path),
         update_weight_start_version=0,
+        train_rpc_timeout_s=43200,
     )
     group.create(rollout_manager=object())
     first_workers = tuple(group.executor.workers)
@@ -571,3 +606,53 @@ def test_prepared_disk_retry_reuses_export_and_recreates_only_before_a_new_prepa
     group.prepare_weight_update("deployment:9", force_full=True)
     assert len(group.args.launches) == (2 if release_train else 1)
     assert exports == ["deployment:9", "deployment:9"]
+    assert result_waits == [43200, 43200]
+    export_waits = [
+        timeout
+        for executor in group.args.launches
+        for method, timeout in executor.rpc_waits
+        if method in {"set_runtime_load_id_for_update", "update_weights"}
+    ]
+    assert export_waits == [43200] * 4
+
+
+@pytest.mark.parametrize("timeout", [14400, 43200, 0.5])
+def test_actor_and_critic_use_job_timeout_without_changing_initialization(make_group, monkeypatch, timeout):
+    args = make_group(
+        megatron_config_path=None,
+        actor_num_nodes=1,
+        actor_num_gpus_per_node=2,
+        critic_num_nodes=1,
+        critic_num_gpus_per_node=2,
+        kl_coef=0,
+        use_kl_loss=False,
+        use_opd=False,
+        use_critic=True,
+        start_rollout_id=None,
+    ).args
+    monkeypatch.setattr(train_groups, "prepare_critic_args", lambda config: SimpleNamespace(**vars(config)))
+    groups = train_groups.create_train_groups(
+        args,
+        {"actor": "actor-pg", "critic": "critic-pg"},
+        object(),
+        actor_cls=_Worker,
+        train_rpc_timeout_s=timeout,
+    )
+    try:
+        for group in groups:
+            group.initialize_runtime_load_id("deployment:0")
+            group.save_model(4, force_sync=True, scenario_step=4)
+            group.update_weights()
+            group.publish_adapter("scenario", "adapter")
+            assert all(worker.published_adapters == [("scenario", "adapter")] for worker in group.executor.workers)
+            assert group.executor.rpc_waits == [
+                ("init", 14400),
+                ("set_rollout_manager", 14400),
+                ("initialize_runtime_load_id", 14400),
+                ("save_model", timeout),
+                ("update_weights", timeout),
+                ("publish_adapter", timeout),
+            ]
+    finally:
+        for group in groups:
+            group.release()

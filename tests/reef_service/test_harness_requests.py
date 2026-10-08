@@ -36,7 +36,7 @@ from reef.service.request_service import RequestService
 from reef.storage.sqlite import SQLiteRecordStore
 from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import Mutation
-from reef.train.cordis_backend.backend import _merged_requires
+from reef.train.cordis_backend.backend import merged_requires
 from reef.train.cordis_backend.processor import RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.trainer import Trainer
@@ -410,15 +410,15 @@ def test_the_merge_takes_the_proposers_items_by_name_wherever_it_put_them(caplog
     base = ({"name": "A", "kind": "env"},)
     item = {"name": "B", "kind": "env"}
     for handed in ([*base, item], [item, *base], [item]):
-        assert _merged_requires(base, handed) == ([*base, item], [])
-    assert _merged_requires(base, [{"name": "A", "kind": "env", "check": "rm -rf /"}]) == ([*base], [])
+        assert merged_requires(base, handed) == ([*base, item], [])
+    assert merged_requires(base, [{"name": "A", "kind": "env", "check": "rm -rf /"}]) == ([*base], [])
     with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-        merged, refused = _merged_requires(
+        merged, refused = merged_requires(
             base, [item, {"name": "bad", "kind": "secret"}, {"name": "C", "kind": "service"}]
         )
         # What was dropped is returned with its reason, so the step records it beside the kept list.
-        assert _merged_requires(base, "nope") == ([*base], [{"item": "nope", "reason": "not a list"}])
-        assert _merged_requires(base, None) == ([*base], [])
+        assert merged_requires(base, "nope") == ([*base], [{"item": "nope", "reason": "not a list"}])
+        assert merged_requires(base, None) == ([*base], [])
     assert merged == [*base, item, {"name": "C", "kind": "service"}]
     assert refused == [
         {"item": {"name": "bad", "kind": "secret"}, "reason": f"requires[0].kind must be one of {REQUIRE_KINDS}"}
@@ -434,41 +434,73 @@ def test_a_training_request_with_requires_hashes_like_one_without() -> None:
     assert hash(with_items) == hash(plain) and with_items != plain
 
 
-def test_the_backend_caps_the_merged_list_and_writes_the_row_of_a_step_that_proposed_nothing(
-    tmp_path: Path, caplog
-) -> None:
-    """Only the items past the handed base are the proposer's; the merged list stops at eight, the person's items
-    first, and the log names what fell off. A step whose proposer returned nothing still carries the person's
-    items in its row, and a proposer that left the list alone changes nothing."""
+@pytest.mark.parametrize("added_count", [1, 2, 3])
+def test_backend_rejects_requires_over_the_cap(tmp_path: Path, added_count: int) -> None:
     person = [{"name": f"P{index}", "kind": "env"} for index in range(6)]
-    added = [{"name": "A0", "kind": "env"}, {"name": "A1", "kind": "service"}, {"name": "A2", "kind": "permission"}]
-
-    def batch_for(request_id: str) -> TrainingBatch:
-        request = TrainingRequest("ask", "s", "rel-0", request_id, requires=person)
-        return TrainingBatch(f"demo:instruction:{request_id}", (), request=request)
+    added = [{"name": f"A{index}", "kind": "env"} for index in range(added_count)]
 
     def extending(nodes, samples, models, *, requests=()):
-        requests[0]["requires"].extend(added)
+        # Repeated names must not consume the remaining capacity.
+        requests[0]["requires"].extend([*person, *added, *added])
         return MARKER
 
-    with caplog.at_level(logging.WARNING, logger="reef.train.cordis_backend.backend"):
-        b = backend(tmp_path, extending)
-        result = run_backend_step(b, batch_for("ask-1"), b.initial_state())
-    assert result.metrics["training_request"]["requires"] == [*person, *added[:2]]
-    assert result.metrics["training_request"]["id"] == "ask-1" and result.metrics["published"] is True
-    (capped,) = [record.getMessage() for record in caplog.records if "capped" in record.getMessage()]
-    assert capped == "propose: requires capped at 8 items; dropped: A2"
+    request = TrainingRequest("ask", "s", "rel-0", "ask-1", requires=person)
+    batch = TrainingBatch("demo:instruction:ask-1", (), request=request)
+    candidate_backend = backend(tmp_path, extending)
+    initial = candidate_backend.initial_state()
+    result = run_backend_step(candidate_backend, batch, initial)
+    assert result.metrics["training_request"]["requires"] == [*person, *added]
+    assert result.metrics["training_request"]["id"] == "ask-1"
+    if added_count > 2:
+        assert result.metrics["skipped"] == "proposal requires 9 items; at most 8 are allowed; split the request"
+        assert not result.metrics.get("published", False)
+        assert result.state["entries"] == initial["entries"]
+    else:
+        assert result.metrics["published"] is True
 
-    b = backend(tmp_path, lambda n, s, m, *, requests=(): None)
-    result = run_backend_step(b, batch_for("ask-2"), b.initial_state())
+
+def test_requires_overflow_reason_reaches_request_page(tmp_path: Path) -> None:
+    def propose(nodes, samples, models, *, requests=()):
+        requests[0]["requires"].extend({"name": f"ENV_{index}", "kind": "env"} for index in range(9))
+        return MARKER
+
+    dispatcher = _dispatcher(tmp_path, _manual(tmp_path, propose))
+    scenario = dispatcher.get_or_create_scenario("agents")
+    assert scenario is not None
+
+    async def run() -> None:
+        client = TestClient(TestServer(create_app(dispatcher)))
+        await client.start_server()
+        try:
+            answer = await (await _post(client, _request("add a rule"))).json()
+            await _committed(scenario, 1)
+            metrics = _request_rows(scenario)[0]["metrics"]
+            assert not metrics.get("published", False)
+            reason = "proposal requires 9 items; at most 8 are allowed; split the request"
+            assert metrics["skipped"] == reason
+            response = await client.get(
+                f"/reef/harness/requests/{answer['agent_record_id']}/page",
+                headers={"x-reef-scenario": "agents"},
+            )
+            assert response.status == 200
+            assert reason in await response.text()
+        finally:
+            await client.close()
+
+    try:
+        asyncio.run(run())
+    finally:
+        dispatcher.close()
+
+
+def test_no_proposal_keeps_the_requests_requires(tmp_path: Path) -> None:
+    person = [{"name": "P0", "kind": "env"}]
+    request = TrainingRequest("ask", "s", "rel-0", "ask-2", requires=person)
+    batch = TrainingBatch("demo:instruction:ask-2", (), request=request)
+    candidate_backend = backend(tmp_path, lambda n, s, m, *, requests=(): None)
+    result = run_backend_step(candidate_backend, batch, candidate_backend.initial_state())
     assert result.metrics["skipped"] == "no proposal"
-    assert result.metrics["training_request"] == {
-        "id": "ask-2",
-        "text": "ask",
-        "session": "s",
-        "release_id": "rel-0",
-        "requires": person,
-    }
+    assert result.metrics["training_request"] == {"id": "ask-2", **request.to_dict()}
 
 
 def test_prepare_commit_keeps_the_backends_training_request_and_fills_a_step_that_never_reached_it() -> None:

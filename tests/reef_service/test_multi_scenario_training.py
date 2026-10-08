@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 import pytest
@@ -11,6 +12,8 @@ from reef.artifact import InMemoryRepositoryBackend
 from reef.core import AgentRecord
 from reef.core.errors import ReefError
 from reef.core.records_types import RequestType
+from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.service.app import RequestService
 from reef.surface import adapter_name
 
 
@@ -107,6 +110,40 @@ def test_two_scenarios_train_through_one_adapter_runtime(tmp_path) -> None:
         )
         assert served_math["lora_path"] == adapter_name("math", "w1")
         assert served_code["lora_path"] == adapter_name("code", "w3")
+    finally:
+        dispatcher.close()
+
+
+@pytest.mark.unit
+def test_a_checkpointed_release_still_routes_requests_to_its_adapter(tmp_path) -> None:
+    """A checkpointed commit makes the durable release the serving head; requests must still name its adapter.
+
+    The engine loads the new adapter either way, so a request that names none is silently answered by the
+    frozen base while its record claims the release.
+    """
+    initial = tmp_path / "initial"
+    initial.mkdir()
+    runtime = AdapterRuntime()
+    runtime._checkpoint_dir = tmp_path / "exported"
+    dispatcher = build_training_dispatcher(
+        runtime,
+        tmp_path,
+        InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
+        checkpoint_strategy=EveryNVersions(1),
+    )
+    try:
+        _feed(dispatcher, "math", 1)
+        wait_for_step(dispatcher, 1, scenario="math")
+        math = dispatcher.get_or_create_scenario("math")
+        assert runtime.adapter_versions["math"] == "w1"
+        assert getattr(math.current_artifact_ref(), "runtime_load_id", None) is None, "the head is the durable release"
+
+        _, request = asyncio.run(
+            RequestService(dispatcher)._prepare_request(
+                {"x-reef-scenario": "math"}, {"messages": []}, "/v1/chat/completions", handler=object()
+            )
+        )
+        assert request["lora_path"] == adapter_name("math", "w1")
     finally:
         dispatcher.close()
 

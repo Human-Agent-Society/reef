@@ -746,7 +746,7 @@ def test_publication_pause_fences_surviving_engines_before_dead_slots_recover(mo
     worker = types.SimpleNamespace(
         config=SGLangConfig("model", 1, 1, 1, pause_mode="retract"), updatable_rollout_engines=[None, engine]
     )
-    module._SGLangInferenceEngines(worker).pause()
+    module._SGLangEngineGroup(worker).pause()
     assert paused == ["retract", "flush"]
 
 

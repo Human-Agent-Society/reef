@@ -28,8 +28,7 @@ identifier as SGLang's served model name. Startup has a one-hour readiness
 deadline for SGLang and 30 seconds for Reef. On failure or interruption,
 Reef cleans up both processes. Logs live under ``.reef/run/``.
 Local ``--inference.model-path`` cannot be combined with upstream URL/model selection;
-``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below. Training
-still requires an explicit stack file.
+``--model`` remains provider shorthand. Native engine options use ``inference.options`` as described below.
 
 An external-provider deployment also needs no YAML file:
 
@@ -139,6 +138,24 @@ support remains in `PR #325 <https://github.com/Human-Agent-Society/reef/pull/32
 this extension contract alone does not install or implement MLX.
 ``training.ready-timeout`` controls bridge startup (default 3600 seconds);
 ``reef.ready-timeout`` controls HTTP startup (default 30 seconds).
+
+``training.timeout-s`` sets the training coordinator RPC wait in seconds. With
+Slime, it also sets the internal worker RPC waits for training, checkpoint saves,
+weight export and publication. For example, set ``training: {timeout-s: 43200}`` in
+YAML or pass ``--training.timeout-s 43200`` to allow waits of up to 12 hours.
+The value must be a positive finite number. If omitted, the coordinator wait
+follows ``inference.timeout-s`` (default 300 seconds), while Slime's internal
+worker waits retain their four-hour default. Worker initialization keeps its
+existing timeout independently of this setting.
+
+Each RPC has its own wait budget. The outer coordinator call still bounds the
+combined training and checkpoint-save wait; giving each internal RPC 12 hours
+does not allow those phases to take 12 hours each inside the same outer call.
+A timeout stops waiting, not worker execution, and does not automatically retry
+the job or save an intermediate checkpoint. A job left in ``RUNNING`` needs
+operator recovery before it can be replayed; see
+`Training-step coordination <../developer-guide/executors.rst#training-step-coordination>`__.
+
 Slime-integrated inference uses the same ``inference`` fields as standalone
 serving. ``inference.num-gpus`` is the total inference GPU budget;
 ``inference.tensor-parallel-size`` is the GPU count per engine (default 1).
@@ -172,6 +189,16 @@ these only when constructing driver arguments; generated inference flags are
 not stored in ``training.options``. Router bind settings use ``router-ip`` and
 ``router-port``; other supported router flags retain their native ``router-*``
 names. The standalone engine launcher does not include a router.
+
+In Slime-integrated inference, and for the local SGLang engines that the
+Tinker backend starts, each engine probes free ports on its host at startup.
+A probe reserves nothing, so another process, such as another stack on the
+same host network, can bind a probed port first. If the engine then fails to
+start and another process holds one of its ports, Reef stops the engine and
+starts it again on new ports. Reef does the same when another process listens
+on the engine's HTTP port and answers the readiness check. Reef makes at most
+three startup attempts per engine. Other startup failures, and any failure of
+an encoder engine, stop the launch.
 
 Migration from the previous version 2 training configuration:
 
@@ -231,6 +258,44 @@ the committed checkpoint before restart; its training checkpoint must not be
 used to reconstruct serving. See `Worker executors <../developer-guide/executors.rst>`__ for the
 recovery policy and compatibility limits.
 
+``reef.inference_backend: vllm`` selects the vLLM engine integration for
+training-time serving. Reef launches one vLLM server per engine on the
+reserved GPUs with ``VLLM_SERVER_DEV_MODE=1``, Reef's connector and
+``--logprobs-mode processed_logprobs``, and drives publication through vLLM's
+control routes: ``/pause?mode=keep`` (a retracting pause adds
+``/reset_prefix_cache?reset_running_requests=true``), ``/sleep`` and
+``/wake_up`` for colocated memory release, ``/update_weight_version``,
+``/collective_rpc reload_weights`` and the ``/v1/load_lora_adapter`` routes.
+Engines are single-node; more than one engine needs ``router_url``. Each
+engine takes one port, probed upward from ``engine_port_base`` (default
+15000) on its host. If the engine then fails to start and another process
+holds that port, or another process listens on that port when the engine
+becomes ready, Reef stops the engine and starts it again on a new port, with
+at most three startup attempts per engine. Engine
+options use vLLM's engine-argument names; Reef sets ``model``, ``host``,
+``port``, ``tensor_parallel_size`` and ``enable_sleep_mode`` itself, defaults
+``generation_config`` to ``vllm`` so the model's own generation defaults cannot
+add truncation or a temperature the trainer never sees, rejects
+``kv_offloading_size`` (list ``OffloadingConnector`` in ``kv_transfer_config``
+instead) and enables prefix caching only under a retracting pause. vLLM
+releases the KV cache only together with the weights, so
+``keep-lora-base-resident`` is unavailable on it, and it resumes scheduling by
+itself once every region is resident, so the engine restores the KV cache
+when Reef resumes generation rather than when the coordinator calls
+``onload_kv``: generation stays paused until the coordinator's commit.
+
+The Slime backend pairs with ``inference.backend: vllm`` through the disk
+weight path: ``training.options.update-weight-transport: disk`` in full mode,
+with no ``update-weight-local-checkpoint-dir``, no LoRA rank and no
+``check-weight-update-equal``, since Slime's other transports call SGLang-only
+engine routes. The trainer writes each checkpoint under
+``update-weight-disk-dir`` and the engines reload it with their weight version.
+Engine options come from ``inference.options`` in vLLM's own names and never
+pass through Slime's parser. One engine per stack: ``inference.num-gpus`` must
+equal ``inference.tensor-parallel-size`` until Slime can name a ``router_url``.
+The Tinker backend still produces SGLang engine options and keeps
+``inference.backend: sglang``.
+
 Reef coordinates native inference and training, alongside its HTTP service.
 PRM and user-simulation services are independently deployed by OpenClawRL;
 Reef does not discover, launch, schedule, probe or stop them. The recipe consumes
@@ -243,7 +308,8 @@ Managed engine launches use one generic builder. A backend definition supplies
 its command template, public parameter bindings, reserved aliases and HTTP
 health path. Adding an engine with this launch contract does not require a
 backend-specific deploy module or a second process lifecycle implementation.
-Currently only the SGLang definition is supplied.
+Reef supplies the SGLang and vLLM definitions; ``--inference.backend`` selects
+one.
 
 The launcher translates public paths to the existing internal service and
 recipe contracts before starting children. Config references such as
@@ -340,8 +406,10 @@ trainer. Sampling runs through::
 SGLang and Slime's trainer both read at [A] (full vocabulary, trainer with
 ``rollout_temperature``, no penalties), so they agree as long as a recipe uses
 no penalties or ``logit_bias``. vLLM ``--logprobs-mode processed_logprobs``
-reads at [B], so it matches only with top-k, top-p and min-p off; otherwise
-the trainer must replay vLLM's sampling mask. Verify with Slime's
+reads at [B], so it matches only with top-k, top-p and min-p off, and Reef's
+vLLM client rejects a request whose effective ``top_p`` is below 1, ``top_k``
+above 0 or ``min_p`` above 0; replaying vLLM's sampling mask in the trainer
+would lift that restriction. Verify with Slime's
 ``train_rollout_logprob_abs_diff`` on identical weights before training.
 
 For both handlers, set ``inference.handler-config.force_reasoning`` to

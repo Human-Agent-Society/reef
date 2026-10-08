@@ -361,8 +361,10 @@ def test_training_inference_forces_the_flags_reef_serving_relies_on():
 
 
 def test_inference_engine_does_not_inherit_or_patch_slime(monkeypatch):
+    from reef.runtime.interfaces import InferenceEngine
+
     module = _load_sglang_engine_module(monkeypatch)
-    assert module.ReefSGLangEngine.__bases__ == (object,)
+    assert module.ReefSGLangEngine.__bases__ == (InferenceEngine,)
     assert not hasattr(module, "install_sglang_extensions")
 
 

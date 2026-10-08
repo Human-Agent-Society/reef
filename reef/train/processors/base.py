@@ -297,13 +297,21 @@ class DataProcessor:
     def status(self) -> Mapping[str, Any]:
         """Return JSON-safe state that callers need while waiting.
 
-        Most processors have no caller-visible state. A processor may
-        override this for a terminal outcome that cannot become a training
-        batch, allowing a bounded external wait to fail explicitly.
+        ``ready_units`` against ``batch_size`` says how close the next batch
+        is. A caller waiting on a release needs it to tell a batch that is
+        still filling from one that never will: a scenario whose producer
+        stopped short, or whose record stream picked up rows the producer did
+        not send, sits below the batch size with nothing else to report, and
+        without these two the wait is indistinguishable from slow training.
+
+        A processor may override this for a terminal outcome that cannot
+        become a training batch, allowing a bounded external wait to fail
+        explicitly.
         """
+        state: dict[str, Any] = {"ready_units": self._ready_count(), "batch_size": self._batch_size}
         if self.supported_training_modes & {"manual", "hybrid"}:
-            return {"buffered_requests": self.buffered_requests()}
-        return {}
+            state["buffered_requests"] = self.buffered_requests()
+        return state
 
     def close(self) -> None:
         """Release resources the processor owns; safe to call more than once.

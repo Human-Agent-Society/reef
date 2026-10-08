@@ -162,6 +162,18 @@ serves it over
 ``GET /reef/harness``. An adapter combines the rendered tree with a harness
 executable; that harness and its configured model form the running agent.
 
+Render
+------
+
+Turning a harness tree into the files one agent uses: harness tree entries in,
+paths and their text out. This process does not touch disk or start an agent.
+
+Reef's shared engine and the adapter own it together. The engine goes first,
+merging and writing by rules that are the same for every agent and rejecting a
+tree that breaks them. The adapter gets the last word: its paths decide where
+each file goes, and its quirks module may rewrite, drop, or refuse what the
+engine produced before an agent ever reads it.
+
 Skill
 -----
 

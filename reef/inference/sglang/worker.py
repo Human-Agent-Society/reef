@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from contextlib import suppress
 from typing import Any
 
 import ray
 
+from reef.inference.process import retire_engines
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.health import SGLangEngineHealthChecks
 from reef.inference.sglang.launch import SGLangCluster, engine_environment
@@ -16,7 +16,7 @@ from reef.runtime.recovery import (
     EngineHealthMonitor,
     HealthMonitorConfig,
     InferenceControl,
-    InferenceEngines,
+    InferenceEngineGroup,
     InferenceMonitor,
     WeightUpdateConnection,
 )
@@ -27,20 +27,6 @@ def recover_server(server) -> None:
     if not any(engine is None for group in server.server_groups for engine in group.all_engines):
         return
     server.recover()
-
-
-def retire_engines(engines: Sequence[Any], *, timeout: float = 30) -> None:
-    """Ask each engine actor to shut down, then kill it; failures never block retirement."""
-    pending = []
-    for engine in engines:
-        with suppress(Exception):
-            pending.append(engine.shutdown.remote())
-    if pending:
-        with suppress(Exception):
-            ray.get(pending, timeout=timeout)
-    for engine in engines:
-        with suppress(Exception):
-            ray.kill(engine, no_restart=True)
 
 
 class SGLangWorker:
@@ -128,7 +114,7 @@ class SGLangWorker:
 
     def _create_control(self) -> InferenceControl:
         return InferenceControl(
-            _SGLangInferenceEngines(self), _SGLangWeightUpdateConnection(self), _SGLangInferenceMonitor(self)
+            _SGLangEngineGroup(self), _SGLangWeightUpdateConnection(self), _SGLangInferenceMonitor(self)
         )
 
     def pause_generation_for_update(self):
@@ -267,7 +253,7 @@ class SGLangWorker:
         self._routers = []
 
 
-class _SGLangInferenceEngines(InferenceEngines):
+class _SGLangEngineGroup(InferenceEngineGroup):
     """Ray fan-out and SGLang engine replacement behind Reef's control contract."""
 
     def __init__(self, worker: SGLangWorker) -> None:
