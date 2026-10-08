@@ -1,142 +1,207 @@
 # Reefine: refine your harness on reef-pi
 
 Reefine turns plain-language requests into versioned harness changes: skills,
-rules, agent commands, or pi extensions. This tutorial runs two demos and
-measures how many requests pass evaluation.
+rules, agent commands, or pi extensions. This tutorial shows how to request,
+review, install, and try a change in a normal `reef-pi` session.
 
-The service proposes and evaluates each change. A session after installation
-shows whether the agent follows the requested behavior.
-
-## Quick start
+## 1. Start Reef
 
 Use the repository environment from the [development guide](../../docs/contributing/development.rst).
 The `python3` on your PATH must import `reef` and `reef_client`.
-Start an OpenAI-compatible model endpoint with the model available.
-Keep port `8901` free.
+Have Node.js, npm, `rg`, and `fd` available for pi.
+Start a model endpoint that supports tool calls. Keep port `8901` free.
+
+In a terminal at the repository root:
+
+```bash
+source .venv/bin/activate
+reef serve --recipe reefine \
+  --inference.upstream-url http://127.0.0.1:11434 \
+  --inference.upstream-model gemma4:26b \
+  --inference.upstream-api-key dummy
+```
+
+This example uses a local Ollama model. Change the endpoint, model, and key
+for your provider. Leave the service running throughout the tutorial.
+It listens on `127.0.0.1:8901` and stores state under `.reef/reefine/`.
+Local models can take several minutes per request.
+
+The local service requires no token unless `REEF_TOKEN` is set.
+If you use a token, export it in both terminals and add
+`-H "Authorization: Bearer $REEF_TOKEN"` to each `curl` command below.
+
+## 2. Install reef-pi
+
+Open another terminal at the repository root. Activate the same environment.
+Create a scenario to keep this harness's releases and requests together:
+
+```bash
+source .venv/bin/activate
+curl -fsS -H 'Content-Type: application/json' \
+  -d '{"name": "reefine-tutorial"}' \
+  http://127.0.0.1:8901/reef/scenarios
+
+curl -fsS -H 'x-reef-scenario: reefine-tutorial' \
+  'http://127.0.0.1:8901/reef/harness/install?adapter=pi' | bash
+
+export PATH="$HOME/.local/bin:$PATH"
+reef-pi doctor
+```
+
+The install command downloads a script from your Reef service and runs it.
+It installs the harness under `~/reef-harness/reefine-tutorial` and adds the
+`reef-pi` wrapper under `~/.local/bin/`. Keep the harness outside your project.
+`reef-pi doctor` checks the installation and service connection.
+
+## 3. Ask for a change
+
+Copy the tutorial's small bug fixture into a separate workspace, then start pi:
 
 ```bash
 # From the repository root:
-source .venv/bin/activate
-cd tutorials/reefine
-uv pip install -e .
-
-# These are run.sh's defaults. Change them for your endpoint.
-export REEF_UPSTREAM_URL=http://127.0.0.1:11434  # No /v1 suffix.
-export REEF_UPSTREAM_MODEL=gemma4:26b
-export REEF_UPSTREAM_API_KEY=dummy              # Use your endpoint's key.
-
-./run.sh bugfix
+mkdir -p "$HOME/reefine-example"
+cp tutorials/reefine/demos/workspace/*.py "$HOME/reefine-example/"
+cd "$HOME/reefine-example"
+reef-pi
 ```
 
-`run.sh` starts Reef with [configs/deployment.yaml](configs/deployment.yaml),
-installs the harness, runs the demo, and stops the service on exit.
-The deployment uses token `reef-local`. If you set `REEF_TOKEN`, keep it equal
-to the deployment token.
+In the session, type:
 
-The service installs the pinned pi version under `~/.local/share/reef-harness/pi`
-on first start. The harness goes into `work/harness/`. The wrapper goes into
-`~/.reef/installs/`, and `~/.local/bin/reef-pi` links to it.
+```text
+/reefine When I ask you to fix a bug, reproduce it with a failing test before editing the code.
+```
 
-Local models can take several minutes per request. The script defaults to
-`REEF_PROPOSER_TIMEOUT_S=900` and `REEF_PROPOSER_MAX_TOKENS=16384`.
-Set these variables before running the script to override them.
+Answer any clarification questions. Reef proposes and evaluates the change,
+then reports the result in the session with a link to the request page.
+The service performs the change; the session submits the request.
 
-## Run the demos
-
-| Command | Requested behavior | Session after installation |
-| --- | --- | --- |
-| `./run.sh bugfix` | Reproduce a bug with a failing test, fix it, run tests, then request a second agent's review. | Fix `adder.py` in a copy of [demos/workspace/](demos/workspace/). |
-| `./run.sh research` | Search for papers, download and read them, then answer with citations. | Explain the comparison-sorting lower bound with a source. |
-
-The exact requests are in [demos/bugfix.md](demos/bugfix.md) and
-[demos/research.md](demos/research.md). Each demo:
-
-1. Submits the request with `reef-pi evolve`.
-2. Waits for the proposal and evaluation result.
-3. Prints the changes and timing.
-4. Promotes a pending release, if present.
-5. Runs `reef-pi setup --yes` for declared requirements.
-6. Installs a selected or promoted release.
-7. Runs a session and prints its tool calls and final answer.
-
-If no release is selected, the session uses the previously installed harness.
-An unmet setup requirement or refused installation stops the demo with exit code `2`.
-
-**The demos automatically promote extensions and run setup checks.**
-Extensions run with your privileges. For manual use, read the version page
-before promotion and inspect the declared requirements before setup.
-
-## Understand the result
-
-The deployment uses manual training: each accepted instruction runs one step.
-Failed session reports do not trigger additional steps.
-
-The proposer designs the change, writes entries, and reviews them against the request.
-The service checks the entries, then evaluates the candidate with `selection: floor`.
-The health task must run `echo reef-ok` through the shell tool and return its output.
-
-- `1 / 0` means the health task passed; `0 / 1` means it failed.
-- `selected` means the release was published.
-- `pending` means the release needs promotion because it changes a `code_extension`.
-- `rejected` means evaluation rejected the candidate.
-- `skipped` includes the reason no change was evaluated.
-
-Passing the health task does not prove that the requested behavior works.
-Read the design and review notes with `reef-pi page <version>` or `/versions <version>`.
-Check the session's tool calls against the request.
-
-Declared `requires` items can be incomplete or incorrect. Review the version
-page for unmet requirements and undeclared variables. Generated extensions
-can use `fetch` and system commands. Additional npm dependencies are not installed.
-
-## Measure requests
+You can also submit a request from the shell:
 
 ```bash
-./run.sh measure          # 10 requests by default.
-./run.sh measure --n 12   # All 12 requests in the fixed list.
+reef-pi evolve "When I ask you to fix a bug, reproduce it with a failing test before editing the code." --wait
 ```
 
-Measurement submits skill and rule requests one at a time.
-It does not promote or install their releases, or run a session after each request.
+Use either entry point for the same request. Neither requires `run.sh`.
 
-| Count | Meaning |
-| --- | --- |
-| Filed | Requests accepted by the service. |
-| Answered | Results containing a proposed change. |
-| Admitted | Candidates evaluated. |
-| Won | Candidates that passed the health task. |
-| Published | Releases published. |
-| Pending | Releases awaiting promotion. |
+## 4. Review and install the result
 
-These counts measure proposal and evaluation outcomes, not compliance with each request.
+In the pi session, list the versions:
 
-## Inspect saved results
+```text
+/versions
+```
 
-| Path | Contents |
-| --- | --- |
-| `work/reef.log` | Service log. |
-| `work/<mode>-<timestamp>.json` | Run results and catalog rows. |
-| `work/<mode>-<timestamp>/` | Demo workspace, session receipts, and any saved pending-release page. |
-| `work/deployment/steps/` | Proposer replies, parsed changes, and evaluation records. |
+Use the version shown in the result in place of `<version>`:
 
-Runs reuse the state in `work/deployment/`. Queued requests from an interrupted
-run can finish before a new request. To start a fresh chain, move `work/` aside
-before running a demo.
+```text
+/versions <version>
+```
+
+Read the design, usage instructions, and review notes. The default evaluation
+checks that the harness can run `echo reef-ok` and return its output.
+Passing this health task does not prove that your requested behavior works.
+Rejected or skipped requests leave the served version unchanged.
+
+If you accept the change, install it:
+
+```text
+/versions <version> install
+```
+
+Confirm installation and complete any setup prompts. A version that changes
+an extension waits for this approval; installation promotes it before use.
+Extensions run with your privileges. Inspect declared requirements before
+providing values or allowing checks. Unmet requirements prevent installation.
+
+Load the installed version:
+
+```text
+/reload
+```
+
+Restarting `reef-pi` also loads it. For shell-based review, setup, and updates,
+see the [Reefine guide](../../docs/user-guide/recipes/reefine.rst#how-it-works).
+
+## 5. Try the changed behavior
+
+In the reloaded session, ask:
+
+```text
+Fix the bug in adder.py.
+```
+
+Check the tool calls: the agent should run a failing test before editing
+`adder.py`, then fix the code and run the test again.
+A published release alone does not establish that the instruction was followed.
+If the behavior is incomplete, submit a more specific `/reefine` request.
+
+For a research workflow, try another request:
+
+```text
+/reefine When I ask a research question, search for relevant papers, download and read them, then answer with citations.
+```
+
+Review, install, and reload that version in the same way. Ask a research
+question and check whether the agent actually reads sources before citing them.
+These are example requests, not built-in Reefine modes.
+
+## Optional scripted demos
+
+`run.sh` automates experiments for this tutorial. It starts a separate deployment,
+installs a harness, runs a fixed request, saves results, and stops the service.
+Stop the manually started service first: both use port `8901`.
+
+```bash
+# From the repository root, with .venv activated:
+cd tutorials/reefine
+uv pip install -e .
+export REEF_UPSTREAM_URL=http://127.0.0.1:11434  # No /v1 suffix.
+export REEF_UPSTREAM_MODEL=gemma4:26b
+export REEF_UPSTREAM_API_KEY=dummy
+export REEF_TOKEN=reef-local                  # Matches configs/deployment.yaml.
+
+./run.sh bugfix
+./run.sh research
+./run.sh measure --n 10
+```
+
+`bugfix` adds a second agent's review to the test-and-fix request.
+`research` requests the paper-reading workflow. The exact requests are in
+[demos/bugfix.md](demos/bugfix.md) and [demos/research.md](demos/research.md).
+
+**The demos automatically promote pending extensions and run `setup --yes`.**
+They do not pause for the manual review described above. Unmet requirements
+or refused installation stop a demo with exit code `2`.
+If no change is selected, its test session uses the previously installed harness.
+
+The [scripted deployment](configs/deployment.yaml) uses the text proposer and
+stores state under `work/`. The built-in profile used above can use an agent
+proposer where supported. Both use manual training and a health evaluation.
+The script sets proposer limits of 900 seconds and 16,384 tokens by default.
+
+Measurement submits up to 12 fixed skill and rule requests, one at a time.
+It reports accepted requests, proposed changes, evaluated candidates, health
+passes, published releases, and pending releases. It does not install those
+updates or run a session after each request.
+
+Each run saves `work/<mode>-<timestamp>.json`. Demo workspaces and receipts
+are under `work/<mode>-<timestamp>/`; service logs are in `work/reef.log`.
+Runs reuse `work/deployment/`. Move `work/` aside before a run to start fresh.
 
 ## Historical results
 
-The recorded runs from September 6–8, 2026 used `gemma4:26b` on a Mac mini M4
-with 32 GB of memory. They used three arithmetic tasks and `selection: always`.
-Publication therefore did not require an evaluation win. These results do not
-validate the current health task.
+Recorded runs from September 6–8, 2026 used `gemma4:26b` on a Mac mini M4
+with 32 GB of memory. They used three arithmetic tasks and `selection: always`,
+which published changes regardless of evaluation results.
+They do not validate the current health task.
 
 - Bug-fix sessions reproduced, fixed, and tested the bug, but did not obtain a second agent's review.
-- The first research session answered from memory. A later session used a local search tool, but downloaded and read no paper.
+- Research sessions answered from memory or used a local search tool, but downloaded and read no paper.
 - No recorded run produced an extension.
 
-The four measurement runs on the code from PR #315 reported:
+Four measurement runs on the code from PR #315 reported:
 
-| Run | Filed | Answered | Admitted | Won | Published | Median request time (s) |
+| Run | Filed | Answered | Evaluated | Won | Published | Median request time (s) |
 | --- | --- | --- | --- | --- | --- | --- |
 | 1 | 2 | 2 | 2 | 0 | 2 | — |
 | 2 | 10 | 3 | 3 | 1 | 3 | 248.0 |
@@ -147,16 +212,3 @@ Here, `Won` means more arithmetic-task wins than losses. Run 1 stopped after
 a driver error; its counts came from catalog rows, and its median was unavailable.
 Parser and request-handling code changed between runs. Runs were not repeated,
 so the table does not establish a success rate or a performance comparison.
-
-## Use the built-in recipe
-
-Reefine also ships in `reef-infra`. To start its built-in service profile:
-
-```bash
-reef serve --recipe reefine --model ollama/gemma4:26b
-```
-
-The profile listens on `127.0.0.1:8901` and stores state under `.reef/reefine/`.
-Set `REEF_TOKEN` to require a Bearer token; otherwise, this loopback service
-has no authentication. This profile differs from the tutorial deployment.
-See the [Reefine guide](../../docs/user-guide/recipes/reefine.rst) for configuration.
