@@ -455,8 +455,10 @@ def test_a_manifest_without_a_test_split_is_written_as_version_1_exactly(tmp_pat
             "test must be a list",
         ),
         (
-            '{"version": 2, "seed": 0, "eval_fraction": 0.5, "test_fraction": 0.1, "train": ["a"], "eval": [],'
-            ' "test": ["a"]}',
+            (
+                '{"version": 2, "seed": 0, "eval_fraction": 0.5, "test_fraction": 0.1, "train": ["a"], "eval": [],'
+                ' "test": ["a"]}'
+            ),
             "both the test split",
         ),
     ],

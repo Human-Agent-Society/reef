@@ -734,9 +734,9 @@ def test_a_task_the_oracle_refuses_or_the_agent_cannot_play_is_removed(tmp_path:
     unplayable = StandInGenerator(tmp_path / "tasks2", play_error="Failed to start tmux session. Error: None")
     p, _ = generating(tmp_path / "second", unplayable, count=1, generations=1)
     assert not looked(p)
-    assert [call["arm"] for call in unplayable.plays] == [
-        "plain"
-    ], "the hint arm is not played for a task that cannot run"
+    assert [call["arm"] for call in unplayable.plays] == ["plain"], (
+        "the hint arm is not played for a task that cannot run"
+    )
     assert unplayable.deleted == ["harbor-00000-000-inspection"]
     assert unplayable.reports[0]["metadata"]["refusal"].startswith("the Reasoning Agent could not play the task")
 
