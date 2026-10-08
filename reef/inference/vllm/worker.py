@@ -8,7 +8,7 @@ from typing import Any
 
 import ray
 
-from reef.inference.process import retire_engines
+from reef.inference.process import EngineStartup, retire_engines
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.launch import VLLMEngineGroup, VLLMEngineHealthChecks, engine_environment
 from reef.runtime.publication import WeightUpdateLock
@@ -31,9 +31,9 @@ class VLLMWorker:
         self._health_monitor: EngineHealthMonitor | None = None
         self._closed = False
         try:
-            pending = self.group.start_engines({})
-            if pending:
-                ray.get(pending)
+            startup = EngineStartup()
+            startup.start(self.group)
+            startup.wait()
             self.rollout_engine_lock = self._new_rollout_engine_lock()
             self._control = InferenceControl(
                 _VLLMEngineGroup(self), _VLLMWeightUpdateConnection(self), _VLLMInferenceMonitor(self)

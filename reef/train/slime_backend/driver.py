@@ -129,6 +129,27 @@ def _apply_bridge_resume_fallback(args) -> None:
     args.start_rollout_id = 0
 
 
+def _apply_unsaved_optimizer_resume(args) -> None:
+    """Resume a run that never saved its optimizer from its weights alone.
+
+    With ``--no-save-optim`` (required, for one, when the optimizer is offloaded
+    to the CPU) Reef's checkpoints carry no optimizer or scheduler state, and
+    after each save the train group already reloads them with
+    ``no_load_optim``. A cold restart did not, so Megatron looked for the
+    missing state and failed with ``KeyError: 'optimizer'``. This applies the
+    same rule when ``--load`` resumes the run's own save directory.
+    """
+    if not getattr(args, "no_save_optim", False):
+        return
+    load, save = getattr(args, "load", None), getattr(args, "save", None)
+    if not (isinstance(load, str) and load.strip() and isinstance(save, str) and save.strip()):
+        return
+    if Path(load).resolve() != Path(save).resolve():
+        return
+    if (Path(load) / "latest_checkpointed_iteration.txt").is_file():
+        args.no_load_optim = True
+
+
 def _retention_options(arguments: Sequence[str]) -> tuple[RetentionConfig, list[str]]:
     parser = argparse.ArgumentParser(add_help=False, allow_abbrev=False, argument_default=argparse.SUPPRESS)
     parser.add_argument("--reef-checkpoint-policy", dest="policy")
@@ -211,6 +232,7 @@ def create_training_plan(
     _configure_executors(args, config, slime_args)
     _validate_tracking_args(args)
     _apply_bridge_resume_fallback(args)
+    _apply_unsaved_optimizer_resume(args)
     spec.apply_driver_options(args, loss_family_config)
     _stamp_loss_family_reference(args, loss_family)
     from reef.train.slime_backend.reef_adapters.bridge import prepare_bridge

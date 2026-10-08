@@ -9,6 +9,7 @@ from typing import Any
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
+from reef.inference.process import EngineGroup, EngineStartup
 from reef.inference.vllm.config import VLLMConfig
 from reef.inference.vllm.engine import ReefVLLMEngine
 from reef.runtime.recovery import EngineHealthChecks, EngineHealthTarget
@@ -24,7 +25,7 @@ def engine_environment(config: VLLMConfig) -> dict[str, str]:
     }
 
 
-class VLLMEngineGroup:
+class VLLMEngineGroup(EngineGroup):
     """One model's engines: identical single-node replicas, one actor each, on the reserved GPUs.
 
     ``placement`` is the deployment's inference reservation: the placement
@@ -35,6 +36,8 @@ class VLLMEngineGroup:
         self.config = config
         self.placement = placement
         self.all_engines: list[Any] = [None] * config.engine_count
+        self.nodes_per_engine = 1
+        self.port_ranges: dict[int, tuple[str, range]] = {}
         self.num_new_engines = 0
         self.needs_offload = bool(config.offload and config.shared_gpus > 0)
 
@@ -54,26 +57,30 @@ class VLLMEngineGroup:
     def parallel_config(self) -> dict[str, int]:
         return {"tp_size": self.config.gpus_per_engine, "pp_size": 1, "ep_size": 1, "moe_dp_size": 1}
 
-    def start_engines(self, cursors: dict[str, int]) -> list[Any]:
-        """Launch an actor for every empty slot; return the pending ``init`` calls.
+    def start_engines(self, cursors: dict[str, int]) -> dict[int, Any]:
+        """Launch an actor for every empty slot; return each new slot's pending ``init`` call.
 
         ``cursors`` tracks the next free port per host so engines of this
         deployment never race for the same port; probing starts at the
-        configured ``engine_port_base``, which stacks sharing a host must set apart.
+        configured ``engine_port_base``.
         """
         created = [index for index, engine in enumerate(self.all_engines) if engine is None]
         for index in created:
             self.all_engines[index] = self._launch_actor(index)
         self.num_new_engines = len(created)
-        pending = []
-        for index in created:
+        return self.init_engines(created, cursors)
+
+    def init_engines(self, slots: list[int], cursors: dict[str, int]) -> dict[int, Any]:
+        pending = {}
+        for index in slots:
             actor = self.all_engines[index]
             host, _ = ray.get(actor.node_address_and_port.remote())
             _, port = ray.get(
                 actor.node_address_and_port.remote(start_port=cursors.get(host, self.config.engine_port_base))
             )
             cursors[host] = port + 1
-            pending.append(actor.init.remote(host, port))
+            self.port_ranges[index] = (host, range(port, port + 1))
+            pending[index] = actor.init.remote(host, port)
         return pending
 
     def _launch_actor(self, index: int) -> Any:
@@ -97,9 +104,9 @@ class VLLMEngineGroup:
     def recover(self) -> None:
         """Relaunch dead engines; a colocated replacement releases memory like the originals did."""
         missing = [index for index, engine in enumerate(self.all_engines) if engine is None]
-        pending = self.start_engines({})
-        if pending:
-            ray.get(pending)
+        startup = EngineStartup()
+        startup.start(self)
+        startup.wait()
         replaced = [self.all_engines[index] for index in missing]
         if self.needs_offload and replaced:
             ray.get([engine.release_memory_occupation.remote() for engine in replaced])

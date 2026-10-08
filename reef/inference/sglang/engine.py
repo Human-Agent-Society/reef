@@ -13,6 +13,7 @@ from typing import Any
 import requests
 from urllib3.exceptions import NewConnectionError
 
+from reef.inference.process import check_server_owner, ports_in_use
 from reef.inference.sglang.config import SGLangConfig
 from reef.inference.sglang.lora_schema import (
     require_lora_distributed_request_schema,
@@ -40,6 +41,7 @@ class ReefSGLangEngine(InferenceEngine):
     """Own one native SGLang process, or borrow an existing HTTP engine."""
 
     _get_current_node_ip_and_free_port = staticmethod(node_address_and_port)
+    ports_in_use = staticmethod(ports_in_use)
 
     def __init__(
         self,
@@ -95,9 +97,11 @@ class ReefSGLangEngine(InferenceEngine):
         if self.external_url:
             self._verify_external_engine(options)
         else:
-            self.process = launch_engine(options)
+            process = launch_engine(options)
+            self.process = process
             if self.node_rank == 0:
-                wait_ready(self.get_url(), self.process, self.config.startup_timeout)
+                wait_ready(self.get_url(), process, self.config.startup_timeout)
+                check_server_owner(host, port, process.pid)
         self._register_to_router(options)
 
     def _server_options(

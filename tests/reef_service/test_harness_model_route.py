@@ -11,6 +11,7 @@ run stay admitted, and the binding itself always renders.
 from __future__ import annotations
 
 import json
+import re
 from typing import Any
 
 import pytest
@@ -65,7 +66,7 @@ def test_claude_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], b
 
 def test_claude_writes_the_binding_env_only_beside_the_binding_token() -> None:
     # A tree alone never carries the endpoint; the binding's three names pass because its token is beside them.
-    with pytest.raises(RenderError, match="must not set env ANTHROPIC_BASE_URL"):
+    with pytest.raises(RenderError, match=re.escape("must not set env.ANTHROPIC_BASE_URL in claude/settings.json")):
         render("claude", [config({"env": {"ANTHROPIC_BASE_URL": OTHER_URL}})], bound=False)
     files = render("claude", [config({"env": {"ANTHROPIC_BASE_URL": OTHER_URL}})], bound=True, api="anthropic")
     env = json.loads(files["claude/settings.json"])["env"]

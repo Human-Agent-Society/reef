@@ -1745,6 +1745,35 @@ def test_bridge_mode_restart_keeps_resumable_checkpoint(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("no_save_optim", "same_dir", "tracked", "expected"),
+    [
+        (True, True, True, True),
+        # A first start has nothing of its own to resume.
+        (True, True, False, False),
+        # A checkpoint from elsewhere may well carry its optimizer.
+        (True, False, True, False),
+        (False, True, True, False),
+    ],
+)
+def test_a_restart_without_a_saved_optimizer_does_not_load_one(
+    tmp_path: Path, no_save_optim: bool, same_dir: bool, tracked: bool, expected: bool
+) -> None:
+    from reef.train.slime_backend.driver import _apply_unsaved_optimizer_resume
+
+    save = tmp_path / "megatron"
+    load = save if same_dir else tmp_path / "other"
+    load.mkdir(parents=True)
+    if tracked:
+        (load / "latest_checkpointed_iteration.txt").write_text("23", encoding="utf-8")
+    args = SimpleNamespace(no_save_optim=no_save_optim, no_load_optim=False, load=str(load), save=str(save))
+
+    _apply_unsaved_optimizer_resume(args)
+
+    assert args.no_load_optim is expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("overrides", "message"),
     [
         ({"debug_train_only": True}, "debug-train-only"),
