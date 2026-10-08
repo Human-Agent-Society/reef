@@ -14,6 +14,7 @@ import yaml
 
 import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
+from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer, ClientState, DescriptorError, load_descriptor
 from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
 from reef.harness.adapters.opencode.quirks import read_frontmatter
@@ -1134,6 +1135,21 @@ def test_adapter_renderer_steps_run_in_order_on_their_own_files() -> None:
 def test_codex_refuses_a_tree_that_sets_what_the_binding_writes(data: dict[str, object]) -> None:
     with pytest.raises(RenderError, match="Reef's model binding writes it"):
         render_composition([("config", {"data": data})], get_adapter("codex"))
+
+
+def test_with_skill_frontmatter_adds_the_header_only_to_bare_text() -> None:
+    path = "harness/skills/notes/SKILL.md"
+    bare = "# Notes skill\n\nKeep short notes.\n"
+    assert with_skill_frontmatter(path, bare) == "---\nname: notes\ndescription: Notes skill\n---\n" + bare
+    assert with_skill_frontmatter(path, "") == "---\nname: notes\ndescription: notes\n---\n"
+    headed = "---\nname: notes\ndescription: Short notes\n---\nKeep short notes.\n"
+    assert with_skill_frontmatter(path, headed) == headed
+
+
+def test_default_renderer_leaves_skill_and_command_files_unchanged() -> None:
+    bare = "Summarize the thread.\n"
+    assert AdapterRenderer.process_skill("harness/skills/summarize/SKILL.md", bare) == bare
+    assert AdapterRenderer.process_command("harness-commands/summarize/SKILL.md", bare) == bare
 
 
 def test_an_adapter_renderer_step_must_be_a_static_method() -> None:

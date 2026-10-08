@@ -58,6 +58,7 @@ from typing import Any, ClassVar
 
 import yaml
 
+from reef.harness.adapters.common.frontmatter import skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
@@ -214,16 +215,14 @@ def _with_frontmatter(path: str, text: str, user_only: bool) -> str:
         header, body = frontmatter or {}, "\n".join(lines[close + 1 :])
     else:
         header, body = {}, text
-    name = path.split("/")[-2]
-    first = next((line.strip().lstrip("#").strip() for line in body.splitlines() if line.strip()), "")
-    description = first[:200] or name
-    header = {"name": name, "description": description, **header}
+    synthesized = skill_frontmatter(path, body)
+    header = {**synthesized, **header}
     # dsh ignores a skill whose name is not a skill name or whose description is empty or not a string, so either is
     # written the way a missing one is.
     if not isinstance(header["name"], str) or not SKILL_NAME.fullmatch(header["name"]):
-        header["name"] = name
+        header["name"] = synthesized["name"]
     if not isinstance(header["description"], str) or not header["description"]:
-        header["description"] = description
+        header["description"] = synthesized["description"]
     if user_only:
         # Only the person types a command: never the model, and never hidden from the / menu.
         header["disable-model-invocation"] = True

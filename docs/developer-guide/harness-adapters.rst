@@ -130,6 +130,14 @@ files:
 Each step defaults to leaving its input unchanged, so an adapter overrides only
 the ones it needs. A step refuses a tree by raising ``RenderError``.
 
+Steps that several adapters need call helpers in
+``reef.harness.adapters.common``. For example, most harnesses list a
+``SKILL.md`` only when it has ``name`` and ``description`` frontmatter, so
+their ``process_skill`` returns ``with_skill_frontmatter(path, text)``. That
+helper adds the skill's directory name and the first line of its text when the
+text has no frontmatter. An adapter that writes the header in another form
+gets the same values from ``skill_frontmatter(path, text)``.
+
 .. important::
 
    Prefer the narrow steps over ``finalize_render``. A ``process_*`` step sees

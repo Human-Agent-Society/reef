@@ -7,8 +7,8 @@ and failing at render is what keeps a gated change meaning what it says instead
 of silently dropping a knob.
 
 Skills carry the ``name`` and ``description`` frontmatter the instruction
-builder reads, synthesized when an evolved node ships bare text, under both
-skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
+builder reads. ``process_skill`` and ``process_command`` add it
+when an evolved node ships bare text, under both skill roots. Terminus 2 has no slash-command surface, so ``agent_command``
 renders under the second root, and Harbor lists those skills beside the
 others, with nothing that marks them as commands.
 
@@ -41,8 +41,7 @@ import re
 from collections.abc import Mapping
 from typing import Any
 
-import yaml
-
+from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer, ExecutionValidator
 from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, SandboxExecutor
 from reef.harness.runners.terminus.tree import ENVIRONMENT_ENV, TerminusTreeError, extension_source
@@ -83,15 +82,6 @@ MODEL_ROUTE_KWARGS = re.compile(
 BODY_MODEL_KEYS = frozenset({"model", "models"})
 
 
-def _with_frontmatter(path: str, text: str) -> str:
-    if text.startswith("---\n"):
-        return text
-    name = path.split("/")[-2]
-    first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
-    header: dict[str, Any] = {"name": name, "description": first[:200] or name}
-    return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
-
-
 class TerminusAdapterRenderer(AdapterRenderer):
     @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
@@ -111,12 +101,12 @@ class TerminusAdapterRenderer(AdapterRenderer):
 
     @staticmethod
     def process_skill(path: str, text: str) -> str:
-        return _with_frontmatter(path, text)
+        return with_skill_frontmatter(path, text)
 
     @staticmethod
     def process_command(path: str, text: str) -> str:
         # A command is a skill under the second root, so it needs the same frontmatter.
-        return _with_frontmatter(path, text)
+        return with_skill_frontmatter(path, text)
 
     @staticmethod
     def check_model_route(
