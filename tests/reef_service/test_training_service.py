@@ -35,20 +35,23 @@ class Group:
         self.executor.shutdown()
 
 
-def service_and_resources(monkeypatch, *, critic=False, release_error=False):
+def service_and_resources(monkeypatch, *, critic=False, release_error=False, timeout=None):
     events = []
     actor = Group("actor", events, release_error=release_error)
     critic_group = Group("critic", events) if critic else None
     args = SimpleNamespace()
     preparation = object()
-    service = training.SlimeTrainingService(args, preparation=preparation, loss_family_config="recipe-settings")
+    service = training.SlimeTrainingService(
+        args, preparation=preparation, loss_family_config="recipe-settings", train_rpc_timeout_s=timeout
+    )
     resources = SlimeDeploymentResources(args, ray_address="unused", namespace="test")
     resources.placement_groups = {"actor": "actor-pg", "critic": "critic-pg"}
 
-    def create(received, placements, rollout_manager):
+    def create(received, placements, rollout_manager, *, train_rpc_timeout_s):
         assert received is args
         assert placements is resources.placement_groups
         assert rollout_manager is None
+        assert train_rpc_timeout_s == (14400 if timeout is None else timeout)
         events.append(("allocate",))
         return actor, critic_group
 
@@ -82,8 +85,9 @@ def test_training_initializes_without_receiver_then_attaches_sender(monkeypatch,
     assert resources.placement_groups == {"actor": "actor-pg", "critic": "critic-pg"}
 
 
-def test_training_operations_receive_groups_and_policy_without_inference(monkeypatch):
-    service, resources, _events = service_and_resources(monkeypatch, critic=True)
+@pytest.mark.parametrize("timeout", [None, 43200, 0.5])
+def test_training_operations_receive_groups_and_policy_without_inference(monkeypatch, timeout):
+    service, resources, _events = service_and_resources(monkeypatch, critic=True, timeout=timeout)
     service.start(resources)
     with pytest.raises(RuntimeError, match="attached weight transport"):
         service.backend()
@@ -91,9 +95,10 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     service.attach_weight_transport(WeightTransferSession(service.weight_transfer_protocol, control, "session-1"))
     captured = []
 
-    def create(args, actor, critic, *, preparation, loss_family_config):
+    def create(args, actor, critic, *, preparation, loss_family_config, train_rpc_timeout_s):
         assert actor.train_parallel_config == {"attached": True}
         assert critic.train_parallel_config == {"attached": True}
+        assert train_rpc_timeout_s == (14400 if timeout is None else timeout)
         captured.append((args, preparation, loss_family_config))
         return object()
 
@@ -101,6 +106,14 @@ def test_training_operations_receive_groups_and_policy_without_inference(monkeyp
     assert service.backend() is service.backend()
     assert captured == [(service.args, service.preparation, "recipe-settings")]
     service.close()
+
+
+@pytest.mark.parametrize("timeout", [0, -1, True, "43200", float("inf"), float("nan")])
+def test_training_rejects_invalid_worker_timeout_before_start(timeout):
+    with pytest.raises(ValueError, match=r"training\.timeout-s must be a positive finite number"):
+        training.SlimeTrainingService(
+            SimpleNamespace(), preparation=None, loss_family_config=None, train_rpc_timeout_s=timeout
+        )
 
 
 def test_native_transport_rejects_reuse_across_receiver_incarnations(monkeypatch):

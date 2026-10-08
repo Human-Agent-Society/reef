@@ -38,6 +38,175 @@ the agent's tools (``native_tool``) and its responses to loop events
 |              |                                                            | reef-eval ships with reef-infra           |
 +--------------+------------------------------------------------------------+-------------------------------------------+
 
+Rendering
+~~~~~~~~~
+
+Rendering turns a harness tree into the files one agent reads: the tree's
+entries and an adapter descriptor in, root-relative paths with their text out.
+It touches no disk and starts no agent. Reef renders a tree to run an episode,
+to serve a release, and to check that a proposed mutation is renderable at all.
+
+Reef and the adapter own the rendering process together. The engine processes
+the harness tree first, merging and writing by rules (see below) that are the
+same for every agent and rejecting a tree that breaks them. The adapter gets
+the last word: its declared paths decide where each file goes, and the
+``quirks`` module it may declare receives everything the engine produced and
+returns the tree that is actually used. So the two are divided by order and by
+reach: the engine applies one set of rules to every agent, and the adapter has
+the final say for its own.
+
+What the engine owns
+^^^^^^^^^^^^^^^^^^^^
+
+`reef/harness/tree/render.py <../../reef/harness/tree/render.py>`__ runs for
+every adapter. No adapter replaces it, and an adapter registered through the
+``reef.harness_adapters`` entry-point group reaches it on the same path as a
+bundled one. It turns entries into files by these rules:
+
+- Each config target is a JSON object: ``config`` entries deep-merge into it in
+  tree order, over the defaults the descriptor enforces. Every target is written
+  even when no entry touches it, so those defaults always reach the agent.
+- All ``rules`` entries concatenate, in tree order, into the one rules file. A
+  tree with no ``rules`` entry renders no rules file.
+- Each named kind renders one file per entry through the descriptor's path
+  template, with the entry's ``config.name`` filling ``{name}``.
+
+The engine also refuses a tree, before any agent runs. These checks apply to
+whatever the adapter declares; for example:
+
+- Two entries that produce the same file, such as two ``skill`` entries both
+  named ``review``.
+- An entry whose kind the descriptor gives no path, such as ``code_extension``
+  under ``native``.
+- A ``config`` entry naming a target the descriptor does not declare.
+- A ``native_graph`` or ``native_agent`` naming a tool, skill, agent, or graph
+  that no entry defines, or agents that delegate in a cycle.
+- A second ``native_loop``: a tree holds at most one.
+
+What the adapter owns
+^^^^^^^^^^^^^^^^^^^^^
+
+An adapter is configured mostly via declaration. ``descriptor.yaml`` supplies
+the path template for each tree node kind, the named config targets, and the
+defaults merged under every tree. An adapter whose agent differs only in where
+files go needs no code at all, although they must comply with the following
+rules:
+
+- ``files.config`` must declare a ``primary`` target.
+- ``files.rules`` and ``files.skill`` are required.
+- every named template must contain ``{name}``.
+
+An adapter may also declare a ``quirks`` module to further customize the
+rendering process. The module defines one subclass of ``AdapterRenderer``
+from ``reef.harness.adapters.descriptor``; the loader finds it in the module.
+The render calls its steps in this order, and each step is given only its own
+files:
+
+.. list-table::
+   :header-rows: 1
+
+   * - Step
+     - Given
+     - Use it to
+   * - ``process_config``
+     - One merged config file, as a JSON object
+     - Refuse or adjust config, such as a setting the tree must keep
+   * - ``process_skill``
+     - The text of one ``skill`` file
+     - Add or check skill frontmatter
+   * - ``process_command``
+     - The text of one ``agent_command`` file
+     - Add or check command frontmatter
+   * - ``check_model_route``
+     - The processed config files, skill files and command files
+     - Refuse the model routes the harness reads beyond the binding's keys,
+       such as a fallback model or a second provider
+   * - ``finalize_render``
+     - Every rendered file as text, each config file already written in its
+       format
+     - Work that spans several files, or a config file its suffix's format
+       does not fit; it parses a config file again to change it
+
+Each step defaults to leaving its input unchanged, so an adapter overrides only
+the ones it needs. A step refuses a tree by raising ``RenderError``.
+
+.. important::
+
+   Prefer the narrow steps over ``finalize_render``. A ``process_*`` step sees
+   one file of one kind, and ``check_model_route`` only reads, so a reader can
+   tell what each one may change and a reviewer can check it in isolation.
+   ``finalize_render`` sees and may rewrite every file, including config files
+   it has to parse again, so its effects are hard to follow and easy to break
+   when the render changes. Use it only for work no narrow step can do:
+   output that depends on several files, or a file layout its suffix's format
+   cannot produce. Keep what it does small, and move a check into a narrow
+   step whenever that step sees everything the check needs.
+
+Every model call must go to Reef. Before any step, the render refuses a tree
+that sets a key the descriptor's ``model_binding`` writes, unless the binding's
+credential (the value holding ``{api_key}``) is set beside it. The binding is
+merged after the tree and wins every key it writes, so only a tree rendered
+without the binding, as admission renders a proposal, can set one; admission
+refuses an inline credential, so the credential tells the two apart. No
+adapter can turn this check off. Each adapter's ``check_model_route`` refuses
+the other routes its harness reads.
+
+Every step is a static method, and defining one as an ordinary method fails
+when the class is created. The render uses the class without making an
+instance, so a step's output depends only on its arguments and no step passes
+state to a later one. Keep module-level state out of the steps as well.
+
+Before ``finalize_render``, the render writes each config file in the format
+its suffix names: ``.json`` as JSON, ``.toml`` as TOML (Codex's
+``config.toml``), ``.yaml`` or ``.yml`` as YAML (Hermes's ``config.yaml``), and
+``.env`` as ``KEY=value`` lines; any other suffix is written as JSON. An
+adapter whose file needs another layout writes it again in ``finalize_render``.
+
+Examples:
+
+- dsh's ``finalize_render`` turns an object keyed by plugin id into the YAML
+  patch list dsh actually loads, a shape no deep merge could produce directly,
+  and adds the rendered extensions to that list, since only the rendered files
+  name them.
+- Codex writes ``models.json`` and points ``config.toml`` at it in
+  ``finalize_render``, since that spans two config files. It refuses
+  ``code_extension`` there too; refusals like this far outnumber the engine's
+  own.
+
+A quirks module written before ``AdapterRenderer`` may still define a
+module-level ``finalize_render(files)`` instead. This is deprecated and loading
+such a module warns: it runs in place of the ``finalize_render`` step. Its
+config files arrive in the format their suffix names, so a ``.toml``,
+``.yaml`` or ``.env`` file is no longer JSON. Define an ``AdapterRenderer``
+subclass instead.
+
+Note that ``native`` declares no ``quirks`` and runs on the engine's rules
+alone.
+
+Seaming engine and adapter together
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+- The merge rule is the engine's. It recurses into objects and replaces
+  everything else, lists included, so an agent whose configuration appends to a
+  list cannot say so in the descriptor; its quirks rebuild the list instead.
+- The renderer steps receive paths, text, and config objects. They cannot see
+  which entry produced what.
+- One rules file is mandatory. An agent reading rules from several needs its
+  quirks to split the concatenated text apart again.
+
+Misc
+^^^^
+
+Rendering is not publication. An episode's files are written into a throwaway
+root that is removed when the episode ends, and harness evolution renders both
+the candidate and the current tree every step in order to compare them; at most
+one of the two becomes a release.
+
+Restrictions that depend on how an episode runs, rather than on what a tree
+contains, are checked at launch instead. Terminus's requirement for remote E2B
+tasks is one: a tree carrying a ``code_extension`` renders, then fails to launch
+under the wrong executor.
+
 Codex model metadata
 ~~~~~~~~~~~~~~~~~~~~
 

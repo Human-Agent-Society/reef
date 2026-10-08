@@ -510,10 +510,12 @@ Inference recovery and reconnect
 
 ``reef.runtime.recovery.InferenceControl`` owns pause intent and
 recovery/reconnect ordering through three backend contracts defined beside it
-in ``reef.runtime.recovery``: ``InferenceEngines`` for engine operations, ``WeightUpdateConnection`` for transport-lock inspection
+in ``reef.runtime.recovery``: ``InferenceEngineGroup`` for operations on the engine group, ``WeightUpdateConnection`` for transport-lock inspection
 and replacement, and ``InferenceMonitor`` for background recovery. The SGLang
 inference worker supplies these adapters; engine handles, GPU topology and Ray
-fan-out remain private to it. The existing training-side RPC vocabulary and
+fan-out remain private to it. Each engine actor implements
+``reef.runtime.interfaces.InferenceEngine``, the per-engine vocabulary the
+group, the backend and the weight updaters call by name. The existing training-side RPC vocabulary and
 six-field engine/lock attachment tuple are unchanged.
 
 Pause intent is recorded before the engine barrier, so a partial pause failure
@@ -759,7 +761,10 @@ do not publish inference weights.
 
 Preparation failure is retryable without a new job identity. Once ``RUNNING``
 is recorded, a training/save failure is ambiguous and requires operator
-recovery; automatic retry must not repeat a possible optimizer step. A
+recovery; automatic retry must not repeat a possible optimizer step. For
+Slime, the startup preflight's error lists what the job left on disk, and
+`Troubleshooting <../user-guide/troubleshooting.rst#reports-and-training>`__
+gives the recovery. A
 checkpointed or completed job replays without preparing or training again.
 Resource cleanup failure after ``CHECKPOINT`` also replays the recorded result.
 A job's identity is its batch and admission fence: the scenario step is not

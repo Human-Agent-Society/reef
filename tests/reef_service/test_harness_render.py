@@ -14,7 +14,7 @@ import yaml
 
 import reef.harness.adapters
 from reef.harness.adapters import available_adapters, get_adapter
-from reef.harness.adapters.descriptor import ClientState, DescriptorError, load_descriptor
+from reef.harness.adapters.descriptor import AdapterRenderer, ClientState, DescriptorError, load_descriptor
 from reef.harness.adapters.hermes.quirks import DEFAULT_IDENTITY
 from reef.harness.adapters.opencode.quirks import read_frontmatter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindingError
@@ -1084,6 +1084,113 @@ def test_descriptor_client_argument_lists_are_lists_of_strings(tmp_path, key: st
         load_descriptor(target)
 
 
+def test_adapter_renderer_steps_run_in_order_on_their_own_files() -> None:
+    calls: list[tuple[str, str]] = []
+
+    class RecordingRenderer(AdapterRenderer):
+        @staticmethod
+        def process_config(path, config):
+            calls.append(("process_config", path))
+            return config
+
+        @staticmethod
+        def process_skill(path, text):
+            calls.append(("process_skill", path))
+            return text.upper()
+
+        @staticmethod
+        def process_command(path, text):
+            calls.append(("process_command", path))
+            return text
+
+        @staticmethod
+        def finalize_render(files):
+            calls.append(("finalize_render", ""))
+            return files
+
+    nodes = [("config", {"data": {"defaultThinkingLevel": "off"}})]
+    nodes += [node for node in NODES if node[0] in ("skill", "agent_command")]
+    files = render_composition(nodes, replace(get_adapter("pi"), renderer=RecordingRenderer))
+    assert calls == [
+        ("process_config", "pi-agent/settings.json"),
+        ("process_config", "pi-agent/models.json"),
+        ("process_skill", "pi-agent/skills/notes/SKILL.md"),
+        ("process_command", "pi-agent/prompts/summarize.md"),
+        ("finalize_render", ""),
+    ]
+    assert files["pi-agent/skills/notes/SKILL.md"] == "# NOTES SKILL\n\nKEEP SHORT NOTES.\n"
+    assert json.loads(files["pi-agent/settings.json"])["defaultThinkingLevel"] == "off"
+
+    # The render refuses a key Reef's model binding writes whatever the adapter's renderer does.
+    with pytest.raises(RenderError, match=re.escape("must not set defaultModel in pi-agent/settings.json")):
+        render_composition(
+            [("config", {"data": {"defaultModel": "other/m"}})], replace(get_adapter("pi"), renderer=RecordingRenderer)
+        )
+
+
+@pytest.mark.parametrize(
+    "data", [{"model": "gpt-5"}, {"model_provider": "reef"}, {"model_providers": {"reef": {"name": "Reef"}}}]
+)
+def test_codex_refuses_a_tree_that_sets_what_the_binding_writes(data: dict[str, object]) -> None:
+    with pytest.raises(RenderError, match="Reef's model binding writes it"):
+        render_composition([("config", {"data": data})], get_adapter("codex"))
+
+
+def test_an_adapter_renderer_step_must_be_a_static_method() -> None:
+    with pytest.raises(TypeError, match=r"StatefulRenderer\.process_skill must be a static method"):
+
+        class StatefulRenderer(AdapterRenderer):
+            def process_skill(self, path, text):
+                return text
+
+
+def test_a_quirks_module_with_only_finalize_render_still_gets_the_last_word(tmp_path, monkeypatch) -> None:
+    """An external quirks module written before AdapterRenderer keeps working, with a deprecation warning."""
+    (tmp_path / "legacy_quirks.py").write_text(
+        "def finalize_render(files):\n    return {**files, 'native/LEGACY': 'seen ' + str(len(files)) + '\\n'}\n"
+    )
+    monkeypatch.syspath_prepend(str(tmp_path))
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "native" / "descriptor.yaml").read_text())
+    data["quirks"] = "legacy_quirks"
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.warns(DeprecationWarning, match="finalize_render, which is deprecated"):
+        descriptor = load_descriptor(target)
+    files = render_composition([], descriptor)
+    assert files["native/LEGACY"] == f"seen {len(files) - 1}\n"
+
+
+@pytest.mark.parametrize(
+    ("source", "message"),
+    [
+        (
+            "from reef.harness.adapters.descriptor import AdapterRenderer\n"
+            "class FirstRenderer(AdapterRenderer):\n    pass\n"
+            "class SecondRenderer(AdapterRenderer):\n    pass\n",
+            "more than one AdapterRenderer subclass: FirstRenderer, SecondRenderer",
+        ),
+        (
+            "from reef.harness.adapters.descriptor import AdapterRenderer\n"
+            "class Renderer(AdapterRenderer):\n    pass\n"
+            "def finalize_render(files):\n    return files\n",
+            "an AdapterRenderer subclass or finalize_render, not both",
+        ),
+    ],
+    ids=["two-renderers", "renderer-and-finalize-render"],
+)
+def test_a_quirks_module_must_define_one_adapter_renderer(tmp_path, monkeypatch, source: str, message: str) -> None:
+    # One module name per case, since Python caches an imported module by its name.
+    module_name = f"invalid_quirks_{tmp_path.name.replace('-', '_')}"
+    (tmp_path / f"{module_name}.py").write_text(source)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    data = yaml.safe_load((Path(reef.harness.adapters.__file__).parent / "native" / "descriptor.yaml").read_text())
+    data["quirks"] = module_name
+    target = tmp_path / "descriptor.yaml"
+    target.write_text(yaml.safe_dump(data), encoding="utf-8")
+    with pytest.raises(DescriptorError, match=message):
+        load_descriptor(target)
+
+
 def test_bundled_descriptors_keep_the_state_their_resume_and_setup_read() -> None:
     """A reef-<adapter> run keeps what the binary's resume and first-run setup read in the installed tree."""
     kept = {
@@ -1259,8 +1366,11 @@ def test_codex_catalog_uses_bound_capabilities(reasoning: bool) -> None:
         {"context_window": 100, "reasoning": True, "base_instructions": "override"},
     ],
 )
-def test_codex_rejects_invalid_model_metadata(metadata: dict[str, object]) -> None:
-    with pytest.raises(RenderError, match="codex model"):
+def test_codex_rejects_model_metadata_from_a_tree(metadata: dict[str, object]) -> None:
+    # Only Reef's model binding writes the model metadata, whatever it holds.
+    with pytest.raises(
+        RenderError, match=re.escape("must not set models in codex/models.json: Reef's model binding writes it")
+    ):
         render_composition(
             [("config", {"target": "models", "data": {"models": {"m": metadata}}})], get_adapter("codex")
         )

@@ -68,7 +68,10 @@ def test_native_training_options_reach_slime_before_legacy_direct_flags(tmp_path
 @pytest.mark.parametrize(
     "mode", ["managed", "colocate", "lora", "lora-colocate", "lora-colocate-keep-base", "external"]
 )
-def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode):
+@pytest.mark.parametrize(
+    "timeout_config", [{}, {"train_timeout_s": None}, {"train_timeout_s": 43200}, {"train_timeout_s": 0.5}]
+)
+def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode, timeout_config):
     from types import SimpleNamespace
 
     from reef.service.training_driver import assemble_model_plan
@@ -122,7 +125,10 @@ def test_plan_preflight_selects_components_without_allocating(monkeypatch, mode)
         pytest.fail("plan construction must not connect or allocate resources")
 
     monkeypatch.setattr(ray, "init", unexpected)
-    training = driver.create_training_plan({}, loss_family="loss")
+    training = driver.create_training_plan({"reef": timeout_config}, loss_family="loss")
+    configured_timeout = timeout_config.get("train_timeout_s")
+    expected_timeout = 14400 if configured_timeout is None else configured_timeout
+    assert training.training.train_rpc_timeout_s == expected_timeout
     assert not hasattr(training, "inference")
     plan = assemble_model_plan({}, training)
     plan.validate()

@@ -145,8 +145,8 @@ curl -f http://127.0.0.1:8900/healthz          # ready to serve
 Send inference requests through Reef and report a score for each response. The
 SAO recipe uses each eligible scored rollout to run a training step.
 
-Reef's inference endpoint is OpenAI- and Anthropic-compatible: `/v1/chat/completions`
-and `/v1/messages` take the provider's own request body. A request includes the
+Reef's inference endpoint is OpenAI- and Anthropic-compatible: `/v1/chat/completions`,
+`/v1/responses` and `/v1/messages` take the provider's own request body. A request includes the
 `x-reef-scenario` header; a new name creates a scenario using the deployment's
 configured recipe. Requests do not select recipes.
 
@@ -346,6 +346,7 @@ This list is non-exhaustive, with team members listed alphabetically by last nam
 [Zhenting Qi](https://github.com/zhentingqi),
 [Ao Qu](https://github.com/quao627),
 [Mingruo Qu](https://github.com/workhardforcoding),
+[Yihong Tang](https://github.com/YihongT),
 [Zhaokai Wang](https://github.com/wzk1015),
 [Xuezhi Yan](https://github.com/yanxz),
 [Hanfei Yu](https://github.com/hanfeiyu),

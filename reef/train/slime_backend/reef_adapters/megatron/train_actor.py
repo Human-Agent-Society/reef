@@ -25,6 +25,7 @@ from reef.train.slime_backend.reef_adapters.megatron.lora import (
     zero_megatron_lora_adapters,
 )
 from reef.train.slime_backend.reef_adapters.megatron.lora_checkpoint import save_lora_adapter_to_path
+from reef.train.slime_backend.reef_adapters.megatron.scheduler_resume import restore_scheduler_progress
 from reef.train.slime_backend.reef_adapters.training_job.storage import ADAPTER_SLOTS_DIRNAME
 from reef.train.slime_backend.reef_adapters.worker_hooks import (
     _loss_family_spec,
@@ -57,6 +58,8 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
 
     def init(self, args, role, with_ref=False, with_opd_teacher=False):
         result = super().init(args, role, with_ref=with_ref, with_opd_teacher=with_opd_teacher)
+        if isinstance(result, int):
+            restore_scheduler_progress(args, result, getattr(self, "opt_param_scheduler", None))
         updater = getattr(self, "weight_updater", None)
         if updater is not None:
             updater.tie_word_embeddings = bool(getattr(self.hf_config, "tie_word_embeddings", False))

@@ -7,7 +7,7 @@ npm-installs ``@opencode-ai/plugin`` with a ``node_modules`` tree and
 lockfiles. The whitelist below names exactly those artifacts so the episode
 inverse tolerates them and nothing else.
 
-``finalize_render`` enforces the traps a mutated config node could reopen: a
+``process_config`` enforces the traps a mutated config node could reopen: a
 benchmark episode must never autoupdate the binary mid-campaign or upload a
 share link, so a composition that overrides either is rejected at render -
 the same gate that rejects an invalid node.
@@ -57,10 +57,11 @@ import json
 import math
 import re
 from collections.abc import Collection, Hashable, Mapping
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import yaml
 
+from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
 _CONFIG_PATH = "opencode/opencode.json"
@@ -193,7 +194,7 @@ FrontmatterLoader.add_constructor("tag:yaml.org,2002:float", FrontmatterLoader.c
 
 
 def check_binding_shape(config: Mapping[str, object]) -> None:
-    """``provider`` and ``model`` appear together in the binding's shape, with its key, or not at all."""
+    """``provider`` and ``model`` appear together in the binding's shape, or not at all."""
     provider = config.get("provider")
     model = config.get("model")
     if provider is None and model is None:
@@ -212,10 +213,6 @@ def check_binding_shape(config: Mapping[str, object]) -> None:
     options, models = reef["options"], reef["models"]
     if not isinstance(options, dict) or set(options) != BINDING_OPTION_KEYS or not isinstance(models, dict):
         raise RenderError(refusal)
-    # The binding's key is never empty and a tree cannot hold one, so a tree that copies this shape fails here.
-    api_key = options["apiKey"]
-    if not isinstance(api_key, str) or not api_key.strip():
-        raise RenderError(refusal)
     if any(entry != {} for entry in models.values()):
         raise RenderError(refusal)
     if not isinstance(model, str) or model.removeprefix(f"{BINDING_PROVIDER}/") not in models:
@@ -232,9 +229,7 @@ def check_agent_name(where: str, agent: object, agents: Collection[str]) -> None
 
 
 def check_command(where: str, command: Mapping[object, object], agents: Collection[str]) -> None:
-    """A command chooses no model, its fields have the types opencode reads, and its agent is one the run has."""
-    if "model" in command:
-        raise RenderError(f"opencode {where} must not choose a model: Reef's model binding chooses it")
+    """A command's fields have the types opencode reads, and its agent is one the run has."""
     for field, expected in COMMAND_FIELD_TYPES.items():
         if field in command and not isinstance(command[field], expected):
             raise RenderError(
@@ -331,21 +326,11 @@ def read_frontmatter(where: str, text: str) -> Mapping[object, object]:
     return data
 
 
-def finalize_render(files: dict[str, str]) -> dict[str, str]:
-    config = json.loads(files[_CONFIG_PATH])
-    if config.get("autoupdate") is not False:
-        raise RenderError("opencode composition must keep autoupdate false for benchmark episodes")
-    if config.get("share") != "disabled":
-        raise RenderError("opencode composition must keep share disabled for benchmark episodes")
-    if config.get("enabled_providers") != [BINDING_PROVIDER]:
-        raise RenderError(
-            f"opencode composition must keep enabled_providers [{BINDING_PROVIDER!r}]: "
-            "a run uses only the provider Reef's model binding writes"
-        )
-    check_binding_shape(config)
-    for key in MODEL_CHOICE_KEYS:
-        if key in config:
-            raise RenderError(f"opencode composition must not set {key}: Reef's model binding chooses the model")
+def configured_agents(config: Mapping[str, object]) -> tuple[dict[str, str], set[str]]:
+    """Each agent opencode builds from ``config`` with its mode, and the names of the hidden agents.
+
+    Raises RenderError for an agent entry that opencode would refuse to load.
+    """
     # ``mode`` is opencode's deprecated name for ``agent``: opencode merges its entries over the agent entries of
     # the same name as primary agents, after its schema has checked both.
     merged: dict[str, dict[str, object]] = {}
@@ -356,10 +341,6 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
         for name, agent in entries.items():
             if not isinstance(agent, dict):
                 raise RenderError(f"opencode {section} {name!r} must be an object, got {agent!r}")
-            if "model" in agent:
-                raise RenderError(
-                    f"opencode {section} {name!r} must not choose a model: Reef's model binding chooses it"
-                )
             # opencode files an agent under its key but runs it by this name, so a run that uses it finds no agent.
             if "name" in agent and agent["name"] != name:
                 raise RenderError(
@@ -389,52 +370,105 @@ def finalize_render(files: dict[str, str]) -> dict[str, str]:
             hidden.add(name)
         elif agent.get("hidden") is False:
             hidden.discard(name)
-    if "default_agent" in config:
-        default_agent = config["default_agent"]
-        check_agent_name("default_agent", default_agent, agents)
-        if agents[default_agent] == "subagent" or default_agent in hidden:
+    return agents, hidden
+
+
+class OpencodeAdapterRenderer(AdapterRenderer):
+    @staticmethod
+    def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
+        if config.get("autoupdate") is not False:
+            raise RenderError("opencode composition must keep autoupdate false for benchmark episodes")
+        if config.get("share") != "disabled":
+            raise RenderError("opencode composition must keep share disabled for benchmark episodes")
+        if config.get("enabled_providers") != [BINDING_PROVIDER]:
             raise RenderError(
-                f"opencode default_agent names agent {default_agent!r}, a subagent or a hidden agent, which cannot"
-                " start a run"
+                f"opencode composition must keep enabled_providers [{BINDING_PROVIDER!r}]: "
+                "a run uses only the provider Reef's model binding writes"
             )
-    elif all(mode == "subagent" or name in hidden for name, mode in agents.items()):
-        # With no default_agent opencode starts a run with the first agent that is neither, and fails with none.
-        raise RenderError(
-            "opencode composition leaves no agent that can start a run: every agent it keeps is a subagent or hidden"
-        )
-    commands = config.get("command")
-    for name, command in commands.items() if isinstance(commands, dict) else ():
-        if isinstance(command, dict):
-            check_command(f"command {name!r} in opencode.json", command, agents)
-    for path, text in list(files.items()):
-        if path.startswith(COMMAND_DIR) and path.endswith(".md"):
-            command_name = path[len(COMMAND_DIR) : -len(".md")]
-            where = f"command {command_name!r}"
-            frontmatter = read_frontmatter(where, text)
-            # opencode files a command file under the name in its frontmatter, so another name would put this
-            # file in the place of the command of that name, /reefine included.
-            if "name" in frontmatter and frontmatter["name"] != command_name:
+        agents, hidden = configured_agents(config)
+        if "default_agent" in config:
+            default_agent = config["default_agent"]
+            check_agent_name("default_agent", default_agent, agents)
+            if agents[default_agent] == "subagent" or default_agent in hidden:
                 raise RenderError(
-                    f"opencode {where} frontmatter must not set name {frontmatter['name']!r}: opencode files the "
-                    "command under that name, in place of any command already named so"
+                    f"opencode default_agent names agent {default_agent!r}, a subagent or a hidden agent, which "
+                    "cannot start a run"
                 )
-            check_command(where, frontmatter, agents)
-        elif path.startswith(SKILL_DIR) and path.endswith("/SKILL.md"):
-            skill_name = path[len(SKILL_DIR) : -len("/SKILL.md")]
-            # The file is read as it came first, so a form the check refuses stays refused.
-            frontmatter = read_frontmatter(f"skill {skill_name!r}", text)
-            has_block = text.startswith("---") and not text.startswith("----")
-            listed = [frontmatter.get("name"), frontmatter.get("description")]
-            if has_block and not all(isinstance(value, str) and value.strip() for value in listed):
-                # opencode lists a skill only with both, so one without them would never reach the model.
-                raise RenderError(f"opencode skill {skill_name!r} must set name and description in its frontmatter")
-            if not has_block:
-                first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
-                header = {"name": skill_name, "description": first[:200] or skill_name}
-                files[path] = (
-                    "---\n"
-                    + "".join(f"{key}: {json.dumps(value, ensure_ascii=False)}\n" for key, value in header.items())
-                    + "---\n"
-                    + text
+        elif all(mode == "subagent" or name in hidden for name, mode in agents.items()):
+            # With no default_agent opencode starts a run with the first agent that is neither, and fails with none.
+            raise RenderError(
+                "opencode composition leaves no agent that can start a run: every agent it keeps is a subagent or "
+                "hidden"
+            )
+        commands = config.get("command")
+        for name, command in commands.items() if isinstance(commands, dict) else ():
+            if isinstance(command, dict):
+                check_command(f"command {name!r} in opencode.json", command, agents)
+        return config
+
+    @staticmethod
+    def process_skill(path: str, text: str) -> str:
+        skill_name = path[len(SKILL_DIR) : -len("/SKILL.md")]
+        # The file is read as it came first, so a form the check refuses stays refused.
+        frontmatter = read_frontmatter(f"skill {skill_name!r}", text)
+        has_block = text.startswith("---") and not text.startswith("----")
+        listed = [frontmatter.get("name"), frontmatter.get("description")]
+        if has_block and not all(isinstance(value, str) and value.strip() for value in listed):
+            # opencode lists a skill only with both, so one without them would never reach the model.
+            raise RenderError(f"opencode skill {skill_name!r} must set name and description in its frontmatter")
+        if has_block:
+            return text
+        first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
+        header = {"name": skill_name, "description": first[:200] or skill_name}
+        return (
+            "---\n"
+            + "".join(f"{key}: {json.dumps(value, ensure_ascii=False)}\n" for key, value in header.items())
+            + "---\n"
+            + text
+        )
+
+    @staticmethod
+    def check_model_route(
+        configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
+    ) -> None:
+        config = configs[_CONFIG_PATH]
+        check_binding_shape(config)
+        for key in MODEL_CHOICE_KEYS:
+            if key in config:
+                raise RenderError(f"opencode composition must not set {key}: Reef's model binding chooses the model")
+        for section in ("agent", "mode"):
+            for name, agent in config.get(section, {}).items():
+                if "model" in agent:
+                    raise RenderError(
+                        f"opencode {section} {name!r} must not choose a model: Reef's model binding chooses it"
+                    )
+        config_commands = config.get("command")
+        for name, command in config_commands.items() if isinstance(config_commands, dict) else ():
+            if isinstance(command, dict) and "model" in command:
+                raise RenderError(
+                    f"opencode command {name!r} in opencode.json must not choose a model: Reef's model binding "
+                    "chooses it"
                 )
-    return files
+        for path, text in commands.items():
+            where = f"command {path[len(COMMAND_DIR) : -len('.md')]!r}"
+            if "model" in read_frontmatter(where, text):
+                raise RenderError(f"opencode {where} must not choose a model: Reef's model binding chooses it")
+
+    @staticmethod
+    def finalize_render(files: dict[str, str]) -> dict[str, str]:
+        # A command file names agents, which only the config defines.
+        agents, _ = configured_agents(json.loads(files[_CONFIG_PATH]))
+        for path, text in files.items():
+            if path.startswith(COMMAND_DIR) and path.endswith(".md"):
+                command_name = path[len(COMMAND_DIR) : -len(".md")]
+                where = f"command {command_name!r}"
+                frontmatter = read_frontmatter(where, text)
+                # opencode files a command file under the name in its frontmatter, so another name would put this
+                # file in the place of the command of that name, /reefine included.
+                if "name" in frontmatter and frontmatter["name"] != command_name:
+                    raise RenderError(
+                        f"opencode {where} frontmatter must not set name {frontmatter['name']!r}: opencode files the "
+                        "command under that name, in place of any command already named so"
+                    )
+                check_command(where, frontmatter, agents)
+        return files

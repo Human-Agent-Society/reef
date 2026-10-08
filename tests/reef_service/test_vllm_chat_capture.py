@@ -112,7 +112,6 @@ def test_vllm_facade_records_engine_ids_and_connector_stamps_without_retokenizin
                 "model": "served-model",
                 "messages": [{"role": "user", "content": "hello"}],
                 "temperature": 0.7,
-                "top_p": 0.9,
                 "max_completion_tokens": 2,
                 "logprobs": True,
                 "top_logprobs": 1,
@@ -121,7 +120,7 @@ def test_vllm_facade_records_engine_ids_and_connector_stamps_without_retokenizin
         assert received == [
             {
                 "token_ids": [10, 11],
-                "sampling_params": {"max_tokens": 2, "temperature": 0.7, "top_p": 0.9, "logprobs": 1},
+                "sampling_params": {"max_tokens": 2, "temperature": 0.7, "logprobs": 1},
                 "stream": False,
             }
         ]
@@ -212,9 +211,9 @@ def test_vllm_sampling_params_and_adapter_selection_use_vllm_names() -> None:
             "stop": ["\n"],
             "vllm_sampling_params": {"min_tokens": 2},
         },
-        {"max_tokens": 512, "top_k": 20, "temperature": 0.6},
+        {"max_tokens": 512, "top_k": 0, "temperature": 0.6},
     )
-    assert sampling == {"max_tokens": 7, "temperature": 0.3, "seed": 11, "stop": ["\n"], "top_k": 20, "min_tokens": 2}
+    assert sampling == {"max_tokens": 7, "temperature": 0.3, "seed": 11, "stop": ["\n"], "top_k": 0, "min_tokens": 2}
 
     payload = client.payload(
         {"lora_path": "scenario-a:engine:9", "rid": "req-1", "top_logprobs": 1},
@@ -233,6 +232,23 @@ def test_vllm_sampling_params_and_adapter_selection_use_vllm_names() -> None:
     assert "model" not in client.payload({}, [1], sampling, capture_topk=0, stream=False)
     with pytest.raises(ValueError, match="max_completion_tokens"):
         client.sampling_params({"max_tokens": 0}, {})
+
+
+@pytest.mark.parametrize(
+    "request_body, defaults",
+    [
+        ({"max_tokens": 4, "top_p": 0.9}, {}),
+        ({"max_tokens": 4}, {"top_k": 20}),
+        ({"max_tokens": 4, "vllm_sampling_params": {"min_p": 0.1}}, {}),
+    ],
+)
+def test_vllm_sampling_params_reject_truncation_the_trainer_cannot_reproduce(request_body, defaults) -> None:
+    with pytest.raises(ValueError, match="after top-p, top-k and min-p"):
+        VLLMGenerateClient().sampling_params(request_body, defaults)
+    accepted = VLLMGenerateClient().sampling_params(
+        {"max_tokens": 4, "top_p": 1.0, "top_k": -1, "min_p": 0}, {"temperature": 1.0}
+    )
+    assert accepted == {"max_tokens": 4, "top_p": 1.0, "top_k": -1, "min_p": 0, "temperature": 1.0}
 
 
 @pytest.mark.unit
