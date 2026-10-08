@@ -369,12 +369,14 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         )
 
     async def write(self, task: HarborTask) -> WrittenTask:
-        """The task written under the generator's root; a name an earlier attempt of the generation took is replaced."""
+        """Write a task; only description-based generation retries may replace a conflicting name."""
         if self.generator is None:
             raise GeneratorError("this processor has no generator service to ask")
         try:
             return await self.generator.write_task(task)
         except TaskNameConflict:
+            if "designer_record_id" in task.metadata:
+                raise
             # A reload cancelled this generation's earlier attempt; what it wrote under the name gives way.
             await self.generator.delete_task(task.name)
             return await self.generator.write_task(task)

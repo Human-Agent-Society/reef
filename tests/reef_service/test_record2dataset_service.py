@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -667,10 +668,13 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
         written = await processor.write(task)
         assert (await processor.validate(written.path)).is_valid
         assert read_harbor_task(written.path).source_agent_record_ids == task.source_agent_record_ids
-        proposal, measure = await processor.proposed(3, 1, None, request=generation_request)
+        proposal, measure = await processor.proposed(0, 0, None, request=generation_request)
         assert measure is not None
         assert proposal.designer_record_id == "designer-2"
-        assert proposal.task_name == "harbor-00003-001"
+        assert task.name.startswith("harbor-history-")
+        assert proposal.task_name is not None and proposal.task_name.startswith("harbor-history-")
+        assert proposal.task_name != task.name
+        assert read_harbor_task(written.path).digest == task.digest
 
     run_with(built, body)
     prompt = designer.calls[0]["messages"][1]["content"]
@@ -681,6 +685,44 @@ def test_history_and_materials_reach_the_designer_and_feedback_uses_its_receipt(
     assert "before the task was solved" in prompt
     assert len(checks.calls) == 2 and len(plays.calls) == 2
     assert [report["record_id"] for report in designer.reports] == ["designer-2"]
+
+
+def test_history_proposal_preserves_tasks_referenced_by_a_loop_manifest(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> None:
+        processor = SpadeProcessor(ProcessorContext("spade", {}), generator=generator)
+        loop_task = await processor.generate(TaskGenerationRequest((), "shell tasks"))
+        written = await processor.write(loop_task)
+        manifest_path = await generator.write_manifest(generation=0, names=[loop_task.name], eval_fraction=0, seed=0)
+        manifest = manifest_path.read_bytes()
+
+        proposal, measure = await processor.proposed(
+            0, 0, None, request=TaskGenerationRequest(source_records(), "rebuild")
+        )
+
+        assert measure is not None and proposal.task_name != loop_task.name
+        assert read_harbor_task(written.path).digest == loop_task.digest
+        assert manifest_path.read_bytes() == manifest
+
+    run_with(built, body)
+
+
+def test_history_write_refuses_a_name_conflict_without_replacing_the_task(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> None:
+        processor = SpadeProcessor(ProcessorContext("spade", {}), generator=generator)
+        task = await processor.generate(TaskGenerationRequest(source_records(), "rebuild"))
+        written = await processor.write(task)
+        conflicting = replace(task, instruction=task.instruction + "Use the supplied state file.\n")
+
+        with pytest.raises(TaskNameConflict):
+            await processor.write(conflicting)
+
+        assert read_harbor_task(written.path).digest == task.digest
+
+    run_with(built, body)
 
 
 def test_source_record_wire_roundtrip_preserves_payload_and_version() -> None:

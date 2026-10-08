@@ -25,6 +25,7 @@ root: a restarted service serves the same root.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
@@ -318,9 +319,13 @@ class ProposalJob(Job):
         except (DesignerReplyError, ValueError) as exc:
             return {"record_id": answer.record_id, "task": None, "refusal": f"reply refused: {exc}"}
         if self.request.inputs.source_records:
+            source_record_ids = tuple(record.agent_record_id for record in self.request.inputs.source_records)
+            # Each reconstruction has its own name, including repeated proposals from the same records.
+            identity = json.dumps([self.scenario, source_record_ids, answer.record_id]).encode("utf-8")
             task = replace(
                 task,
-                source_agent_record_ids=tuple(record.agent_record_id for record in self.request.inputs.source_records),
+                name=f"harbor-history-{hashlib.sha256(identity).hexdigest()}",
+                source_agent_record_ids=source_record_ids,
                 metadata={**task.metadata, "designer_record_id": answer.record_id},
             )
         return {"record_id": answer.record_id, "task": task_document(task), "refusal": ""}

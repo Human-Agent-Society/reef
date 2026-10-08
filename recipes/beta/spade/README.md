@@ -97,6 +97,8 @@ async def rebuild_task(
 
 The example generates a task, writes it, and validates it. With source records, the returned task keeps their original IDs in `source_agent_record_ids`. It stores the new Designer receipt in `metadata["designer_record_id"]`. Calling `generate` alone does not write, check, play, or train the task.
 
+History tasks use `harbor-history-<hash>` names derived from the scenario, source record IDs, and Designer receipt. Each new Designer call gets a separate name, even with the same source records. Name conflicts are refused without deleting the existing task. Identical task content is still refused as a duplicate.
+
 To run SPADE's write, check, play, and report sequence, call `proposed(generation, index, skill, request=...)`. This method sends feedback against the new Designer receipt.
 
 Materials can be UTF-8 files or directories on the caller's machine. The client sends their contents over HTTP. The service does not need a shared filesystem. A selected directory keeps its relative paths under `asset-0/`, `asset-1/`, and so on. A selected file uses `asset-N/<filename>`.
