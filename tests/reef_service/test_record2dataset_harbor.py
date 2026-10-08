@@ -345,8 +345,10 @@ def test_a_task_that_is_unsolvable_or_free_is_refused_with_the_reason(tmp_path: 
         ({"correctness": 1.0, "structure": 0.0, "reward": 0.0}, "the reference solution scored 0.0, not 1"),
         (
             {"correctness": 1.0, "structure": 1.0},
-            "the reference solution scored None, not 1; the trial ended with a verifier that wrote correctness,"
-            " structure and no reward entry",
+            (
+                "the reference solution scored None, not 1; the trial ended with a verifier that wrote correctness,"
+                " structure and no reward entry"
+            ),
         ),
     ],
 )
