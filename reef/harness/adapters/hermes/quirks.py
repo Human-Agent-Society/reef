@@ -3,9 +3,7 @@
 Config nodes write ``config.yaml`` as a JSON object and the render
 emits it as YAML by its suffix, and the ``env`` target as ``.env`` lines, where hermes
 reads a custom provider's key. It also writes the ``.no-bundled-skills`` marker, so an
-episode carries only the tree's skills instead of hermes's bundled catalog;
-synthesizes the ``name`` and ``description`` frontmatter hermes requires on a
-SKILL.md the node text left bare, under both skill roots; adds the commands
+episode carries only the tree's skills instead of hermes's bundled catalog; adds the commands
 root to ``skills.external_dirs`` after the tree's own entries, so a tree
 that sets the list still has its commands; and, for every rendered plugin,
 writes the ``plugin.yaml`` manifest and grants the plugin in
@@ -13,7 +11,9 @@ writes the ``plugin.yaml`` manifest and grants the plugin in
 capability), since hermes discovers plugins but loads none without consent.
 Rules render to ``SOUL.md``, which hermes reads as the agent's identity and
 seeds with its own only while the file is absent, so the rules follow that
-default identity instead of replacing it.
+default identity instead of replacing it. ``process_skill`` and
+``process_command`` give a SKILL.md the node text left bare the ``name`` and
+``description`` frontmatter hermes requires, under both skill roots.
 
 The traps a mutated config could reopen: the scanner download, the session
 title call, the background review and the curator that write skills into the
@@ -57,6 +57,7 @@ from typing import Any
 
 import yaml
 
+from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
@@ -133,15 +134,6 @@ cleanup_whitelist = (
     "hermes/bin/**",
     "hermes/models_dev_cache.json*",
 )
-
-
-def _with_frontmatter(path: str, text: str) -> str:
-    if text.startswith("---\n"):
-        return text
-    name = path.split("/")[-2]
-    first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
-    header = {"name": name, "description": first[:200] or name}
-    return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
 def nested_setting(config: dict[str, Any], *keys: str) -> object:
@@ -300,12 +292,12 @@ class HermesAdapterRenderer(AdapterRenderer):
 
     @staticmethod
     def process_skill(path: str, text: str) -> str:
-        return _with_frontmatter(path, text)
+        return with_skill_frontmatter(path, text)
 
     @staticmethod
     def process_command(path: str, text: str) -> str:
         # A command is a skill under the commands root, so it needs the same frontmatter.
-        return _with_frontmatter(path, text)
+        return with_skill_frontmatter(path, text)
 
     @staticmethod
     def check_model_route(

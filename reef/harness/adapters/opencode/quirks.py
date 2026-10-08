@@ -61,6 +61,7 @@ from typing import Any, ClassVar
 
 import yaml
 
+from reef.harness.adapters.common.frontmatter import skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
@@ -418,8 +419,7 @@ class OpencodeAdapterRenderer(AdapterRenderer):
             raise RenderError(f"opencode skill {skill_name!r} must set name and description in its frontmatter")
         if has_block:
             return text
-        first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
-        header = {"name": skill_name, "description": first[:200] or skill_name}
+        header = skill_frontmatter(path, text)
         return (
             "---\n"
             + "".join(f"{key}: {json.dumps(value, ensure_ascii=False)}\n" for key, value in header.items())
