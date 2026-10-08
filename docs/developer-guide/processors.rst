@@ -192,44 +192,69 @@ Task generation contract
 methods on the processor itself:
 
 - ``generate(request: TaskGenerationRequest) -> HarborTask`` produces one
-  task specification from source records, a description and optional asset
-  paths. The source records, when there are any, must have distinct ids and
-  belong to one scenario, the processor's; a method whose designer writes
-  from the description alone passes none. Preserve their ordered ids, or the
-  designer's own inference record id, in the generated task's
-  ``source_agent_record_ids``.
+  task specification from source records, a description, and optional materials.
+  Source records must have distinct IDs and belong to the processor's scenario.
+  For description-only generation, pass an empty record tuple.
+  Preserve the source record IDs in order in the task's
+  ``source_agent_record_ids``. Without source records, use the Designer's
+  inference record ID instead.
 - ``validate(task_path: Path) -> TaskValidationResult`` checks a materialized
   candidate without modifying it. The implementation chooses the required
-  structural and execution checks. Empty ``errors`` means all checks passed;
-  non-empty errors reject the task. Infrastructure failures raise exceptions
-  rather than reporting that the task is invalid.
+  structural and execution checks. Empty ``errors`` means all checks passed.
+  Non-empty errors reject the task. Infrastructure failures raise exceptions
+  instead of marking the task invalid.
 
-Import the ABC from ``reef.train.processors`` and the request/result types
-from ``reef.train.processors.task_generation``. Asset paths name generator-accessible files or
-directories, such as repository snapshots or verifier fixtures; constructing
-a request does not read them. Method-specific prompts and settings belong to
-the processor configuration.
+Import ``TaskGenerationRequest`` from ``reef.core.tasks``. It is the shared
+input contract for processors and record2dataset. Import the processor ABC
+from ``reef.train.processors``. Import ``TaskValidationResult`` from
+``reef.train.processors.task_generation``. That module also exports the shared
+request type for compatibility.
 
-The ABC supplies no lifecycle: implementing the two hooks does not start a
-worker or make batches ready, and the inherited lifecycle is the no-update
-default. A method supplies its own, keeping the two rules every lifecycle
-must keep: both hooks run outside the trainer lock, and ``ingest``,
-``ready`` and ``build_batch`` never wait for them.
+A request carries source records, a description, and optional materials.
+Supply materials as local paths in ``assets`` or as UTF-8 text in
+``asset_files``. The keys in ``asset_files`` are relative file names.
+Supplying both fields is an error. Constructing a request reads no files.
+Record2dataset wraps the request in
+``DesignerRequest(inputs=request, ...)`` and adds Designer settings.
+``HttpGenerator`` reads local paths before transmission. The service rebuilds
+the shared request from records and file contents. It does not access the
+caller's paths.
 
-The first implementation is SPADE (``recipes/beta/spade/processor.py``),
-which pairs the ABC with the reported-feedback engine. A private worker (the
-computed engine's ``JudgingWorker``) runs one generation at a time:
-``generate`` asks the designer for a task, the task is written, ``validate``
-runs Harbor's oracle check on it, the task is played, and the episodes come
-back as reports the reported half groups and batches; the next generation
-starts after a configured number of batches was acknowledged, and a restart
-carries on from the generation reports on disk. None of the container-bound
-steps run in the Reef service process: ``reef.record2dataset`` is the
-generator service ``reef serve`` starts beside the HTTP service from the
-deployment's ``generator`` section (see `the generator section
-<../reference/configuration.rst#the-generator-section>`__), and the processor
-drives it over HTTP. Conversion of generated tasks into ``TaskItem`` batches
-for a rollout-capable backend remains future work.
+The ABC supplies no task execution lifecycle. Implementing the two hooks does
+not start a worker or prepare batches. The inherited lifecycle remains the
+no-update default. Each recipe supplies its own lifecycle. Both hooks must
+run outside the trainer lock. The synchronous ``ingest``, ``ready``, and
+``build_batch`` methods must never wait for them.
+
+SPADE (``recipes/beta/spade/processor.py``) pairs the ABC with the
+reported-feedback engine. A private ``JudgingWorker`` runs one generation
+at a time. The Designer proposes a task. The generator service writes it,
+checks it with Harbor, and runs task episodes. The processor groups the
+episode reports into training batches.
+
+The next generation starts after the configured number of batches have been
+acknowledged. After a restart, SPADE resumes from its saved generation reports.
+Container operations run in the generator service, ``reef.record2dataset``.
+The processor calls this service over HTTP. The ``generator`` deployment
+section configures the service that ``reef serve`` starts.
+See `generator configuration
+<../reference/configuration.rst#the-generator-section>`__ for its settings.
+Conversion of generated tasks into ``TaskItem`` batches for a rollout-capable
+backend remains future work.
+
+SPADE's ``generate`` also accepts selected historical records and materials.
+It forwards the shared request to ``HttpGenerator``. The client reads local
+materials and sends their UTF-8 contents with the records over HTTP. The
+Designer uses these inputs to reconstruct the original task. The resulting
+``HarborTask`` preserves source record IDs in order. Its
+``metadata.designer_record_id`` identifies the new Designer call. Feedback
+uses that new receipt. Description-only requests keep
+the Designer receipt as their task source, as before.
+
+The automatic SPADE loop still generates from its configured description and
+previous task scores. Callers select historical records explicitly. See the
+`SPADE example <https://github.com/Human-Agent-Society/reef/blob/main/recipes/beta/spade/README.md#generate-from-selected-records>`__
+for the input limits and usage.
 
 A record's path to a batch
 --------------------------

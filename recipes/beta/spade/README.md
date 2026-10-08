@@ -22,11 +22,25 @@ beta/spade/
 
 `SpadeProcessor` implements two of Reef's processor contracts at once.
 
-As a reported feedback processor it takes the task player's reports: every plain episode names its task under `metadata.task`, the episodes of one task form a group, a group is complete at `rollouts-per-task` episodes, and a batch holds `tasks-per-step` complete groups. `SpadeObjective` centers and scales each episode's reward within its task group (a group with one reward everywhere gives 0), and Tinker's built in `importance_sampling` loss puts that advantage on every response token, so the recipe runs on the `tinker` backend today and fails at selection on Slime, which has no loss family of that name. The Designer's own reports (`metadata.role: designer`) and the hint arm's episodes (`arm: hint`) share the scenario; the processor releases them unassembled and trains on the plain arm alone.
+As a reported feedback processor, it groups the task player's reports by task. Each plain episode identifies its task in `metadata.task`. A group is complete when it contains `rollouts-per-task` episodes. A batch contains `tasks-per-step` complete groups.
 
-As a task generation processor (`reef.train.processors.TaskGenerationProcessor`) it runs the Designer. One generation is one job on a private worker, off the trainer's thread: `count` proposals over the `skills`, each a call to `generate` (the Designer asked through the generator service, with the last generation's results in the prompt as SPADE's experience section), written under the generator's tasks root (a duplicate refused; a name that an earlier attempt of the same generation took before a reload cancelled it is replaced), checked by `validate` (Harbor's oracle and nop agents: the reference solution scores 1, doing nothing below 1), played `rollouts-per-task` times as it is (the training data) and `hint-plays` times with `solution/hint.txt` appended (measured only), and reported against the Designer's receipt with its regret as the score, 0 for a refused one. Regret is the mean hint reward minus the mean plain reward; the plain mean puts the task in its band (mastered above 0.9, out of reach below 0.1, else frontier), and the frontier, highest regret first, is what the next prompt shows. The tasks are split by the Designer's record ids into `manifest-<generation>.json` under the tasks root, and `state-dir/generation-<generation>.json` keeps every proposal, refusal and measure; a restart reads it to carry on with the next generation and the last experience.
+`SpadeObjective` centers and scales each episode's reward within its task group. If all rewards in a group are equal, each advantage is 0. Tinker's `importance_sampling` loss applies that advantage to every response token. The recipe requires the `tinker` backend. Selecting Slime fails because it has no loss family with that name.
 
-The first generation starts when the processor first looks for a batch; the next once `batches-per-generation` batches were acknowledged since the previous one started (its episodes train while it runs), so the Designer writes for the policy that trains now; a generation that measured no task is followed at once; `generations` caps them. `GET /reef/status` shows the generation in flight, the count completed and the last error.
+Designer reports (`metadata.role: designer`) and hint episodes (`arm: hint`) share the scenario. The processor releases these records without assembling them into training samples. It trains only on plain episodes.
+
+As a task generation processor (`reef.train.processors.TaskGenerationProcessor`), it runs the Designer through the generator service. Each generation runs on a private worker, outside the trainer's thread. It makes `count` proposals across the configured `skills`:
+
+1. The Designer proposes a task. Its prompt includes the previous generation's results as SPADE's experience section.
+2. The service writes the task under its tasks root. Duplicate tasks are refused. After a reload cancels a generation, a retry replaces a task with the same name from the earlier attempt.
+3. `validate` runs Harbor's oracle and nop agents. The reference solution must score 1. Doing nothing must score below 1.
+4. The task player runs `rollouts-per-task` plain episodes for training. If the task has `solution/hint.txt`, it also runs `hint-plays` episodes with that hint appended. Hint episodes measure performance only.
+5. The processor reports the task's regret against the Designer's receipt. Refused proposals receive a score of 0.
+
+Regret is the mean hint reward minus the mean plain reward. Without hint episodes, regret is 0. The mean plain reward determines the task's band: mastered above 0.9, out of reach below 0.1, and frontier otherwise. The next prompt lists frontier tasks by regret, highest first.
+
+The service splits tasks by source record ID into `manifest-<generation>.json` under the tasks root. The processor saves each proposal, refusal, and measurement in `state-dir/generation-<generation>.json`. After a restart, it reads these reports to recover the last experience and continue with the next generation.
+
+The first generation starts when the processor first checks for a batch. Training can consume its episodes while generation continues. The next generation starts after `batches-per-generation` batches have been acknowledged since the previous generation started. If a generation measures no tasks, the next starts immediately. The `generations` setting limits the total number of generations. `GET /reef/status` shows the active generation, the number completed, and the last error.
 
 ## Run it
 
@@ -51,3 +65,48 @@ python -m reef.harness.client.tasks --reef-url http://127.0.0.1:8900 --scenario 
 Thinking stays off because a thinking model's episode never assembles into one sample: the agent's history carries earlier turns without their thinking, so the second turn's prompt no longer extends the first turn's tokens. With thinking off, Qwen3's generation prompt still ends with an empty think block that the history drops; `scaffold-tolerance` lets the assembly realign those masked tokens. A tasks root under a path Docker shares with the host (on macOS, under the home directory) is required, or the verifier's reward file never reaches the host.
 
 Known limits: a generation runs for hours while the weights reload every step, so one task group can hold episodes of two weight versions; `max-staleness` bounds that. The Designer's own training, its regret as the reward of its proposals, follows.
+
+## Generate from selected records
+
+To reconstruct a past task, pass its `AgentRecord` objects and selected local materials to `generate`. The records must belong to the processor's scenario. Run the generator service first. Then call this function from an async caller outside the trainer lock:
+
+```python
+from pathlib import Path
+
+from recipes.beta.spade import SpadeProcessor
+from reef.core import AgentRecord
+from reef.core.tasks import HarborTask, TaskGenerationRequest
+from reef.record2dataset import HttpGenerator
+from reef.train.types import ProcessorContext
+
+
+async def rebuild_task(
+    records: tuple[AgentRecord, ...], assets: tuple[Path, ...], generator_url: str
+) -> HarborTask:
+    generator = HttpGenerator(generator_url)
+    processor = SpadeProcessor(ProcessorContext("spade", {}), generator=generator)
+    task = await processor.generate(
+        TaskGenerationRequest(records, "Reconstruct the original task before it was solved.", assets)
+    )
+    written = await generator.write_task(task)
+    result = await processor.validate(written.path)
+    if not result.is_valid:
+        raise ValueError("; ".join(result.errors))
+    return task
+```
+
+The example generates a task, writes it, and validates it. With source records, the returned task keeps their original IDs in `source_agent_record_ids`. It stores the new Designer receipt in `metadata["designer_record_id"]`. Calling `generate` alone does not write, check, play, or train the task.
+
+History tasks use `harbor-history-<hash>` names derived from the scenario, source record IDs, and Designer receipt. Each new Designer call gets a separate name, even with the same source records. Name conflicts are refused without deleting the existing task. Identical task content is still refused as a duplicate.
+
+To run SPADE's write, check, play, and report sequence, call `proposed(generation, index, skill, request=...)`. This method sends feedback against the new Designer receipt.
+
+Materials can be UTF-8 files or directories on the caller's machine. The client sends their contents over HTTP. The service does not need a shared filesystem. A selected directory keeps its relative paths under `asset-0/`, `asset-1/`, and so on. A selected file uses `asset-N/<filename>`.
+
+Use a prepared snapshot containing only the materials the Designer should see. The client rejects symlinks, special files, non-text files, and unreadable files. Limits are 128 files, 256 KiB of file contents, and 512 KiB of JSON for records and files combined. Oversized inputs fail before a Designer call. The client and service do not truncate these inputs.
+
+The input contract is `TaskGenerationRequest` in `reef.core.tasks`. Both SPADE and record2dataset use this type. For materials already in memory, pass `asset_files={"state.txt": "file contents"}` instead of `assets`. The old import from `reef.train.processors.task_generation` remains supported.
+
+To call the generator directly, wrap the shared request in `DesignerRequest(inputs=request, difficulty="hard")`. Then call `HttpGenerator.propose(...)`. `DesignerRequest` holds the shared input and adds Designer settings. The HTTP client reads local `assets` into `asset_files`. The service reconstructs the same input type. Each source record retains its payload, type, timestamp, references, and artifact version. Existing `DesignerRequest(target="...")` calls still work for description-only generation. Use matching client and generator versions for historical inputs.
+
+The automatic generation loop still uses the configured description and previous task scores. The caller selects historical sessions. The Designer makes one model call. It does not yet inspect files with tools or revise a task after a failed check. Passing the oracle check does not establish that the reconstruction is faithful to the original task.

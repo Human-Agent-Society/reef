@@ -8,9 +8,10 @@ from pathlib import Path
 import pytest
 
 from reef.core import AgentRecord, RequestType
-from reef.core.tasks import HarborTask, read_harbor_task, write_harbor_task
+from reef.core.tasks import HarborTask, TaskGenerationRequest, read_harbor_task, write_harbor_task
 from reef.train.processors import TaskGenerationProcessor
-from reef.train.processors.task_generation import TaskGenerationRequest, TaskValidationResult
+from reef.train.processors.task_generation import TaskGenerationRequest as LegacyTaskGenerationRequest
+from reef.train.processors.task_generation import TaskValidationResult
 from reef.train.types import ProcessorContext, TaskItem, TrainingBatch
 
 pytestmark = pytest.mark.unit
@@ -100,3 +101,15 @@ def test_request_and_rejection_require_explanations(source_record: AgentRecord) 
         TaskGenerationRequest((source_record,), " ")
     with pytest.raises(ValueError, match="non-empty strings"):
         TaskValidationResult(errors=(" ",))
+
+
+def test_old_import_path_reexports_the_shared_request() -> None:
+    assert LegacyTaskGenerationRequest is TaskGenerationRequest
+
+
+def test_shared_request_accepts_paths_or_contents_without_reading_files(tmp_path: Path) -> None:
+    missing = tmp_path / "missing"
+    assert TaskGenerationRequest((), "rebuild", (missing,)).assets == (missing,)
+    assert TaskGenerationRequest((), "rebuild", asset_files={"input.txt": "text"}).asset_files == {"input.txt": "text"}
+    with pytest.raises(ValueError, match="not both"):
+        TaskGenerationRequest((), "rebuild", (missing,), asset_files={"input.txt": "text"})
