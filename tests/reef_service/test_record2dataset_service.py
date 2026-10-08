@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import os
@@ -17,7 +18,7 @@ import pytest
 from aiohttp.test_utils import TestServer
 from reef_client.client import ReefClientError
 
-from reef.core.tasks import HarborTask, read_harbor_task, read_split_manifest
+from reef.core.tasks import HarborTask, TaskSplit, read_harbor_task, read_split_manifest, write_split_manifest
 from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset import (
     Designer,
@@ -459,6 +460,48 @@ def test_a_manifest_splits_the_named_tasks_under_the_root(tmp_path: Path) -> Non
     run_with(built, body)
 
 
+def test_a_manifest_keeps_the_splits_earlier_manifests_gave_and_lists_a_test_split(tmp_path: Path) -> None:
+    built, _, _, _ = service(tmp_path)
+
+    async def body(generator: HttpGenerator) -> object:
+        first = []
+        for index in range(2):
+            proposed = await generator.propose(request(), scenario="spade", generation=1, index=index, tags={})
+            assert proposed.task is not None
+            first.append((await generator.write_task(proposed.task)).name)
+        await generator.write_manifest(generation=1, names=first, eval_fraction=1.0, seed=1)
+        await generator.delete_task(first[1])
+        second = []
+        for index in range(2):
+            proposed = await generator.propose(request(), scenario="spade", generation=2, index=index, tags={})
+            assert proposed.task is not None
+            second.append(proposed.task)
+        # One task of generation 2 is made from the record of an eval task of generation 1.
+        shared = read_harbor_task(tmp_path / "tasks" / first[0]).source_agent_record_ids
+        second[0] = dataclasses.replace(
+            second[0], source_agent_record_ids=(*second[0].source_agent_record_ids, *shared)
+        )
+        names = [(await generator.write_task(task)).name for task in second]
+        answer = await generator.call(
+            "POST",
+            "/manifests",
+            body={"generation": 2, "names": names, "eval_fraction": 0.0, "test_fraction": 1.0, "seed": 1},
+        )
+        assert answer["train"] == [] and answer["eval"] == [names[0]] and answer["test"] == [names[1]]
+        manifest = read_split_manifest(tmp_path / "tasks" / "manifest-00002.json")
+        assert manifest.eval == (names[0],) and manifest.test == (names[1],) and manifest.test_fraction == 1.0
+        assert read_split_manifest(tmp_path / "tasks" / "manifest-00001.json").eval == tuple(sorted(first))
+        # A manifest that places a listed task in another split is refused, not merged.
+        write_split_manifest(tmp_path / "tasks" / "manifest-00009.json", TaskSplit((first[0],), (), 1, 0.0))
+        with pytest.raises(GeneratorError, match="both the train split and the eval split"):
+            await generator.write_manifest(generation=3, names=names, eval_fraction=0.0, seed=1)
+        with pytest.raises(GeneratorError, match="test_fraction must be a number"):
+            await generator.call("POST", "/manifests", body={"names": names, "test_fraction": "0.5"})
+        return None
+
+    run_with(built, body)
+
+
 def test_a_proposal_report_reaches_the_designer(tmp_path: Path) -> None:
     built, designer, _, _ = service(tmp_path)
 
@@ -588,6 +631,13 @@ def test_the_wire_forms_round_trip(tmp_path: Path) -> None:
     assert task_from_document(task_document(task)) == task
     with pytest.raises(ValueError, match="not a Harbor task"):
         task_from_document({**task_document(task), "tests": {}})
+    assert not {"parents", "is_imported", "top_level_config"} & set(task_document(task))
+    stamped = dataclasses.replace(
+        task, parents=(task.digest,), is_imported=True, top_level_config={"source": "ExampleSuite"}
+    )
+    assert task_from_document(json.loads(json.dumps(task_document(stamped)))) == stamped
+    with pytest.raises(WireError, match="parents must be a list of strings"):
+        task_from_document({**task_document(task), "parents": "x"})
     with pytest.raises(ValueError, match="must be a JSON object"):
         task_from_document("task")
     play = TaskPlay(tmp_path / "t", "t", "e1", None, {"score": 0.5}, "the trial raised", (), 2, (), None)

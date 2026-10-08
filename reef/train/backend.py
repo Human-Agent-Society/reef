@@ -188,6 +188,14 @@ class CandidateBackend(CandidateEvaluator, ABC):
         """
         return
 
+    def observe_consumed_records(self, record_ids: frozenset[str]) -> None:
+        """Observe the record ids a scenario commit consumed, and at recovery those of every earlier commit.
+
+        Backends normally need no side effect here. The harness backend holds out an eval task only until one
+        of the records the task was made from is consumed.
+        """
+        return
+
     def shipped_content_update(self, state: Mapping[str, Any], published_tree: Path) -> TrainStepResult | None:
         """A result that republishes the content this Reef ships, when the served tree no longer carries it.
 

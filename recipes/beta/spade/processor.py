@@ -12,11 +12,12 @@ One generation is one job on a private worker, off the trainer's thread: ``count
 written (a duplicate refused; a name an earlier attempt of the generation took before a reload cancelled
 it is replaced), validated, played ``rollouts_per_task`` times as it is (the training data) and
 ``hint_plays`` times with the hint appended (measured only), and reported against the Designer's receipt
-with its regret as the score. The first generation starts when the processor first looks for a
-batch; the next once ``batches_per_generation`` batches were acknowledged since the previous one started
-(its episodes train while it runs), so the Designer always writes for the policy that trains now; a
-generation that measured no task is followed at once. Every generation's report goes under ``state_dir``,
-which is what a restart reads to carry on with the next number and the last experience.
+with its regret as the score. A task the split puts in eval, decided before play, plays both arms
+unreported and stays out of the next prompt. The first generation starts when the processor first looks
+for a batch; the next once ``batches_per_generation`` batches were acknowledged since the previous one
+started (its episodes train while it runs), so the Designer always writes for the policy that trains now;
+a generation that measured no task is followed at once. Every generation's report goes under
+``state_dir``, which is what a restart reads to carry on with the next number and the last experience.
 
 The Designer's own reports and the hint arm's reports share the scenario with the training data; the
 processor tells them apart (``metadata.role``, the episode's ``arm`` label) and releases them unassembled.
@@ -47,7 +48,7 @@ from recipes.beta.spade.generation import (
     write_generation_report,
 )
 from reef.core import AgentRecord
-from reef.core.tasks import HarborTask
+from reef.core.tasks import HarborTask, SplitName, assign_splits
 from reef.record2dataset.client import (
     DuplicateTask,
     Generator,
@@ -421,18 +422,28 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             return await self.reported(
                 ProposalRecord(index, skill, record_id, None, "; ".join(validation.errors)), None
             )
-        measure, refusal = await self.measured(task, written.path, written.digest, skill, generation)
+        # A keyed hash of the name places the task before play, as the manifest written after the generation does:
+        # its group is its own Designer record and no eval task is its parent.
+        split_name = assign_splits((task,), seed=self.seed, eval_fraction=self.eval_fraction).split_of(task.name)
+        measure, refusal = await self.measured(task, written.path, written.digest, skill, generation, split_name)
         if measure is None:
             await self.generator.delete_task(task.name)
             return await self.reported(ProposalRecord(index, skill, record_id, None, refusal), None)
         return await self.reported(ProposalRecord(index, skill, record_id, task.name, ""), measure)
 
     async def measured(
-        self, task: HarborTask, task_path: Path, digest: str, skill: str | None, generation: int
+        self,
+        task: HarborTask,
+        task_path: Path,
+        digest: str,
+        skill: str | None,
+        generation: int,
+        split_name: SplitName | None,
     ) -> tuple[TaskMeasure | None, str]:
         """Both arms played: the plain arm is the training data, the hint arm measures how much the hint helps.
 
-        A task the Reasoning Agent could not play at all (every plain episode ended before the agent ran) is no
+        Only a train task's episodes are reported; an eval task is measured the same way and trains nothing. A
+        task the Reasoning Agent could not play at all (every plain episode ended before the agent ran) is no
         measure of the Reasoning Agent; it comes back as None with the first episode's error.
         """
         if self.generator is None:
@@ -443,7 +454,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             scenario=self.scenario,
             arm=TRAINING_ARM,
             plays=self.rollouts_per_task,
-            is_reporting=True,
+            is_reporting=split_name == "train",
             extra_instruction_files=(),
             tags=tags,
             model=self.served_model,
@@ -457,7 +468,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
                 scenario=self.scenario,
                 arm=HINT_ARM,
                 plays=hint_plays,
-                is_reporting=True,
+                is_reporting=split_name == "train",
                 extra_instruction_files=(HINT_FILE,),
                 tags=tags,
                 model=self.served_model,
@@ -480,6 +491,7 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
             plain_rewards=rewards_of(plain),
             hint_rewards=rewards_of(hint),
             record=record,
+            split=split_name,
         )
         return measure, ""
 

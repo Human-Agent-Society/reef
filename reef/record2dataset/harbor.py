@@ -32,7 +32,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from reef.core.tasks import HarborTask, TaskSplit, split_by_source
+from reef.core.tasks import HarborTask, TaskSplit, assign_splits, read_harbor_task, read_split_manifest
 from reef.harness.episodes.trajectory import primary_reward
 from reef.record2dataset.designer import SKILL_PATTERN, HarborReply
 
@@ -476,12 +476,54 @@ def oracle_check(
     return OracleResult(is_solvable=True, reason="", oracle_reward=oracle.reward, nop_reward=nop.reward)
 
 
-def split_generation(tasks: Sequence[HarborTask], *, eval_fraction: float, seed: int) -> TaskSplit:
-    """Split one generation's tasks so that every task of one designer call lands in one split."""
+def split_generation(
+    tasks: Sequence[HarborTask],
+    *,
+    eval_fraction: float,
+    seed: int,
+    test_fraction: float = 0.0,
+    pinned: TaskSplit | None = None,
+    listed: Sequence[HarborTask] = (),
+) -> TaskSplit:
+    """Split one generation's tasks: a task takes the split of the tasks, here or ``listed``, it shares a record with.
+
+    ``pinned`` and ``listed`` are what :func:`listed_tasks` reads from the manifests already under the tasks root;
+    the result lists this generation's tasks only (see :func:`reef.core.tasks.assign_splits`).
+    """
     names = [task.name for task in tasks]
     repeated = sorted({name for name in names if names.count(name) > 1})
     if repeated:
         raise ValueError(f"tasks share a name: {', '.join(repeated)}")
-    return split_by_source(
-        {task.name: task.source_agent_record_ids for task in tasks}, eval_fraction=eval_fraction, seed=seed
+    generation = set(names)
+    split = assign_splits(
+        [*tasks, *(task for task in listed if task.name not in generation)],
+        seed=seed,
+        eval_fraction=eval_fraction,
+        test_fraction=test_fraction,
+        pinned=pinned,
     )
+    return TaskSplit(
+        train=tuple(name for name in split.train if name in generation),
+        eval=tuple(name for name in split.eval if name in generation),
+        seed=split.seed,
+        eval_fraction=split.eval_fraction,
+        test=tuple(name for name in split.test if name in generation),
+        test_fraction=split.test_fraction,
+    )
+
+
+def listed_tasks(tasks_root: Path) -> tuple[TaskSplit, tuple[HarborTask, ...]]:
+    """Every task the manifests under ``tasks_root`` list, as one split, and each listed task still there, read back.
+
+    A name two manifests place in different splits is refused; a listed task directory that is gone is skipped.
+    """
+    splits: dict[str, set[str]] = {"train": set(), "eval": set(), "test": set()}
+    for manifest_path in sorted(tasks_root.glob("manifest-*.json")):
+        manifest = read_split_manifest(manifest_path)
+        splits["train"].update(manifest.train)
+        splits["eval"].update(manifest.eval)
+        splits["test"].update(manifest.test)
+    listed = TaskSplit(tuple(splits["train"]), tuple(splits["eval"]), 0, 0.0, tuple(splits["test"]))
+    names = sorted({*listed.train, *listed.eval, *listed.test})
+    tasks = tuple(read_harbor_task(tasks_root / name) for name in names if os.path.lexists(tasks_root / name))
+    return listed, tasks

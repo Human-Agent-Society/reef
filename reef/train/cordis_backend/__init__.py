@@ -13,7 +13,12 @@ composite proposal: it applies
 atomically and receives one selection decision, never one per mutation. The
 default policy selects a candidate with more task wins than losses; the
 ``floor`` policy runs the candidate alone and selects it when every task
-scores at least ``floor_score``.
+scores at least ``floor_score``; the ``paired_confidence`` policy reruns
+pairs whose current episode an infrastructure fault hit and selects when a
+sign test over tasks passes and the bootstrap lower bound of the mean gain is
+above ``min_effect``. When the tasks are a task manifest's eval split, a task
+a consumed batch named, or whose source record a commit consumed, is not
+evaluated again, and eval failures never reach the proposer.
 
 Versioning goes through reef's native artifact stack: a selected mutation
 renders to a directory and returns a ``TrainStepResult`` with the artifact
@@ -29,10 +34,13 @@ of the training loop.
 from reef.harness.tree.mutations import Mutation, MutationError
 from reef.train.cordis_backend.backend import (
     CordisBackend,
+    EvalSplitTask,
     FloorMixin,
     FloorPlugin,
     FloorPluginFactory,
     HarnessCandidate,
+    PairedConfidencePlugin,
+    PairedConfidencePluginFactory,
     ScoreComparisonMixin,
     ScoreComparisonPlugin,
     ScoreComparisonPluginFactory,
@@ -40,12 +48,20 @@ from reef.train.cordis_backend.backend import (
 from reef.train.cordis_backend.contracts import StepProgress
 from reef.train.cordis_backend.manifest import FailureManifest, FailureObservation, FailureRecord
 from reef.train.cordis_backend.processor import CordisProcessor
-from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer, StepProposal, untrusted_text
+from reef.train.cordis_backend.strategies import (
+    EpisodeScorer,
+    Promoter,
+    Proposer,
+    ScoreUnavailable,
+    StepProposal,
+    untrusted_text,
+)
 
 __all__ = [
     "CordisBackend",
     "CordisProcessor",
     "EpisodeScorer",
+    "EvalSplitTask",
     "FailureManifest",
     "FailureObservation",
     "FailureRecord",
@@ -55,11 +71,14 @@ __all__ = [
     "HarnessCandidate",
     "Mutation",
     "MutationError",
+    "PairedConfidencePlugin",
+    "PairedConfidencePluginFactory",
     "Promoter",
     "Proposer",
     "ScoreComparisonMixin",
     "ScoreComparisonPlugin",
     "ScoreComparisonPluginFactory",
+    "ScoreUnavailable",
     "StepProgress",
     "StepProposal",
     "untrusted_text",

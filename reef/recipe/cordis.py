@@ -24,7 +24,7 @@ from urllib.parse import quote
 from reef.core.errors import ReefError
 from reef.core.model_metadata import ModelMetadata
 from reef.core.reports import ScoredRolloutReport
-from reef.core.tasks import TaskSplitError, manifest_task_paths
+from reef.core.tasks import HarborTaskError, TaskSplitError, manifest_task_paths, read_harbor_task
 from reef.harness.adapters import get_adapter
 from reef.harness.adapters.descriptor import DescriptorError
 from reef.harness.episodes.e2b import E2BExecutor, deployment_owner
@@ -52,7 +52,9 @@ from reef.surface.harnesses import create_harness_surface
 from reef.train.backend import STALE_RESULT_POLICIES, StaleResultPolicy
 from reef.train.cordis_backend.backend import (
     CordisBackend,
+    EvalSplitTask,
     FloorPluginFactory,
+    PairedConfidencePluginFactory,
     ScoreComparisonPluginFactory,
     tree_files,
 )
@@ -67,11 +69,13 @@ from reef.train.cordis_backend.strategies import (
     resolve_proposer,
 )
 from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory, CandidatePluginFactory
+from reef.train.evaluation.paired import PairedConfidenceSettings
 from reef.train.trainer import Trainer
 
 _CANDIDATE_PLUGIN_FACTORIES: dict[str, CandidatePluginFactory] = {
     "score_comparison": ScoreComparisonPluginFactory(),
     "floor": FloorPluginFactory(),
+    "paired_confidence": PairedConfidencePluginFactory(),
     "always": AlwaysSelectPluginFactory(),
 }
 
@@ -218,7 +222,15 @@ class CordisRecipe(Recipe):
     algorithm state always wins over the seed), optional ``selection`` (the
     candidate-selection policy: ``score_comparison``, the default; ``floor``,
     which runs the candidate alone and selects it when every task scores at
-    least ``floor_score``, default ``1.0``; ``always``;
+    least ``floor_score``, default ``1.0``; ``paired_confidence``, which
+    reruns both sides of a pair whose current episode an infrastructure
+    fault hit up to ``infra_reruns`` times (default 0), counts a pair still
+    faulted, or faulted on the candidate side, as a candidate loss, and
+    selects when at least ``min_valid_pairs`` (default 1) pairs are valid, an
+    exact sign test over tasks passes at ``confidence_level`` (default 0.95)
+    and the bootstrap lower bound of the mean task gain is above
+    ``min_effect`` (default 0);
+    ``always``;
     or a dotted reference to a ``CandidatePluginFactory`` subclass or instance),
     optional ``step_record_dir`` (a directory under which every scenario's
     steps write the proposer's model calls, the parsed proposal and each evaluation
@@ -321,6 +333,8 @@ class CordisRecipe(Recipe):
     agent_executor: EpisodeExecutor | None = None
     agent_timeout_s: float = 1800.0
     agent_trial_timeout_s: float = 300.0
+    #: The eval split of ``task_manifest`` by task path, so the backend skips an eval task a consumed batch named.
+    eval_split_tasks: Mapping[str, EvalSplitTask] | None = None
     config_sections: ClassVar[tuple[str, ...]] = ("evolution",)
 
     batch_size: int = config_field(1)
@@ -356,6 +370,11 @@ class CordisRecipe(Recipe):
         object.__setattr__(self, "episode_workers", requirements.workers)
         if self.batch_policy not in ("reports", "records"):
             raise ValueError("batch_policy must be 'reports' or 'records'")
+        if self.batch_policy == "records" and self.eval_split_tasks is not None:
+            raise ValueError(
+                "batch_policy 'records' cannot take evolution.task_manifest: a records batch carries no report, so "
+                "it names no task, and the plays of an eval task would reach the proposer unnoticed"
+            )
         if self.episode_timeout_s <= 0:
             raise ValueError("episode_timeout_s must be positive")
         if self.episode_repeats < 1:
@@ -395,6 +414,7 @@ class CordisRecipe(Recipe):
         tasks = evolution.get("tasks")
         manifest_path = evolution.get("task_manifest")
         tasks_root = evolution.get("tasks_root")
+        eval_split_tasks: dict[str, EvalSplitTask] | None = None
         if manifest_path is not None:
             if tasks is not None:
                 raise RecipeConfigError("evolution.tasks and evolution.task_manifest cannot both be set")
@@ -430,6 +450,13 @@ class CordisRecipe(Recipe):
             if not task_paths:
                 raise RecipeConfigError(f"evolution.task_manifest {manifest_path} names no eval tasks")
             tasks = [str(path) for path in task_paths]
+            eval_split_tasks = {}
+            for path in task_paths:
+                try:
+                    task = read_harbor_task(path)
+                except HarborTaskError as exc:
+                    raise RecipeConfigError(str(exc)) from exc
+                eval_split_tasks[str(path)] = EvalSplitTask(task.name, frozenset(task.source_agent_record_ids))
         elif tasks_root is not None:
             raise RecipeConfigError("evolution.tasks_root is only read with evolution.task_manifest")
         elif not isinstance(tasks, Sequence) or isinstance(tasks, str) or not tasks:
@@ -508,6 +535,23 @@ class CordisRecipe(Recipe):
             if selection != "floor":
                 raise RecipeConfigError("evolution.floor_score applies only to the floor selection")
             candidate_plugin = FloorPluginFactory(floor_score=float(floor_score))
+        paired_options = {
+            key: evolution[key]
+            for key in ("min_valid_pairs", "min_effect", "confidence_level", "infra_reruns")
+            if key in evolution
+        }
+        if paired_options:
+            if selection != "paired_confidence":
+                raise RecipeConfigError(
+                    f"evolution.{next(iter(paired_options))} applies only to the paired_confidence selection"
+                )
+            infra_reruns = paired_options.pop("infra_reruns", 0)
+            try:
+                candidate_plugin = PairedConfidencePluginFactory(
+                    PairedConfidenceSettings(**paired_options), infra_reruns=infra_reruns
+                )
+            except ValueError as exc:
+                raise RecipeConfigError(f"evolution.{exc}") from exc
         # A recheck compares two trees; the floor evaluates one.
         if selection == "floor" and budgets["recheck_every"]:
             raise RecipeConfigError("evolution.recheck_every does not apply to the floor selection")
@@ -635,6 +679,7 @@ class CordisRecipe(Recipe):
             "worker_executor": worker_executor,
             "worker_gpus": worker_gpus,
             "tasks": tuple(str(task) for task in tasks),
+            "eval_split_tasks": eval_split_tasks,
             "adapter": adapter,
             "binary": binary,
             "episode_timeout_s": float(timeout),
@@ -811,6 +856,7 @@ class CordisRecipe(Recipe):
             "agent_executor": self.agent_executor,
             "agent_timeout_s": self.agent_timeout_s,
             "agent_trial_timeout_s": self.agent_trial_timeout_s,
+            "eval_split_tasks": self.eval_split_tasks,
         }
 
     def _build_trainer(
