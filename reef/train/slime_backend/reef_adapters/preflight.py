@@ -7,6 +7,9 @@ of a half-started cluster.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
+from typing import Any
+
 from reef.runtime.recovery import marker_rollouts, read_marker
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
@@ -128,7 +131,7 @@ def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionConfig)
     )
     marker = read_marker(storage.marker_path)
     if marker is not None and marker["status"] == "RUNNING":
-        raise RuntimeError(f"ambiguous training job {marker['job_id']}")
+        raise RuntimeError(running_job_message(storage, marker, args.megatron_lora_rank))
     if marker is not None and marker["status"] in {"REJECTING", "REJECTED"}:
         # The newest training checkpoint still contains the declined candidate;
         # it cannot reconstruct the incumbent engines or committed adapters.
@@ -144,3 +147,59 @@ def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionConfig)
     if storage.critic_root is not None:
         args.critic_save = str(storage.critic_root)
     return storage
+
+
+def running_job_message(storage: CheckpointStorage, marker: Mapping[str, Any], megatron_lora_rank: int) -> str:
+    """List what a job stopped while ``RUNNING`` left on disk, and where its recovery is documented.
+
+    These files cannot always show whether the job's optimizer step reached the
+    checkpoint. They also cannot show whether the job before it was committed.
+    So the message states facts only. The troubleshooting guide gives a manual
+    recovery for one state only. In that state, the run is full-weight, its
+    tracker names an earlier rollout, and the job left no files for its own
+    rollout. Every other state needs the checkpoints restored from a copy, and
+    the guide says which copy.
+    """
+    rollout_id = marker["rollout_id"]
+    tracker = storage.megatron_root / "latest_checkpointed_iteration.txt"
+    try:
+        tracker_text: str | None = tracker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        tracker_text = None
+    except (OSError, ValueError) as error:
+        tracker_text = f"<{error}>"
+    if tracker_text is None:
+        tracker_iteration: int | None = None
+        tracker_state = "is missing"
+    elif tracker_text.isdecimal():
+        tracker_iteration = int(tracker_text)
+        tracker_state = f"names iteration {tracker_iteration}"
+    else:
+        tracker_iteration = None
+        tracker_state = f"is unreadable: {tracker_text!r}"
+    record_path = storage.records_root / f"{rollout_id:020d}.json"
+    rollout_paths = [
+        str(path) for path in (*storage.asset_paths(rollout_id), record_path) if path.exists() or path.is_symlink()
+    ]
+    per_scenario_lora = megatron_lora_rank > 0
+    lora_state = f"yes (--megatron-lora-rank {megatron_lora_rank})" if per_scenario_lora else "no"
+    troubleshooting_entry = "'A restart fails with ambiguous training job' in the troubleshooting guide"
+    restore_from_copy = f"restore {storage.root} from a copy; the entry says which copy"
+    if (
+        not per_scenario_lora
+        and tracker_iteration is not None
+        and tracker_iteration < rollout_id
+        and not rollout_paths
+    ):
+        recovery = (
+            f"{troubleshooting_entry} gives a manual recovery for this state, which applies only if all of its "
+            f"conditions hold, including that the job for rollout {tracker_iteration} was committed; otherwise "
+            f"{restore_from_copy}"
+        )
+    else:
+        recovery = f"{troubleshooting_entry} gives no manual recovery for this state; {restore_from_copy}"
+    return (
+        f"ambiguous training job {marker['job_id']}: {storage.marker_path} is RUNNING for rollout {rollout_id}; "
+        f"Megatron's tracker {tracker} {tracker_state}; paths for rollout {rollout_id}: "
+        f"{', '.join(rollout_paths) or 'none'}; per-scenario LoRA: {lora_state}; {recovery}"
+    )
