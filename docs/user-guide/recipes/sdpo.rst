@@ -143,6 +143,71 @@ One run of 100 steps. Test accuracy goes from 41.2% to 74.4% at step 75 and
 ends at 71.7%. The rollouts stay diverse and a question seen a second time is
 answered no better than the rest of the grid.
 
+AgentCL coding stream
+---------------------
+
+The self-contained `AgentCL example
+<../../../recipes/sdpo/examples/agentcl/README.md>`__ runs the pinned
+96-task dependent coding stream through native Reef SDPO and Harbor's
+isolated verifier. It is a supervised weight-learning extension of AgentCL,
+not a reproduction of its unsupervised memory methods. Full acceptance requires
+96 committed updates, a frozen 96-task repeat, and 120 independent tasks.
+The example currently supplies the workflow and CPU checks; these files do not
+establish that a full GPU run or final checkpoint reload has succeeded.
+
+.. code:: bash
+
+   cd recipes/sdpo/examples/agentcl
+   ./run.sh export --data-root /path/to/data --cache-dir /path/to/cache
+   ./run.sh baseline --data-root /path/to/data --run-root /path/to/full --dry-run
+   ./run.sh train --profile smoke --data-root /path/to/data --run-root /path/to/smoke --dry-run
+   ./run.sh train --profile full --data-root /path/to/data --run-root /path/to/full --dry-run
+
+Export checks immutable source hashes and creates separate student/verifier
+assets without executing benchmark code. Reference-solution sandbox validation
+is a separate prerequisite. Dry-run validates native configuration, prints
+model/data/token/topology/schedule/output settings and submits nothing.
+Use real commands only after approval for the exact runtime, GPUs, inference,
+training and containers. The driver connects to one externally supervised
+service; it allocates no resources and creates no credentials.
+
+The recipe opt-in ``accept_multi_turn_policy_samples: true`` makes one terminal
+report reference all ordered inference receipts in a complete episode. The
+teacher uses the privileged initial request and the student's exact full
+suffix. Strict zero-tolerance assembly retains every sampled assistant token;
+tool observations and conversation context receive zero loss. Missing turns,
+forks, mixed releases, masking drift, or window overflow fail explicitly.
+Single-turn behavior remains the default when the opt-in is false.
+
+SDPO uses four independent episodes from the same initial task/release,
+then one update per complete one-task grid. Smoke uses two episodes per grid.
+The processor uses sanitized verifier feedback and a successful sibling's full
+trajectory; no dataset demonstration is read. The proposal is
+Qwen2.5-7B-Instruct, an 8K student/16K teacher window, a 2K response cap,
+student-top-100-plus-tail JSD, EMA 0.05, zero skipped tokens and AdamW at
+LR 1e-5. Primary first-pass score is predeclared attempt 0, matching one-attempt
+baseline/evaluation. Training mean@4 is reported separately.
+
+After full training, ``run.sh evaluate --phase frozen-repeat`` and
+``run.sh evaluate --phase independent`` keep the release fixed, produce no
+reports and perform no demonstration/teacher lookup. The README gives complete
+commands, bounded smoke settings and resume restrictions. Deterministic IDs
+and an atomic cursor reconcile exact native committed consumption; unknown
+outcomes stop rather than replay inference. An HF-only checkpoint is not an
+optimizer-equivalent continuation, even with the fresh-base #728 resume fix.
+
+``run.sh verify`` independently recomputes score/coverage and commit checks.
+GPU training, exact token masks, weight change, final export reload, browser
+checks and owned cleanup remain separate qualification requirements.
+``run.sh render-traces`` creates an offline searchable viewer of recorded
+student requests/actions, observations and teacher context. The example-owned capture processor stores the actual native teacher/student
+input tensors privately under ``teacher-records``. It returns the original
+batch without changing the objective. Captured teacher text is a decode of
+the token IDs, not a separately sampled completion. Missing captures remain
+labeled unavailable. ``--native-input-checks`` checks the first complete
+multi-turn grid before task two; ``run.sh qualify-inputs`` checks all captures.
+These input checks do not establish optimizer execution or checkpoint changes. W&B is configured but disabled; online uploads need separate approval.
+
 Related guides
 --------------
 

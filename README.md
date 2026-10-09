@@ -279,6 +279,8 @@ selected by dotted class reference and not shipped in the Reef wheel.
 | Continual learning on a task stream | A stream of independent tasks that a verifier scores one by one | [SAO](https://reefinfra.ai/docs/user-guide/recipes/sao/) | [Meta-Harness](recipes/meta_harness/README.md), [GEPA](https://reefinfra.ai/docs/user-guide/recipes/gepa/) | Measured: [AIME 2025](recipes/gepa/examples/aime/README.md#the-validation-contract), [IMOAnswerBench](recipes/sao/examples/imo_answerbench/README.md#results), [CEO-Bench](recipes/sao/examples/ceobench/README.md#results), [Terminal-Bench](recipes/meta_harness/examples/terminal_bench/README.md#results). |
 | Learning from usage | Real interaction where no one reports a score or feedback arrives late | [OpenClaw-RL](https://reefinfra.ai/docs/user-guide/recipes/openclawrl/) | [SkillClaw](https://reefinfra.ai/docs/user-guide/recipes/skillclaw/), [Reefine](docs/user-guide/recipes/reefine.rst) | Measured: [simulated student with GSM8K task stream](recipes/openclawrl/examples/openclawrl/README.md#results), [WildClawBench](recipes/skillclaw/README.md#the-2026-08-29-results-glm-53-flash-preliminary). |
 
+AgentCL coding supports [SDFT](recipes/sdft/examples/agentcl/README.md), [SDPO](recipes/sdpo/examples/agentcl/README.md), and [OPD](recipes/opd/examples/agentcl/README.md). Each example documents its teacher, complete-episode training contract, and verification limits.
+
 [`recipes/basic/`](recipes/basic/) is the record-only starting stack and stays
 outside the catalog. For a small walkthrough of feedback, candidate edits, and
 publication, start with [the coding harness tutorial](tutorials/evolve-your-harness/README.md).

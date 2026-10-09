@@ -1,0 +1,14 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "reef-opd-agentcl-harness"
+version = "0.1.0"
+description = "AgentCL coding episodes through Harbor and native Reef OPD"
+requires-python = ">=3.12"
+dependencies = ["reef-client>=0.2.1", "reef-eval[harbor]==0.1.1"]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["harness*"]

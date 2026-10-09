@@ -39,13 +39,13 @@ class SDFTProcessor(DistillProcessor):
     batch_label = "sdft"
 
     def __init__(self, context: ProcessorContext) -> None:
-        self._template = context_block_template(context.config)
+        self.template = context_block_template(context.config)
         super().__init__(context)
 
     def teacher_request(
         self, messages: list[Any], tools: list[Any] | None, response: str, teacher_context: str
     ) -> tuple[list[Any], list[Any] | None]:
-        block = self._template.replace(CONTEXT_PLACEHOLDER, teacher_context)
+        block = self.template.replace(CONTEXT_PLACEHOLDER, teacher_context)
         rendered = normalize_messages_for_template(messages)
         if rendered and rendered[-1].get("role") == "user":
             last = dict(rendered[-1])
