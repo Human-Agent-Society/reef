@@ -90,13 +90,13 @@ RUN pip uninstall -y flashinfer-cubin flashinfer-jit-cache flashinfer-python && 
 
 COPY . .
 
-# Replace the image's Slime distribution with Reef's exact pin. Keep
-# the base image's CUDA-matched dependency set by resolving neither package's
-# dependencies here.
+# Replace the image's Slime distribution with Reef's exact pin. Install Slime
+# with --no-deps to keep the base image's CUDA-matched dependency set. Install
+# Reef with its core dependencies. pyproject.toml keeps GPU packages out of
+# that list.
 RUN pip uninstall -y slime && \
     pip install --no-cache-dir --no-deps --group runtime && \
-    pip install -e . --no-deps && \
-    pip install reef-client --no-deps
+    pip install --no-cache-dir -e .
 
 # An earlier layer's dependency resolution can leave numpy 2.x debris behind
 # after pip downgrades (dist-info says 1.26.4 while 2.x submodules such as
@@ -137,6 +137,10 @@ ENV PYTHONPATH=/opt/sglang/python:/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}
 # scipy) is exactly where a broken compiled stack surfaces at runtime; walking
 # it here turns that class of drift into a build failure.
 RUN python -c "from sglang.srt.server_args import ServerArgs; import transformers, scipy.linalg"
+
+# `reef serve --help` loads the CLI, the deployment config and the record
+# storage modules without a GPU. A missing core dependency fails the build here.
+RUN reef serve --help > /dev/null
 
 # Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
 # applies (reef_adapters/megatron/lora.py) and the HF export that publishes
