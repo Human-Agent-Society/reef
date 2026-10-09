@@ -26,9 +26,18 @@ The image also replaces the base's FlashInfer with 0.7.0. Earlier releases
 can compute wrong attention in SGLang's default `flashinfer` backend (upstream
 FlashInfer issue #2896), so rollout log-probs drift from the trained policy.
 If you serve from another environment with FlashInfer older than 0.7.0, set
-`attention-backend: triton` under `inference.options`. Slime's policy loss
-reports the gap as `train/train_rollout_logprob_abs_diff` when it trains on
-rollout log-probs: it should stay near 1e-5, not 1e-3.
+`attention-backend: triton` under `inference.options`.
+
+When Slime trains on rollout log-probs, its policy loss reports the mean
+per-token gap between trainer and rollout log-probs as
+`train/train_rollout_logprob_abs_diff`. This value has no fixed threshold. It
+grows with the entropy of the model's predictions on the sampled tokens, which
+Slime reports as `train/entropy_loss`. On RTX PRO 6000 (sm_120) with
+FlashInfer 0.7.0, the `recipes/sao/examples/imo_answerbench` smoke run with
+Qwen2.5-1.5B-Instruct reported 0.005 to 0.019. Each value was about 0.02 to
+0.04 times `train/entropy_loss`. So this value alone does not show whether an
+engine has the FlashInfer bug. Check the FlashInfer version instead. The image
+build fails if the installed FlashInfer lacks the fix.
 
 TTT-Discover's Qwen3-8B LoRA experiment uses the optional `tttd` target. It
 adds only the Erdős evaluator's solver dependencies for generated programs,
