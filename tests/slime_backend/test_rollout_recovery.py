@@ -335,13 +335,15 @@ def test_reef_external_fields_are_tensorized_without_patching_slime(monkeypatch:
 def test_uncertain_weight_update_synchronously_retires_managed_engine_handles(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    raw_rollout, module = _load_manager_module(monkeypatch, serving=True)
+    from reef.inference.sglang.launch import SGLangModel
+
+    _, module = _load_manager_module(monkeypatch, serving=True)
     engines = [
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-0")),
         types.SimpleNamespace(shutdown=_RemoteMethod("shutdown-1")),
     ]
     group = _ServerGroup(list(engines), num_new_engines=0)
-    server = raw_rollout.RolloutServer(server_groups=[group])
+    server = SGLangModel(server_groups=[group])
     pauses: list[str] = []
     manager = object.__new__(module.SGLangWorker)
     manager._control = manager._create_control()
