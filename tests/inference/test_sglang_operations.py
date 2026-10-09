@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from reef.inference.sglang.backend import SGLangInferenceBackend
-from reef.inference.sglang.config import SGLangConfig
+from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
 from reef.inference.sglang.service import INFERENCE_PROTOCOL, SGLangInferenceService
 from reef.runtime.deployment import InferenceConnection
 from reef.runtime.executor.ray import RayExecutor
@@ -191,3 +191,62 @@ def test_worker_loads_an_adapter_directory_into_every_engine_then_stamps_the_ver
     worker.servers = {}
     with pytest.raises(RuntimeError, match="no updatable"):
         worker.load_adapter_from_disk("x", "/p", "inc:2")
+
+
+def test_engine_control_and_weight_transfer_skip_encoder_groups(monkeypatch):
+    from reef.inference.sglang import worker as worker_module
+    from reef.inference.sglang.launch import SGLangEngineGroup, SGLangModel
+
+    calls = []
+
+    class Remote:
+        def __init__(self, engine_name, method, result=None):
+            self.engine_name, self.method, self.result = engine_name, method, result
+
+        def remote(self, *args, **kwargs):
+            calls.append((self.engine_name, self.method))
+            return self.result
+
+    def engine(name):
+        methods = ("pause_generation", "flush_cache", "continue_generation", "check_weights")
+        handle = SimpleNamespace(**{method: Remote(name, method) for method in methods})
+        handle.get_runtime_load_id = Remote(name, "get_runtime_load_id", "weights:1")
+        return handle
+
+    config = SGLangConfig("model", 2, 1, 2, pause_mode="retract")
+    encoder = SGLangEngineGroup(config, SGLangGroupConfig("encoder", 1, 1), None, 0, ("router", 3000))
+    regular = SGLangEngineGroup(config, SGLangGroupConfig("regular", 1, 1), None, 1, ("router", 3000))
+    encoder.all_engines = [engine("encoder")]
+    regular.all_engines = [engine("regular")]
+    encoder.num_new_engines = 1
+    regular.num_new_engines = 1
+    monkeypatch.setattr(worker_module.ray, "get", lambda refs, **_: list(refs))
+    monkeypatch.setattr(worker_module, "retire_engines", lambda engines: None)
+    worker = worker_module.SGLangWorker.__new__(worker_module.SGLangWorker)
+    worker.config = config
+    worker._health_monitors = []
+    worker.rollout_engine_lock = object()
+    worker.servers = {"actor": SGLangModel([encoder, regular])}
+    worker._control = worker._create_control()
+
+    assert worker.get_runtime_load_ids() == ["weights:1"]
+    worker.pause_generation_for_update()
+    worker.continue_generation_after_update()
+    worker.check_weights("snapshot")
+    engines, _lock, new_engines, gpu_counts, gpu_offsets, parallel_configs = worker.get_updatable_engines_and_lock()
+    assert (engines, new_engines, gpu_counts, gpu_offsets, parallel_configs) == (
+        regular.engines,
+        1,
+        [1],
+        [1],
+        [regular.parallel_config()],
+    )
+    assert worker.terminate_updatable_engines() == 1
+    assert encoder.all_engines[0] is not None and regular.all_engines == [None]
+    assert calls == [
+        ("regular", "get_runtime_load_id"),
+        ("regular", "pause_generation"),
+        ("regular", "flush_cache"),
+        ("regular", "continue_generation"),
+        ("regular", "check_weights"),
+    ]

@@ -191,33 +191,43 @@ class SGLangModel:
         return [engine for group in self.server_groups for engine in group.all_engines]
 
     @property
+    def generation_groups(self) -> list[SGLangEngineGroup]:
+        """Groups whose engines receive engine control requests and weight transfers.
+
+        An encoder-only engine serves only ``/encode`` and health checks.
+        Engine control and weight transfer skip encoder groups, so encoder
+        engines keep the weights they started with.
+        """
+        return [group for group in self.server_groups if group.worker_type != "encoder"]
+
+    @property
     def engines(self) -> list[Any]:
-        return [engine for group in self.server_groups for engine in group.engines]
+        return [engine for group in self.generation_groups for engine in group.engines]
 
     @property
     def num_new_engines(self) -> int:
-        return sum(group.num_new_engines for group in self.server_groups)
+        return sum(group.num_new_engines for group in self.generation_groups)
 
     @num_new_engines.setter
     def num_new_engines(self, value: int) -> None:
-        for group in self.server_groups:
+        for group in self.generation_groups:
             group.num_new_engines = value
 
     @property
     def engine_gpu_counts(self) -> list[int]:
-        return [group.num_gpus_per_engine for group in self.server_groups for _ in group.engines]
+        return [group.num_gpus_per_engine for group in self.generation_groups for _ in group.engines]
 
     @property
     def engine_gpu_offsets(self) -> list[int]:
         return [
             group.gpu_offset + index * group.num_gpus_per_engine
-            for group in self.server_groups
+            for group in self.generation_groups
             for index in range(len(group.engines))
         ]
 
     @property
     def engine_parallel_configs(self) -> list[dict[str, int]]:
-        return [group.parallel_config() for group in self.server_groups for _ in group.engines]
+        return [group.parallel_config() for group in self.generation_groups for _ in group.engines]
 
     def offload(self):
         return ray.get(
