@@ -24,9 +24,9 @@ from harbor.environments.base import ExecResult
 from harbor.models.trajectories.trajectory import Trajectory
 
 
-@pytest.fixture(params=["sdft", "sdpo", "opd"])
-def module(request):
-    return importlib.import_module(f"recipes.{request.param}.examples.agentcl.harness.episode")
+@pytest.fixture
+def module():
+    return importlib.import_module("recipes.agentcl.harness.episode")
 
 
 def fixture_model(module, *, changes=None):
@@ -317,8 +317,7 @@ def test_evaluation_needs_no_training_tensors_and_has_no_report_interface(module
 
 
 def test_kernel_retains_state_and_resets_namespace_fixture_only(module):
-    method = module.__name__.split(".")[1]
-    kernel = importlib.import_module(f"recipes.{method}.examples.agentcl.harbor.environment.kernel")
+    kernel = importlib.import_module("recipes.agentcl.harbor.environment.kernel")
     namespace = {"__name__": "fixture"}
     assert kernel.execute("value = 41", namespace, 1, 200)["status"] == "ok"
     assert kernel.execute("print(value + 1)", namespace, 1, 200)["output"] == "42\n"
@@ -430,9 +429,8 @@ def test_final_contract_preserves_ordinary_pattern_bindings(module, capture):
 
 
 def test_pattern_binding_cannot_turn_incorrect_answer_into_verifier_pass(module, tmp_path):
-    method = module.__name__.split(".")[1]
     contract = importlib.import_module(module.__package__ + ".answer_contract")
-    verifier = importlib.import_module(f"recipes.{method}.examples.agentcl.harbor.tests.verify")
+    verifier = importlib.import_module("recipes.agentcl.harbor.tests.verify")
     source = "def answer():\n    return 0\n\nmatch lambda values: True:\n    case all:\n        pass\n"
     assert contract.CONTRACT_VERSION == "agentcl-final-module-v2"
     with pytest.raises(module.AnswerContractError, match="Builtin names"):
@@ -513,8 +511,7 @@ def test_kernel_launch_survives_controlling_terminal_exit(module, tmp_path):
     assert "process.poll() is None" in launch_script
     assert "process.kill()" in launch_script and "process.wait()" in launch_script
     assert "test -S" not in command
-    method = module.__name__.split(".")[1]
-    source = Path(importlib.import_module(f"recipes.{method}.examples.agentcl.harbor.environment.kernel").__file__)
+    source = Path(importlib.import_module("recipes.agentcl.harbor.environment.kernel").__file__)
     socket_path = tmp_path / "kernel.sock"
     log_path = tmp_path / "kernel.log"
     kernel_path = tmp_path / "kernel.py"

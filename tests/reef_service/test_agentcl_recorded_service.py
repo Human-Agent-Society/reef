@@ -6,13 +6,10 @@ import asyncio
 import copy
 from pathlib import Path
 
-import pytest
 from aiohttp.test_utils import TestServer
 from reef_client import ReefClient
 
-from recipes.opd.examples.agentcl.harness import episode as opd_episode
-from recipes.sdft.examples.agentcl.harness import episode as sdft_episode
-from recipes.sdpo.examples.agentcl.harness import episode as sdpo_episode
+from recipes.agentcl.harness import episode
 from reef.artifact import Artifact
 from reef.dispatcher import build_default_dispatcher
 from reef.runtime.interfaces import InferenceHandler
@@ -48,11 +45,8 @@ class SyntheticAgentHandler(InferenceHandler):
         }
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
-def test_agentcl_reads_private_tensors_from_real_authenticated_record_route(method: str, tmp_path: Path) -> None:
-    episode = {"sdft": sdft_episode, "sdpo": sdpo_episode, "opd": opd_episode}[method]
-
-    class SyntheticSandbox(sdft_episode.EpisodeSandbox, sdpo_episode.EpisodeSandbox, opd_episode.EpisodeSandbox):
+def test_agentcl_reads_private_tensors_from_real_authenticated_record_route(tmp_path: Path) -> None:
+    class SyntheticSandbox(episode.EpisodeSandbox):
         def __init__(self) -> None:
             self.calls: list[str] = []
             self.answer: str | None = None
@@ -83,7 +77,7 @@ def test_agentcl_reads_private_tensors_from_real_authenticated_record_route(meth
         )
         await server.start_server()
         try:
-            client = ReefClient(str(server.make_url("")).rstrip("/"), token="synthetic-test-token", timeout_s=5)
+            client = ReefClient(str(server.make_url("")).rstrip("/"), token="synthetic-test-token", timeout_s=30)
             sandbox = SyntheticSandbox()
             settings = episode.EpisodeSettings(
                 episode_id="synthetic-service-episode",

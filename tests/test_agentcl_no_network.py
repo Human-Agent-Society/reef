@@ -27,9 +27,9 @@ from harbor.trial.network_policy import TrialNetworkPlan
 from harbor.trial.trial import Trial
 
 
-@pytest.fixture(params=["sdft", "sdpo", "opd"])
-def provider(request):
-    return importlib.import_module(f"recipes.{request.param}.examples.agentcl.harness.no_network")
+@pytest.fixture
+def provider():
+    return importlib.import_module("recipes.agentcl.harness.no_network")
 
 
 def create_environment(
@@ -141,8 +141,7 @@ def test_rejects_policy_change_after_start(provider, tmp_path, mode):
 
 
 def test_campaign_lab_override_uses_custom_provider(provider, tmp_path, monkeypatch):
-    method = provider.__name__.split(".")[1]
-    driver = importlib.import_module(f"recipes.{method}.examples.agentcl.run")
+    driver = importlib.import_module("recipes.agentcl.run")
     laboratory = SimpleNamespace(run=AsyncMock())
     monkeypatch.setattr("reef_eval.Lab", Mock(return_value=laboratory))
     arguments = argparse.Namespace(
@@ -345,10 +344,3 @@ def test_agent_stop_preserves_cleanup_semantics(provider, tmp_path, monkeypatch,
     assert not mounts.exists()
     assert not resources.exists()
     assert not startup_env.exists()
-
-
-def test_method_provider_sources_are_identical():
-    root = Path(__file__).resolve().parents[1]
-    assert (root / "recipes/sdft/examples/agentcl/harness/no_network.py").read_bytes() == (
-        root / "recipes/sdpo/examples/agentcl/harness/no_network.py"
-    ).read_bytes()

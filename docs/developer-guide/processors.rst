@@ -249,12 +249,8 @@ Shared engines live under ``reef/train/processors/``, including
 ``DistillProcessor``, the reported engine of the distilling recipes: it
 emits the student's rollout plus the teacher sequence, the request the recipe
 composes from the recorded request and the report's ``teacher_context`` (its
-``teacher_request`` override) rendered with the served model's chat template.
-A processor whose teacher reads exact recorded IDs sets
-``renders_teacher_prompt=False`` and loads no tokenizer. Its
-``check_teacher_length`` call preserves the configured overflow behavior;
-strict whole-episode mode raises on overflow and retains all source records.
-Concrete method processors live in ``recipes/<name>/processor.py``; the harness evolution implementation
+``teacher_request`` override) rendered with the served model's chat template. Concrete method processors
+live in ``recipes/<name>/processor.py``; the harness evolution implementation
 lives in ``reef/train/cordis_backend/processor.py``. Recipe-specific correlation
 and model clients belong beside the method processor.
 

@@ -25,9 +25,9 @@ from harbor.models.task.config import EnvironmentConfig, NetworkPolicy
 from harbor.models.trial.paths import TrialPaths
 
 
-@pytest.fixture(params=["sdft", "sdpo", "opd"])
-def provider(request):
-    return importlib.import_module(f"recipes.{request.param}.examples.agentcl.harness.detached")
+@pytest.fixture
+def provider():
+    return importlib.import_module("recipes.agentcl.harness.detached")
 
 
 @pytest.fixture
@@ -215,15 +215,38 @@ def test_cancelled_request_subprocess_does_not_execute_or_replay(environment, ru
     assert not marker.exists() and not (job / "started.json").exists()
 
 
-def test_timeout_kills_child_process_group(environment, runner):
-    job = request_job(runner, Path(environment.control_temp_dir.name), "sleep 10 & wait", seconds=0.2)
-    started_at = time.monotonic()
-    invoke_runner(runner, job)
+def test_timeout_kills_child_process_group(environment, runner, monkeypatch):
+    control = Path(environment.control_temp_dir.name)
+    child_pid = control / "child-pid"
+    job = request_job(runner, control, "sleep 10 & echo $! > " + shlex.quote(str(child_pid)) + "; wait", seconds=30)
+    expired = threading.Event()
+    real_time = time.time
+    monkeypatch.setattr(runner.time, "time", lambda: real_time() + (60 if expired.is_set() else 0))
+    errors = []
+
+    def execute():
+        try:
+            runner.run(job / "request.json")
+        except Exception as error:
+            errors.append(error)
+
+    worker = threading.Thread(target=execute)
+    worker.start()
+    try:
+        deadline = time.monotonic() + 5
+        while not child_pid.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert child_pid.exists(), "The child must start before its deadline expires"
+    finally:
+        expired.set()
+        worker.join(timeout=5)
+    assert not worker.is_alive() and not errors
     result = json.loads((job / "result.json").read_text())
     assert result["timed_out"] and result["return_code"] == -signal.SIGKILL
-    assert time.monotonic() - started_at < 1
     with pytest.raises(ProcessLookupError):
         os.kill(result["pid"], 0)
+    descendant = Path("/proc") / child_pid.read_text().strip() / "status"
+    assert not descendant.exists() or "State:\tZ" in descendant.read_text()
 
 
 def test_cancel_marker_drains_child(environment, runner):
@@ -461,11 +484,3 @@ def test_failed_teardown_retains_control_mount_for_retry(environment, monkeypatc
     inherited.side_effect = None
     asyncio.run(environment.stop(True))
     assert not control.exists() and environment.control_temp_dir is None
-
-
-def test_example_sources_identical():
-    root = Path(__file__).resolve().parents[1]
-    for name in ("command_runner.py", "detached.py"):
-        assert (root / "recipes/sdft/examples/agentcl/harness" / name).read_bytes() == (
-            root / "recipes/sdpo/examples/agentcl/harness" / name
-        ).read_bytes()

@@ -1,18 +1,14 @@
-"""Whole-episode OPD assembly, capture and masked loss using CPU fixtures."""
+"""Whole-episode OPD assembly and masked loss using CPU fixtures."""
 
 import copy
-import json
 import sys
 from dataclasses import replace
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.opd import OPDProcessor, OPDRecipe
-from recipes.opd.examples.agentcl import qualification
-from recipes.opd.examples.agentcl.native import CapturedOPDProcessor
 from reef.core import AgentRecord, RequestType
 from reef.core.reports import TeacherContextReport
 from reef.train.types import ProcessorContext, TrainingBatch
@@ -91,53 +87,6 @@ def test_invalid_episode_cannot_fill_opd_batch(monkeypatch, fault):
         processor.ingest(terminal_record(references))
     assert not processor.ready()
     assert not processor.releasable_record_ids()
-
-
-def test_native_capture_is_exact_private_and_repeatable(monkeypatch, tmp_path: Path):
-    monkeypatch.setitem(sys.modules, "transformers", SimpleNamespace())
-    directory = tmp_path / "teacher-records"
-    processor = CapturedOPDProcessor(
-        ProcessorContext(
-            "science",
-            {"batch_size": 1, "accept_multi_turn_policy_samples": True, "native_sample_dir": str(directory)},
-            TeacherContextReport,
-        )
-    )
-    records = episode_inferences()
-    for record in records:
-        processor.ingest(record)
-    references = tuple(record.agent_record_id for record in records)
-    processor.ingest(terminal_record(references))
-    batch = processor.build_batch()
-    path = directory / "episode-report.json"
-    capture = json.loads(path.read_text())
-    episode = {
-        "report_id": "episode-report",
-        "references": list(references),
-        "release_id": "slime-v3",
-        "turns": [
-            {
-                "receipt": record.agent_record_id,
-                "record": {"payload": record.payload, "artifact_ref": {"release_id": "slime-v3"}},
-            }
-            for record in records
-        ],
-    }
-    checked = qualification.check_native_sample(capture, episode)
-    assert checked["assistant_token_count"] == 6
-    assert checked["masked_context_token_count"] == 3
-    assert checked["teacher_student_sequence_identity"] is True
-    assert capture["teacher_token_sha256"] == capture["student_token_sha256"]
-    assert capture["teacher_input"]["prompt_text_decoded_from_captured_tokens"] is None
-    assert path.stat().st_mode & 0o777 == 0o600
-    assert directory.stat().st_mode & 0o777 == 0o700
-    before = path.read_bytes()
-    processor.release_batch(batch.batch_id)
-    assert processor.build_batch().items == batch.items
-    assert path.read_bytes() == before
-    capture["teacher_tokens"][0] = 999
-    with pytest.raises(ValueError, match="exact recorded student"):
-        qualification.check_native_sample(capture, episode)
 
 
 def test_sampled_opd_loss_trains_assistant_positions_and_masks_tool_context(monkeypatch):

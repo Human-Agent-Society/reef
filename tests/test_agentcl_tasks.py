@@ -2,26 +2,107 @@
 
 from __future__ import annotations
 
+import argparse
 import asyncio
 import hashlib
-import importlib
 import json
 import tomllib
 from pathlib import Path
 from typing import cast
+from unittest.mock import Mock
 
 import pytest
 from harbor.models.task.config import TaskConfig
 from reef_eval import Lab
 from reef_eval.types import EpisodeResult, EpisodeSpec
 
-from recipes.opd.examples.agentcl.report import JsonObject
+from recipes.agentcl import report, run, taskexport
+from recipes.agentcl.harbor.tests import verify
+from recipes.agentcl.report import JsonObject
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def exporter(method: str):
-    return importlib.import_module(f"recipes.{method}.examples.agentcl.taskexport")
+def manifest_fixture(root: Path) -> report.JsonObject:
+    training: list[report.JsonValue] = []
+    independent: list[report.JsonValue] = []
+    reference_bytes = b"Verified demonstration"
+    test_code = "assert candidate() == 1\n"
+    for role, count, rows in (("training", 96, training), ("independent", 120, independent)):
+        for position in range(count):
+            if role == "training":
+                category = "raw" if position < 48 else "new"
+                identifier = str(position if position < 48 else (position - 47) % 48)
+            else:
+                category = "new"
+                identifier = f"independent-{position}"
+            reference = f"privileged/{role}/{position:03d}.py"
+            task_relative = f"tasks/{role}/{position:03d}"
+            task_path = root / task_relative
+            files = {
+                "instruction.md": b"Implement candidate().",
+                "environment/Dockerfile": b"FROM python:3.12-slim\n",
+                "tests/task.json": json.dumps({"test_code": test_code}).encode(),
+            }
+            for relative, content in files.items():
+                path = task_path / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+            rows.append(
+                {
+                    "role": role,
+                    "category": category,
+                    "id": identifier,
+                    "pair_id": identifier,
+                    "position": position,
+                    "task_path": task_relative,
+                    "reference_path": reference,
+                    "reference_sha256": hashlib.sha256(reference_bytes).hexdigest(),
+                    "test_sha256": hashlib.sha256(test_code.encode()).hexdigest(),
+                    "files": {relative: hashlib.sha256(content).hexdigest() for relative, content in files.items()},
+                }
+            )
+            path = root / reference
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(reference_bytes)
+    manifest: report.JsonObject = {
+        "schema_version": 1,
+        "dataset": "osunlp/AgentCL",
+        "revision": taskexport.REVISION,
+        "source_files": dict(taskexport.SOURCE_FILES),
+        "overlay_version": "fixture",
+        "answer_contract": "fixture",
+        "corrections_sha256": hashlib.sha256(b"fixture").hexdigest(),
+        "training": training,
+        "independent": independent,
+    }
+    report.write_object(root / "manifest.json", manifest)
+    manifest_checksum = hashlib.sha256((root / "manifest.json").read_bytes()).hexdigest()
+    results = []
+    for value in training + independent:
+        row = cast(report.JsonObject, value)
+        results.append(
+            {
+                **row,
+                "task_files": dict(cast(report.JsonObject, row["files"])),
+                "reference_key": taskexport.reference_key(manifest_checksum, row),
+                "reward": 1,
+                "error": None,
+            }
+        )
+    report.write_object(
+        root / "reference-verification.json",
+        {
+            "schema_version": 2,
+            "revision": taskexport.REVISION,
+            "manifest_sha256": manifest_checksum,
+            "status": "passed",
+            "total": 216,
+            "passed": 216,
+            "results": results,
+        },
+    )
+    return manifest
 
 
 def fixture_streams():
@@ -52,9 +133,8 @@ def fixture_streams():
     return raw + complex_tasks, complex_tasks, independent
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
-def test_export_preserves_order_and_keeps_hidden_assets_out_of_student_image(method, tmp_path, monkeypatch):
-    module = exporter(method)
+def test_export_preserves_order_and_keeps_hidden_assets_out_of_student_image(tmp_path, monkeypatch):
+    module = taskexport
     streams = fixture_streams()
     sources = dict(zip(module.SOURCE_FILES, streams, strict=True))
     monkeypatch.setattr(module, "read_source", lambda filename, _cache: sources[filename])
@@ -96,9 +176,8 @@ def test_export_preserves_order_and_keeps_hidden_assets_out_of_student_image(met
         module.export_tasks(output, tmp_path / "cache")
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
-def test_stream_validation_rejects_reordering_bad_pairs_and_independent_roles(method):
-    module = exporter(method)
+def test_stream_validation_rejects_reordering_bad_pairs_and_independent_roles():
+    module = taskexport
     dependent, conventional, independent = fixture_streams()
     module.validate_streams(dependent, conventional, independent)
     with pytest.raises(ValueError, match="order"):
@@ -112,23 +191,17 @@ def test_stream_validation_rejects_reordering_bad_pairs_and_independent_roles(me
         module.validate_streams(dependent, conventional, independent)
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
-def test_pinned_source_rejects_tampered_cache_without_network(method, tmp_path):
-    module = exporter(method)
+def test_pinned_source_rejects_tampered_cache_without_network(tmp_path):
+    module = taskexport
     filename = next(iter(module.SOURCE_FILES))
     (tmp_path / filename).write_text("[]")
     with pytest.raises(ValueError, match="checksum mismatch"):
         module.read_source(filename, tmp_path)
 
 
-def load_verifier(method: str):
-    return importlib.import_module(f"recipes.{method}.examples.agentcl.harbor.tests.verify")
-
-
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
 @pytest.mark.parametrize("style", ["assertions", "unittest"])
-def test_original_scoring_pass_bad_invalid_and_timeout_fixture_only(method, style, tmp_path):
-    verifier = load_verifier(method)
+def test_original_scoring_pass_bad_invalid_and_timeout_fixture_only(style, tmp_path):
+    verifier = verify
     if style == "assertions":
         tests = "def base(value):\n    return value + 1\nassert combined(1, 2) == 5\n"
     else:
@@ -168,31 +241,13 @@ def test_original_scoring_pass_bad_invalid_and_timeout_fixture_only(method, styl
     assert verifier.grade(task, answer, 2, isolate_user=False)["reward"] == 0
 
 
-def test_method_local_data_harness_and_verifier_assets_are_identical():
-    sdft = ROOT / "recipes/sdft/examples/agentcl"
-    sdpo = ROOT / "recipes/sdpo/examples/agentcl"
-    opd = ROOT / "recipes/opd/examples/agentcl"
-    paths = [Path("taskexport.py")]
-    paths.extend(
-        path.relative_to(sdft)
-        for directory in ("harness", "harbor")
-        for path in (sdft / directory).rglob("*")
-        if path.is_file() and "__pycache__" not in path.parts
-    )
-    for relative in paths:
-        if relative.name == "requirements.txt":
-            assert (
-                sorted((sdft / relative).read_text().splitlines())
-                == sorted((sdpo / relative).read_text().splitlines())
-                == (opd / relative).read_text().splitlines()
-            ), relative
-        else:
-            assert (
-                (sdft / relative).read_bytes() == (sdpo / relative).read_bytes() == (opd / relative).read_bytes()
-            ), relative
+def test_harness_and_verifier_share_the_final_answer_contract():
+    example = ROOT / "recipes/agentcl"
+    assert (example / "harness/answer_contract.py").read_bytes() == (
+        example / "harbor/tests/answer_contract.py"
+    ).read_bytes()
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
 @pytest.mark.parametrize(
     "attack",
     [
@@ -211,8 +266,8 @@ def test_method_local_data_harness_and_verifier_assets_are_identical():
         "def isinstance(*args):\n    return True\n",
     ],
 )
-def test_restricted_final_contract_rejects_known_grader_attacks(method, attack, tmp_path):
-    verifier = load_verifier(method)
+def test_restricted_final_contract_rejects_known_grader_attacks(attack, tmp_path):
+    verifier = verify
     task = tmp_path / "task.json"
     answer = tmp_path / "answer.py"
     task.write_text(json.dumps({"test_code": "assert False\n"}))
@@ -221,9 +276,8 @@ def test_restricted_final_contract_rejects_known_grader_attacks(method, attack, 
     assert result["reward"] == 0 and result["status"] == "invalid"
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
-def test_versioned_definition_order_preserves_assertions_and_candidate_authority(method, tmp_path):
-    verifier = load_verifier(method)
+def test_versioned_definition_order_preserves_assertions_and_candidate_authority(tmp_path):
+    verifier = verify
     tests = "def collision(n):\n    return n ** 2\n\nassert collision(3) + collision(3) == 6\n"
     task = tmp_path / "task.json"
     answer = tmp_path / "answer.py"
@@ -237,9 +291,8 @@ def test_versioned_definition_order_preserves_assertions_and_candidate_authority
     assert verifier.grade(task, answer, 2, isolate_user=False)["reward"] == 0
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
-def test_gold_only_annotation_import_prefix_and_explicit_separator(method):
-    module = exporter(method)
+def test_gold_only_annotation_import_prefix_and_explicit_separator():
+    module = taskexport
     row = {
         "id": "Fixture",
         "category": "new",
@@ -255,10 +308,9 @@ def test_gold_only_annotation_import_prefix_and_explicit_separator(method):
     assert changes[-1]["operation"] == "gold_only_test_import_prefix_and_problem_separator"
 
 
-@pytest.mark.parametrize("method", ["sdft", "sdpo", "opd"])
 @pytest.mark.parametrize("style", ["loop", "test_function"])
-def test_original_nested_and_named_test_checks_are_executed(method, style, tmp_path):
-    verifier = load_verifier(method)
+def test_original_nested_and_named_test_checks_are_executed(style, tmp_path):
+    verifier = verify
     if style == "loop":
         tests = "for value in [1,2]:\n    assert answer(value) == value + 1\n"
     else:
@@ -272,14 +324,12 @@ def test_original_nested_and_named_test_checks_are_executed(method, style, tmp_p
     assert verifier.grade(task, answer, 2, isolate_user=False)["reward"] == 0
 
 
-@pytest.mark.parametrize("method", ["opd", "sdft", "sdpo"])
 @pytest.mark.parametrize(
     "change", ["instruction", "verifier", "image", "missing", "extra", "empty", "outside", "symlink"]
 )
-def test_manifest_rejects_changed_or_incompletely_hashed_task_files(method, change, tmp_path):
-    workflow = importlib.import_module(f"tests.test_{method}_agentcl")
-    manifest = workflow.manifest_fixture(tmp_path)
-    workflow.run.load_manifest(tmp_path)
+def test_manifest_rejects_changed_or_incompletely_hashed_task_files(change, tmp_path):
+    manifest = manifest_fixture(tmp_path)
+    run.load_manifest(tmp_path)
     row = manifest["training"][0]
     task = tmp_path / row["task_path"]
     if change in ("instruction", "verifier", "image"):
@@ -298,25 +348,22 @@ def test_manifest_rejects_changed_or_incompletely_hashed_task_files(method, chan
     else:
         (task / "instruction.md").unlink()
         (task / "instruction.md").symlink_to(tmp_path / row["reference_path"])
-    workflow.report.write_object(tmp_path / "manifest.json", manifest)
+    report.write_object(tmp_path / "manifest.json", manifest)
     with pytest.raises(ValueError, match="exported task"):
-        workflow.run.load_manifest(tmp_path)
+        run.load_manifest(tmp_path)
 
 
-@pytest.mark.parametrize("method", ["opd", "sdft", "sdpo"])
 @pytest.mark.parametrize("change", ["missing", "legacy", "manifest", "test", "files", "key", "task-bytes"])
-def test_reference_prerequisite_blocks_all_methods_before_sampling(method, change, tmp_path):
-    workflow = importlib.import_module(f"tests.test_{method}_agentcl")
-    arguments = workflow.arguments_fixture(tmp_path)
-    manifest = workflow.manifest_fixture(arguments.data_root)
-    path = arguments.data_root / "reference-verification.json"
+def test_reference_prerequisite_blocks_sampling_for_unverified_or_changed_tasks(change, tmp_path):
+    manifest = manifest_fixture(tmp_path)
+    path = tmp_path / "reference-verification.json"
     if change == "missing":
         path.unlink()
     elif change == "task-bytes":
-        task = arguments.data_root / manifest["training"][0]["task_path"]
+        task = tmp_path / manifest["training"][0]["task_path"]
         (task / "instruction.md").write_bytes(b"changed")
     else:
-        qualification = workflow.report.read_object(path)
+        qualification = report.read_object(path)
         if change == "legacy":
             qualification["schema_version"] = 1
         elif change == "manifest":
@@ -327,33 +374,48 @@ def test_reference_prerequisite_blocks_all_methods_before_sampling(method, chang
             qualification["results"][0]["task_files"] = {}
         else:
             qualification["results"][0]["reference_key"] = "wrong"
-        workflow.report.write_object(path, qualification)
-    if method == "opd":
-        api = workflow.FakeApi()
-        backend = workflow.FakeEpisodes(api)
-    else:
-        api = workflow.FakeApi(attempts=arguments.attempts)
-        backend = workflow.FakeEpisodes()
-    campaign = workflow.run.Campaign(arguments, api, backend, manifest)
+        report.write_object(path, qualification)
+    arguments = argparse.Namespace(
+        run_root=tmp_path / "run",
+        data_root=tmp_path,
+        method="sdpo",
+        run_id="fixture",
+        model_path="fixture",
+        teacher_checkpoint="",
+        profile="smoke",
+        steps=2,
+        attempts=2,
+        seed=42,
+        max_turns=8,
+        scenario="fixture",
+        service_url="http://fixture",
+        wandb_project=None,
+        wandb_entity=None,
+    )
+    api = Mock(spec=run.ReefApi)
+    api.commits.return_value = []
+    api.current_release.return_value = {"release_id": "base", "operation": "creation"}
+    backend = Mock(spec=run.EpisodeBackend)
+    campaign = run.Campaign(arguments, api, backend, manifest)
     with pytest.raises((RuntimeError, ValueError), match=r"reference|exported task"):
         asyncio.run(campaign.execute_phase("train"))
-    assert not backend.calls and not api.reports and not api.history
+    backend.run.assert_not_called()
+    api.report.assert_not_called()
+    api.commits.assert_called_once_with([])
 
 
-@pytest.mark.parametrize("method", ["opd", "sdft", "sdpo"])
-def test_reference_results_reject_changed_manifest_even_with_matching_reference(method, tmp_path):
-    workflow = importlib.import_module(f"tests.test_{method}_agentcl")
-    manifest = workflow.manifest_fixture(tmp_path)
+def test_reference_results_reject_changed_manifest_even_with_matching_reference(tmp_path):
+    manifest = manifest_fixture(tmp_path)
     task = manifest["training"][0]
     verifier = tmp_path / task["task_path"] / "tests/task.json"
     test_code = "assert candidate() == 2\n"
     verifier.write_text(json.dumps({"test_code": test_code}))
     task["files"]["tests/task.json"] = hashlib.sha256(verifier.read_bytes()).hexdigest()
     task["test_sha256"] = hashlib.sha256(test_code.encode()).hexdigest()
-    workflow.report.write_object(tmp_path / "manifest.json", manifest)
-    workflow.run.load_manifest(tmp_path)
+    report.write_object(tmp_path / "manifest.json", manifest)
+    run.load_manifest(tmp_path)
     with pytest.raises(RuntimeError, match="fresh qualification"):
-        workflow.run.validate_reference_verification(tmp_path, manifest)
+        run.validate_reference_verification(tmp_path, manifest, "sdpo")
 
 
 class ReferenceFixtureExecutor:
@@ -365,15 +427,13 @@ class ReferenceFixtureExecutor:
         return EpisodeResult(rewards={"reward": 1.0})
 
 
-@pytest.mark.parametrize("method", ["opd", "sdft", "sdpo"])
 @pytest.mark.parametrize("change", ["verifier", "image"])
-def test_reference_cache_is_bound_to_changed_verifier_or_image(method, change, tmp_path, monkeypatch):
+def test_reference_cache_is_bound_to_changed_verifier_or_image(change, tmp_path, monkeypatch):
     import reef_eval
 
-    workflow = importlib.import_module(f"tests.test_{method}_agentcl")
-    module = exporter(method)
+    module = taskexport
     root = tmp_path / "data"
-    manifest = workflow.manifest_fixture(root)
+    manifest = manifest_fixture(root)
     executor = ReferenceFixtureExecutor()
     lab = Lab(tmp_path / "lab", executor=executor)
 
@@ -396,9 +456,9 @@ def test_reference_cache_is_bound_to_changed_verifier_or_image(method, change, t
     path = root / str(task["task_path"]) / relative
     path.write_bytes(content)
     cast(JsonObject, task["files"])[relative] = hashlib.sha256(content).hexdigest()
-    workflow.report.write_object(root / "manifest.json", manifest)
+    report.write_object(root / "manifest.json", manifest)
     second = asyncio.run(module.verify_references(root, tmp_path / "lab"))
     assert second["status"] == "passed" and executor.calls == 432
     assert first["results"][0]["reference_key"] != second["results"][0]["reference_key"]
     assert first["manifest_sha256"] != second["manifest_sha256"]
-    workflow.run.validate_reference_verification(root, manifest)
+    run.validate_reference_verification(root, manifest, "sdpo")
