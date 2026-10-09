@@ -97,7 +97,7 @@ def experience_text(experience: Sequence[PlayRecord]) -> str:
     out_of_reach = [r for r in experience if r.outcome == "out_of_reach"]
     lines = [
         (
-            "WHAT THE AGENT DID LAST TIME (mean episode returns in [-1, 1] over its attempts; a hint is a few "
+            "WHAT THE AGENT DID LAST TIME (mean episode returns in [0, 1] over its attempts; a hint is a few "
             "sentences of strategy the agent was given on a second set of attempts):"
         )
     ]

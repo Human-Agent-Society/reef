@@ -83,6 +83,7 @@ if script.get("sleep_s"):
 trial = jobs / "job" / "trial"
 trial.mkdir(parents=True)
 reward = script["rewards"].get(agent)
+reward_map = script.get("reward_maps", {{}}).get(agent)
 exception = script.get("exceptions", {{}}).get(agent)
 failure = script.get("agent_failures", {{}}).get(agent)
 if failure:
@@ -92,7 +93,7 @@ if failure:
 (jobs / "job" / "result.json").write_text(json.dumps({{"stats": {{"n_trials": 1}}}}))
 result = {{
     "task_name": "t",
-    "verifier_result": {{"rewards": {{"reward": reward}}}} if reward is not None else None,
+    "verifier_result": {{"rewards": reward_map or {{"reward": reward}}}} if reward_map or reward is not None else None,
     "exception_info": {{"exception_type": "AgentTimeoutError", "exception_message": exception}} if exception else None,
 }}
 (trial / "result.json").write_text(json.dumps(result))
@@ -335,6 +336,28 @@ def test_a_task_the_oracle_solves_and_the_nop_agent_does_not_is_solvable(tmp_pat
 def test_a_task_that_is_unsolvable_or_free_is_refused_with_the_reason(tmp_path: Path, rewards, reason: str) -> None:
     root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
     result = oracle_check(root, harbor=fake_harbor(tmp_path, rewards))
+    assert not result.is_solvable and result.reason == reason
+
+
+@pytest.mark.parametrize(
+    ("oracle_rewards", "reason"),
+    [
+        ({"correctness": 1.0, "structure": 0.0, "reward": 0.0}, "the reference solution scored 0.0, not 1"),
+        (
+            {"correctness": 1.0, "structure": 1.0},
+            (
+                "the reference solution scored None, not 1; the trial ended with a verifier that wrote correctness,"
+                " structure and no reward entry"
+            ),
+        ),
+    ],
+)
+def test_a_verifier_with_several_rewards_is_read_by_its_primary_reward(
+    tmp_path: Path, oracle_rewards: dict[str, float], reason: str
+) -> None:
+    root = write_harbor_task(harbor_task(generated()), tmp_path / "tasks")
+    harbor = fake_harbor(tmp_path, {"oracle": None, "nop": 0.0}, reward_maps={"oracle": oracle_rewards})
+    result = oracle_check(root, harbor=harbor)
     assert not result.is_solvable and result.reason == reason
 
 
