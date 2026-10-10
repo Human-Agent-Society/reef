@@ -77,7 +77,7 @@ implements one assembly hook:
    def make_training_batch(self, batch_number, request):
        if request is not None and self.training_mode == "manual":
            # Manual runs the instruction alone; harness needs no samples.
-           self._pending_reports = ()
+           self.experience_buffer.reserve(0)
            return TrainingBatch(request.id, ())
        # Hybrid hands the instruction the units an automatic batch would take.
        return self._make_pending(batch_number)

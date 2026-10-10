@@ -705,9 +705,26 @@ a complete step, then trains several comparison groups within it.
 ``make_batch`` receives items in group/arrival order. Acknowledgement consumes
 all selected reports, even when the recipe omits constant-reward groups from
 its output. Reports arriving after reservation remain for a later batch.
-``output_schema`` declares the batch type, ``exclusive_sources`` controls source
-release for terminal group/duplicate reports, and ``ordered_groups`` orders ready
-groups by their keys.
+``output_schema`` declares the batch type, and ``exclusive_sources`` controls source
+release for terminal group/duplicate reports.
+
+``selection_policy()`` returns the policy that sets the batch order of singleton
+reports and ready groups. The default policy is ``ArrivalOrder``. If
+``ordered_groups`` is true, the default is ``GroupKeyOrder``, which orders ready
+groups by their keys. To use a different order, override ``selection_policy()``
+and return a ``reef.train.experience.SelectionPolicy`` subclass. The constructor
+calls this method one time. The computed-feedback engine has the same hook for
+its candidates.
+
+The computed-feedback engine also has ``eligibility_checks()``. It returns the
+``reef.train.experience.EligibilityCheck`` objects that drop candidates while no
+batch is out. The default is ``StalenessCheck(max_staleness)``. It drops
+candidates that are more than ``max_staleness`` versions behind the newest
+candidate, by record arrival. The recipe's ``max_staleness`` reaches the
+processor as ``ProcessorContext.max_staleness``. With the default value 0, only
+candidates of the newest version stay. Dropped candidates are released and
+never batched. Runtime admission still checks each batch against the serving
+version.
 
 There is no report-level ``judge``, ``WAIT``, ``NEVER``, or eligibility flag.
 Reference validation runs at admission; incomplete groups wait for more valid

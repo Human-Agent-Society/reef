@@ -238,16 +238,17 @@ def _staleness_admission(
             if drop_reason is not None:
                 break
             producing = RuntimeLoadId.parse(value)
+            lag = producing.lag_behind(serving)
             if str(producing) != value:
                 drop_reason = "malformed_producing_runtime_load_id"
-            elif producing.incarnation != serving.incarnation:
+                break
+            if lag is None:
                 drop_reason = "cross_incarnation"
-            elif previous_sequence is not None and producing.sequence <= previous_sequence:
+                break
+            if previous_sequence is not None and producing.sequence <= previous_sequence:
                 drop_reason = "non_monotonic_producing_runtime_load_ids"
-            if drop_reason is not None:
                 break
             previous_sequence = producing.sequence
-            lag = serving.sequence - producing.sequence
             lags.append(lag)
             group_lags.append(lag)
             if lag < 0:
