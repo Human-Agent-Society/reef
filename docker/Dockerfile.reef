@@ -69,12 +69,13 @@ RUN rm -rf /opt/sglang && \
 # by PR #4401), which silently corrupts attention for some prompts: on RTX PRO
 # 6000 (sm_120), SGLang's flashinfer backend scored Qwen2.5-1.5B tokens up to
 # 11 nats away from HF and Megatron, so rollout log-probs no longer matched the
-# trained policy (0.007 mean train/rollout log-prob gap against 1e-6 with the
-# fix) and every correction that reads them (SAO's ratio, TIS, score
-# centering) trained on the error. The pins below are the lowest versions
-# 0.7.0 accepts; apache-tvm-ffi stays at 0.1.11 because sgl-deep-gemm pins it
-# exactly. The cubin package ends at 0.6.13, so kernels come from the per-arch
-# JIT caches instead. --no-deps keeps the base's torch and CUDA stack.
+# trained policy and every correction that reads them (SAO's ratio, TIS, score
+# centering) trained on the error. In one SAO run, the mean train/rollout
+# log-prob gap was 0.007 before the fix and 1e-6 after it. The pins below are
+# the lowest versions 0.7.0 accepts; apache-tvm-ffi stays at 0.1.11 because
+# sgl-deep-gemm pins it exactly. The cubin package ends at 0.6.13, so kernels
+# come from the per-arch JIT caches instead. --no-deps keeps the base's torch
+# and CUDA stack.
 RUN pip uninstall -y flashinfer-cubin flashinfer-jit-cache flashinfer-python && \
     pip install --no-cache-dir --no-deps "flashinfer-python==0.7.0" \
         "apache-tvm-ffi==0.1.11" "cuda-tile>=1.4.0,<2" "nvidia-cudnn-frontend>=1.29.0,<2" \
