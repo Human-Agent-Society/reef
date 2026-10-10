@@ -215,6 +215,7 @@ def _load_reef_train_actor_adapter(monkeypatch: pytest.MonkeyPatch):
     reloadable = types.ModuleType("slime.utils.reloadable_process_group")
     reloadable.destroy_process_groups = lambda: None  # type: ignore[attr-defined]
     reloadable.reload_process_groups = lambda: None  # type: ignore[attr-defined]
+    reloadable.monkey_patch_torch_dist = lambda: None  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "slime.utils.reloadable_process_group", reloadable)
     timer = types.ModuleType("slime.utils.timer")
     timer.timer = _stub_timer_decorator  # type: ignore[attr-defined]

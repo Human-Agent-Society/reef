@@ -200,6 +200,10 @@ on the engine's HTTP port and answers the readiness check. Reef makes at most
 three startup attempts per engine. Other startup failures, and any failure of
 an encoder engine, stop the launch.
 
+Encoder engines keep the weights they started with. Weight updates go only to
+the other engines of the model. When a model with an encoder group trains,
+keep its vision encoder frozen.
+
 Migration from the previous version 2 training configuration:
 
 .. list-table::

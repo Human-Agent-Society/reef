@@ -69,12 +69,13 @@ RUN rm -rf /opt/sglang && \
 # by PR #4401), which silently corrupts attention for some prompts: on RTX PRO
 # 6000 (sm_120), SGLang's flashinfer backend scored Qwen2.5-1.5B tokens up to
 # 11 nats away from HF and Megatron, so rollout log-probs no longer matched the
-# trained policy (0.007 mean train/rollout log-prob gap against 1e-6 with the
-# fix) and every correction that reads them (SAO's ratio, TIS, score
-# centering) trained on the error. The pins below are the lowest versions
-# 0.7.0 accepts; apache-tvm-ffi stays at 0.1.11 because sgl-deep-gemm pins it
-# exactly. The cubin package ends at 0.6.13, so kernels come from the per-arch
-# JIT caches instead. --no-deps keeps the base's torch and CUDA stack.
+# trained policy and every correction that reads them (SAO's ratio, TIS, score
+# centering) trained on the error. In one SAO run, the mean train/rollout
+# log-prob gap was 0.007 before the fix and 1e-6 after it. The pins below are
+# the lowest versions 0.7.0 accepts; apache-tvm-ffi stays at 0.1.11 because
+# sgl-deep-gemm pins it exactly. The cubin package ends at 0.6.13, so kernels
+# come from the per-arch JIT caches instead. --no-deps keeps the base's torch
+# and CUDA stack.
 RUN pip uninstall -y flashinfer-cubin flashinfer-jit-cache flashinfer-python && \
     pip install --no-cache-dir --no-deps "flashinfer-python==0.7.0" \
         "apache-tvm-ffi==0.1.11" "cuda-tile>=1.4.0,<2" "nvidia-cudnn-frontend>=1.29.0,<2" \
@@ -90,13 +91,13 @@ RUN pip uninstall -y flashinfer-cubin flashinfer-jit-cache flashinfer-python && 
 
 COPY . .
 
-# Replace the image's Slime distribution with Reef's exact pin. Keep
-# the base image's CUDA-matched dependency set by resolving neither package's
-# dependencies here.
+# Replace the image's Slime distribution with Reef's exact pin. Install Slime
+# with --no-deps to keep the base image's CUDA-matched dependency set. Install
+# Reef with its core dependencies. pyproject.toml keeps GPU packages out of
+# that list.
 RUN pip uninstall -y slime && \
     pip install --no-cache-dir --no-deps --group runtime && \
-    pip install -e . --no-deps && \
-    pip install reef-client --no-deps
+    pip install --no-cache-dir -e .
 
 # An earlier layer's dependency resolution can leave numpy 2.x debris behind
 # after pip downgrades (dist-info says 1.26.4 while 2.x submodules such as
@@ -137,6 +138,10 @@ ENV PYTHONPATH=/opt/sglang/python:/root/Megatron-LM${PYTHONPATH:+:${PYTHONPATH}}
 # scipy) is exactly where a broken compiled stack surfaces at runtime; walking
 # it here turns that class of drift into a build failure.
 RUN python -c "from sglang.srt.server_args import ServerArgs; import transformers, scipy.linalg"
+
+# `reef serve --help` loads the CLI, the deployment config and the record
+# storage modules without a GPU. A missing core dependency fails the build here.
+RUN reef serve --help > /dev/null
 
 # Megatron-Bridge supplies the PEFT LoRA implementation reef's LoRA path
 # applies (reef_adapters/megatron/lora.py) and the HF export that publishes
