@@ -85,6 +85,29 @@ files:
         # Covers a run where the person passes their own --settings, which
         # replaces the one in client_args.
         disableDeepLinkRegistration: "disable"
+      # Keys the merged config must keep at the defaults' value, and settings
+      # keys no tree may set at all: the shared render refuses a composition
+      # that moves them, before any quirks step runs. The locked settings
+      # choose the model, a credential helper or a login method, which Reef's
+      # model binding owns.
+      locked:
+        - includeCoAuthoredBy
+        - disableDeepLinkRegistration
+        - advisorModel
+        - apiKeyHelper
+        - availableModels
+        - awsAuthRefresh
+        - awsCredentialExport
+        - enforceAvailableModels
+        - fallbackModel
+        - forceLoginGatewayUrl
+        - forceLoginMethod
+        - gcpAuthRefresh
+        - model
+        - modelOverrides
+        - modelPicker
+        - proxyAuthHelper
+        - switchModelsOnFlag
   rules: "claude/CLAUDE.md"
   agent_command: "claude/commands/{name}.md"
   skill: "claude/skills/{name}/SKILL.md"

@@ -7,22 +7,24 @@ npm-installs ``@opencode-ai/plugin`` with a ``node_modules`` tree and
 lockfiles. The whitelist below names exactly those artifacts so the episode
 inverse tolerates them and nothing else.
 
-``process_config`` enforces the traps a mutated config node could reopen: a
-benchmark episode must never autoupdate the binary mid-campaign or upload a
-share link, so a composition that overrides either is rejected at render -
-the same gate that rejects an invalid node.
+``process_config`` checks what the declaration cannot state: an agent must
+keep its own name and carry the fields opencode's schema types, a command
+names an agent the run has, and a tree with no ``default_agent`` must keep
+an agent that can start one. The keys a composition must keep are declared
+in the descriptor (``autoupdate``, ``share``, ``enabled_providers``, and the
+model choices the binding owns) and the shared render refuses them before
+this step runs.
 
 It also keeps the model Reef's. The descriptor sets ``enabled_providers`` to
 ``["reef"]``, so opencode offers no provider but the binding's, its own zen
-provider included, and a composition must keep exactly that list. The model
-binding Reef appends at render is the only writer of ``provider`` and
-``model``: it renders after the tree, wins every key it writes, and always
-writes a non-empty ``apiKey``, which a tree cannot hold because admission
-refuses an inline credential. So the two keys pass only in the binding's
-shape with that key, which a tree rendered alone, as admission renders it,
-never has. A provider, a model choice (``small_model``, an agent's or a
-command's ``model``) or ``disabled_providers`` anywhere else is a composition
-pointing opencode at another endpoint.
+provider included. The model binding Reef appends at render is the only
+writer of ``provider`` and ``model``: it renders after the tree, wins every
+key it writes, and always writes a non-empty ``apiKey``, which a tree cannot
+hold because admission refuses an inline credential. So the two keys pass
+only in the binding's shape with that key, which a tree rendered alone, as
+admission renders it, never has; the descriptor locks the model choices
+(``small_model``, ``disabled_providers``, an agent's, a mode's or a
+command's ``model``) beside them.
 
 opencode reads the frontmatter of a command or a skill with gray-matter,
 which strips a byte order mark, takes the text after the opening ``---`` as
@@ -72,8 +74,6 @@ SKILL_DIR = "opencode/skill/"
 BINDING_PROVIDER = "reef"
 BINDING_PROVIDER_KEYS = frozenset({"models", "npm", "options"})
 BINDING_OPTION_KEYS = frozenset({"apiKey", "baseURL"})
-#: Top-level keys the binding never writes that choose which model or which providers a run uses.
-MODEL_CHOICE_KEYS = ("small_model", "disabled_providers")
 #: The agents opencode builds in, with their modes. Its title, summary and compaction agents are hidden: they hold
 #: the prompts of opencode's own calls, and a command may name one, but none starts a run.
 BUILTIN_AGENT_MODES = {
@@ -376,15 +376,6 @@ def configured_agents(config: Mapping[str, object]) -> tuple[dict[str, str], set
 class OpencodeAdapterRenderer(AdapterRenderer):
     @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        if config.get("autoupdate") is not False:
-            raise RenderError("opencode composition must keep autoupdate false for benchmark episodes")
-        if config.get("share") != "disabled":
-            raise RenderError("opencode composition must keep share disabled for benchmark episodes")
-        if config.get("enabled_providers") != [BINDING_PROVIDER]:
-            raise RenderError(
-                f"opencode composition must keep enabled_providers [{BINDING_PROVIDER!r}]: "
-                "a run uses only the provider Reef's model binding writes"
-            )
         agents, hidden = configured_agents(config)
         if "default_agent" in config:
             default_agent = config["default_agent"]
@@ -433,22 +424,6 @@ class OpencodeAdapterRenderer(AdapterRenderer):
     ) -> None:
         config = configs[_CONFIG_PATH]
         check_binding_shape(config)
-        for key in MODEL_CHOICE_KEYS:
-            if key in config:
-                raise RenderError(f"opencode composition must not set {key}: Reef's model binding chooses the model")
-        for section in ("agent", "mode"):
-            for name, agent in config.get(section, {}).items():
-                if "model" in agent:
-                    raise RenderError(
-                        f"opencode {section} {name!r} must not choose a model: Reef's model binding chooses it"
-                    )
-        config_commands = config.get("command")
-        for name, command in config_commands.items() if isinstance(config_commands, dict) else ():
-            if isinstance(command, dict) and "model" in command:
-                raise RenderError(
-                    f"opencode command {name!r} in opencode.json must not choose a model: Reef's model binding "
-                    "chooses it"
-                )
         for path, text in commands.items():
             where = f"command {path[len(COMMAND_DIR) : -len('.md')]!r}"
             if "model" in read_frontmatter(where, text):

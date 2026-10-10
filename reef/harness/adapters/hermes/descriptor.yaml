@@ -61,6 +61,25 @@ files:
           write_json_snapshots: true
         skills:
           creation_nudge_interval: 0
+      # Keys the merged config must keep at the defaults' value, and keys no tree may set at all: the shared
+      # render refuses a composition that moves them, before any quirks step runs. The first six keep an episode
+      # hermetic and single request with its snapshot readable; the rest name another provider, endpoint or
+      # fallback chain, which Reef's model binding chooses.
+      locked:
+        - security.tirith_enabled
+        - auxiliary.title_generation.enabled
+        - memory.nudge_interval
+        - skills.creation_nudge_interval
+        - curator.enabled
+        - sessions.write_json_snapshots
+        - api_base
+        - base_url
+        - model_aliases
+        - provider
+        - providers
+        - custom_providers
+        - fallback_model
+        - fallback_providers
     # The env file hermes loads from its home; the model binding puts the
     # provider key here too, since for an OpenRouter host hermes reads the
     # key from the environment and not from config.yaml.

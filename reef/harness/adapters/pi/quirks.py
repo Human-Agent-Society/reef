@@ -18,8 +18,10 @@ every key it writes. The provider's ``apiKey`` is a credential, which a tree
 cannot hold because admission refuses an inline credential, so those keys
 pass only beside it, and ``reef`` only with the keys the binding writes.
 Another provider (its own ``baseUrl``, or pi's built in one with a new
-endpoint), ``enabledModels`` and ``httpProxy``, which sends every call
-through another host, are the tree choosing where calls go, and are refused.
+endpoint) is the tree choosing where calls go, and is refused;
+``enabledModels`` and ``httpProxy``, which send every call through another
+host or another set of models, are declared locks in the descriptor and
+refused by the shared render.
 
 pi 0.84.2 rewrites a few old settings keys when it loads ``settings.json`` and
 writes the new form back on its next save: ``queueMode`` becomes
@@ -51,8 +53,6 @@ MODELS_PATH = "pi-agent/models.json"
 #: The provider Reef's binding writes and its keys.
 BINDING_PROVIDER = "reef"
 BINDING_PROVIDER_KEYS = frozenset({"api", "apiKey", "baseUrl", "models"})
-#: settings.json keys that choose the models a run may use, or send every call through a proxy.
-MODEL_ROUTE_SETTINGS = ("enabledModels", "httpProxy")
 
 
 def _with_frontmatter(path: str, text: str) -> str:
@@ -64,7 +64,7 @@ def _with_frontmatter(path: str, text: str) -> str:
     return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
-def check_model_route(settings: dict[str, Any], models: dict[str, Any]) -> None:
+def check_model_route(models: dict[str, Any]) -> None:
     """Refuse a provider, an endpoint, a credential or a model the binding did not write."""
     refusal = "Reef's model binding chooses the provider, the endpoint, the credential and the model"
     providers = models.get("providers")
@@ -73,9 +73,6 @@ def check_model_route(settings: dict[str, Any], models: dict[str, Any]) -> None:
     provider = (providers or {}).get(BINDING_PROVIDER)
     if provider is not None and (not isinstance(provider, dict) or set(provider) != BINDING_PROVIDER_KEYS):
         raise RenderError(f"pi composition must not configure provider {BINDING_PROVIDER!r}: {refusal}")
-    for key in MODEL_ROUTE_SETTINGS:
-        if key in settings:
-            raise RenderError(f"pi composition must not set {key}: {refusal}")
 
 
 def migrated_settings(settings: dict[str, object]) -> dict[str, object]:
@@ -111,4 +108,4 @@ class PiAdapterRenderer(AdapterRenderer):
     def check_model_route(
         configs: Mapping[str, Mapping[str, Any]], skills: Mapping[str, str], commands: Mapping[str, str]
     ) -> None:
-        check_model_route(dict(configs[SETTINGS_PATH]), dict(configs[MODELS_PATH]))
+        check_model_route(dict(configs[MODELS_PATH]))

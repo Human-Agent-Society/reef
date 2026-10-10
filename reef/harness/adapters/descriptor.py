@@ -4,7 +4,9 @@ An ``AdapterDescriptor`` is loaded from a ``descriptor.yaml`` and states
 everything the shared engines need to drive one harness binary:
 
 - ``config_targets``: named JSON config files with their enforced defaults
-  (a ``primary`` target is required; ``config`` nodes merge into targets).
+  (a ``primary`` target is required; ``config`` nodes merge into targets) and
+  their locked keys (paths the merged config must keep at its defaults value,
+  or must not set when the defaults do not name it).
 - ``node_paths``: root-relative render paths for the other node kinds;
   named kinds carry a ``{name}`` placeholder. A kind the adapter leaves out
   is refused at admission and at render, never dropped.
@@ -42,8 +44,10 @@ everything the shared engines need to drive one harness binary:
 
 A descriptor may name a ``quirks`` module: its ``cleanup_whitelist`` extends
 the declared one and the :class:`AdapterRenderer` subclass it defines adds the
-adapter's own render steps (the seam that enforces adapter traps such as
-opencode's ``autoupdate: false``). External adapters register through the
+adapter's own render steps (the seam that enforces what the declaration cannot
+state, such as opencode's agent and command shapes; the keys a tree must keep
+are declared under ``files.config.<target>.locked`` and checked by the shared
+render). External adapters register through the
 ``reef.harness_adapters`` entry point group, each entry resolving to an
 ``AdapterDescriptor`` or a zero-argument callable returning one.
 """
@@ -207,10 +211,14 @@ class DescriptorError(ReefError):
 
 @dataclass(frozen=True)
 class ConfigTarget:
-    """One JSON config file: its render path and the defaults merged first."""
+    """One JSON config file: its render path, the defaults merged first, and the keys the tree must keep."""
 
     path: str
     defaults: Mapping[str, Any] = field(default_factory=dict)
+    #: Dotted key paths the merged config must keep at their ``defaults`` value; a path the defaults do not set
+    #: must not appear in the merged config at all. A ``*`` segment matches every key of an object and every item
+    #: of a list. The shared render checks them before any adapter step runs, so no adapter can skip the check.
+    locked: tuple[str, ...] = ()
 
 
 #: The ``{api_key}`` an installed binding carries when the client has no Reef token (a Reef without auth): a
@@ -439,6 +447,8 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
     client_tools = _parse_client_tools(data.get("client_tools"), where)
     client_state = _parse_client_state(data.get("client_state"), where)
     renderer, quirk_whitelist, validate_execution = _load_quirks(data.get("quirks"), where)
+    model_binding = _parse_model_binding(data.get("model_binding"), config_targets, where)
+    _check_locked_binding_overlap(config_targets, model_binding, where)
     descriptor = AdapterDescriptor(
         name=name,
         binary=_require_str(data, "binary", where),
@@ -456,7 +466,7 @@ def load_descriptor(path: Path) -> AdapterDescriptor:
         is_prompt_task_directory=is_prompt_task_directory,
         host_env=dict(host_env),
         is_root_bind_mounted=is_root_bind_mounted,
-        model_binding=_parse_model_binding(data.get("model_binding"), config_targets, where),
+        model_binding=model_binding,
         tree_path=_parse_tree_path(files, where),
         validate_execution=validate_execution,
         client_env=dict(client_env),
@@ -493,8 +503,61 @@ def _parse_config_targets(raw: Any, where: str) -> dict[str, ConfigTarget]:
         targets[str(target_name)] = ConfigTarget(
             path=_require_str(target, "path", f"{where} config target {target_name!r}"),
             defaults=dict(defaults),
+            locked=_locked_paths(target.get("locked", []), f"{where} config target {target_name!r} 'locked'"),
         )
     return targets
+
+
+def _locked_paths(value: Any, where: str) -> tuple[str, ...]:
+    """``locked`` key paths: dot separated key names, a ``*`` segment matching any object key or list item."""
+    paths = _str_list(value, where)
+    for path in paths:
+        if any(segment == "" for segment in path.split(".")):
+            raise DescriptorError(f"{where} entries must be dot separated key names, '*' naming a whole segment")
+    return paths
+
+
+def _binding_key_paths(data: Mapping[str, Any], segments: tuple[str, ...]) -> list[tuple[str, ...]]:
+    """Each key path a binding template writes, as segments; a template segment in braces matches any key."""
+    paths: list[tuple[str, ...]] = []
+    for key, value in data.items():
+        segment = str(key)
+        if isinstance(value, Mapping) and value:
+            paths.extend(_binding_key_paths(value, (*segments, segment)))
+        else:
+            paths.append((*segments, segment))
+    return paths
+
+
+def _paths_overlap(left: tuple[str, ...], right: tuple[str, ...]) -> bool:
+    """Whether two key paths can name one key: every segment pair matches, so one path holds the other.
+
+    A ``*`` in a locked path matches any binding segment, and a binding segment in braces (a ``{model}``
+    placeholder) matches any locked segment.
+    """
+    return all(locked == "*" or "{" in bound or locked == bound for locked, bound in zip(left, right, strict=False))
+
+
+def _check_locked_binding_overlap(
+    config_targets: Mapping[str, ConfigTarget],
+    model_binding: Mapping[str, tuple[Mapping[str, Any], ...]],
+    where: str,
+) -> None:
+    """A locked path must not overlap a key the model binding writes: the shared binding check owns those keys.
+
+    A lock beside the binding's keys could only refuse the binding's own render, or, one rename later, silently
+    stop the binding from writing what the adapter needs.
+    """
+    for api, templates in model_binding.items():
+        for node in templates:
+            target_name = str(node["target"])
+            for bound in _binding_key_paths(node["data"], ()):
+                for locked in config_targets[target_name].locked:
+                    if _paths_overlap(tuple(locked.split(".")), bound):
+                        raise DescriptorError(
+                            f"{where} config target {target_name!r} locks {locked!r}, which the {api} model "
+                            f"binding writes ({'.'.join(bound)})"
+                        )
 
 
 def _parse_model_binding(

@@ -68,6 +68,15 @@ files:
           disabled: true
         session-telemetry-otel:
           disabled: true
+      # Keys the merged config must keep at the defaults' value: the session log
+      # stays where the bundle put it and uncompressed (the reader cannot parse
+      # zstd), and the LLM title call (one extra model request per episode) and
+      # the telemetry stay off. The shared render refuses a composition that
+      # moves them, in either profile, before any quirks step runs.
+      locked:
+        - session-persistence-jsonl.config.compression
+        - session-title-llm.disabled
+        - session-telemetry-otel.disabled
     # The lowest trust layer of dsh's launch environment; the model binding
     # puts the key of its apiKeyEnv route here.
     env:
@@ -88,6 +97,10 @@ files:
           disabled: true
         session-telemetry-otel:
           disabled: true
+      locked:
+        - session-persistence-jsonl.config.compression
+        - session-title-llm.disabled
+        - session-telemetry-otel.disabled
     # The web profile's manifest. dsh writes patchReload live into a new web
     # profile, and with it the pinned `dsh web` exits at start ("user
     # patch-layer watching requires the Cordis HMR service"); startup reads
@@ -103,6 +116,8 @@ files:
           profile:
             bundles: ["@deepseek-ai/dsh-base", "@deepseek-ai/dsh-web-app"]
             patchReload: startup
+      locked:
+        - dsh.profile.patchReload
   rules: "dsh/AGENTS.md"
   agent_command: "dsh-agents/skills/{name}/SKILL.md"
   skill: "dsh/skills/{name}/SKILL.md"
