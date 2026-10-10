@@ -236,6 +236,7 @@ def test_sdft_recipe_reads_reef_side_config_and_hands_it_to_the_processor() -> N
     assert recipe.processor_config() == {
         "batch_size": 4,
         "tokenizer_path": TOKENIZER_PATH,
+        "accept_multi_turn_policy_samples": False,
         "max_teacher_tokens": 24000,
         "context_template": "Example: {context}",
     }
@@ -422,3 +423,40 @@ def test_sdft_backend_validation_pins_the_loss_type_and_one_step_per_rollout() -
         family.validate_backend_args(_args(use_rollout_logprobs=False))
     with pytest.raises(RuntimeError, match="num-steps-per-rollout"):
         family.validate_backend_args(_args(num_steps_per_rollout=2))
+
+
+@pytest.mark.unit
+def test_sdft_episode_uses_privileged_initial_request_and_unchanged_wire(tokenizer: CountingTokenizer) -> None:
+    from .test_distill_processor import episode_inferences
+
+    target = _processor(accept_multi_turn_policy_samples=True, context_template="Demonstration: {context}")
+    records = episode_inferences()
+    for record in records:
+        target.ingest(record)
+    target.ingest(_report("episode", tuple(record.agent_record_id for record in records), "verified solution"))
+    batch = target.build_batch()
+    (sample,) = batch.items
+    assert len(tokenizer.calls[0][0]) == 1
+    assert tokenizer.calls[0][0][-1]["content"].endswith("Demonstration: verified solution")
+    assert "Observation" not in tokenizer.calls[0][0][-1]["content"]
+    prepared = prepare_slime_step(batch, "sdft", {}, StepScheduling(unit="sample"))
+    payload = prepared.payload
+    (row,) = payload["samples"]
+    assert len(row) == 7 and row[0] == "episode"
+    assert row[2] == [1, 1, 1, 0, 0, 1, 1, 0, 1]
+    rollout = to_slime_rollout_data({key: value for key, value in payload.items() if key != "source_rows"})
+    assert rollout["response_lengths"] == [9]
+    assert rollout["teacher_tokens"][0][-9:] == rollout["tokens"][0][-9:]
+    assert sum(rollout["loss_masks"][0]) == 6
+    assert sample.training["tokens"] == records[-1].payload["response"]["training"]["tokens"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("enabled", [False, True])
+def test_sdft_recipe_exposes_existing_episode_opt_in(enabled: bool) -> None:
+    recipe = SDFTRecipe.from_environment(
+        {},
+        config={"data": {"tokenizer_path": TOKENIZER_PATH, "accept_multi_turn_policy_samples": enabled}},
+        **runtime_bindings(StubTrainingRuntime()),
+    )
+    assert recipe.processor_config()["accept_multi_turn_policy_samples"] is enabled

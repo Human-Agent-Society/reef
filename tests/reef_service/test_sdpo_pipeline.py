@@ -268,3 +268,115 @@ def test_sdpo_settings_roundtrip_and_training_requirements() -> None:
         family.validate_specific_args(args, "test")
     assert SdpoSettings().teacher_update_rate == 0.05
     assert family.rollout_data_keys == ("teacher_tokens", "distill_sample_weights")
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("remove_thinking", [False, True])
+def test_sdpo_episode_demonstrates_full_sibling_and_preserves_every_suffix_position(
+    tokenizer: SDPOTokenizer, remove_thinking: bool
+) -> None:
+    from .test_distill_processor import episode_inferences
+
+    target = processor(accept_multi_turn_policy_samples=True, remove_thinking_from_demonstration=remove_thinking)
+    all_references = []
+    for rollout in (1, 0):
+        records = episode_inferences(f"sibling-{rollout}")
+        references = tuple(record.agent_record_id for record in records)
+        all_references.extend(references)
+        for record in records:
+            target.ingest(record)
+        report_id = f"report-{rollout}"
+        all_references.append(report_id)
+        target.ingest(
+            AgentRecord.create(
+                scenario="science",
+                request_type=RequestType.REPORT,
+                agent_record_id=report_id,
+                payload=SDPOReport(step=0, group=0, rollout=rollout, score=float(rollout == 0)).to_dict(
+                    references=references
+                ),
+                references=references,
+            )
+        )
+        if rollout == 1:
+            assert not target.ready()
+    batch = target.build_batch()
+    assert len(batch.items) == 2
+    assert [sample.training["distill_sample_weight"] for sample in batch.items] == [0.0, 1.0]
+    demonstration_prompt = tokenizer.calls[1][0][-1]["content"]
+    assert "Action sibling-0-0" in demonstration_prompt
+    assert "Action sibling-0-1" in demonstration_prompt
+    assert "Action sibling-0-2" in demonstration_prompt
+    assert "Observation sibling-0-0" in demonstration_prompt
+    assert "Observation sibling-0-1" in demonstration_prompt
+    assert "python" in demonstration_prompt and "1+1" in demonstration_prompt
+    assert ("private" in demonstration_prompt) is (not remove_thinking)
+    assert "sibling-1" not in demonstration_prompt
+    for sample in batch.items:
+        assert sample.training["turn_count"] == 3
+        assert sample.training["teacher_tokens"][-9:] == sample.training["tokens"][-9:]
+        assert sample.training["loss_mask"] == [1, 1, 1, 0, 0, 1, 1, 0, 1]
+    assert target.build_batch() is batch
+    assert target.acknowledge(batch.batch_id) == frozenset(all_references)
+    assert not target.ready()
+
+
+@pytest.mark.unit
+def test_sdpo_episode_rejects_prompt_truncation(tokenizer: SDPOTokenizer) -> None:
+    target = processor(accept_multi_turn_policy_samples=True, max_teacher_prompt_tokens=2)
+    ingest(target, 0, score=1.0)
+    ingest(target, 1)
+    with pytest.raises(ValueError, match="truncation is not allowed"):
+        target.build_batch()
+    assert target.releasable_record_ids() == frozenset()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("enabled", [False, True])
+def test_sdpo_recipe_exposes_existing_episode_opt_in(enabled: bool) -> None:
+    recipe = SDPORecipe.from_environment(
+        {},
+        config={"data": {"tokenizer_path": "/models/test", "accept_multi_turn_policy_samples": enabled}},
+        **runtime_bindings(StubTrainingRuntime()),
+    )
+    assert recipe.processor_config()["accept_multi_turn_policy_samples"] is enabled
+
+
+@pytest.mark.unit
+def test_sdpo_opt_in_keeps_single_turn_results_identical(tokenizer: SDPOTokenizer) -> None:
+    batches = []
+    calls = []
+    for enabled in (False, True):
+        target = processor(accept_multi_turn_policy_samples=enabled)
+        ingest(target, 0, score=1.0)
+        ingest(target, 1)
+        batches.append(target.build_batch())
+        calls.append(tokenizer.calls[-2:])
+    assert calls[0] == calls[1]
+    assert [sample.training for sample in batches[0].items] == [sample.training for sample in batches[1].items]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("turn_index", [0, 1, 2])
+def test_sdpo_checks_release_of_every_episode_turn(tokenizer: SDPOTokenizer, turn_index: int) -> None:
+    from .test_distill_processor import episode_inferences
+
+    target = processor(accept_multi_turn_policy_samples=True)
+    records = list(episode_inferences())
+    records[turn_index] = replace(
+        records[turn_index], artifact_ref=replace(records[turn_index].artifact_ref, release_id="slime-v4")
+    )
+    for record in records:
+        target.ingest(record)
+    references = tuple(record.agent_record_id for record in records)
+    with pytest.raises(ValueError, match="one policy release"):
+        target.ingest(
+            AgentRecord.create(
+                scenario="science",
+                request_type=RequestType.REPORT,
+                payload=SDPOReport(step=0, group=0, rollout=0, score=1.0).to_dict(references=references),
+                references=references,
+            )
+        )
+    assert not target.ready()
+    assert target.releasable_record_ids() == frozenset()
