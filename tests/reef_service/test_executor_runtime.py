@@ -26,7 +26,7 @@ from reef.runtime.executor.connection import (
     RayRuntimeError,
 )
 from reef.runtime.executor.uniproc import UniProcExecutor
-from reef.runtime.interfaces import PreparedTrainingStep
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingMethod
 from reef.runtime.interfaces import TrainingRuntimeError
 from reef.runtime.interfaces import TrainingRuntimeError as ContractTrainingRuntimeError
 from reef.service import assembly
@@ -82,7 +82,9 @@ def test_local_executor_runs_candidate_activation_and_durable_commit(backend):
     try:
         assert runtime.model_path == "model-path"
         assert runtime.base_url == "http://router"
-        prepared = runtime.prepare_training_step(policy_batch(), "custom-objective", {}, StepScheduling(), 0)
+        prepared = runtime.prepare_training_step(
+            policy_batch(), TrainingMethod("custom-objective"), {}, StepScheduling(), 0
+        )
         assert prepared.payload["expected_runtime_load_id"] == "v0"
         candidate = runtime.train_candidate(prepared.payload)
         assert worker.calls == ["prepare", "execute"]

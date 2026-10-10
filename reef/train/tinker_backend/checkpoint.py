@@ -1,13 +1,22 @@
-"""Versioned local manifests referencing durable Tinker checkpoints."""
+"""Versioned local manifests referencing durable Tinker checkpoints.
+
+A manifest also records the learning-rate schedule its weights were trained
+under and the optimizer steps that schedule has completed: the optimizer
+state lives in the remote checkpoint, and the schedule's progress travels with
+it, so a job branched from this checkpoint continues the schedule.
+"""
 
 from __future__ import annotations
 
 import json
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
+
+from reef.runtime.interfaces import LearningRateScheduleState
 
 MANIFEST = "tinker-checkpoint.json"
 
@@ -19,6 +28,8 @@ class TinkerCheckpoint:
     state_path: str
     sampler_path: str
     schema_version: int = 1
+    #: ``None`` until a job selects a schedule: the configured learning rate applies.
+    learning_rate_schedule_state: LearningRateScheduleState | None = None
 
     def __post_init__(self) -> None:
         if self.schema_version != 1 or not self.base_model or self.lora_rank <= 0:
@@ -31,16 +42,33 @@ class TinkerCheckpoint:
         if (self.base_model, self.lora_rank) != (base_model, lora_rank):
             raise ValueError("Tinker checkpoint model/rank does not match the runtime")
 
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        if self.learning_rate_schedule_state is None:
+            # Manifests stay as they were until a schedule is selected.
+            value.pop("learning_rate_schedule_state")
+        return value
+
+    @classmethod
+    def from_dict(cls, value: Mapping[str, Any]) -> TinkerCheckpoint:
+        if not isinstance(value, Mapping):
+            raise ValueError("Tinker checkpoint manifest must be an object")
+        fields = dict(value)
+        schedule_state = fields.pop("learning_rate_schedule_state", None)
+        return cls(
+            **fields,
+            learning_rate_schedule_state=(
+                None if schedule_state is None else LearningRateScheduleState.from_dict(schedule_state)
+            ),
+        )
+
     def write(self, directory: Path) -> None:
         directory.mkdir(parents=True, exist_ok=True)
-        atomic_json(directory / MANIFEST, asdict(self))
+        atomic_json(directory / MANIFEST, self.to_dict())
 
     @classmethod
     def read(cls, directory: Path) -> TinkerCheckpoint:
-        value = json.loads((directory / MANIFEST).read_text())
-        if not isinstance(value, dict):
-            raise ValueError("Tinker checkpoint manifest must be an object")
-        return cls(**value)
+        return cls.from_dict(json.loads((directory / MANIFEST).read_text()))
 
 
 def atomic_json(path: Path, value: Any) -> None:

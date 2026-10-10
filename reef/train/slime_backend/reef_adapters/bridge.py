@@ -3,6 +3,13 @@
 The adapter prepares Slime batches, executes optimizer work, persists paired
 checkpoints and sends native tensors under a Reef-selected serving identity.
 Reef owns scheduling, resource handoff, admission, publication and recovery.
+
+Every job trains the loss family and learning-rate schedule its payload
+names. The workers start with the recipe's startup family; a job of another
+family is validated against the workers' startup arguments before it trains,
+and the actor workers switch to it (and to the job's schedule) when they
+receive the job's data. The schedule's progress is kept per scenario beside
+the job marker, written with each checkpoint, so a restart continues it.
 """
 
 from __future__ import annotations
@@ -18,6 +25,7 @@ from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import resolve
 from reef.runtime.executor.failure import ExecutorFailedError, ExecutorFailure, ExecutorFailureListener
 from reef.runtime.interfaces import (
+    LearningRateScheduleState,
     PreparedTrainingJob,
     PreparedTrainingStep,
     ScenarioHistoryStore,
@@ -26,17 +34,25 @@ from reef.runtime.interfaces import (
     TrainingContext,
     TrainingCoordinationConfig,
     TrainingJobResult,
+    TrainingMethod,
     TrainingMetrics,
+    learning_rate_metrics,
+    resolve_learning_rate_schedule_state,
 )
-from reef.runtime.recovery import ScenarioHistory, history_path, marker_rollouts
+from reef.runtime.recovery import ScenarioHistory, history_path, marker_rollouts, read_json, write_json
 from reef.runtime.scheduler import _producing_runtime_load_ids
 from reef.runtime.scheduler import max_staleness as _max_staleness
 from reef.train.algos.registry import loss_family_refs
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
+from reef.train.slime_backend.distill import DistillAlgorithm
 from reef.train.slime_backend.loss_families import resolve_loss_family
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
-from reef.train.slime_backend.reef_adapters.batches import TrainingBatchProcessor
+from reef.train.slime_backend.reef_adapters.batches import (
+    WORKER_SWITCH_KEY,
+    TrainingBatchProcessor,
+    optimizer_step_sizes,
+)
 from reef.train.slime_backend.reef_adapters.preflight import (
     configure_megatron_runtime,
     configure_rollout_runtime,
@@ -46,6 +62,7 @@ from reef.train.slime_backend.reef_adapters.preflight import (
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.slime_backend.reef_adapters.train_groups import DEFAULT_TRAIN_RPC_TIMEOUT_S, SlimeTrainGroup
 from reef.train.slime_backend.reef_adapters.training_job.storage import (
+    LEARNING_RATE_SCHEDULES_FILENAME,
     CheckpointStorage,
     RetentionConfig,
     critic_checkpoint_due,
@@ -68,6 +85,14 @@ def create_train_groups(
     )
 
 
+@dataclass(frozen=True)
+class WorkerTrainingSettings:
+    """The loss family and learning-rate schedule state that the actor workers train with."""
+
+    loss_family: str
+    schedule_state: LearningRateScheduleState | None
+
+
 class _NullAlgorithm(SlimeAlgorithm):
     """Stateless no-op algorithm for bridges started without a loss family."""
 
@@ -83,6 +108,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
 
     This adapter has no inference control object and never reads or advances
     Reef's publication marker. Its context contains only scheduling values.
+    ``args`` are the arguments the workers started with.
     """
 
     def __init__(
@@ -90,6 +116,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         actor_group,
         *,
         batch_processor: TrainingBatchProcessor,
+        args: SlimeArguments,
         save_hf_template: str | None,
         start_rollout_id: int = 0,
         storage_config: RetentionConfig | None = None,
@@ -143,6 +170,24 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             )
         else:
             self._algo = _NullAlgorithm()
+        self.args = args
+        self.critic_steps_per_actor = critic_steps_per_actor
+        self.critic_only_steps = critic_only_steps
+        # Bound algorithms and each family's worker arguments, by family name;
+        # the startup family's arguments are the workers' own.
+        self.algorithms_by_loss_family: dict[str, SlimeAlgorithm] = {self._algo.loss_family: self._algo}
+        self.args_by_loss_family: dict[str, SlimeArguments] = {self._algo.loss_family: args}
+        # Arguments some family changes from the startup ones: a worker switch sends all of them.
+        self.switched_arg_names: set[str] = set()
+        self.worker_settings = WorkerTrainingSettings(self._algo.loss_family, None)
+        self.learning_rate_schedules_path = (
+            None
+            if save_hf_template is None
+            else Path(save_hf_template.format(rollout_id=0)).expanduser().parent / LEARNING_RATE_SCHEDULES_FILENAME
+        )
+        self.learning_rate_schedules = read_learning_rate_schedules(
+            self.learning_rate_schedules_path, next_rollout_id=start_rollout_id
+        )
         self._storage = (
             CheckpointStorage(
                 storage_config,
@@ -207,6 +252,11 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         if self._storage is None and (checkpoint.exists() or checkpoint.is_symlink()):
             raise RuntimeError(f"checkpoint target already exists: {checkpoint}")
         rollout_data = to_slime_rollout_data(dict(payload))
+        algorithm = self.algorithm_for_loss_family(payload["loss"])
+        method = TrainingMethod.from_dict(payload["method"])
+        schedule_state = resolve_learning_rate_schedule_state(
+            self.learning_rate_schedule_state(scenario), method.learning_rate_schedule
+        )
         if self._score_centering is not None:
             # Torch, like the tensorization that follows; loaded only when the term is on.
             from reef.train.slime_backend.score_centering.heads import attach_sampler_heads
@@ -219,7 +269,14 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             and list(rollout_versions) != list(_producing_runtime_load_ids(payload))
         ):
             raise ValueError("loss-family row producing versions do not match the shared training payload")
-        self._algo.validate_payload(rollout_data)
+        algorithm.validate_payload(rollout_data)
+        optimizer_steps = 0
+        if schedule_state is not None:
+            if self.args.decoupled_lr is not None:
+                raise RuntimeError(
+                    "a recipe-selected learning-rate schedule cannot drive --decoupled-lr parameter groups"
+                )
+            optimizer_steps = len(optimizer_step_sizes(rollout_data, self.args.global_batch_size))
         context: Any = nullcontext(None)
         if self._storage is not None:
             protected = marker_rollouts(prior_marker)
@@ -241,7 +298,10 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             # The teacher is scored before the RUNNING marker so a
             # scoring failure leaves no partial state: the job
             # stays retryable under the same identity.
-            algorithm_metrics = self._algo.prepare_rollout(rollout_data)
+            algorithm_metrics = algorithm.prepare_rollout(rollout_data)
+            worker_settings = WorkerTrainingSettings(algorithm.loss_family, schedule_state)
+            if worker_settings != self.worker_settings:
+                rollout_data[WORKER_SWITCH_KEY] = self.worker_switch(worker_settings)
             # Local batch processing preserves Slime's DP schedule and
             # object-store transport: one Box per training DP rank.
             packed = self._batch_processor.prepare_external_train_data(rollout_data)
@@ -253,15 +313,18 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
                 job_id=job_id,
                 rollout_data=rollout_data,
                 packed=packed,
+                algorithm=algorithm,
                 algorithm_metrics=algorithm_metrics,
+                worker_settings=worker_settings,
+                optimizer_steps=optimizer_steps,
             )
 
     def train_job(self, job: _SlimePreparedTrainingJob) -> TrainingMetrics:
-        """Run one optimizer step for an admitted job and collect its metrics."""
+        """Run one job's optimizer steps and collect its metrics."""
         checkpoint = job.checkpoint
         if checkpoint.scenario is not None:
             self._group.activate_scenario(checkpoint.scenario)
-        training = self._algo.train(
+        training = job.algorithm.train(
             checkpoint.rollout_id,
             job.packed,
             actor_group=self._group,
@@ -270,7 +333,7 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         )
         durable_metrics = {
             **training.durable_metrics,
-            **self._algo.rollout_metrics(job.rollout_data, self.context.runtime_load_id),
+            **job.algorithm.rollout_metrics(job.rollout_data, self.context.runtime_load_id),
         }
         train_metrics = next(
             (dict(result) for result in training.worker_results if isinstance(result, Mapping) and result),
@@ -278,6 +341,15 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
         )
         train_metrics.update(self.resolve_training_result(self._group.async_pop_rank0_metrics()))
         train_metrics.update(job.algorithm_metrics)
+        if training.actor_trained:
+            # The actor fetched the job's data, and with it any worker switch.
+            self.worker_settings = job.worker_settings
+            schedule_state = job.worker_settings.schedule_state
+            if schedule_state is not None:
+                job.next_schedule_state = schedule_state.advanced(job.optimizer_steps)
+                train_metrics.update(
+                    learning_rate_metrics(schedule_state.learning_rates(job.optimizer_steps), job.next_schedule_state)
+                )
         return TrainingMetrics(training=train_metrics, durable=durable_metrics)
 
     def save_job_checkpoint(self, job: _SlimePreparedTrainingJob) -> None:
@@ -300,6 +372,85 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
             self._storage.complete(job.job_id, rollout_id, reward=math.fsum(rewards) / len(rewards))
         if checkpoint.scenario is not None:
             self._require_history().record_checkpoint(checkpoint.scenario, rollout_id)
+        if job.next_schedule_state is not None:
+            self.record_learning_rate_schedule_state(checkpoint.scenario, rollout_id, job.next_schedule_state)
+
+    def algorithm_for_loss_family(self, loss_family: str) -> SlimeAlgorithm:
+        """The bound algorithm of a job's loss family; a new family is validated against the workers first.
+
+        A family other than the startup one runs with its default driver
+        options and the workers' startup arguments (see
+        ``loss_family_job_args``). The first use registers its wire keys with
+        the batch processor; a family that declares one of them with another
+        dtype is refused.
+        """
+        if not self._algo.loss_family:
+            # A bridge started without a family trains whatever it is given.
+            return self._algo
+        spec = resolve_loss_family(loss_family)
+        algorithm = self.algorithms_by_loss_family.get(spec.loss_family)
+        if algorithm is not None:
+            return algorithm
+        if isinstance(spec, DistillAlgorithm) and any(
+            isinstance(bound, DistillAlgorithm) for bound in self.algorithms_by_loss_family.values()
+        ):
+            raise RuntimeError(
+                f"loss family {spec.loss_family!r} is a second distillation family in this run; "
+                "a worker keeps one teacher, built from the first distillation family's settings"
+            )
+        # Imported here: the argument module reaches the Megatron LoRA stack,
+        # which importing the bridge must not load (test_dependency_boundaries).
+        from reef.train.slime_backend.reef_adapters.slime_arguments import loss_family_job_args
+
+        job_args = loss_family_job_args(self.args, spec)
+        dtypes = dict(self.args.reef_rollout_tensor_dtypes or {})
+        for key, dtype in job_args.reef_rollout_tensor_dtypes.items():
+            if dtypes.setdefault(key, dtype) != dtype:
+                raise RuntimeError(
+                    f"loss family {spec.loss_family!r} declares rollout key {key!r} as {dtype}, "
+                    f"another family of this run as {dtypes[key]}"
+                )
+        startup = vars(self.args)
+        self.switched_arg_names.update(
+            name for name, value in vars(job_args).items() if name not in startup or startup[name] != value
+        )
+        # The batch processor partitions and tensorizes the keys a job's data carries.
+        self.args.custom_rollout_data_keys = tuple(
+            dict.fromkeys((*(self.args.custom_rollout_data_keys or ()), *(job_args.custom_rollout_data_keys or ())))
+        )
+        self.args.reef_rollout_tensor_dtypes = dtypes
+        algorithm = spec.bind(
+            None, critic_steps_per_actor=self.critic_steps_per_actor, critic_only_steps=self.critic_only_steps
+        )
+        self.args_by_loss_family[spec.loss_family] = job_args
+        self.algorithms_by_loss_family[spec.loss_family] = algorithm
+        return algorithm
+
+    def worker_switch(self, settings: WorkerTrainingSettings) -> dict[str, Any]:
+        """What the actor workers set before a job: the family's switched arguments and the schedule state."""
+        loss_family_args = {}
+        if self.switched_arg_names:
+            values = vars(self.args_by_loss_family[settings.loss_family])
+            loss_family_args = {name: values.get(name) for name in sorted(self.switched_arg_names)}
+        schedule_state = settings.schedule_state
+        return {
+            "loss_family_args": loss_family_args,
+            "learning_rate_schedule_state": None if schedule_state is None else schedule_state.to_dict(),
+        }
+
+    def learning_rate_schedule_state(self, scenario: str | None) -> LearningRateScheduleState | None:
+        """The schedule state of ``scenario``'s weights (``None``: the shared model), as its last checkpoint left it."""
+        record = self.learning_rate_schedules.get(scenario or "")
+        return None if record is None else LearningRateScheduleState.from_dict(record)
+
+    def record_learning_rate_schedule_state(
+        self, scenario: str | None, rollout_id: int, schedule_state: LearningRateScheduleState
+    ) -> None:
+        """Keep the schedule state a saved checkpoint trained to, beside the job marker."""
+        if self.learning_rate_schedules_path is None:
+            raise RuntimeError("the Slime bridge keeps learning-rate schedule progress beside --save-hf")
+        self.learning_rate_schedules[scenario or ""] = {"rollout_id": rollout_id, **schedule_state.to_dict()}
+        write_json(self.learning_rate_schedules_path, {"schedules": self.learning_rate_schedules})
 
     def prepare_weights(self, runtime_load_id: str, *, force_full: bool) -> None:
         self._group.prepare_weight_update(runtime_load_id, force_full=force_full)
@@ -348,16 +499,16 @@ class SlimeTrainingBackend(TrainingBackend, ExecutorFailureListener):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        """Prepare a framework-neutral Reef batch with Slime-owned logic."""
+        """Prepare a framework-neutral Reef batch with Slime-owned logic; refuse a method the workers cannot train."""
         prepared = prepare_slime_step(
-            batch, objective, algorithm_state, scheduling, sampler_topk=self._score_centering is not None
+            batch, method, algorithm_state, scheduling, sampler_topk=self._score_centering is not None
         )
         if prepared.payload is not None:
-            self._algo.validate_payload(prepared.payload)
+            self.algorithm_for_loss_family(prepared.payload["loss"]).validate_payload(prepared.payload)
         return prepared
 
     def _checkpoint_path(self, rollout_id: int) -> str:
@@ -380,14 +531,22 @@ class _SlimePreparedTrainingJob(PreparedTrainingJob):
         job_id: str,
         rollout_data: dict[str, Any],
         packed: Any,
+        algorithm: SlimeAlgorithm,
         algorithm_metrics: Mapping[str, Any],
+        worker_settings: WorkerTrainingSettings,
+        optimizer_steps: int,
     ) -> None:
         self._backend = backend
         self._checkpoint = checkpoint
         self.job_id = job_id
         self.rollout_data = rollout_data
         self.packed = packed
+        self.algorithm = algorithm
         self.algorithm_metrics = algorithm_metrics
+        self.worker_settings = worker_settings
+        self.optimizer_steps = optimizer_steps
+        # The schedule state after training, once the actor stepped; recorded with the checkpoint.
+        self.next_schedule_state: LearningRateScheduleState | None = None
 
     @property
     def checkpoint(self) -> TrainingCheckpoint:
@@ -398,6 +557,24 @@ class _SlimePreparedTrainingJob(PreparedTrainingJob):
 
     def save_checkpoint(self) -> None:
         self._backend.save_job_checkpoint(self)
+
+
+def read_learning_rate_schedules(path: Path | None, *, next_rollout_id: int) -> dict[str, dict[str, Any]]:
+    """Every scenario's schedule progress, refusing progress newer than the checkpoints the workers loaded."""
+    value = None if path is None else read_json(path)
+    if value is None:
+        return {}
+    records: dict[str, dict[str, Any]] = {}
+    for scenario, record in value["schedules"].items():
+        LearningRateScheduleState.from_dict(record)
+        if record["rollout_id"] >= next_rollout_id:
+            raise RuntimeError(
+                f"learning-rate schedule progress in {path} was recorded at rollout {record['rollout_id']}, "
+                f"after the checkpoint the workers loaded (next rollout {next_rollout_id}); restore the file "
+                "that belongs to that checkpoint"
+            )
+        records[scenario] = dict(record)
+    return records
 
 
 @dataclass(frozen=True)
@@ -448,6 +625,7 @@ def create_training_backend(
     return SlimeTrainingBackend(
         actor_group,
         batch_processor=TrainingBatchProcessor(args, actor_group.train_parallel_config),
+        args=args,
         save_hf_template=args.save_hf,
         start_rollout_id=args.start_rollout_id or 0,
         storage_config=preparation.retention,

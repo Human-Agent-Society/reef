@@ -143,7 +143,7 @@ def sampler(client):
 def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    checkpoint, metrics = client.train(base, [[row], [row]], ImportanceSamplingLoss())
+    checkpoint, metrics = client.train(base, [[row], [row]], ImportanceSamplingLoss(), [1e-4, 5e-5])
     events = client._sdk.events
     assert [event[0] for event in events] == [
         "session",
@@ -164,6 +164,8 @@ def test_training_restores_optimizer_then_saves_both_durable_snapshots(client):
     assert events[6][1] == events[7][1]
     assert events[6][2] is None and events[7][2] is None
     assert checkpoint.state_path == "tinker://next/state"
+    # Every optimizer step takes its own rate: a schedule advances inside one job.
+    assert [event[1].learning_rate for event in events if event[0] == "optim_step"] == [1e-4, 5e-5]
     assert metrics["optimizer_steps"] == 2
     assert events[-1] == ("close", "success")
 
@@ -173,11 +175,11 @@ def test_uncertain_optimizer_closes_attempt_and_retry_restores_incumbent(client)
     row = TokenRow((10, 20), (1,), (-0.25,), 1)
     client._sdk.fail = True
     with pytest.raises(TimeoutError):
-        client.train(base, [[row]], ImportanceSamplingLoss())
+        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4])
     assert client._sdk.events[-1] == ("close", "errored")
     assert not any(event[0] == "save_state" for event in client._sdk.events)
     client._sdk.fail = False
-    client.train(base, [[row]], ImportanceSamplingLoss())
+    client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4])
     assert client._sdk.events[-1] == ("close", "success")
     assert [event[1] for event in client._sdk.events if event[0] == "restore_with_optimizer"] == [base.state_path] * 2
 
@@ -192,7 +194,7 @@ def test_custom_loss_routes_to_forward_backward_custom(client):
 
     base = TinkerCheckpoint(client._model, 32, "tinker://base/state", "tinker://base/sampler")
     row = TokenRow((10, 11, 20, 21), (1, 1), (-0.25, -0.5), 2)
-    _, metrics = client.train(base, [[row]], Custom())
+    _, metrics = client.train(base, [[row]], Custom(), [1e-4])
     names = [event[0] for event in client._sdk.events]
     assert "forward_backward_custom" in names and "forward_backward" not in names
     assert next(event for event in client._sdk.events if event[0] == "forward_backward_custom")[2] == pytest.approx(
@@ -245,7 +247,7 @@ def test_remote_model_mismatch_fails_before_training_or_sampling(client, sampler
         lambda _, path: Future(SimpleNamespace(base_model="other/model", is_lora=True, lora_rank=32)),
     )
     with pytest.raises(ValueError, match="remote Tinker training checkpoint"):
-        client.train(base, [[row]], ImportanceSamplingLoss())
+        client.train(base, [[row]], ImportanceSamplingLoss(), [1e-4])
     assert not any(event[0] == "forward_backward" for event in client._sdk.events)
     monkeypatch.setattr(Sampler, "get_base_model", lambda _: "other/model")
     with pytest.raises(ValueError, match="remote Tinker sampler checkpoint"):

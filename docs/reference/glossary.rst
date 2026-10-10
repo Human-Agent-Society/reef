@@ -137,6 +137,17 @@ registered name or dotted class/instance path and binds the ``StepScheduling``
 the runtime cuts each batch with; the objective only rejects a schedule its
 loss cannot train.
 
+Training method
+---------------
+
+A ``TrainingMethod``: the objective of one training job and an optional
+learning-rate schedule for that job. A recipe's ``training_method_selector``
+picks one for every job, so one run can switch objectives or start a new
+learning-rate schedule. By default every job trains the recipe's
+``training_spec()`` objective. The method is part of the job's identity. See
+`Write a recipe
+<../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__.
+
 Loss family
 -----------
 

@@ -23,7 +23,13 @@ from reef.recipe.checkpoint_strategy import CheckpointStrategy, EveryNVersions
 from reef.recipe.config import config_positive_int
 from reef.recipe.config_fields import config_field, parse_int, recipe_config_fields, resolve_config_field_values
 from reef.recipe.errors import RecipeConfigError
-from reef.runtime.interfaces import InferenceHandler, InferenceRuntime, MultimodalRelay, TrainingRuntime
+from reef.runtime.interfaces import (
+    InferenceHandler,
+    InferenceRuntime,
+    MultimodalRelay,
+    TrainingMethod,
+    TrainingRuntime,
+)
 from reef.storage.records import RecordStore
 from reef.surface.base import AcceptAnyArtifact, Surface
 from reef.surface.weights import create_weight_surface
@@ -31,6 +37,7 @@ from reef.train.algos import StepScheduling
 from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
+from reef.train.runtime_backend import FixedTrainingMethodSelector, RuntimeCandidateBackend, TrainingMethodSelector
 from reef.train.trainer import ComponentTrainer, Trainer
 
 
@@ -336,6 +343,10 @@ class WeightTrainingSpec:
     optimizer steps (rollout unit, step size, epochs, shuffle, remainder). It
     is the recipe's choice, not the objective's; the objective only rejects a
     schedule its loss cannot train, at build time and again in the backend.
+
+    ``objective`` is the recipe's startup objective: the training backend
+    starts with its loss family, and every job trains with it unless the
+    recipe overrides :meth:`WeightTrainingRecipe.training_method_selector`.
     """
 
     objective: str
@@ -393,6 +404,17 @@ class WeightTrainingRecipe(Recipe):
         trainer wiring may omit ``processor`` and override :meth:`build`.
         """
         return WeightTrainingSpec(objective="")
+
+    def training_method_selector(self) -> TrainingMethodSelector:
+        """How this recipe picks the objective and learning-rate schedule of each training job.
+
+        The default trains every job with ``training_spec().objective`` and the
+        backend's configured learning rate. A recipe that switches methods
+        within one run (a supervised phase before policy training, a
+        distillation phase after it) returns its own selector, built from its
+        config fields; the backend still starts with the spec's objective.
+        """
+        return FixedTrainingMethodSelector(TrainingMethod(type(self).training_spec().objective))
 
     def __post_init__(self) -> None:
         super().__post_init__()
@@ -542,8 +564,6 @@ class WeightTrainingRecipe(Recipe):
         experiment_logger: ExperimentLogger | None = None,
     ) -> Trainer:
         """Build the shared weight trainer with this recipe's report contract."""
-        from reef.train.runtime_backend import RuntimeCandidateBackend
-
         spec = type(self).training_spec()
         processor_class = spec.processor
         if processor_class is None:
@@ -576,7 +596,7 @@ class WeightTrainingRecipe(Recipe):
             processor_factory=lambda context: processor_class(context.with_config(config)),
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
-                spec.objective,
+                self.training_method_selector(),
                 spec.scheduling,
                 inference_runtime=self.runtime,
                 loss_family=spec.loss_family,

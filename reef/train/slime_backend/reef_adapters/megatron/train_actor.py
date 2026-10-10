@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import inspect
+from collections.abc import Mapping
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
@@ -29,6 +30,7 @@ from slime.utils.misc import Box
 from slime.utils.timer import Timer, timer
 from torch_memory_saver import torch_memory_saver
 
+from reef.train.slime_backend.reef_adapters.batches import WORKER_SWITCH_KEY
 from reef.train.slime_backend.reef_adapters.megatron.adapter_slots import AdapterSlotSwitcher
 from reef.train.slime_backend.reef_adapters.megatron.lora import (
     collect_lora_train_metrics,
@@ -44,6 +46,7 @@ from reef.train.slime_backend.reef_adapters.worker_hooks import (
     record_worker_metrics,
     reef_node_ip_and_free_port,
     resolve_tensor_dtype,
+    switch_loss_family,
 )
 
 
@@ -92,11 +95,31 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
             finally:
                 if self.args.offload_train:
                     self.sleep()
+        # The loss families whose actor init hook ran; a family runs its hook on its first job.
+        self.initialized_loss_families = {args.loss_family}
         if role == "actor":
             init_hook = _loss_family_hook(args, "reef_actor_init_hook_path")
             if init_hook is not None:
                 init_hook(self)
         return result
+
+    def switch_training_method(self, worker_switch: Mapping[str, Any]) -> None:
+        """Switch this actor to a job's loss family and learning-rate schedule.
+
+        ``loss_family_args`` are the family's job arguments, which the bridge
+        derived from the startup arguments. ``learning_rate_schedule_state`` is
+        the job's schedule state, or ``None`` for Slime's configured scheduler.
+        """
+        for name, value in worker_switch["loss_family_args"].items():
+            setattr(self.args, name, value)
+        switch_loss_family(self.args)
+        loss_family = self.args.loss_family
+        if loss_family not in self.initialized_loss_families:
+            init_hook = _loss_family_hook(self.args, "reef_actor_init_hook_path")
+            if init_hook is not None:
+                init_hook(self)
+            self.initialized_loss_families.add(loss_family)
+        self.args.reef_learning_rate_schedule_state = worker_switch["learning_rate_schedule_state"]
 
     def set_rollout_manager(self, inference: Any) -> dict[str, Any]:
         """Attach directly to inference and return topology to Reef's trainer."""
@@ -182,6 +205,13 @@ class ReefMegatronTrainRayActor(MegatronTrainRayActor):
     def _get_rollout_data(self, rollout_data_ref):
         rollout_data = super()._get_rollout_data(rollout_data_ref)
         from slime.backends.megatron_utils.cp_utils import slice_log_prob_with_cp
+
+        # A job whose family or schedule state differs from the workers' current
+        # one carries a worker switch; the actor switches before its family's
+        # keys are sliced. The critic keeps the startup family.
+        worker_switch = rollout_data.pop(WORKER_SWITCH_KEY, None)
+        if worker_switch is not None and self.role == "actor":
+            self.switch_training_method(worker_switch)
 
         device = torch.cuda.current_device()
         # Slime's own per-response-token tensors, plus the ones the loss

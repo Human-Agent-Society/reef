@@ -19,7 +19,7 @@ from reef_service._trajectories import policy_trajectory
 from reef_service.slime_coordinator import build_slime_coordinator
 from slime.utils.misc import Box
 
-from reef.runtime.interfaces import TrainingJobResult
+from reef.runtime.interfaces import TrainingJobResult, TrainingMethod
 from reef.runtime.recovery import read_marker, transition_marker, write_marker
 from reef.runtime.scheduler import TrainingCoordinator
 from reef.train.algos import StepScheduling
@@ -110,6 +110,7 @@ def _payload(
         # or from the order in which a dict happens to be traversed.
         "rollout_ids": [0, 0, 1],
         "loss": loss,
+        "method": TrainingMethod(loss).to_dict(),
     }
     if advantages != "default":
         data["advantages"] = advantages
@@ -134,6 +135,7 @@ def test_to_slime_rollout_data_converts_non_empty_payload_and_preserves_groups()
             "samples": [_row("first"), _row("second", reward=1.0)],
             "rollout_ids": [7, 7],
             "loss": "pg",
+            "method": TrainingMethod("pg").to_dict(),
             "advantages": [0.25, -0.25],
         }
     )
@@ -165,6 +167,7 @@ def test_to_slime_rollout_data_aggregates_rollout_mask_sums() -> None:
         ],
         "rollout_ids": [0, 0, 1],
         "loss": "pg",
+        "method": TrainingMethod("pg").to_dict(),
         "advantages": [0.25, -0.25, 0.0],
     }
 
@@ -233,6 +236,7 @@ def test_to_slime_rollout_data_rejects_mixed_empty_and_non_empty_log_probs() -> 
                 ],
                 "rollout_ids": [0],
                 "loss": "pg",
+                "method": TrainingMethod("pg").to_dict(),
             },
             "sample",
         ),
@@ -513,6 +517,7 @@ def _sao_durable_actor(
         "samples": rows,
         "rollout_ids": list(range(len(rows))),
         "loss": "sao",
+        "method": TrainingMethod("sao").to_dict(),
         "scenario_step": 0,
         "expected_runtime_load_id": serving_version,
         "max_staleness": max_staleness,
@@ -551,6 +556,7 @@ def _loss_family_durable_actor(
         "samples": [_row("source-0")],
         "rollout_ids": [0],
         "loss": loss_family,
+        "method": TrainingMethod(loss_family).to_dict(),
         "scenario_step": 0,
         "expected_runtime_load_id": serving_version,
         "max_staleness": 2,
@@ -739,8 +745,8 @@ def test_bridge_checkpoint_requires_save_template() -> None:
         _execute_and_update_weights(actor, payload)
 
 
-# The identity of the fixture payload: its rows and admission fence, not its scenario step.
-JOB_ID = "d54ddfad3343892d72fe6c067e789de79ab878daa84468025904f3246b857c05"
+# The identity of the fixture payload: its rows, training method and admission fence, not its scenario step.
+JOB_ID = "a7ea42aae11c5c37e3567d4c7e743476b52416d8d1f9e87ed70ce8caee58adda"
 
 
 @pytest.mark.unit
@@ -893,6 +899,7 @@ def test_bridge_admits_and_preserves_mixed_token_runtime_load_ids(tmp_path) -> N
         ],
         "rollout_ids": [0],
         "loss": "sft",
+        "method": TrainingMethod("sft").to_dict(),
         "scenario_step": 0,
         "expected_runtime_load_id": "engine:7",
         "max_staleness": 2,
@@ -925,6 +932,7 @@ def test_bridge_rejects_mixed_token_versions_at_exact_admission_without_running_
         "samples": [_row("mixed", tokens=(10, 20, 21), loss_mask=(1, 1), log_probs=(-0.1, -0.2))],
         "rollout_ids": [0],
         "loss": "sft",
+        "method": TrainingMethod("sft").to_dict(),
         "scenario_step": 0,
         "expected_runtime_load_id": "engine:7",
         "max_staleness": 0,
@@ -1396,6 +1404,7 @@ def test_complete_marker_republishes_checkpoint_with_its_original_runtime_load_i
         ],
         "rollout_ids": [0],
         "loss": "sao",
+        "method": TrainingMethod("sao").to_dict(),
         "scenario_step": 1,
         "expected_runtime_load_id": recovered_version,
         "max_staleness": 2,
@@ -2017,7 +2026,12 @@ def test_slime_preparation_configured_batch_size_forwards_remainder_policy() -> 
 @pytest.mark.unit
 def test_to_slime_rollout_data_validates_step_layout() -> None:
     sample = ["a", [1, 2], [1], [-0.1], 0.5]
-    payload = {"samples": [sample, sample, sample, sample], "rollout_ids": [0, 1, 2, 3], "loss": "sft"}
+    payload = {
+        "samples": [sample, sample, sample, sample],
+        "rollout_ids": [0, 1, 2, 3],
+        "loss": "sft",
+        "method": TrainingMethod("sft").to_dict(),
+    }
 
     assert to_slime_rollout_data({**payload, "external_step_sizes": [3, 1]})["external_step_sizes"] == [3, 1]
     with pytest.raises(ValueError, match="sum 3 must equal the 4 distinct rollout_ids"):
@@ -2046,7 +2060,7 @@ def test_prepare_slime_step_reports_schedule_metrics(monkeypatch: pytest.MonkeyP
     monkeypatch.setattr(preparation, "resolve_objective", lambda _name: ScheduleObjective())
 
     result = preparation.prepare_slime_step(
-        _grouped_batch(8, 1), "any", {}, StepScheduling(batch_size=3, epochs=2, remainder="drop")
+        _grouped_batch(8, 1), TrainingMethod("any"), {}, StepScheduling(batch_size=3, epochs=2, remainder="drop")
     )
 
     assert result.metrics == {"steps": 1, "epochs": 2, "optimizer_steps": 4, "dropped_rollouts": 2}

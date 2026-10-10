@@ -16,7 +16,7 @@ from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.executor import Executor
 from reef.runtime.executor.failure import ExecutorFailedError
 from reef.runtime.executor.ray import RayExecutor
-from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, TrainingRuntimeError
+from reef.runtime.interfaces import PreparedTrainingStep, TrainingJobResult, TrainingMethod, TrainingRuntimeError
 
 DEFAULT_ACTOR_NAME = "reef-train-bridge"
 DEFAULT_NAMESPACE = "reef"
@@ -67,7 +67,7 @@ class CoordinatorClient(ABC):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep: ...
@@ -133,11 +133,11 @@ class ExecutorCoordinatorClient(CoordinatorClient):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
-        return self._rpc("prepare_training_step", batch, objective, dict(algorithm_state), scheduling)
+        return self._rpc("prepare_training_step", batch, method, dict(algorithm_state), scheduling)
 
     def execute_training_job(self, payload: Mapping[str, Any]) -> TrainingJobResult:
         return self._rpc("execute_training_job", dict(payload))

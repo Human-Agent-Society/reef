@@ -79,9 +79,23 @@ the captured behavior-policy probabilities. SAO and OpenClaw-RL losses are
 not implemented by this integration; selecting an unregistered loss family
 fails before training.
 
+Each job trains the Tinker loss of the objective that its recipe selected for
+it (`Switch methods within a run
+<../developer-guide/write-a-recipe.rst#switch-methods-within-a-run>`__). A job
+that switches objectives starts from the incumbent weights and optimizer
+state, like any other job. The objective's family needs a Tinker loss
+registered in the process that prepares the job. Tinker preparation needs one
+advantage per trajectory, so it does not support supervised or distillation
+objectives. A job that selects one fails before training.
+
 ``lora-rank``, ``seed``, and ``learning-rate`` configure adapter initialization
-and Adam updates. Other Adam settings currently use the pinned SDK's defaults
-(beta1 0.9, beta2 0.95, epsilon 1e-12, zero weight decay and gradient clipping).
+and Adam updates. ``learning-rate`` applies until a recipe selects a
+learning-rate schedule. From that job on, Reef computes each optimizer step's
+rate from the schedule. The checkpoint manifest records the schedule and its
+completed steps. A retry or a restart branches from the incumbent's manifest,
+so it uses the same schedule progress. Other Adam settings currently use the
+pinned SDK's defaults (beta1 0.9, beta2 0.95, epsilon 1e-12, zero weight decay
+and gradient clipping).
 ``training.timeout-s`` bounds SDK futures and configures
 transport timeouts; ``inference.timeout-s`` bounds sampling. These timeouts do
 not cancel a remote update that the service has already accepted.
@@ -102,9 +116,11 @@ it cannot accidentally apply the uncertain gradient a second time to that model.
 This favors recovery correctness over session reuse and training throughput.
 
 Reef publishes a small local ``tinker-checkpoint.json`` artifact containing the
-schema version, base model, LoRA rank, training-state URI, and sampler URI. It
-contains references, not portable weight tensors. Restore and rollback require
-continued access to both remote checkpoints in the originating account/project.
+schema version, base model, LoRA rank, training-state URI, and sampler URI.
+After a recipe selects a learning-rate schedule, the manifest also records the
+schedule's progress. The manifest contains references, not portable weight
+tensors. Restore and rollback require continued access to both remote
+checkpoints in the originating account/project.
 Local disk retention does not remove remote files. Use Tinker's checkpoint
 management for remote retention, preserving all checkpoints referenced by Reef.
 

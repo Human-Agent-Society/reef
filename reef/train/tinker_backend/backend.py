@@ -15,12 +15,13 @@ import json
 import urllib.parse
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
-from dataclasses import asdict
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
 from reef.core.batches import StepScheduling, TrainingBatch
 from reef.runtime.interfaces import (
+    LearningRateScheduleState,
     PreparedTrainingJob,
     PreparedTrainingStep,
     TrainingBackend,
@@ -28,7 +29,9 @@ from reef.runtime.interfaces import (
     TrainingContext,
     TrainingCoordinationConfig,
     TrainingJobResult,
+    TrainingMethod,
     TrainingMetrics,
+    learning_rate_metrics,
 )
 from reef.runtime.recovery import ScenarioHistory, history_path, read_json, write_json
 from reef.train.algos.registry import register_loss_family_ref
@@ -36,7 +39,7 @@ from reef.train.tinker_backend.checkpoint import MANIFEST, TinkerCheckpoint
 from reef.train.tinker_backend.client import TinkerClient
 from reef.train.tinker_backend.config import TinkerConfig
 from reef.train.tinker_backend.losses import BACKEND, TinkerLoss, TokenRow, resolve_tinker_loss, row_from_payload
-from reef.train.tinker_backend.preparation import prepare_tinker_step
+from reef.train.tinker_backend.preparation import job_learning_rates, prepare_tinker_step
 
 #: Where a checkpoint directory keeps the PEFT adapter the engines load.
 ADAPTER_DIR = "adapter"
@@ -47,7 +50,9 @@ class TinkerTrainingBackend(TrainingBackend):
 
     Each scenario's incumbent is the Tinker checkpoint its last publication
     loaded into the engines, remembered on disk so a restart branches from
-    the same weights and optimizer state. A rejected job leaves it unchanged.
+    the same weights, optimizer state and learning-rate schedule progress. A
+    rejected job leaves it unchanged. Every job trains the objective and
+    schedule its payload names.
     """
 
     def __init__(
@@ -133,12 +138,12 @@ class TinkerTrainingBackend(TrainingBackend):
     def prepare_training_step(
         self,
         batch: TrainingBatch,
-        objective: str,
+        method: TrainingMethod,
         algorithm_state: Mapping[str, Any],
         scheduling: StepScheduling,
     ) -> PreparedTrainingStep:
         # Staleness admission is the coordinator's; the payload carries only the rows.
-        return prepare_tinker_step(batch, objective, algorithm_state, scheduling, batch_size=self._config.batch_size)
+        return prepare_tinker_step(batch, method, algorithm_state, scheduling, batch_size=self._config.batch_size)
 
     @contextmanager
     def prepare(
@@ -158,22 +163,32 @@ class TinkerTrainingBackend(TrainingBackend):
         if directory.exists() or directory.is_symlink():
             raise RuntimeError(f"checkpoint target already exists: {directory}")
         loss = resolve_tinker_loss(payload["loss"])
+        method = TrainingMethod.from_dict(payload["method"])
         batches = [[row_from_payload(row) for row in rows] for rows in payload["batches"]]
         if not batches or any(not rows for rows in batches):
             raise ValueError("a Tinker training job needs at least one non-empty optimizer batch")
+        incumbent = self._incumbent(scenario)[0]
+        learning_rates, schedule_state = job_learning_rates(
+            incumbent.learning_rate_schedule_state,
+            method.learning_rate_schedule,
+            len(batches),
+            self._config.learning_rate,
+        )
         yield _TinkerPreparedJob(
             self,
             TrainingCheckpoint(rollout_id=rollout_id, path=directory, scenario_step=scenario_step, scenario=scenario),
-            incumbent=self._incumbent(scenario)[0],
+            incumbent=incumbent,
             batches=batches,
             loss=loss,
+            learning_rates=learning_rates,
+            schedule_state=schedule_state,
         )
 
     def train_job(self, job: _TinkerPreparedJob) -> TrainingMetrics:
-        checkpoint, metrics = self.client.train(job.incumbent, job.batches, job.loss)
+        checkpoint, metrics = self.client.train(job.incumbent, job.batches, job.loss, job.learning_rates)
         checkpoint.validate_model(self._model, self._config.lora_rank)
-        job.result = checkpoint
-        return TrainingMetrics(training=dict(metrics))
+        job.result = replace(checkpoint, learning_rate_schedule_state=job.schedule_state)
+        return TrainingMetrics(training={**metrics, **learning_rate_metrics(job.learning_rates, job.schedule_state)})
 
     def save_job_checkpoint(self, job: _TinkerPreparedJob) -> None:
         """Materialize the trained adapter beside its manifest; the job is durable only after this."""
@@ -239,7 +254,7 @@ class TinkerTrainingBackend(TrainingBackend):
         value = read_json(self._incumbent_path(scenario))
         if value is None:
             return self.base, None, None
-        checkpoint = TinkerCheckpoint(**value["checkpoint"])
+        checkpoint = TinkerCheckpoint.from_dict(value["checkpoint"])
         checkpoint.validate_model(self._model, self._config.lora_rank)
         return checkpoint, int(value["rollout_id"]), str(value["runtime_load_id"])
 
@@ -248,12 +263,12 @@ class TinkerTrainingBackend(TrainingBackend):
     ) -> None:
         write_json(
             self._incumbent_path(scenario),
-            {"checkpoint": asdict(checkpoint), "rollout_id": rollout_id, "runtime_load_id": runtime_load_id},
+            {"checkpoint": checkpoint.to_dict(), "rollout_id": rollout_id, "runtime_load_id": runtime_load_id},
         )
 
 
 class _TinkerPreparedJob(PreparedTrainingJob):
-    """One admitted job: the incumbent it branches from and the rows it trains on."""
+    """One admitted job: the incumbent it branches from, the rows it trains on and each step's learning rate."""
 
     def __init__(
         self,
@@ -263,12 +278,16 @@ class _TinkerPreparedJob(PreparedTrainingJob):
         incumbent: TinkerCheckpoint,
         batches: Sequence[Sequence[TokenRow]],
         loss: TinkerLoss,
+        learning_rates: tuple[float, ...],
+        schedule_state: LearningRateScheduleState | None,
     ) -> None:
         self._backend = backend
         self._checkpoint = checkpoint
         self.incumbent = incumbent
         self.batches = batches
         self.loss = loss
+        self.learning_rates = learning_rates
+        self.schedule_state = schedule_state
         self.result: TinkerCheckpoint | None = None
 
     @property

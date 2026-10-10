@@ -225,7 +225,9 @@ class SaoAlgorithm(SlimeAlgorithm):
         if plan.train_actor:
             actor_results = list(resolve(actor_group.async_train(rollout_id, refs, external_data=critic_values)) or ())
         return TrainResult(
-            actor_results, {"sao/critic_updates": plan.critic_updates, "sao/actor_trained": int(plan.train_actor)}
+            actor_results,
+            {"sao/critic_updates": plan.critic_updates, "sao/actor_trained": int(plan.train_actor)},
+            actor_trained=plan.train_actor,
         )
 
     def rollout_metrics(self, rollout_data: dict[str, Any], serving_version: str) -> dict[str, Any]:
