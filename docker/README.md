@@ -93,9 +93,8 @@ training:
     update-weight-disk-dir: /work/weights
 ```
 
-`Train model weights <https://reefinfra.ai/docs/reference/configuration/>`_
-in the configuration reference lists the pairing conditions (full mode, no
-LoRA rank, one engine per stack).
+The [configuration reference](https://reefinfra.ai/docs/reference/configuration/)
+lists the pairing conditions (full mode, no LoRA rank, one engine per stack).
 
 What this image is not: the Slime layer skips Slime's SGLang patches and the
 Reef stage does not install the reviewed SGLang revision, so SGLang engines
