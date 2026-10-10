@@ -19,6 +19,7 @@ from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import (
     HarborTask,
     HarborTaskConflict,
+    TaskGenerationRequest,
     read_harbor_task,
     read_split_manifest,
     write_harbor_task,
@@ -528,6 +529,17 @@ def generating(
     return built, generator
 
 
+def test_generate_forwards_records_and_materials(tmp_path: Path) -> None:
+    built, generator = generating(tmp_path)
+    material = tmp_path / "requirements.txt"
+    material.write_text("Use the port recorded in /var/run/app.port.")
+    records = (inference("source-1"),)
+    request = TaskGenerationRequest(records, "Rebuild the port task", (material,))
+    asyncio.run(built.generate(request))
+    sent = generator.proposals[0]["request"]
+    assert sent.inputs is request
+
+
 def test_the_first_look_for_a_batch_runs_generation_zero_end_to_end(tmp_path: Path) -> None:
     p, generator = generating(tmp_path)
     assert p.status()["generation"] == {"in_flight": None, "next": 0, "completed": 0, "of": 3, "last_error": ""}
@@ -787,3 +799,11 @@ def test_the_real_worker_runs_a_generation_off_the_trainers_thread(tmp_path: Pat
         assert p.operational_metrics()["generations_completed"] == 1
     finally:
         p.close()
+
+
+def test_history_from_another_scenario_is_not_forwarded(tmp_path: Path) -> None:
+    built, generator = generating(tmp_path)
+    source = AgentRecord.create(scenario="other", request_type=RequestType.INFERENCE, payload={})
+    with pytest.raises(ValueError, match="processor's scenario"):
+        asyncio.run(built.generate(TaskGenerationRequest((source,), "rebuild")))
+    assert generator.proposals == []

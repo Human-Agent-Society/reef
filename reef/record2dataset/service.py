@@ -25,6 +25,7 @@ root: a restarted service serves the same root.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import importlib.util
 import json
 import logging
@@ -36,6 +37,7 @@ import threading
 import uuid
 from abc import ABC, abstractmethod
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from pathlib import Path
 
 from aiohttp import web
@@ -44,6 +46,7 @@ from reef_client.client import ReefClientError
 from reef.core.tasks import (
     HarborTaskConflict,
     HarborTaskError,
+    TaskGenerationRequest,
     read_harbor_task,
     write_harbor_task,
     write_split_manifest,
@@ -71,8 +74,10 @@ from reef.record2dataset.wire import (
     WireError,
     checked_object,
     checked_string,
+    checked_text_files,
     oracle_document,
     play_document,
+    source_records_from_document,
     task_document,
     task_from_document,
 )
@@ -313,6 +318,16 @@ class ProposalJob(Job):
             )
         except (DesignerReplyError, ValueError) as exc:
             return {"record_id": answer.record_id, "task": None, "refusal": f"reply refused: {exc}"}
+        if self.request.inputs.source_records:
+            source_record_ids = tuple(record.agent_record_id for record in self.request.inputs.source_records)
+            # Each reconstruction has its own name, including repeated proposals from the same records.
+            identity = json.dumps([self.scenario, source_record_ids, answer.record_id]).encode("utf-8")
+            task = replace(
+                task,
+                name=f"harbor-history-{hashlib.sha256(identity).hexdigest()}",
+                source_agent_record_ids=source_record_ids,
+                metadata={**task.metadata, "designer_record_id": answer.record_id},
+            )
         return {"record_id": answer.record_id, "task": task_document(task), "refusal": ""}
 
 
@@ -562,10 +577,15 @@ class GeneratorService:
         try:
             body = await self.body_of(request)
             fields = checked_object(body.get("request"), "request")
+            scenario = checked_string(body, "scenario", label="a proposal")
             skill = fields.get("skill")
             grounding = fields.get("grounding")
             designer_request = DesignerRequest(
-                target=checked_string(fields, "target", label="request"),
+                inputs=TaskGenerationRequest(
+                    source_records=source_records_from_document(fields, scenario=scenario),
+                    description=checked_string(fields, "target", label="request"),
+                    asset_files=checked_text_files(fields, "asset_files", label="request"),
+                ),
                 skill=skill if isinstance(skill, str) else None,
                 difficulty=str(fields.get("difficulty", "medium")),
                 turn_limit=checked_count(
@@ -577,7 +597,7 @@ class GeneratorService:
             job = ProposalJob(
                 self.designer,
                 designer_request,
-                scenario=checked_string(body, "scenario", label="a proposal"),
+                scenario=scenario,
                 model=self.designer_model or self.model_for(body),
                 generation=checked_count(body.get("generation", 0), "generation"),
                 index=checked_count(body.get("index", 0), "index"),

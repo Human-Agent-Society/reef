@@ -291,7 +291,7 @@ class _SGLangEngineGroup(InferenceEngineGroup):
 
     def terminate(self) -> int:
         server = self._worker._get_updatable_server()
-        groups = [] if server is None else server.server_groups
+        groups = [] if server is None else server.generation_groups
         slots = [
             (group, index) for group in groups for index, engine in enumerate(group.all_engines) if engine is not None
         ]

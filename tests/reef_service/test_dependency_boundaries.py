@@ -526,3 +526,10 @@ def test_training_backends_never_import_inference_implementations() -> None:
         package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
         imported = _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package)
         assert _imports_of(imported, "reef.inference") == [], str(path.relative_to(REPO_ROOT))
+
+
+def test_task_generation_input_definition_does_not_depend_on_consumers() -> None:
+    module = importlib.import_module("reef.core.tasks.generation")
+    imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.core.tasks")
+    for dependency in ("reef.train", "reef.record2dataset", "recipes"):
+        assert _imports_of(imported, dependency) == []

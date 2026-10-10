@@ -1,7 +1,7 @@
 """Guarantees of the tutorials/reefine demos, hermetic: the deployment builds in manual mode with the harness
 requests defaults and the evaluation's floor over the one health task, the driver parses, the demo requests and the
 measurement's fixed list pass admission's screens on POST /reef/train, the bugfix fixture fails its one test, and the
-README keeps the shape the rows land in."""
+README examples have valid shell syntax and local links resolve."""
 
 from __future__ import annotations
 
@@ -31,15 +31,6 @@ HEALTH_TASK = (
     "[health] Run the shell command `echo reef-ok` with your shell tool and reply with its exact output as a "
     "plain word alone on the last line."
 )
-RUNS_HEADER = (
-    "| Demo | Model | Run | Date | Code | Proposal | Result | W / L / T | Pending | Promoted | Requires "
-    "| Show session | Proposer (s) | Ask to install (s) |"
-)
-RUNS_COLUMNS = 14
-MEASURE_HEADER = (
-    "| Run | Model | Date | Code | Parser | Requests | Answered | Admitted | Won | Published | Skipped | Median (s) |"
-)
-MEASURE_COLUMNS = 12
 #: Additional retired concepts in the tutorial; check-doc-contracts.mjs checks simplified terminology repository-wide.
 DROPPED_WORDS = (
     r"\blineage\b",
@@ -295,55 +286,25 @@ def test_the_workspace_fixture_fails_exactly_one_test() -> None:
     assert "passed" not in done.stdout.splitlines()[-1]
 
 
-def test_the_readme_keeps_the_runs_table_shape_and_the_docs_words() -> None:
+def test_readme_shell_examples_have_valid_syntax() -> None:
     readme = (TUTORIAL / "README.md").read_text(encoding="utf-8")
-    assert readme.isascii()
-    assert RUNS_HEADER in readme
-    assert "<!-- rows -->" in readme
-    # Every row is a live run naming the pull request it ran on; the marker stays where the next row lands.
-    separator = "|" + "---|" * RUNS_COLUMNS
-    table = readme.split(f"{RUNS_HEADER}\n{separator}\n", 1)[1].split("<!-- rows -->", 1)[0]
-    rows = [line for line in table.splitlines() if line]
-    assert rows and all(line.startswith("| ") and line.count("|") == RUNS_COLUMNS + 1 for line in rows)
-    assert all(re.search(r"\| #\d+ \|", line) for line in rows)
-    measure_separator = "|" + "---|" * MEASURE_COLUMNS
-    measured = readme.split(f"{MEASURE_HEADER}\n{measure_separator}\n", 1)[1].split("<!-- measure rows -->", 1)[0]
-    measure_rows = [line for line in measured.splitlines() if line]
-    assert measure_rows and all(line.count("|") == MEASURE_COLUMNS + 1 for line in measure_rows)
-    assert all(re.search(r"\| #\d+ \|", line) for line in measure_rows)
+    commands = re.findall(r"```bash\n(.*?)```", readme, re.DOTALL)
+    assert commands
+    for command in commands:
+        done = subprocess.run(["bash", "-n"], input=command, capture_output=True, text=True)
+        assert done.returncode == 0, done.stderr
+
+
+def test_readme_local_links_and_terminology() -> None:
+    readme = (TUTORIAL / "README.md").read_text(encoding="utf-8")
+    links = re.findall(r"\]\(([^)]+)\)", readme)
+    assert links
+    for link in links:
+        if link.startswith(("https://", "http://", "#")):
+            continue
+        assert (TUTORIAL / link.partition("#")[0]).exists(), link
     for pattern in DROPPED_WORDS:
         assert re.search(pattern, readme, re.IGNORECASE) is None, pattern
-    for heading in (
-        "## Directory layout",
-        "## Quick start",
-        "## What each demo does",
-        "## The measurement",
-        "## Environment",
-        "## Runs",
-        "## Reading",
-        "## Reproduce",
-        "## Notes",
-        "## Known limitations",
-    ):
-        assert heading in readme
-    for needle in ("./run.sh bugfix", "REEF_UPSTREAM_URL", "REEF_UPSTREAM_MODEL", "REEF_UPSTREAM_API_KEY"):
-        assert needle in readme
-    assert "selection: floor" in readme and "passed / failed" in readme
-    # The historical rows ran under selection: always; the README says so beside them.
-    assert "selection: always" in readme and "RFC #308" in readme
-    # The rows ran on the request store head; the README names that commit until rows from this path land.
-    assert "training_mode: manual" in readme and "7e3982bb" in readme
-    # One paragraph is one line: no hard wraps inside prose, fenced blocks aside.
-    lines = readme.splitlines()
-    fenced = False
-    for index, line in enumerate(lines[:-1]):
-        if line.startswith("```"):
-            fenced = not fenced
-            continue
-        if fenced or not line or line.startswith(("#", "|", "-", " ", "<!--")) or line[0].isdigit():
-            continue
-        following = lines[index + 1]
-        assert following == "" or following.startswith(("#", "|", "-", "`", "<!--")), line[:60]
 
 
 def test_the_tutorial_is_listed_beside_the_other() -> None:

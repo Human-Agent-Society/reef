@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from reef_service.test_task_player import StandInReef
 
+from reef.core.tasks import TaskGenerationRequest
 from reef.record2dataset import (
     DesignerError,
     DesignerReplyError,
@@ -17,6 +20,7 @@ from reef.record2dataset import (
     designer_prompt,
     parse_harbor_reply,
 )
+from reef.record2dataset.wire import designer_request_document
 
 pytestmark = pytest.mark.unit
 
@@ -221,3 +225,21 @@ def test_a_refused_designer_call_is_a_designer_error() -> None:
         reef.close()
     with pytest.raises(DesignerError, match="timeout_s"):
         ReefDesigner(reef_url="http://127.0.0.1:1", timeout_s=0)
+
+
+def test_designer_wraps_shared_inputs_and_retains_legacy_target_calls() -> None:
+    inputs = TaskGenerationRequest((), "recover the port")
+    request = DesignerRequest(inputs, difficulty="hard")
+    assert request.inputs is inputs
+    assert request.target == inputs.description
+    assert DesignerRequest("recover the port") == DesignerRequest(target="recover the port")
+    assert replace(request, difficulty="easy").inputs is inputs
+    with pytest.raises(ValueError, match="not both"):
+        DesignerRequest(inputs, target="another task")
+
+
+def test_unread_assets_cannot_be_silently_omitted_from_prompt_or_wire(tmp_path: Path) -> None:
+    request = DesignerRequest(TaskGenerationRequest((), "rebuild", (tmp_path / "source",)))
+    for render in (designer_prompt, designer_request_document):
+        with pytest.raises(ValueError, match="local assets"):
+            render(request)

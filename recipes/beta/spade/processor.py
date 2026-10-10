@@ -47,19 +47,20 @@ from recipes.beta.spade.generation import (
     write_generation_report,
 )
 from reef.core import AgentRecord
-from reef.core.tasks import HarborTask
+from reef.core.tasks import HarborTask, TaskGenerationRequest
 from reef.record2dataset.client import (
     DuplicateTask,
     Generator,
     GeneratorError,
     HttpGenerator,
+    ProposedTask,
     TaskNameConflict,
     WrittenTask,
 )
 from reef.record2dataset.designer import DesignerRequest
 from reef.train.processors.computed import Failed, JudgingWorker, SupportsReceipt
 from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
-from reef.train.processors.task_generation import TaskGenerationProcessor, TaskGenerationRequest, TaskValidationResult
+from reef.train.processors.task_generation import TaskGenerationProcessor, TaskValidationResult
 from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
 
 logger = logging.getLogger(__name__)
@@ -325,37 +326,57 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
     async def generate(
         self, request: TaskGenerationRequest, *, skill: str | None = None, index: int = 0
     ) -> HarborTask:
-        """One Designer proposal through the generator service; a reply that is no task raises :class:`ProposalRefused`."""
+        """Generate one task through the generator service.
+
+        Raise :class:`ProposalRefused` if the Designer reply contains no usable task.
+        """
+        proposed = await self.propose_task(request, skill=skill, index=index)
+        if proposed.task is None:
+            raise ProposalRefused(proposed.refusal, proposed.record_id)
+        return proposed.task
+
+    async def propose_task(
+        self,
+        request: TaskGenerationRequest,
+        *,
+        skill: str | None = None,
+        index: int = 0,
+        generation: int | None = None,
+    ) -> ProposedTask:
+        """Forward selected records and local materials, retaining the Designer's receipt for feedback."""
         if self.generator is None:
             raise GeneratorError("this processor has no generator service to ask")
+        if any(record.scenario != self.scenario for record in request.source_records):
+            raise ValueError("source records must belong to the processor's scenario")
+        if generation is None:
+            generation = self._generation
         designer_request = DesignerRequest(
-            target=request.description,
+            inputs=request,
             skill=skill,
             difficulty=self.difficulty,
             turn_limit=self.turn_limit,
             grounding=self.grounding,
             experience_text=experience_text(experience_for(self._experience, skill)),
         )
-        tags = {"role": "designer", "generation": str(self._generation), **skill_tag(skill)}
-        proposed = await self.generator.propose(
+        tags = {"role": "designer", "generation": str(generation), **skill_tag(skill)}
+        return await self.generator.propose(
             designer_request,
             scenario=self.scenario,
-            generation=self._generation,
+            generation=generation,
             index=index,
             tags=tags,
             model=self.served_model,
         )
-        if proposed.task is None:
-            raise ProposalRefused(proposed.refusal, proposed.record_id)
-        return proposed.task
 
     async def write(self, task: HarborTask) -> WrittenTask:
-        """The task written under the generator's root; a name an earlier attempt of the generation took is replaced."""
+        """Write a task; only description-based generation retries may replace a conflicting name."""
         if self.generator is None:
             raise GeneratorError("this processor has no generator service to ask")
         try:
             return await self.generator.write_task(task)
         except TaskNameConflict:
+            if "designer_record_id" in task.metadata:
+                raise
             # A reload cancelled this generation's earlier attempt; what it wrote under the name gives way.
             await self.generator.delete_task(task.name)
             return await self.generator.write_task(task)
@@ -400,17 +421,21 @@ class SpadeProcessor(ReportedFeedbackProcessor, TaskGenerationProcessor):
         )
 
     async def proposed(
-        self, generation: int, index: int, skill: str | None
+        self, generation: int, index: int, skill: str | None, *, request: TaskGenerationRequest | None = None
     ) -> tuple[ProposalRecord, TaskMeasure | None]:
-        """One proposal from the Designer's call to its report: the task measured, or the refusal."""
+        """Run one proposal through generation, validation, play, and feedback.
+
+        Return the proposal record and any task measurement.
+        """
         if self.generator is None:
             raise GeneratorError("this processor has no generator service to ask")
-        request = TaskGenerationRequest((), self.description)
-        try:
-            task = await self.generate(request, skill=skill, index=index)
-        except ProposalRefused as exc:
-            return await self.reported(ProposalRecord(index, skill, exc.record_id, None, str(exc)), None)
-        record_id = task.source_agent_record_ids[0]
+        if request is None:
+            request = TaskGenerationRequest((), self.description)
+        proposed = await self.propose_task(request, skill=skill, index=index, generation=generation)
+        record_id = proposed.record_id
+        task = proposed.task
+        if task is None:
+            return await self.reported(ProposalRecord(index, skill, record_id, None, proposed.refusal), None)
         try:
             written = await self.write(task)
         except (DuplicateTask, TaskNameConflict) as exc:
