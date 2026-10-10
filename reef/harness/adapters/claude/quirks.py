@@ -6,21 +6,18 @@ feature-gate cache, per-session ``todos/`` lists, and ``shell-snapshots/``.
 The descriptor whitelists those so the episode inverse tolerates them and
 reports anything else as residue.
 
-``process_config`` enforces the traps a mutated ``settings.json`` could
-reopen; a composition that breaks one is rejected at render, the same check
-that rejects an invalid node. Claude Code copies ``settings.env`` over its
-own environment. The episode env turns telemetry and non-essential traffic
-off, so ``settings.env`` must not set either to ``0``, ``false``, ``off``,
-``no`` or an empty value. The episode env and ``reef-claude`` set
-``DISABLE_AUTOUPDATER`` and ``DISABLE_UPDATES`` so that Claude Code's updater
-and its own ``update`` and ``install`` keep the pinned version; Claude Code
-reads them as on only for ``1``, ``true``, ``yes`` or ``on``, so
-``settings.env`` must not set either one at all. ``includeCoAuthoredBy`` must
-stay off, and ``disableDeepLinkRegistration`` must stay ``"disable"``:
-``reef-claude`` passes the same setting as ``--settings`` so that no tree can
-point the person's ``claude-cli://`` link handler at the pinned binary, and
-the default here covers a run where the person passes their own
-``--settings``.
+``process_config`` enforces what the declaration cannot state. Claude Code
+copies ``settings.env`` over its own environment. The episode env turns
+telemetry and non-essential traffic off, so ``settings.env`` must not set
+either to ``0``, ``false``, ``off``, ``no`` or an empty value. The episode
+env and ``reef-claude`` set ``DISABLE_AUTOUPDATER`` and ``DISABLE_UPDATES``
+so that Claude Code's updater and its own ``update`` and ``install`` keep
+the pinned version; Claude Code reads them as on only for ``1``, ``true``,
+``yes`` or ``on``, so ``settings.env`` must not set either one at all, under
+any name Windows matches without case. The keys a settings.json must keep,
+and the settings keys that choose the model, a credential helper or a login
+method, are declared in the descriptor and refused by the shared render
+before this step runs.
 
 It also keeps every model call on Reef's model binding. The binding writes
 ``ANTHROPIC_BASE_URL``, ``ANTHROPIC_AUTH_TOKEN`` and ``ANTHROPIC_MODEL`` into
@@ -29,8 +26,7 @@ token is a credential, which a tree cannot hold because admission refuses an
 inline credential, so the three names pass only beside the binding's token.
 Any other env name Claude Code reads to choose the endpoint (another
 provider such as Bedrock or Vertex, a proxy), the credential or the model,
-a settings key that chooses the model, a credential helper or a login
-method, and a ``model`` in the frontmatter of a command or a skill are the
+and a ``model`` in the frontmatter of a command or a skill are the
 tree choosing where calls go, and are refused. Claude Code merges the JSON
 object in ``CLAUDE_CODE_EXTRA_BODY`` into every request body, over the bound
 model, so that object may not name a model (``model``, or OpenRouter's
@@ -79,24 +75,6 @@ EXTRA_BODY_ENV = "CLAUDE_CODE_EXTRA_BODY"
 #: Request body fields that name the model: ``model`` replaces the bound one, and OpenRouter reads ``models`` as
 #: fallback models.
 BODY_MODEL_KEYS = ("model", "models")
-#: settings.json keys that choose the model, a credential helper or a login method.
-MODEL_ROUTE_SETTINGS = (
-    "advisorModel",
-    "apiKeyHelper",
-    "availableModels",
-    "awsAuthRefresh",
-    "awsCredentialExport",
-    "enforceAvailableModels",
-    "fallbackModel",
-    "forceLoginGatewayUrl",
-    "forceLoginMethod",
-    "gcpAuthRefresh",
-    "model",
-    "modelOverrides",
-    "modelPicker",
-    "proxyAuthHelper",
-    "switchModelsOnFlag",
-)
 #: Claude Code's frontmatter block: after a byte order mark, an opening --- line, then the text up to the next ---.
 FRONTMATTER_BLOCK = re.compile(r"---\s*\n([\s\S]*?)---\s*\n?")
 #: A plain ``key: value`` line and the value characters Claude Code quotes when its YAML reader refuses the block.
@@ -178,13 +156,6 @@ def extra_body_names_model(value: object) -> bool:
 class ClaudeAdapterRenderer(AdapterRenderer):
     @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        if config.get("includeCoAuthoredBy") is True:
-            raise RenderError("claude composition must keep includeCoAuthoredBy false for benchmark episodes")
-        if config.get("disableDeepLinkRegistration") != "disable":
-            raise RenderError(
-                'claude composition must keep disableDeepLinkRegistration "disable" so a reef-claude session '
-                "leaves the person's claude-cli:// handler alone"
-            )
         env = config.get("env")
         if isinstance(env, dict):
             # The episode env and reef-claude set the updater switches, and a tree value other than 1, true, yes or
@@ -221,11 +192,6 @@ class ClaudeAdapterRenderer(AdapterRenderer):
                         f"claude composition env {name} must be a JSON object without model or models: "
                         "Reef's model binding chooses the model"
                     )
-        for key in MODEL_ROUTE_SETTINGS:
-            if key in config:
-                raise RenderError(
-                    f"claude composition must not set {key}: Reef's model binding chooses the model and its credential"
-                )
         for path, text in {**skills, **commands}.items():
             if frontmatter_chooses_model(text):
                 raise RenderError(

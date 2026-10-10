@@ -45,6 +45,19 @@ files:
         enabled_providers: ["reef"]
         permission:
           "*": "allow"
+      # Keys the merged config must keep at the defaults' value, and keys no tree may set at all: the shared
+      # render refuses a composition that moves them, before any quirks step runs. autoupdate, share and
+      # enabled_providers keep a benchmark episode hermetic and on the binding's provider only; the rest choose
+      # a model beyond the binding, which Reef's model binding writes.
+      locked:
+        - autoupdate
+        - share
+        - enabled_providers
+        - small_model
+        - disabled_providers
+        - agent.*.model
+        - mode.*.model
+        - command.*.model
   rules: "opencode/AGENTS.md"
   agent_command: "opencode/command/{name}.md"
   skill: "opencode/skill/{name}/SKILL.md"

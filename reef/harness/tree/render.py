@@ -5,19 +5,20 @@ descriptor, so a candidate tree can be rendered before and after a mutation
 and compared without touching disk. Config nodes deep-merge into their
 target in tree order over the descriptor's enforced defaults; rules nodes
 concatenate in tree order into the rules file; named kinds render one file
-per node through the descriptor's path templates. The descriptor's
-``renderer`` then processes the config, skill and command files, checks the
-model route, writes each config file in its harness's format, and gets the
-last word in ``finalize_render``, so adapter traps (opencode's
-``autoupdate: false``) are enforced on every rendered tree, not just the
-default one.
+per node through the descriptor's path templates. The shared render refuses
+a tree that sets a locked key off its target's defaults (or sets one the
+defaults never name), then the descriptor's ``renderer`` processes the
+config, skill and command files, checks the model route, writes each config
+file in its harness's format, and gets the last word in ``finalize_render``,
+so what the descriptor declares and what its adapter enforces hold on every
+rendered tree, not just the default one.
 """
 
 from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from pathlib import PurePosixPath
 from typing import Any
 
@@ -213,6 +214,7 @@ def apply_adapter_renderer(descriptor: AdapterDescriptor, files: dict[str, str])
     renderer = descriptor.renderer
     merged = {target.path: json.loads(files[target.path]) for target in descriptor.config_targets.values()}
     check_model_route(descriptor, merged)
+    check_locked_keys(descriptor, merged)
     configs = {path: renderer.process_config(path, config) for path, config in merged.items()}
     skill_path = template_pattern(descriptor.node_paths["skill"])
     command_template = descriptor.node_paths.get("agent_command")
@@ -263,6 +265,73 @@ def check_model_route(descriptor: AdapterDescriptor, configs: Mapping[str, Mappi
                 f"{descriptor.name} composition must not set {'.'.join(segments)} in {path}: "
                 "Reef's model binding writes it"
             )
+
+
+def check_locked_keys(descriptor: AdapterDescriptor, configs: Mapping[str, Mapping[str, Any]]) -> None:
+    """Refuse a tree that sets a locked key off its target's defaults, or sets one the defaults never name.
+
+    The descriptor's ``locked`` paths state what a composition must keep: after the merge, the value at each
+    locked path must equal the defaults' value there, and a path the defaults do not set must not appear at all -
+    an empty value is a set one. A section of the defaults the tree clobbers with a non object refuses too, since
+    it takes every locked key below it away. The check runs once for every adapter, after the binding check and
+    before the renderer's steps, so a declared lock holds on every rendered tree and no adapter can skip it.
+    """
+    for target in descriptor.config_targets.values():
+        config = configs[target.path]
+        for locked in target.locked:
+            segments = tuple(locked.split("."))
+            for found, value in _locked_matches(config, segments, ()):
+                named, expected = _value_at(target.defaults, found)
+                if not named:
+                    raise RenderError(
+                        f"{descriptor.name} composition must not set {'.'.join(found)} in {target.path}: "
+                        "the descriptor locks it, and its defaults do not set it"
+                    )
+                if isinstance(value, bool) != isinstance(expected, bool) or value != expected:
+                    raise RenderError(
+                        f"{descriptor.name} composition must keep {'.'.join(found)} {json.dumps(expected, default=repr)} "
+                        f"in {target.path}: the descriptor locks it"
+                    )
+            for kept, expected in _locked_matches(target.defaults, segments, ()):
+                if not _locked_matches(config, kept, ()):
+                    raise RenderError(
+                        f"{descriptor.name} composition must keep {'.'.join(kept)} {json.dumps(expected, default=repr)} "
+                        f"in {target.path}: the descriptor locks it, and the merged config does not have it"
+                    )
+
+
+def _locked_matches(data: Any, segments: tuple[str, ...], path: tuple[str, ...]) -> list[tuple[tuple[str, ...], Any]]:
+    """Each concrete key path ``segments`` matches in ``data``, with the value there.
+
+    A ``*`` segment matches every key of an object and every item of a list; a segment that would read through a
+    value that is neither matches nothing, so a pattern never crashes on a config of the wrong shape.
+    """
+    if not segments:
+        return [(path, data)]
+    first, rest = segments[0], segments[1:]
+    if first == "*":
+        found: Iterable[tuple[Any, Any]] = (
+            data.items() if isinstance(data, Mapping) else enumerate(data) if isinstance(data, list) else ()
+        )
+    elif isinstance(data, Mapping) and first in data:
+        found = ((first, data[first]),)
+    else:
+        found = ()
+    return [match for key, value in found for match in _locked_matches(value, rest, (*path, str(key)))]
+
+
+def _value_at(data: Any, segments: tuple[str, ...]) -> tuple[bool, Any]:
+    """Whether ``segments`` names a value in ``data``, and that value; a path through anything else is unnamed."""
+    for segment in segments:
+        if isinstance(data, Mapping):
+            if segment not in data:
+                return False, None
+            data = data[segment]
+        elif isinstance(data, list) and segment.isdigit() and int(segment) < len(data):
+            data = data[int(segment)]
+        else:
+            return False, None
+    return True, data
 
 
 def binding_leaves(data: Mapping[str, Any], segments: tuple[str, ...]) -> list[tuple[tuple[str, ...], Any]]:

@@ -79,6 +79,11 @@ whatever the adapter declares; for example:
 - An entry whose kind the descriptor gives no path, such as ``code_extension``
   under ``native``.
 - A ``config`` entry naming a target the descriptor does not declare.
+- A ``config`` entry that moves a key of the target's ``locked`` list off the
+  value its ``defaults`` set, or that sets a locked key the defaults never
+  name. A locked path is dotted key names with ``*`` for any key of an object
+  or any item of a list, and the check runs before the adapter's own steps, so
+  no adapter can skip it.
 - A ``native_graph`` or ``native_agent`` naming a tool, skill, agent, or graph
   that no entry defines, or agents that delegate in a cycle.
 - A second ``native_loop``: a tree holds at most one.
@@ -87,8 +92,9 @@ What the adapter owns
 ^^^^^^^^^^^^^^^^^^^^^
 
 An adapter is configured mostly via declaration. ``descriptor.yaml`` supplies
-the path template for each tree node kind, the named config targets, and the
-defaults merged under every tree. An adapter whose agent differs only in where
+the path template for each tree node kind, the named config targets, the
+defaults merged under every tree, and the keys a tree must keep (``locked``).
+An adapter whose agent differs only in where
 files go needs no code at all, although they must comply with the following
 rules:
 
@@ -110,7 +116,7 @@ files:
      - Use it to
    * - ``process_config``
      - One merged config file, as a JSON object
-     - Refuse or adjust config, such as a setting the tree must keep
+     - Refuse or adjust config, such as a shape the declaration cannot state
    * - ``process_skill``
      - The text of one ``skill`` file
      - Add or check skill frontmatter

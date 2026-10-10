@@ -61,6 +61,11 @@ files:
     primary:
       path: "pi-agent/settings.json"
       defaults: {}
+      # Keys no tree may set at all: they choose the models a run may use or
+      # send every call through another host, which Reef's model binding owns.
+      locked:
+        - enabledModels
+        - httpProxy
     models:
       path: "pi-agent/models.json"
       defaults: {}

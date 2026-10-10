@@ -34,8 +34,11 @@ The traps a mutated patch could reopen, in either profile: the session log
 must stay plain JSONL (the reader cannot parse zstd, and a compressed
 profile refuses a sessions root that holds plain logs), and the session
 telemetry and the LLM title call stay disabled; the web profile's manifest
-keeps ``patchReload: startup``. A composition that flips any of them is
-rejected at render, the same check that rejects an invalid node.
+keeps ``patchReload: startup``. These keys are declared locks in the
+descriptor, and the shared render refuses a composition that moves them
+before any quirks step runs; the chained reads the check here needed would
+have crashed on a section that is not an object. This step keeps the shape
+check: a patch entry must be an object.
 
 Every model call stays on Reef's model binding, in either profile. The
 binding writes the ``llm-pi-ai`` route ``reef`` and selects it in
@@ -295,23 +298,11 @@ def check_model_route(entries: dict[str, Any]) -> None:
 class DshAdapterRenderer(AdapterRenderer):
     @staticmethod
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
-        if path == WEB_MANIFEST:
-            if config.get("dsh", {}).get("profile", {}).get("patchReload") != "startup":
-                raise RenderError(f"dsh composition must keep dsh.profile.patchReload startup in {WEB_MANIFEST}")
+        if path not in PROFILE_PATCHES and path != WEB_MANIFEST:
             return config
-        if path not in PROFILE_PATCHES:
-            return config
-        for plugin, entry in config.items():
+        for plugin, entry in config.items() if path in PROFILE_PATCHES else ():
             if not isinstance(entry, dict):
                 raise RenderError(f"dsh patch entry {plugin!r} must be an object holding config, disabled, or inject")
-        if config.get("session-persistence-jsonl", {}).get("config", {}).get("compression") != "none":
-            raise RenderError(
-                f"dsh composition must keep the session log uncompressed (compression: none) in {path}: "
-                "Reef reads it, and the profiles share one sessions root"
-            )
-        for plugin in ("session-telemetry-otel", "session-title-llm"):
-            if config.get(plugin, {}).get("disabled") is not True:
-                raise RenderError(f"dsh composition must keep {plugin} disabled in {path}")
         return config
 
     @staticmethod

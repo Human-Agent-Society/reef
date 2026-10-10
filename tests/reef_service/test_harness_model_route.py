@@ -44,11 +44,6 @@ CLAUDE_REFUSED = [
     pytest.param({"env": {"ANTHROPIC_DEFAULT_HAIKU_MODEL": "m"}}, id="env-tier-model"),
     pytest.param({"env": {"CLAUDE_CODE_SUBAGENT_MODEL": "m"}}, id="env-subagent-model"),
     pytest.param({"env": {"anthropic_base_url": OTHER_URL}}, id="env-name-in-another-case"),
-    pytest.param({"model": "m"}, id="settings-model"),
-    pytest.param({"fallbackModel": ["m"]}, id="settings-fallback-model"),
-    pytest.param({"apiKeyHelper": "echo k"}, id="credential-helper"),
-    pytest.param({"awsAuthRefresh": "aws sso login"}, id="cloud-credential-helper"),
-    pytest.param({"forceLoginMethod": "gateway"}, id="login-method"),
     pytest.param({"env": {"CLAUDE_CODE_EXTRA_BODY": '{"model": "m"}'}}, id="body-model"),
     pytest.param({"env": {"CLAUDE_CODE_EXTRA_BODY": '{"models": ["m"]}'}}, id="body-fallback-models"),
     pytest.param({"env": {"CLAUDE_CODE_EXTRA_BODY": '\ufeff{"model": "m"}'}}, id="body-after-byte-order-mark"),
@@ -56,11 +51,28 @@ CLAUDE_REFUSED = [
     pytest.param({"env": {"CLAUDE_CODE_EXTRA_BODY": "{model: m}"}}, id="body-render-cannot-read"),
 ]
 
+#: settings.json keys the descriptor locks: fixed names a tree must not set, so the shared render refuses them
+#: before the adapter's own route check runs.
+CLAUDE_LOCKED = [
+    pytest.param({"model": "m"}, id="settings-model"),
+    pytest.param({"fallbackModel": ["m"]}, id="settings-fallback-model"),
+    pytest.param({"apiKeyHelper": "echo k"}, id="credential-helper"),
+    pytest.param({"awsAuthRefresh": "aws sso login"}, id="cloud-credential-helper"),
+    pytest.param({"forceLoginMethod": "gateway"}, id="login-method"),
+]
+
 
 @pytest.mark.parametrize("data", CLAUDE_REFUSED)
 @pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
 def test_claude_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
     with pytest.raises(RenderError, match="Reef's model binding"):
+        render("claude", [config(data)], bound=bound, api="anthropic")
+
+
+@pytest.mark.parametrize("data", CLAUDE_LOCKED)
+@pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
+def test_claude_refuses_a_key_the_descriptor_locks(data: dict[str, Any], bound: bool) -> None:
+    with pytest.raises(RenderError, match="the descriptor locks it"):
         render("claude", [config(data)], bound=bound, api="anthropic")
 
 
@@ -113,12 +125,6 @@ HERMES_REFUSED = [
     pytest.param({"model": "openrouter/m"}, False, id="model-name"),
     pytest.param({"model": {"model": "m"}}, True, id="model-alternate-name"),
     pytest.param(
-        {"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER_URL}}, True, id="fallback-model"
-    ),
-    pytest.param({"fallback_providers": [{"provider": "openrouter", "model": "m"}]}, True, id="fallback-providers"),
-    pytest.param({"providers": {"evil": {"base_url": OTHER_URL, "key_cmd": "echo k"}}}, True, id="named-provider"),
-    pytest.param({"custom_providers": [{"name": "evil", "base_url": OTHER_URL}]}, True, id="custom-providers"),
-    pytest.param(
         {"auxiliary": {"compression": {"provider": "custom", "base_url": OTHER_URL, "model": "m"}}},
         True,
         id="auxiliary",
@@ -131,16 +137,9 @@ HERMES_REFUSED = [
     pytest.param({"delegation": {"provider": "custom", "base_url": OTHER_URL, "model": "m"}}, True, id="delegation"),
     pytest.param({"moa": {"presets": {"p": {"aggregator": {"provider": "custom", "model": "m"}}}}}, True, id="moa"),
     pytest.param({"cron": {"model": "m", "provider": "openrouter"}}, True, id="cron"),
-    pytest.param({"base_url": OTHER_URL}, False, id="top-level-endpoint"),
-    pytest.param({"provider": "openrouter"}, True, id="top-level-provider"),
     pytest.param({"model": {"api_base": OTHER_URL}}, False, id="model-endpoint-alias"),
     pytest.param({"model": {"name": "m"}}, True, id="model-name-alias"),
     pytest.param({"model": {"key_env": "OPENROUTER_API_KEY"}}, True, id="model-key-name"),
-    pytest.param(
-        {"model_aliases": {"fast": {"model": "m", "provider": "custom", "base_url": OTHER_URL}}},
-        True,
-        id="model-aliases",
-    ),
     pytest.param({"model": {"aliases": {"fast": "openrouter/m"}}}, True, id="model-short-aliases"),
     pytest.param(
         {
@@ -181,6 +180,28 @@ HERMES_REFUSED = [
 @pytest.mark.parametrize(("data", "bound"), HERMES_REFUSED)
 def test_hermes_refuses_a_setting_that_chooses_the_route(data: dict[str, Any], bound: bool) -> None:
     with pytest.raises(RenderError, match="Reef's model binding"):
+        render("hermes", [config(data)], bound=bound)
+
+
+#: Top-level keys the descriptor locks: hermes moves them into ``model``, and a tree must not set them at all,
+#: so the shared render refuses them before the adapter's own route check runs.
+HERMES_LOCKED = [
+    pytest.param({"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER_URL}}, id="fallback-model"),
+    pytest.param({"fallback_providers": [{"provider": "openrouter", "model": "m"}]}, id="fallback-providers"),
+    pytest.param({"providers": {"evil": {"base_url": OTHER_URL, "key_cmd": "echo k"}}}, id="named-provider"),
+    pytest.param({"custom_providers": [{"name": "evil", "base_url": OTHER_URL}]}, id="custom-providers"),
+    pytest.param({"base_url": OTHER_URL}, id="top-level-endpoint"),
+    pytest.param({"provider": "openrouter"}, id="top-level-provider"),
+    pytest.param(
+        {"model_aliases": {"fast": {"model": "m", "provider": "custom", "base_url": OTHER_URL}}}, id="model-aliases"
+    ),
+]
+
+
+@pytest.mark.parametrize("data", HERMES_LOCKED)
+@pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
+def test_hermes_refuses_a_key_the_descriptor_locks(data: dict[str, Any], bound: bool) -> None:
+    with pytest.raises(RenderError, match="the descriptor locks it"):
         render("hermes", [config(data)], bound=bound)
 
 
@@ -300,14 +321,26 @@ PI_REFUSED = [
     ),
     pytest.param(config({"providers": {"reef": {"headers": {"x": "!cat k"}}}}, "models"), True, id="binding-extra"),
     pytest.param(config({"defaultProvider": "evil", "defaultModel": "evil/m"}), False, id="default-model"),
-    pytest.param(config({"enabledModels": ["evil/m"]}), True, id="enabled-models"),
-    pytest.param(config({"httpProxy": OTHER_URL}), True, id="proxy"),
+]
+
+#: settings.json keys the descriptor locks: fixed names a tree must not set, so the shared render refuses them
+#: before the adapter's own route check runs.
+PI_LOCKED = [
+    pytest.param(config({"enabledModels": ["evil/m"]}), id="enabled-models"),
+    pytest.param(config({"httpProxy": OTHER_URL}), id="proxy"),
 ]
 
 
 @pytest.mark.parametrize(("node", "bound"), PI_REFUSED)
 def test_pi_refuses_a_setting_that_chooses_the_route(node: tuple[str, dict[str, Any]], bound: bool) -> None:
     with pytest.raises(RenderError, match="Reef's model binding"):
+        render("pi", [node], bound=bound)
+
+
+@pytest.mark.parametrize("node", PI_LOCKED)
+@pytest.mark.parametrize("bound", [False, True], ids=["tree", "bound"])
+def test_pi_refuses_a_key_the_descriptor_locks(node: tuple[str, dict[str, Any]], bound: bool) -> None:
+    with pytest.raises(RenderError, match="the descriptor locks it"):
         render("pi", [node], bound=bound)
 
 
@@ -362,21 +395,34 @@ def test_terminus_keeps_the_arguments_a_tree_tunes() -> None:
 
 
 @pytest.mark.parametrize(
-    ("adapter", "data"),
+    ("adapter", "data", "refusal"),
     [
-        ("claude", {"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": OTHER_URL}}),
-        ("claude", {"env": {"CLAUDE_CODE_EXTRA_BODY": '{"model": "m"}'}}),
-        ("hermes", {"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER_URL}}),
-        ("hermes", {"auxiliary": {"compression": {"fallback_chain": [{"provider": "custom", "model": "m"}]}}}),
-        ("hermes", {"delegation": {"request_overrides": {"model": "m"}}}),
-        ("hermes", {"model": {"api_mode": "bedrock_converse"}}),
-        ("dsh", {"llm-pi-ai": {"config": {"providers": {"evil": DSH_ROUTE}}}}),
-        ("pi", {"enabledModels": ["evil/m"]}),
-        ("terminus", {"llm_call_kwargs": {"base_url": OTHER_URL}}),
-        ("terminus", {"llm_call_kwargs": {"extra_body": {"model": "m"}}}),
+        (
+            "claude",
+            {"env": {"CLAUDE_CODE_USE_BEDROCK": "1", "ANTHROPIC_BEDROCK_BASE_URL": OTHER_URL}},
+            "Reef's model binding",
+        ),
+        ("claude", {"env": {"CLAUDE_CODE_EXTRA_BODY": '{"model": "m"}'}}, "Reef's model binding"),
+        ("claude", {"fallbackModel": ["m"]}, "the descriptor locks it"),
+        (
+            "hermes",
+            {"fallback_model": {"provider": "custom", "model": "m", "base_url": OTHER_URL}},
+            "the descriptor locks it",
+        ),
+        (
+            "hermes",
+            {"auxiliary": {"compression": {"fallback_chain": [{"provider": "custom", "model": "m"}]}}},
+            "Reef's model binding",
+        ),
+        ("hermes", {"delegation": {"request_overrides": {"model": "m"}}}, "Reef's model binding"),
+        ("hermes", {"model": {"api_mode": "bedrock_converse"}}, "Reef's model binding"),
+        ("dsh", {"llm-pi-ai": {"config": {"providers": {"evil": DSH_ROUTE}}}}, "Reef's model binding"),
+        ("pi", {"enabledModels": ["evil/m"]}, "the descriptor locks it"),
+        ("terminus", {"llm_call_kwargs": {"base_url": OTHER_URL}}, "Reef's model binding"),
+        ("terminus", {"llm_call_kwargs": {"extra_body": {"model": "m"}}}, "Reef's model binding"),
     ],
 )
-def test_admission_refuses_the_proposal_and_says_why(adapter: str, data: dict[str, Any]) -> None:
+def test_admission_refuses_the_proposal_and_says_why(adapter: str, data: dict[str, Any], refusal: str) -> None:
     proposal = Mutation("create", "route", {"name": "config", "config": {"data": data}})
-    entries, refusal = admit_mutations([], [proposal], get_adapter(adapter))
-    assert entries == [] and refusal is not None and "Reef's model binding" in refusal
+    entries, refusal_message = admit_mutations([], [proposal], get_adapter(adapter))
+    assert entries == [] and refusal_message is not None and refusal in refusal_message

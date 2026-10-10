@@ -16,11 +16,13 @@ seeds with its own only while the file is absent, so the rules follow that
 default identity instead of replacing it.
 
 The traps a mutated config could reopen: the scanner download, the session
-title call, the background review and the curator that write skills into the
-tree, and the snapshot the reader parses. A composition that flips any of
-them, puts a value that is not an object where a section holding one
-belongs, or puts a value that is not a list of strings where Reef adds a
-name, is rejected at render, the same check that rejects an invalid node.
+title call, the background review and the curator that write skills into
+the tree, and the snapshot the reader parses, are declared in the
+descriptor and refused by the shared render before any quirks step runs.
+This step checks what the declaration cannot state: a section holding a
+value that is not an object where one belongs, and a value that is not a
+list of strings where Reef adds a name, are rejected at render, the same
+check that rejects an invalid node.
 
 Every model call stays on Reef's model binding. The binding writes the
 ``model`` section (a ``custom`` provider, the endpoint, the model and a
@@ -29,12 +31,13 @@ is a credential, which a tree cannot hold because admission refuses an
 inline credential, so those keys pass only beside the binding's key. The
 other names hermes reads for the model, the endpoint or the key (in
 ``model``, and at the top level, which hermes moves into ``model``), the
-model aliases, the sections that name other providers, their endpoints and
-credential commands (``providers``, ``custom_providers``), the fallback
-models (``fallback_model``, ``fallback_providers``) and the mixture of
-agents presets, and a provider, an endpoint, a credential, a model or a
-fallback chain set for an auxiliary task, for delegation, for cron or for
-the curator, are the tree choosing where calls go, and are refused. An
+sections that name other providers, their endpoints and credential commands
+(``providers``, ``custom_providers``) and the fallback models
+(``fallback_model``, ``fallback_providers``) are declared locks beside the
+descriptor's defaults. The model aliases, the mixture of agents presets,
+and a provider, an endpoint, a credential, a model or a fallback chain set
+for an auxiliary task, for delegation, for cron or for the curator, are the
+tree choosing where calls go, and are refused here. An
 auxiliary task may keep ``auto`` or ``main``, which run it on the main
 model. The binding sets no transport, so a tree's ``api_mode`` (in
 ``model`` or in any of those sections) and ``model.openai_runtime`` are
@@ -90,10 +93,6 @@ DEFAULT_IDENTITY = (
 MODEL_ALIAS_KEYS = ("aliases", "api_base", "api_key_env", "key_cmd", "key_env", "model", "name")
 #: The ``model`` keys hermes reads for the transport; the binding writes neither.
 TRANSPORT_KEYS = ("api_mode", "openai_runtime")
-#: Top-level keys hermes moves into ``model`` (the provider and the endpoint), and the model aliases with their routes.
-ROOT_ROUTE_KEYS = ("api_base", "base_url", "model_aliases", "provider")
-#: Sections that name other providers, their endpoints and credential commands, or the fallback models.
-PROVIDER_SECTIONS = ("custom_providers", "fallback_model", "fallback_providers", "providers")
 #: The mixture of agents keys that name its models: the presets, and the older flat form of one preset.
 MOA_KEYS = ("aggregator", "presets", "reference_models")
 #: The keys of an auxiliary task, of delegation, of cron and of the curator that choose its provider, endpoint,
@@ -219,9 +218,6 @@ def check_model_route(config: dict[str, Any]) -> None:
     for key in TRANSPORT_KEYS:
         if is_set(model.get(key)):
             raise RenderError(f"hermes composition must not set model.{key}: {refusal}")
-    for name in (*ROOT_ROUTE_KEYS, *PROVIDER_SECTIONS):
-        if is_set(config.get(name)):
-            raise RenderError(f"hermes composition must not set {name}: {refusal}")
     moa = section_of(config, "moa")
     for key in MOA_KEYS:
         if is_set(moa.get(key)):
@@ -269,28 +265,7 @@ class HermesAdapterRenderer(AdapterRenderer):
     def process_config(path: str, config: dict[str, Any]) -> dict[str, Any]:
         if path != _CONFIG:
             return config
-        if nested_setting(config, "security", "tirith_enabled") is not False:
-            raise RenderError("hermes composition must keep security.tirith_enabled false for benchmark episodes")
-        if nested_setting(config, "auxiliary", "title_generation", "enabled") is not False:
-            raise RenderError(
-                "hermes composition must keep auxiliary.title_generation.enabled false for benchmark episodes"
-            )
-        memory_nudge_interval = nested_setting(config, "memory", "nudge_interval")
-        skill_nudge_interval = nested_setting(config, "skills", "creation_nudge_interval")
-        if memory_nudge_interval != 0 or skill_nudge_interval != 0:
-            raise RenderError(
-                "hermes composition must keep memory.nudge_interval and skills.creation_nudge_interval 0, "
-                "so no background review makes model calls or writes skills"
-            )
-        if nested_setting(config, "curator", "enabled") is not False:
-            raise RenderError(
-                "hermes composition must keep curator.enabled false, so the curator leaves the skills alone"
-            )
-        if nested_setting(config, "sessions", "write_json_snapshots") is not True:
-            raise RenderError(
-                "hermes composition must keep sessions.write_json_snapshots true so Reef can read the trajectory"
-            )
-        # skills is an object here: the nudge check above read skills.creation_nudge_interval from it.
+        # skills is read as an object here; the locked keys above checked what a composition must keep.
         tree_dirs = nested_setting(config, "skills", "external_dirs")
         external_dirs = string_list([tree_dirs] if isinstance(tree_dirs, str) else tree_dirs, "skills.external_dirs")
         config["skills"]["external_dirs"] = external_dirs + [
