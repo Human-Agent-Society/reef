@@ -34,6 +34,7 @@ jobs:
           persist-credentials: false
       - run: docker build --check --target reef -f docker/Dockerfile.reef .
       - run: docker build --check --target tttd -f docker/Dockerfile.reef .
+      - run: docker build --check -f docker/Dockerfile.reef-vllm .
 
   # Full image build, kept for the day a runner with 100GB+ of docker storage
   # exists (self-hosted or larger hosted). Uncomment, point runs-on at that
