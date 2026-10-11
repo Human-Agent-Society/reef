@@ -137,6 +137,15 @@ def marker_in_flight(marker: Mapping[str, Any] | None) -> bool:
     return status == "COMPLETE" and not marker.get("commit_acknowledged")
 
 
+#: Key under which a RUNNING marker keeps the committed marker it replaced.
+COMMITTED_MARKER_KEY = "committed_marker"
+
+
+def marker_committed(marker: Mapping[str, Any] | None) -> bool:
+    """Whether the marker settles a job whose commit Reef acknowledged."""
+    return marker is not None and marker.get("status") == "COMPLETE" and marker.get("commit_acknowledged") is True
+
+
 def marker_path(hf_template: str) -> Path:
     """The single marker location derived from the HF checkpoint template."""
     return Path(hf_template.format(rollout_id=0)).expanduser().parent / LATEST_JOB_MARKER_FILENAME

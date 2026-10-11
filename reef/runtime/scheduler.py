@@ -55,9 +55,11 @@ from reef.runtime.interfaces import (
 )
 from reef.runtime.publication import PUBLISHED_STATES, BackendWeightPublisher, TrainingPublication
 from reef.runtime.recovery import (
+    COMMITTED_MARKER_KEY,
     FileTrainingJobStore,
     TrainingRecovery,
     marker_checkpoint_result,
+    marker_committed,
     marker_disposition,
     marker_in_flight,
     marker_path,
@@ -505,7 +507,7 @@ class TrainingExecution:
                 if prepared.outcome not in {"stale", "storage_blocked"}:
                     raise RuntimeError("training preparation may only return stale or storage_blocked")
                 return prepared
-            return self._run(prepared, self._store, job_id, payload, admission_metrics)
+            return self._run(prepared, self._store, job_id, payload, admission_metrics, marker)
         raise RuntimeError("training preparation suppressed an execution failure")
 
     def _run(
@@ -515,6 +517,7 @@ class TrainingExecution:
         job_id: str,
         payload: Mapping[str, Any],
         admission_metrics: Mapping[str, Any],
+        prior_marker: Mapping[str, Any] | None,
     ) -> TrainingJobResult:
         """Train and checkpoint one admitted job, recording RUNNING then CHECKPOINT."""
         checkpoint = prepared.checkpoint
@@ -525,6 +528,12 @@ class TrainingExecution:
             "rollout_id": checkpoint.rollout_id,
             "scenario_step": checkpoint.scenario_step,
         }
+        if prior_marker is not None and marker_committed(prior_marker):
+            # RUNNING overwrites the settled marker, so keep a copy: the
+            # Slime preflight restores it when a kill leaves nothing saved.
+            running[COMMITTED_MARKER_KEY] = {
+                key: value for key, value in prior_marker.items() if key != COMMITTED_MARKER_KEY
+            }
         parent_runtime_load_id = payload.get("expected_runtime_load_id")
         if isinstance(parent_runtime_load_id, str) and parent_runtime_load_id:
             running["parent_runtime_load_id"] = parent_runtime_load_id

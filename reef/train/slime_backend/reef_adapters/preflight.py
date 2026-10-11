@@ -7,10 +7,13 @@ of a half-started cluster.
 
 from __future__ import annotations
 
+import json
+import sys
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any
 
-from reef.runtime.recovery import marker_rollouts, read_marker
+from reef.runtime.recovery import COMMITTED_MARKER_KEY, marker_committed, marker_rollouts, read_marker, write_marker
 from reef.train.slime_backend.algorithm import SlimeAlgorithm
 from reef.train.slime_backend.reef_adapters.arguments import SlimeArguments
 from reef.train.slime_backend.reef_adapters.training_job.storage import CheckpointStorage, RetentionConfig
@@ -131,7 +134,18 @@ def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionConfig)
     )
     marker = read_marker(storage.marker_path)
     if marker is not None and marker["status"] == "RUNNING":
-        raise RuntimeError(running_job_message(storage, marker, args.megatron_lora_rank))
+        settled = committed_marker_to_restore(storage, marker, args.megatron_lora_rank)
+        if settled is None:
+            raise RuntimeError(running_job_message(storage, marker, args.megatron_lora_rank))
+        print(
+            f"[reef] training job {marker['job_id']} was stopped before it saved rollout {marker['rollout_id']}; "
+            f"restoring the committed marker of rollout {settled['rollout_id']} so its batch trains again. "
+            f"Replaced marker: {json.dumps(dict(marker), sort_keys=True)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        write_marker(storage.marker_path, settled)
+        marker = read_marker(storage.marker_path)
     if marker is not None and marker["status"] in {"REJECTING", "REJECTED"}:
         # The newest training checkpoint still contains the declined candidate;
         # it cannot reconstruct the incumbent engines or committed adapters.
@@ -149,6 +163,80 @@ def prepare_checkpoint_storage(args: SlimeArguments, retention: RetentionConfig)
     return storage
 
 
+def tracker_iteration_state(storage: CheckpointStorage) -> tuple[Path, int | None, str]:
+    """Megatron's tracker under ``--save``, the iteration it names, and how to describe it."""
+    tracker = storage.megatron_root / "latest_checkpointed_iteration.txt"
+    try:
+        tracker_text: str | None = tracker.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        tracker_text = None
+    except (OSError, ValueError) as error:
+        tracker_text = f"<{error}>"
+    if tracker_text is None:
+        return tracker, None, "is missing"
+    if tracker_text.isdecimal():
+        return tracker, int(tracker_text), f"names iteration {int(tracker_text)}"
+    return tracker, None, f"is unreadable: {tracker_text!r}"
+
+
+def rollout_paths(storage: CheckpointStorage, rollout_id: int) -> list[str]:
+    """The checkpoint assets and record for ``rollout_id`` that exist on disk."""
+    record_path = storage.records_root / f"{rollout_id:020d}.json"
+    return [
+        str(path) for path in (*storage.asset_paths(rollout_id), record_path) if path.exists() or path.is_symlink()
+    ]
+
+
+def committed_marker_to_restore(
+    storage: CheckpointStorage, marker: Mapping[str, Any], megatron_lora_rank: int
+) -> dict[str, Any] | None:
+    """The settled marker a ``RUNNING`` job replaced, when restoring it is safe.
+
+    This is the documented full-weight state: the tracker names an earlier
+    rollout ``P``, the job left nothing for its own rollout, and the newest
+    checkpoint record is ``P``'s. The marker the job replaced must be kept in
+    the ``RUNNING`` marker, settle ``P``'s job, and carry Reef's commit
+    acknowledgement, which a rejected job never gets. Any other state stays
+    ambiguous.
+    """
+    committed = marker.get(COMMITTED_MARKER_KEY)
+    if megatron_lora_rank > 0 or not isinstance(committed, Mapping) or not marker_committed(committed):
+        return None
+    _, tracker_iteration, _ = tracker_iteration_state(storage)
+    previous_rollout = committed.get("rollout_id")
+    if tracker_iteration is None or tracker_iteration != previous_rollout or tracker_iteration >= marker["rollout_id"]:
+        return None
+    if rollout_paths(storage, marker["rollout_id"]):
+        return None
+    parent_runtime_load_id = marker.get("parent_runtime_load_id")
+    runtime_load_id = committed.get("runtime_load_id")
+    if not isinstance(runtime_load_id, str) or not runtime_load_id:
+        return None
+    if parent_runtime_load_id is not None and parent_runtime_load_id != runtime_load_id:
+        return None
+    checkpoint_path = committed.get("checkpoint_path")
+    if (
+        not isinstance(checkpoint_path, str)
+        or Path(checkpoint_path).is_symlink()
+        or not Path(checkpoint_path).is_dir()
+    ):
+        return None
+    record_paths = sorted(storage.records_root.glob("*.json"))
+    if not record_paths or record_paths[-1] != storage.records_root / f"{tracker_iteration:020d}.json":
+        return None
+    try:
+        record = json.loads(record_paths[-1].read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if (
+        not isinstance(record, Mapping)
+        or record.get("status") != "COMPLETE"
+        or record.get("job_id") != committed.get("job_id")
+    ):
+        return None
+    return dict(committed)
+
+
 def running_job_message(storage: CheckpointStorage, marker: Mapping[str, Any], megatron_lora_rank: int) -> str:
     """List what a job stopped while ``RUNNING`` left on disk, and where its recovery is documented.
 
@@ -161,36 +249,13 @@ def running_job_message(storage: CheckpointStorage, marker: Mapping[str, Any], m
     the guide says which copy.
     """
     rollout_id = marker["rollout_id"]
-    tracker = storage.megatron_root / "latest_checkpointed_iteration.txt"
-    try:
-        tracker_text: str | None = tracker.read_text(encoding="utf-8").strip()
-    except FileNotFoundError:
-        tracker_text = None
-    except (OSError, ValueError) as error:
-        tracker_text = f"<{error}>"
-    if tracker_text is None:
-        tracker_iteration: int | None = None
-        tracker_state = "is missing"
-    elif tracker_text.isdecimal():
-        tracker_iteration = int(tracker_text)
-        tracker_state = f"names iteration {tracker_iteration}"
-    else:
-        tracker_iteration = None
-        tracker_state = f"is unreadable: {tracker_text!r}"
-    record_path = storage.records_root / f"{rollout_id:020d}.json"
-    rollout_paths = [
-        str(path) for path in (*storage.asset_paths(rollout_id), record_path) if path.exists() or path.is_symlink()
-    ]
+    tracker, tracker_iteration, tracker_state = tracker_iteration_state(storage)
+    paths = rollout_paths(storage, rollout_id)
     per_scenario_lora = megatron_lora_rank > 0
     lora_state = f"yes (--megatron-lora-rank {megatron_lora_rank})" if per_scenario_lora else "no"
     troubleshooting_entry = "'A restart fails with ambiguous training job' in the troubleshooting guide"
     restore_from_copy = f"restore {storage.root} from a copy; the entry says which copy"
-    if (
-        not per_scenario_lora
-        and tracker_iteration is not None
-        and tracker_iteration < rollout_id
-        and not rollout_paths
-    ):
+    if not per_scenario_lora and tracker_iteration is not None and tracker_iteration < rollout_id and not paths:
         recovery = (
             f"{troubleshooting_entry} gives a manual recovery for this state, which applies only if all of its "
             f"conditions hold, including that the job for rollout {tracker_iteration} was committed; otherwise "
@@ -201,5 +266,5 @@ def running_job_message(storage: CheckpointStorage, marker: Mapping[str, Any], m
     return (
         f"ambiguous training job {marker['job_id']}: {storage.marker_path} is RUNNING for rollout {rollout_id}; "
         f"Megatron's tracker {tracker} {tracker_state}; paths for rollout {rollout_id}: "
-        f"{', '.join(rollout_paths) or 'none'}; per-scenario LoRA: {lora_state}; {recovery}"
+        f"{', '.join(paths) or 'none'}; per-scenario LoRA: {lora_state}; {recovery}"
     )
