@@ -426,3 +426,27 @@ def test_only_a_marker_of_a_job_still_out_must_name_its_scenario_step(tmp_path):
     markers.write_marker(path, {**settled, "status": "CHECKPOINT", "commit_acknowledged": False})
     with pytest.raises(RuntimeError, match="scenario step"):
         markers.read_marker(path)
+
+
+@pytest.mark.parametrize("status", ["COMPLETE", "REJECTED"])
+def test_running_keeps_the_committed_marker_it_replaces(backend, status):
+    settled_checkpoint = backend.path.parent / "settled"
+    settled_checkpoint.mkdir()
+    settled = {
+        "status": status,
+        "job_id": "job-before",
+        "rollout_id": 0,
+        "checkpoint_path": str(settled_checkpoint),
+        "runtime_load_id": "engine:0",
+        "commit_acknowledged": status == "COMPLETE",
+    }
+    markers.write_marker(backend.path, settled)
+    backend.checkpoint = TrainingCheckpoint(1, backend.path.parent / "checkpoint", scenario_step=0)
+    backend.fail = "train"
+
+    with pytest.raises(RuntimeError, match="failed train"):
+        coordinator(backend).execute(PAYLOAD)
+
+    running = markers.read_marker(backend.path)
+    assert running["status"] == "RUNNING"
+    assert running.get(markers.COMMITTED_MARKER_KEY) == (settled if status == "COMPLETE" else None)
