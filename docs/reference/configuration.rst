@@ -200,6 +200,17 @@ on the engine's HTTP port and answers the readiness check. Reef makes at most
 three startup attempts per engine. Other startup failures, and any failure of
 an encoder engine, stop the launch.
 
+When Reef starts a router, it probes a free metrics port on the host, from
+port 4000 up. It also probes a free HTTP port, unless the router uses
+``router-port``. Only the first model's router uses ``router-port``. The
+router serves both ports on the host's address. If the router then fails to
+start and another process holds one of these ports, Reef stops the router and
+starts it again on new ports. Reef does the same when another process listens
+on the router's HTTP port and answers the readiness check. Reef makes at most
+three attempts. A configured ``router-port`` does not change, so a conflict on
+it stops the launch. Another stack's metrics port can take a ``router-port``
+near 4000, so use a port outside that range.
+
 Encoder engines keep the weights they started with. Weight updates go only to
 the other engines of the model. When a model with an encoder group trains,
 keep its vision encoder frozen.

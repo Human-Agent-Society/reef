@@ -1,7 +1,8 @@
-"""SGLang and vLLM engine startup relaunches an engine whose ports another process holds."""
+"""SGLang and vLLM startup relaunches an engine or an SGLang router whose ports another process holds."""
 
 from __future__ import annotations
 
+import dataclasses
 import math
 import random
 import socket
@@ -20,6 +21,7 @@ from reef.inference.process import (
     check_server_owner,
     ports_in_use,
 )
+from reef.inference.sglang import launch as sglang_launch
 from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
 from reef.inference.sglang.launch import SGLangCluster, SGLangEngineGroup, SGLangModel
 from reef.inference.vllm import engine as vllm_engine
@@ -36,6 +38,7 @@ SERVER_PID = 4321
 
 class SkipTwoRanges(random.Random):
     def randrange(self, *args):
+        assert args == (1, PORT_CONFLICT_SPREAD)
         return 2
 
 
@@ -292,6 +295,133 @@ def test_startup_and_recovery_relaunch_on_port_conflicts(monkeypatch, site):
     skipped = relaunched - (15000 + 2 * width)
     assert skipped % width == 0 and 0 < skipped < width * PORT_CONFLICT_SPREAD
     assert engines.now == process.PORT_RELEASE_SECONDS
+
+
+class Routers:
+    """Fake router processes on node ``10.0.0.5``, recording each launch's options.
+
+    A probe returns its start port, and a relaunch skips two ports. ``failures``
+    lists the errors of the next readiness checks: a :class:`PortConflictError`
+    comes from the owner check, any other error from ``wait_ready``.
+    ``held_ports`` are the ports that another process binds.
+    """
+
+    def __init__(self, monkeypatch, held_ports=()):
+        self.options = []
+        self.processes = []
+        self.failures = []
+        self.held_ports = held_ports
+        router_module = SimpleNamespace(RouterArgs=dataclasses.make_dataclass("RouterArgs", []))
+        monkeypatch.setitem(sys.modules, "sglang_router", SimpleNamespace(launch_router=router_module))
+        monkeypatch.setitem(sys.modules, "sglang_router.launch_router", router_module)
+        monkeypatch.setattr(sglang_launch, "node_address_and_port", lambda start_port: ("10.0.0.5", start_port))
+        monkeypatch.setattr(sglang_launch, "launch_router", self.launch)
+        monkeypatch.setattr(sglang_launch, "wait_ready", self.wait_ready)
+        monkeypatch.setattr(sglang_launch, "check_server_owner", self.check_server_owner)
+        monkeypatch.setattr(sglang_launch, "ports_in_use", self.ports_in_use)
+        # The fake takes no seed, so a seeded generator fails: a shared seed gives every stack the same ports.
+        monkeypatch.setattr(sglang_launch, "random", SimpleNamespace(Random=lambda: SkipTwoRanges()))
+
+    def launch(self, options):
+        self.options.append(dict(options))
+        router = SimpleNamespace(
+            pid=SERVER_PID + len(self.processes), ready=False, stopped=False, is_alive=lambda: False
+        )
+        router.terminate = lambda: setattr(router, "stopped", True)
+        router.join = lambda timeout: None
+        self.processes.append(router)
+        return router
+
+    def wait_ready(self, url, router, timeout, *, path):
+        if self.failures and not isinstance(self.failures[0], PortConflictError):
+            raise self.failures.pop(0)
+        router.ready = True
+
+    def check_server_owner(self, host, port, server_pid):
+        router = self.processes[-1]
+        assert router.ready and (host, port, server_pid) == ("10.0.0.5", self.options[-1]["port"], router.pid)
+        if self.failures:
+            raise self.failures.pop(0)
+
+    def ports_in_use(self, host, ports):
+        # A router that still runs would hold its own ports.
+        assert host == "10.0.0.5" and self.processes[-1].stopped
+        return [port for port in ports if port in self.held_ports]
+
+
+@pytest.mark.parametrize(
+    "index, router_port, port, metrics_port",
+    [
+        (0, None, 3000, 4000),
+        # The port above a configured router port can be another stack's router port.
+        (0, 30000, 30000, 4000),
+        (0, 4000, 4000, 4001),
+        # Only the first model's router uses the configured port.
+        (1, 30000, 3000, 4000),
+    ],
+)
+def test_router_probes_its_metrics_port_from_4000_on_the_node_address(
+    monkeypatch, index, router_port, port, metrics_port
+):
+    routers = Routers(monkeypatch)
+    cluster = SGLangCluster(SGLangConfig("model", 1, 1, 1, router_port=router_port), None)
+    assert cluster._router(index, pd=False) == ("10.0.0.5", port)
+    (options,) = routers.options
+    # Without prometheus_host, the router serves metrics on loopback. The probe cannot see that port, so every stack
+    # on the host would pick the same one.
+    assert (options["prometheus_host"], options["prometheus_port"]) == ("10.0.0.5", metrics_port)
+
+
+@pytest.mark.parametrize(
+    "router_port, failure, held_ports",
+    [
+        (None, NOT_READY, [3000]),
+        (None, NOT_READY, [4000]),
+        # A configured port stays; only the metrics port moves.
+        (30000, NOT_READY, [4000]),
+        # Another stack's router answered, so its listener holds the port.
+        (None, PortConflictError("another process listens on inference port 10.0.0.5:3000"), []),
+    ],
+)
+def test_router_whose_ports_another_process_holds_starts_again_on_new_ports(
+    monkeypatch, caplog, router_port, failure, held_ports
+):
+    routers = Routers(monkeypatch, held_ports)
+    routers.failures = [failure]
+    cluster = SGLangCluster(SGLangConfig("model", 1, 1, 1, router_port=router_port), None)
+    host, port = cluster._router(0, pd=False)
+    _, second = routers.options
+    assert (host, port) == ("10.0.0.5", second["port"])
+    assert second["port"] == (3002 if router_port is None else router_port)
+    # The metrics port skips the same number of ports, so routers that collided move their metrics ports apart too.
+    assert second["prometheus_port"] == 4002
+    assert routers.processes[0].stopped and cluster.routers == routers.processes[1:]
+    assert "starting attempt 2 of 3 on new ports" in caplog.text
+
+
+@pytest.mark.parametrize(
+    "router_port, held_ports, failures, message",
+    [
+        (None, [], [NOT_READY], "did not become ready"),
+        # Reef cannot move a configured port that another process holds.
+        (3000, [3000], [NOT_READY], "did not become ready"),
+        (3000, [], [PortConflictError("another process listens on inference port 10.0.0.5:3000")], "listens"),
+        (
+            None,
+            [],
+            [PortConflictError("another process listens")] * 3,
+            r"ports 10\.0\.0\.5:3004 were held by other processes after 3 startup attempts",
+        ),
+    ],
+)
+def test_router_failure_stops_the_launch(monkeypatch, router_port, held_ports, failures, message):
+    routers = Routers(monkeypatch, held_ports)
+    routers.failures = list(failures)
+    cluster = SGLangCluster(SGLangConfig("model", 1, 1, 1, router_port=router_port), None)
+    with pytest.raises(RuntimeError, match=message):
+        cluster._router(0, pd=False)
+    assert all(router.stopped for router in routers.processes)
+    assert len(routers.options) == len(failures) and cluster.routers == []
 
 
 class AccessDenied(Exception):
