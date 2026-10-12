@@ -8,8 +8,8 @@ appear in the agent directory even for an offline run.
 
 pi follows the Agent Skills spec: a ``SKILL.md`` needs ``name`` and
 ``description`` frontmatter or the skill is reported as a conflict at startup
-and never offered. A skill node whose text carries none gets both, the
-description being the text's first line, the same synthesis codex and dsh do.
+and never offered. ``process_skill`` gives a skill node whose
+text carries none both, the description being the text's first line.
 
 Every model call stays on Reef's model binding. The binding writes the
 provider ``reef`` in ``models.json`` and selects it with ``defaultProvider``
@@ -37,8 +37,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Any
 
-import yaml
-
+from reef.harness.adapters.common.frontmatter import with_skill_frontmatter
 from reef.harness.adapters.descriptor import AdapterRenderer
 from reef.harness.tree.render import RenderError
 
@@ -53,15 +52,6 @@ MODELS_PATH = "pi-agent/models.json"
 #: The provider Reef's binding writes and its keys.
 BINDING_PROVIDER = "reef"
 BINDING_PROVIDER_KEYS = frozenset({"api", "apiKey", "baseUrl", "models"})
-
-
-def _with_frontmatter(path: str, text: str) -> str:
-    if text.startswith("---\n"):
-        return text
-    name = path.split("/")[-2]
-    first = next((line.strip().lstrip("#").strip() for line in text.splitlines() if line.strip()), "")
-    header: dict[str, Any] = {"name": name, "description": first[:200] or name}
-    return "---\n" + yaml.dump(header, sort_keys=False, default_flow_style=False, allow_unicode=True) + "---\n" + text
 
 
 def check_model_route(models: dict[str, Any]) -> None:
@@ -102,7 +92,7 @@ class PiAdapterRenderer(AdapterRenderer):
     @staticmethod
     def process_skill(path: str, text: str) -> str:
         # Give every skill the frontmatter pi requires when its text has none.
-        return _with_frontmatter(path, text)
+        return with_skill_frontmatter(path, text)
 
     @staticmethod
     def check_model_route(
