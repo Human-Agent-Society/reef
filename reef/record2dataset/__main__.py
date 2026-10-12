@@ -21,7 +21,7 @@ from reef.service.deploy.service_config import ServiceConfig, service_config_fro
 
 def generator_service(settings: ServiceConfig, generator: GeneratorSettings) -> GeneratorService:
     """The service the deployment describes: the designer through Reef, Harbor's checks, the task player."""
-    reef_url = local_service_url(settings)
+    reef_url = settings.endpoints.get("reef") or local_service_url(settings)
     token = settings.tokens[0] if settings.tokens else None
     tasks_root = Path(generator.tasks_root).expanduser()
     work_dir = Path(generator.work_dir).expanduser() if generator.work_dir else tasks_root / ".play"

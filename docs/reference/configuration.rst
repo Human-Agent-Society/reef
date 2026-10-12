@@ -945,6 +945,41 @@ contracts and examples.
 Stack execution backends
 ------------------------
 
+Run one component
+~~~~~~~~~~~~~~~~~
+
+``reef serve -c serve.yaml --component NAME`` starts one configured provider-mode
+service: ``reef``, ``generator``, ``sglang``, or ``vllm``. An unknown name fails
+before startup. Without ``--component``, Reef starts the complete configured stack.
+Separate weight-training deployments are not supported yet.
+
+The public ``endpoints`` section declares component HTTP(S) addresses. References
+such as ``${endpoints.generator}`` read these values. Declared addresses take
+precedence over addresses published by managed services. They must be reachable
+addresses, rather than wildcard binds. Environment and configuration references
+are supported. CLI overrides accept ``--endpoints.NAME URL`` or ``--endpoints``
+with a quoted JSON/YAML object.
+
+A selected service requires addresses for its omitted dependencies. The generator
+requires ``endpoints.reef``. Reef requires ``endpoints.generator`` when the
+deployment configures a generator. Managed standalone inference requires an
+endpoint named after its backend, such as ``endpoints.sglang``.
+
+``inference.host`` sets a standalone engine's bind address (default ``127.0.0.1``).
+``inference.port`` sets its bind port (automatic when omitted in a complete stack).
+A selected inference engine requires a fixed port. Set ``inference.host: 0.0.0.0``
+when peers connect from other containers or hosts. Engine readiness checks use
+the local bind address; peer calls use the declared endpoint. Reef and generator
+components do not download an external engine's model.
+
+Each launcher checks and supervises only its own child. It exits with status 1
+when that child exits unexpectedly. SIGTERM or SIGINT stops that child normally.
+The operator manages peer readiness, placement, restarts, and upgrades.
+See `the Compose example <../user-guide/operate.rst#run-components-as-separate-services>`__.
+
+Whole-stack placement
+~~~~~~~~~~~~~~~~~~~~~
+
 Version 2 chooses native process placement in backend implementation code;
 ``execution.services`` is rejected. Unversioned custom stacks retain
 ``execution.services`` and per-process ``services[].executor`` overrides.
@@ -1208,6 +1243,12 @@ generated-task recipe and for a task generator such as SPADE, under the same
 interpreter as the Reef service (``REEF_PYTHON``, otherwise the launcher's). Its host needs Docker and the
 ``harbor`` command line; the Reef service itself does not. ``execution.generator`` selects its executor, so a deployment can
 place it on the host that has Docker.
+
+The generator reaches Reef at ``endpoints.reef`` when declared. Otherwise, it
+uses the local HTTP bind address, with wildcard binds mapped to loopback.
+``generator.designer-url`` overrides only designer calls; task-player calls
+still use Reef's address. Use `component mode <#run-one-component>`__ to manage
+the generator's lifecycle separately.
 
 .. config::
 
