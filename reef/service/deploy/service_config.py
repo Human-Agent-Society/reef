@@ -210,6 +210,24 @@ class ServiceConfig:
         default=None,
         metadata=config_metadata("Generator service settings as a JSON/YAML object.", path=("generator",)),
     )
+    #: Path to the routing manifest (see :mod:`reef.service.routing`). Setting it
+    #: enables routing: ``reef serve`` hosts the SR/Envoy processes declared under
+    #: ``reef.routing_deployment`` and validates against the manifest. Unset keeps
+    #: the deployment fully non-routing.
+    routing_manifest: str | None = config_option(
+        None,
+        public_path=("reef", "routing_manifest"),
+        help="Routing manifest file; enabling model routing.",
+    )
+    #: The SR/Envoy process definitions ``reef serve`` owns while routing is
+    #: enabled; ``reef.service.deploy.routing`` parses them into services.
+    routing_deployment: Mapping[str, Any] = field(
+        default_factory=dict,
+        metadata=config_metadata(
+            "Semantic Router and Envoy process definitions as a JSON/YAML object.",
+            public_path=("reef", "routing_deployment"),
+        ),
+    )
     #: The flat ``reef`` config section, interpolated; recipes read their own
     #: config fields from it (see the class docstring).
     recipe_settings: Mapping[str, Any] = field(default_factory=dict, repr=False)

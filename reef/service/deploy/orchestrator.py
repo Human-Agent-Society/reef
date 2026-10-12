@@ -63,6 +63,7 @@ from reef.service.deploy.diagnostics import startup_report
 from reef.service.deploy.execution import service_executor_config, service_executor_selection, validate_services
 from reef.service.deploy.generator import attach_generator_service
 from reef.service.deploy.inference import assemble_provider_services, command_line_config, resolve_model_paths
+from reef.service.deploy.routing import attach_routing_services
 from reef.service.deploy.service_config import (
     normalize_service_config,
     service_config_arguments,
@@ -471,6 +472,9 @@ def resolve_deployment_config(
             else:
                 assemble_provider_services(normalized_config)
             attach_generator_service(normalized_config)
+        # Routing also wires into custom unversioned process stacks: their
+        # hand-declared services gain the SR/Envoy processes the same way.
+        attach_routing_services(normalized_config)
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root
