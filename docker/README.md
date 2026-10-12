@@ -1,10 +1,13 @@
 # Docker
 
 The Reef image bundles the full runtime (Slime, SGLang, Ray, Megatron)
-so that a deployment runs entirely inside one image as plain processes. There
-is no docker-compose layer: `reef serve -c <config>` reads the YAML's
-`services` list and starts each declared process directly, with PID/log files
-under `/tmp/reef-stack`.
+so that a deployment runs entirely inside one image as plain processes.
+`reef serve -c <config>` assembles a versioned deployment's components or reads
+a legacy YAML's `services` list. It starts and supervises the complete stack.
+Use `--component reef`, `--component generator`, or the standalone inference
+backend name to manage provider-mode services independently. The
+[Compose example](../docs/user-guide/operate.rst#run-components-as-separate-services)
+uses the same image and deployment file for Reef and the generator.
 
 ## Build
 

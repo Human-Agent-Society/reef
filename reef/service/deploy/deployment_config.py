@@ -42,7 +42,18 @@ class DeploymentConfig:
 
 
 def deployment_config_arguments() -> tuple[ConfigArgument, ...]:
-    return config_arguments(DeploymentConfig)
+    return (
+        *config_arguments(DeploymentConfig),
+        ConfigArgument(
+            "endpoints",
+            ("endpoints",),
+            "object",
+            False,
+            {},
+            "Declared component HTTP(S) addresses, including externally managed services.",
+            public_path=("endpoints",),
+        ),
+    )
 
 
 def _take(values: dict[str, Any], path: tuple[str, ...]) -> Any:
@@ -109,6 +120,7 @@ def translate_layout(config: Mapping[str, Any]) -> dict[str, Any]:
         "evaluation",
         "generator",
         "observability",
+        "endpoints",
     }
     extra = set(pending) - known_sections
     if extra:
@@ -338,7 +350,7 @@ def component_config_arguments(config: Mapping[str, Any]) -> tuple[ConfigArgumen
     public_flags = {
         flag for argument in service_config_arguments() for flag in (*argument.flags, *argument.negative_flags)
     }
-    seen = public_flags | {"--recipe", "--model", "--config", "-c", "--help", "-h"}
+    seen = public_flags | {"--component", "--recipe", "--model", "--config", "-c", "--help", "-h"}
     for argument in arguments:
         for flag in (*argument.flags, *argument.negative_flags):
             if flag in seen:

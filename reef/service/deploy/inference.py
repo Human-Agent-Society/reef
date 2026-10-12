@@ -101,13 +101,17 @@ def http_readiness_command(python: str, endpoint: str) -> list[str]:
     return [
         python,
         "-c",
-        "import sys, urllib.request; "
-        "urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1], timeout=5).close()",
+        (
+            "import sys, urllib.request; "
+            "urllib.request.build_opener(urllib.request.ProxyHandler({})).open(sys.argv[1], timeout=5).close()"
+        ),
         endpoint,
     ]
 
 
-def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[str, Any]:
+def prepare_inference(
+    config: dict[str, Any], settings: ServiceConfig, *, component: str | None = None
+) -> dict[str, Any]:
     """Resolve launch choices once, before model downloads or service creation."""
     backend = settings.inference_backend or "sglang"
     definition = INFERENCE_COMMANDS.get(backend)
@@ -126,16 +130,37 @@ def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[s
     reserved = {token[2:] for token in definition.command if token.startswith("--")}
     extra_args = native_arguments(settings.inference_options, reserved=reserved | set(definition.reserved_options))
     python = os.environ.get("REEF_PYTHON", sys.executable)
-    # The HTTP child and inference engine share one resolved loopback endpoint. The
-    # actual server bind remains authoritative if another process races it.
-    with socket.socket() as listener:
-        listener.bind(("127.0.0.1", 0))
-        port = listener.getsockname()[1]
-        if port == settings.port:
-            with socket.socket() as alternative:
-                alternative.bind(("127.0.0.1", 0))
-                port = alternative.getsockname()[1]
-    endpoint = f"http://127.0.0.1:{port}"
+    if not settings.inference_host.strip():
+        raise DeployConfigError("inference.host must be non-empty")
+    if settings.inference_port is not None and not 1 <= settings.inference_port <= 65535:
+        raise DeployConfigError("inference.port must be between 1 and 65535")
+    endpoint = settings.endpoints.get(backend)
+    if component is not None and not endpoint:
+        raise DeployConfigError(f"--component with managed inference requires endpoints.{backend}")
+    if component == backend and settings.inference_port is None:
+        raise DeployConfigError("a separate inference component requires a fixed inference.port")
+    if settings.inference_port is not None:
+        port = settings.inference_port
+    elif component is not None:
+        # This engine is external; its unused process definition needs no local port allocation.
+        port = urlsplit(endpoint or "").port or 80
+    else:
+        # The actual bind remains authoritative if another process races this allocation.
+        with socket.socket() as listener:
+            listener.bind(("127.0.0.1", 0))
+            port = listener.getsockname()[1]
+            if port == settings.port:
+                with socket.socket() as alternative:
+                    alternative.bind(("127.0.0.1", 0))
+                    port = alternative.getsockname()[1]
+    probe_host = settings.inference_host
+    if probe_host == "0.0.0.0":
+        probe_host = "127.0.0.1"
+    elif probe_host == "::":
+        probe_host = "::1"
+    probe_host = f"[{probe_host}]" if ":" in probe_host and not probe_host.startswith("[") else probe_host
+    local_endpoint = f"http://{probe_host}:{port}"
+    endpoint = endpoint or local_endpoint
     config["reef"].update(
         inference_backend=backend,
         tensor_parallel_size=parallel_size,
@@ -148,7 +173,7 @@ def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[s
         "python": python,
         "model_path": "${reef.model_path}",
         "served_model_name": settings.model_path,
-        "host": "127.0.0.1",
+        "host": settings.inference_host,
         "port": str(port),
         "tensor_parallel_size": str(parallel_size),
     }
@@ -157,7 +182,7 @@ def prepare_inference(config: dict[str, Any], settings: ServiceConfig) -> dict[s
         "executor": "uni",
         "endpoint": endpoint,
         "command": [*(token.format_map(bindings) for token in definition.command), *extra_args],
-        "ready": http_readiness_command(python, endpoint + definition.health_path),
+        "ready": http_readiness_command(python, local_endpoint + definition.health_path),
         "ready_timeout": config.get("ready_timeout", 3600),
     }
 
@@ -195,7 +220,7 @@ def command_line_config(environ: Mapping[str, str]) -> dict[str, Any]:
     return {"reef": reef, "run_dir": ".reef/run"}
 
 
-def assemble_provider_services(config: dict[str, Any]) -> None:
+def assemble_provider_services(config: dict[str, Any], *, component: str | None = None) -> None:
     """Validate typed inputs and add the owned HTTP process and readiness probe."""
     unsupported = set(config.get("reef", {})) & _CONFIGURED_FIELDS
     if unsupported or "training" in config or "evaluation" in config:
@@ -213,7 +238,7 @@ def assemble_provider_services(config: dict[str, Any]) -> None:
         # Validate the public bind and timeout before checking GPU dependencies.
         if not 1 <= settings.port <= 65535 or settings.inference_timeout_s <= 0:
             raise DeployConfigError("local inference requires a valid --reef.port and positive --inference.timeout-s")
-        local_service = prepare_inference(config, settings)
+        local_service = prepare_inference(config, settings, component=component)
         settings = service_config_from_mapping(config)
     elif (
         settings.inference_backend is not None

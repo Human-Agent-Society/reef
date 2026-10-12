@@ -16,7 +16,12 @@ from typing import Any
 
 from reef.core.config import ConfigArgument, config_arguments, config_metadata, config_option, parse_config_values
 from reef.service.cors import console_origins
-from reef.service.deploy.config_utils import config_value, interpolate_config, interpolate_config_values
+from reef.service.deploy.config_utils import (
+    config_value,
+    declared_endpoints,
+    interpolate_config,
+    interpolate_config_values,
+)
 from reef.storage.postgres import postgres_url, validate_postgres_schema
 from reef.storage.records import RecordRetention
 
@@ -61,6 +66,12 @@ class ServiceConfig:
     )
     inference_backend: str | None = config_option(
         None, public_path=("inference", "backend"), help="Managed local inference backend (default: sglang)."
+    )
+    inference_host: str = config_option(
+        "127.0.0.1", public_path=("inference", "host"), help="Standalone inference engine bind address."
+    )
+    inference_port: int | None = config_option(
+        None, public_path=("inference", "port"), help="Standalone inference engine bind port; automatic when omitted."
     )
     tensor_parallel_size: int | None = config_option(
         None,
@@ -207,6 +218,7 @@ class ServiceConfig:
     #: config fields from it (see the class docstring).
     recipe_settings: Mapping[str, Any] = field(default_factory=dict, repr=False)
     preset_config: Mapping[str, Any] | None = field(default=None, repr=False)
+    endpoints: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         RecordRetention(self.agent_record_retention_days, self.agent_record_retention_max_bytes)
@@ -256,6 +268,7 @@ def service_owned_keys() -> frozenset[str]:
     """Every ``reef.*`` key the service layer consumes."""
     non_reef_fields = {
         "evaluation_settings",
+        "endpoints",
         "generator_settings",
         "tracing_config",
         "training_settings",
@@ -405,4 +418,6 @@ def service_config_from_mapping(config: Mapping[str, Any]) -> ServiceConfig:
         values["inference_retry_timeout_s"] = values["inference_timeout_s"]
     # Preserve shared execution settings for presets and directly selected recipes.
     preset = dict(config) if "implementation" in config or ":" in values["recipe"] else None
-    return ServiceConfig(**values, recipe_settings=_reef_section(config), preset_config=preset)
+    return ServiceConfig(
+        **values, recipe_settings=_reef_section(config), preset_config=preset, endpoints=declared_endpoints(config)
+    )

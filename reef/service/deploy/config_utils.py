@@ -15,6 +15,7 @@ import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from reef.core.config import config_value, interpolate_config
 from reef.core.errors import DeployConfigError
@@ -26,6 +27,35 @@ except ImportError as exc:  # pragma: no cover - environment-dependent
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _ENV_VAR_RE = re.compile(r"\$\{(\w+)(:\?)?\}")
+
+
+def declared_endpoints(config: Mapping[str, Any], *, http_only: bool = False) -> dict[str, str]:
+    """Read declared service addresses; public deployments require reachable HTTP(S) URLs."""
+    endpoints = config.get("endpoints", {})
+    if not isinstance(endpoints, Mapping):
+        raise DeployConfigError("endpoints must be an object")
+    result: dict[str, str] = {}
+    for name, value in endpoints.items():
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+            raise DeployConfigError("endpoint names must use letters, digits, '_' or '-'")
+        if not isinstance(value, str) or not value.strip():
+            raise DeployConfigError(f"endpoints.{name} must be a non-empty string")
+        endpoint = interpolate_config(config, value)
+        if http_only:
+            try:
+                address = urlsplit(endpoint)
+                valid = (
+                    address.scheme in {"http", "https"}
+                    and bool(address.hostname)
+                    and address.hostname not in {"0.0.0.0", "::"}
+                    and (address.port is None or 1 <= address.port <= 65535)
+                )
+            except ValueError:
+                valid = False
+            if not valid:
+                raise DeployConfigError(f"endpoints.{name} must be a reachable HTTP(S) URL")
+        result[name] = endpoint
+    return result
 
 
 def _deep_interp_env(obj: Any, environ: Mapping[str, str], missing: dict[str, list[str]], location: str = "") -> Any:

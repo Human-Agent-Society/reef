@@ -22,6 +22,106 @@ Check health and status
 
 The service and every process ``reef serve`` started write logs under ``run_dir`` (``.reef/run/`` by default; a legacy ``/tmp/reef-stack`` stack keeps its own directory), one ``<service>.log`` and one ``<service>.pid`` each.
 
+Run components as separate services
+-----------------------------------
+
+Use ``--component`` when Docker Compose or another service manager should restart
+and place each component independently. The same image and deployment file serve
+all components. This mode supports Reef, the generator, and standalone inference.
+Weight-training stacks still run as one deployment.
+
+For provider mode, save this as ``serve.yaml``:
+
+.. code-block:: yaml
+
+   schema-version: 2
+   reef:
+     host: 0.0.0.0
+     port: 8900
+     token: ${REEF_TOKEN:?}
+   inference:
+     upstream-url: ${REEF_UPSTREAM_URL:?}
+     upstream-model: ${REEF_UPSTREAM_MODEL:?}
+     upstream-api-key: ${REEF_UPSTREAM_API_KEY}
+   generator:
+     host: 0.0.0.0
+     port: 8910
+     tasks-root: /tasks
+   endpoints:
+     reef: http://reef:8900
+     generator: http://generator:8910
+
+Save this as ``compose.yaml`` beside the deployment file. Set ``REEF_IMAGE`` to an
+image containing Reef, Python 3.12+, Git LFS, Harbor, and the Docker CLI.
+The generator also needs access to a Docker daemon for task containers.
+
+.. code-block:: yaml
+
+   x-component: &component
+     image: ${REEF_IMAGE:?}
+     working_dir: /data
+     restart: unless-stopped
+     environment:
+       REEF_TOKEN: ${REEF_TOKEN:?}
+       REEF_UPSTREAM_URL: ${REEF_UPSTREAM_URL:?}
+       REEF_UPSTREAM_MODEL: ${REEF_UPSTREAM_MODEL:?}
+       REEF_UPSTREAM_API_KEY: ${REEF_UPSTREAM_API_KEY:-}
+   services:
+     reef:
+       <<: *component
+       command: [reef, serve, -c, /config/serve.yaml, --component, reef]
+       volumes:
+         - ./serve.yaml:/config/serve.yaml:ro
+         - reef-data:/data
+       ports: ["127.0.0.1:8900:8900"]
+       healthcheck:
+         test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8900/healthz').close()"]
+         interval: 10s
+         timeout: 5s
+         retries: 6
+     generator:
+       <<: *component
+       command: [reef, serve, -c, /config/serve.yaml, --component, generator]
+       volumes:
+         - ./serve.yaml:/config/serve.yaml:ro
+         - generator-data:/data
+         - /var/lib/reef-tasks:/tasks
+         - /var/run/docker.sock:/var/run/docker.sock
+       depends_on:
+         reef:
+           condition: service_healthy
+       healthcheck:
+         test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8910/healthz').close()"]
+         interval: 10s
+         timeout: 5s
+         retries: 6
+   volumes:
+     reef-data:
+     generator-data:
+
+Export the image name, provider URL, model, and bearer token. Export the provider
+key when required. Start and inspect the services:
+
+.. code-block:: bash
+
+   docker compose up -d
+   docker compose ps
+   curl -f http://127.0.0.1:8900/healthz
+   docker compose restart generator
+
+Both services should become healthy. Restarting the generator leaves Reef running.
+Keep component ports on a private network. The generator uses ``endpoints.reef``
+for designer and task-player calls, with Reef's configured bearer token.
+The generator API has no inbound bearer-token check; do not publish its port.
+Access to the Docker socket grants control of the host Docker daemon.
+
+For a separately managed engine, replace the provider settings with
+``inference.model-path``, ``inference.backend``, ``inference.host: 0.0.0.0``, and a
+fixed ``inference.port``. Declare ``endpoints.sglang`` or ``endpoints.vllm`` and
+start that name with ``--component``. Reef forwards requests to that address.
+See `component configuration <../reference/configuration.rst#run-one-component>`__
+for required peer addresses and startup failures.
+
 Read the release chain
 ----------------------
 

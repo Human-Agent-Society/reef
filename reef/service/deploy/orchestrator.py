@@ -26,6 +26,7 @@ from typing import Any
 
 import yaml
 
+from reef.core.config import parse_config_values
 from reef.harness.adapters import get_adapter
 from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import recipe_class_for
@@ -45,6 +46,7 @@ from reef.service.deploy.cli import (
 from reef.service.deploy.config_utils import (
     DeployConfigError,
     config_value,
+    declared_endpoints,
     interpolate_config,
     interpolate_environment,
     load_config,
@@ -52,6 +54,7 @@ from reef.service.deploy.config_utils import (
 )
 from reef.service.deploy.deployment_config import (
     component_config_arguments,
+    deployment_config_arguments,
     normalize_component_config,
     normalize_component_layout,
     reject_null_settings,
@@ -213,7 +216,7 @@ class _Stack:
             host = interpolate_config(self.config, service.get("advertise_host", info["host"]))
             host = f"[{host}]" if ":" in host and not host.startswith("[") else host
             endpoint = interpolate_config(self.config, endpoint).replace("{host}", host)
-            self.config.setdefault("endpoints", {})[name] = endpoint
+            self.config.setdefault("endpoints", {}).setdefault(name, endpoint)
 
     def _start_service(self, service: Mapping[str, Any], config: dict[str, Any]) -> None:
         name = service["name"]
@@ -425,7 +428,12 @@ def _component_selection(
 
 
 def resolve_deployment_config(
-    config: dict[str, Any], overrides: dict[str, str] | None, source: str | Path, *, standard: bool = False
+    config: dict[str, Any],
+    overrides: dict[str, str] | None,
+    source: str | Path,
+    *,
+    standard: bool = False,
+    component: str | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     """Resolve the public layout and selected schemas without starting processes or downloading models."""
     resolved_config_path = Path(source).resolve()
@@ -453,10 +461,20 @@ def resolve_deployment_config(
         if versioned or standard:
             config = translate_references(config, arguments)
         config = interpolate_environment(config, resolved_config_path)
-        # A component named through ${VAR} is only known once the environment is applied.
-        training = recipe_type is not None and selected_weight_training(recipe_type, config) is not None
         if versioned or standard:
             reject_null_settings(config, arguments)
+        if "endpoints" in config:
+            endpoint_arguments = tuple(
+                argument for argument in deployment_config_arguments() if argument.name == "endpoints"
+            )
+            config["endpoints"] = parse_config_values(endpoint_arguments, {"endpoints": config["endpoints"]})[
+                "endpoints"
+            ]
+            config["endpoints"] = declared_endpoints(config, http_only=standard or component is not None)
+        # A component named through ${VAR} is only known once the environment is applied.
+        training = recipe_type is not None and selected_weight_training(recipe_type, config) is not None
+        if component is not None and (training or component in {"slime-driver", "tinker-driver"}):
+            raise DeployConfigError("--component does not yet support separate weight-training deployments")
         if standard:
             if "services" in config.get("execution", {}):
                 raise DeployConfigError("execution.services belongs to legacy process stacks")
@@ -469,8 +487,22 @@ def resolve_deployment_config(
             if training:
                 assemble_training_services(normalized_config)
             else:
-                assemble_provider_services(normalized_config)
+                assemble_provider_services(normalized_config, component=component)
             attach_generator_service(normalized_config)
+        if component is not None:
+            services = normalized_config.get("services", [])
+            selected_service = next((service for service in services if service.get("name") == component), None)
+            if selected_service is None:
+                names = ", ".join(service["name"] for service in services)
+                raise DeployConfigError(f"unknown component {component!r}; configured components: {names}")
+            endpoints = declared_endpoints(normalized_config, http_only=True)
+            dependencies = list(selected_service.get("depends_on", []))
+            if component == "generator":
+                dependencies.append("reef")
+            missing = sorted({name for name in dependencies if name not in endpoints})
+            if missing:
+                raise DeployConfigError(f"component {component!r} requires declared endpoints: {', '.join(missing)}")
+            normalized_config["services"] = [{**selected_service, "depends_on": []}]
     except (ValueError, RecipeConfigError, RuntimeConfigError) as exc:
         raise DeployConfigError(f"config {resolved_config_path}: {exc}") from exc
     return normalized_config, source_root
@@ -487,7 +519,11 @@ def _config_source(config_path: Path | None, versioned: bool) -> str:
 
 
 def _run_orchestrator(
-    config_path: str | None, overrides: dict[str, str] | None = None, *, print_config: bool = False
+    config_path: str | None,
+    overrides: dict[str, str] | None = None,
+    *,
+    print_config: bool = False,
+    component: str | None = None,
 ) -> int:
     resolved_config_path = Path(config_path).expanduser().resolve() if config_path else Path.cwd() / "<command line>"
     config = (
@@ -497,7 +533,7 @@ def _run_orchestrator(
     source = _config_source(resolved_config_path if config_path else None, versioned)
     _log(source)
     normalized_config, source_root = resolve_deployment_config(
-        config, overrides, resolved_config_path, standard=config_path is None
+        config, overrides, resolved_config_path, standard=config_path is None, component=component
     )
     report = startup_report(
         config,
@@ -517,7 +553,8 @@ def _run_orchestrator(
     settings_changed = normalized_config != config
     config = normalized_config
     services = validate_services(config, resolved_config_path)
-    paths_changed = local_model_required(config) and resolve_model_paths(config)
+    owns_model = component is None or component == config.get("reef", {}).get("inference_backend")
+    paths_changed = owns_model and local_model_required(config) and resolve_model_paths(config)
     temp_config_path: Path | None = None
     try:
         if versioned or config_path is None or overrides or paths_changed or settings_changed:
@@ -672,7 +709,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         config_path = _resolve_config(args.config, args.recipe)
         if args.recipe:
             _prepare_profile(args.recipe, args.model, os.environ, overrides)
-        exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config)
+        exit_code = _run_orchestrator(config_path, overrides, print_config=args.print_config, component=args.component)
     except InvalidOverrideError as exc:
         parser.error(str(exc))
     sys.exit(exit_code)

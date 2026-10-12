@@ -35,6 +35,10 @@ a ``services`` list. Each service's ``ready`` probe must pass before the next
 starts. After all services are up, Reef blocks until SIGTERM/SIGINT; a
 watchdog thread detects unexpected exits and tears the stack down.
 
+--component NAME starts only that component. Declare omitted dependencies under
+endpoints and use fixed inference.host/inference.port for a separate engine.
+The operator manages peer readiness, restarts and placement.
+
 The Reef HTTP child receives the effective configuration from the launcher.
 
 Config overrides:
@@ -251,6 +255,12 @@ def build_serve_parser(
     elif service_arguments:
         for argument in deployment_config_arguments():
             argument.add_to(parser)
+    parser.add_argument(
+        "--component",
+        default=None,
+        metavar="NAME",
+        help="Run one provider-mode service (reef, generator, sglang or vllm) from the deployment.",
+    )
     parser.add_argument(
         "--recipe",
         default=None,
