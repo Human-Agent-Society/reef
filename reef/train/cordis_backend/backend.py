@@ -32,6 +32,7 @@ from reef.core.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.core.plugins import PluginConfigError
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -79,7 +80,6 @@ from reef.train.cordis_backend.strategies import (
     StepProposal,
 )
 from reef.train.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin
-from reef.train.plugins import PluginConfigError
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
 
 

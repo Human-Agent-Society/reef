@@ -17,6 +17,7 @@ import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
+from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
@@ -42,7 +43,6 @@ from reef.train.cordis_backend import (
 )
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
-from reef.train.plugins import PluginReference
 from reef.train.trainer import Trainer
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch, TrainStepResult
 

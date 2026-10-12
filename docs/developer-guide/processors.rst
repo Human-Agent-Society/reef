@@ -3,7 +3,7 @@ Processors
 
 A processor is a scenario's batch builder: records in, one typed training
 batch out, with ownership of its in-memory buffers. Storage owns deletion. This page
-explains the two feedback engines, the task-generation ABC, and the path a
+explains the two feedback engines, the task generation contract, and the path a
 record takes to a batch.
 
 .. page::
@@ -188,73 +188,74 @@ by the reported-feedback contract.
 Task generation contract
 ------------------------
 
-``TaskGenerationProcessor(DataProcessor, ABC)`` declares two asynchronous
-methods on the processor itself:
+A deployment can train on tasks that a task generator makes. The deployment
+names a ``TaskGenerator`` class in its ``task-generation`` section and selects
+the built-in generated-task recipe,
+``reef.record2dataset.generated_tasks:GeneratedTaskRecipe``. The recipe does not
+depend on the generator's method, so a team can replace the generator without
+a new recipe. SPADE (``recipes/beta/spade``) is one generator.
 
-- ``generate(request: TaskGenerationRequest) -> HarborTask`` produces one
-  task specification from source records, a description, and optional materials.
-  Source records must have distinct IDs and belong to the processor's scenario.
-  For description-only generation, pass an empty record tuple.
-  Preserve the source record IDs in order in the task's
-  ``source_agent_record_ids``. Without source records, use the Designer's
-  inference record ID instead.
-- ``validate(task_path: Path) -> TaskValidationResult`` checks a materialized
-  candidate without modifying it. The implementation chooses the required
-  structural and execution checks. Empty ``errors`` means all checks passed.
-  Non-empty errors reject the task. Infrastructure failures raise exceptions
-  instead of marking the task invalid.
+``TaskGenerator`` is in ``reef.core.tasks``. Reef calls its class method
+``from_config(config, *, scenario, environ)`` once for each scenario. The
+generator gets what it needs from its ``config`` and from these calls only:
 
-Import ``TaskGenerationRequest`` from ``reef.core.tasks``. It is the shared
-input contract for processors and record2dataset. Import the processor ABC
-from ``reef.train.processors``. Import ``TaskValidationResult`` from
-``reef.train.processors.task_generation``. That module also exports the shared
-request type for compatibility.
+- ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``
+  returns zero or more tasks. A ``GeneratedTask`` holds a ``HarborTask`` and
+  its ``measurement_arms``. Preserve the request's source record IDs in each
+  task's ``source_agent_record_ids``.
+- ``async validate(task: HarborTask) -> TaskValidationResult`` checks one
+  task. Empty ``errors`` means the task passed. Return task defects as errors.
+  Raise when the checks cannot run. The task is a value, so the check does not
+  need a file system that it shares with Reef.
+- ``async record_results(results: tuple[TaskPlayResult, ...])`` receives the
+  results of the last ``generate`` call. The default keeps nothing.
 
-A request carries source records, a description, and optional materials.
-Supply materials as local paths in ``assets`` or as UTF-8 text in
-``asset_files``. The keys in ``asset_files`` are relative file names.
-Supplying both fields is an error. Constructing a request reads no files.
-Record2dataset wraps the request in
-``DesignerRequest(inputs=request, ...)`` and adds Designer settings.
-``HttpGenerator`` reads local paths before transmission. The service rebuilds
-the shared request from records and file contents. It does not access the
-caller's paths.
+A ``PlayArm(name, count, extra_instruction_files)`` asks for ``count`` more
+plays of a task. Each play shows the agent the files that
+``extra_instruction_files`` names after the instruction, for example
+``solution/hint.txt``. The recipe never trains on a measurement arm.
 
-The ABC supplies no task execution lifecycle. Implementing the two hooks does
-not start a worker or prepare batches. The inherited lifecycle remains the
-no-update default. Each recipe supplies its own lifecycle. Both hooks must
-run outside the trainer lock. The synchronous ``ingest``, ``ready``, and
-``build_batch`` methods must never wait for them.
+A ``TaskPlayResult`` holds the task, ``training_rewards``,
+``measurement_rewards`` (by arm name), and an ``error``. The rewards include
+only episodes that ran. An episode that ran
+without a reward counts as 0. A non-empty ``error`` means that the task was not
+played: it failed validation, the generator service refused it, or the agent
+could not start on it.
 
-SPADE (``recipes/beta/spade/processor.py``) pairs the ABC with the
-reported-feedback engine. A private ``JudgingWorker`` runs one generation
-at a time. The Designer proposes a task. The generator service writes it,
-checks it with Harbor, and runs task episodes. The processor groups the
-episode reports into training batches.
+The recipe's processor, ``GeneratedTaskProcessor``, runs one round at a time
+on a private ``JudgingWorker``, outside the trainer lock. In each round it:
 
-The next generation starts after the configured number of batches have been
-acknowledged. After a restart, SPADE resumes from its saved generation reports.
+1. Asks the generator for tasks with the configured ``description``. The
+   request has no source records.
+2. Validates each task with the generator.
+3. Writes each valid task through the generator service and plays it
+   ``plays-per-task`` times on the training arm, then plays each measurement arm.
+4. Sends the results to ``record_results``.
+
+The processor labels its training plays with the arm ``plain`` and trains
+only on reports with that label. A generated task whose measurement arm is
+named ``plain`` comes back unplayed with an error. The processor groups the
+training reports by ``metadata.task.name``. A group is complete at
+``plays-per-task`` episodes, and a batch holds ``tasks-per-step`` complete
+groups. The ``task_group`` objective centers and scales each reward within its
+task group, on Tinker's ``importance_sampling`` loss. The processor releases
+the reports of measurement arms and reports without an arm, such as a
+generator's own reports, without assembling them.
+
+The first round starts when the processor first looks for a batch. The next
+round starts after ``batches-per-round`` batches were acknowledged since the
+previous round started. A round that played no task is followed at once. An
+exception from the generator stops the round. The processor still sends the
+results it has to ``record_results``. A summary of each round goes to
+``state-dir/<scenario>/round-<round>.json``. After a restart, the processor
+continues with the next round. ``GET /reef/status`` shows the generator, the
+round, the task counts, and the last error under ``task_generation``.
+
 Container operations run in the generator service, ``reef.record2dataset``.
 The processor calls this service over HTTP. The ``generator`` deployment
 section configures the service that ``reef serve`` starts.
 See `generator configuration
 <../reference/configuration.rst#the-generator-section>`__ for its settings.
-Conversion of generated tasks into ``TaskItem`` batches for a rollout-capable
-backend remains future work.
-
-SPADE's ``generate`` also accepts selected historical records and materials.
-It forwards the shared request to ``HttpGenerator``. The client reads local
-materials and sends their UTF-8 contents with the records over HTTP. The
-Designer uses these inputs to reconstruct the original task. The resulting
-``HarborTask`` preserves source record IDs in order. Its
-``metadata.designer_record_id`` identifies the new Designer call. Feedback
-uses that new receipt. Description-only requests keep
-the Designer receipt as their task source, as before.
-
-The automatic SPADE loop still generates from its configured description and
-previous task scores. Callers select historical records explicitly. See the
-`SPADE example <https://github.com/Human-Agent-Society/reef/blob/main/recipes/beta/spade/README.md#generate-from-selected-records>`__
-for the input limits and usage.
 
 A record's path to a batch
 --------------------------

@@ -24,8 +24,8 @@ from typing import Any, Self
 
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
+from reef.core.plugins import Plugin, PluginConfigError, PluginReference
 from reef.runtime.interfaces import InferenceRuntime, TrainingRuntime
-from reef.train.plugins import Plugin, PluginConfigError, PluginReference
 
 
 class CandidateEvaluationConfigError(ReefError):

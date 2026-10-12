@@ -750,23 +750,27 @@ Task generation
 
 .. code:: python
 
-   from reef.core.tasks import HarborTask, TaskGenerationRequest
-   from reef.train.processors.task_generation import (
-       TaskGenerationProcessor, TaskValidationResult,
+   from reef.core.tasks import (
+       GeneratedTask, HarborTask, PlayArm, TaskGenerationRequest, TaskGenerator,
+       TaskPlayResult, TaskValidationResult,
    )
 
-``TaskGenerationProcessor`` extends ``DataProcessor`` with two abstract methods:
-``async generate(request: TaskGenerationRequest) -> HarborTask`` and
-``async validate(task_path: Path) -> TaskValidationResult``. Subclasses must
-implement both methods. The ABC supplies no task execution lifecycle.
-Each recipe supplies the lifecycle that runs these methods.
-SPADE uses the reported-feedback engine and the generator service,
-``reef.record2dataset``.
+``TaskGenerator`` is the plugin base class that a deployment's
+``task-generation`` section names. Subclasses implement:
 
-``reef.core.tasks.generation`` defines
-``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``.
-``reef.core.tasks`` exports this type.
-It carries source records and non-empty requirements text.
+- the class method ``from_config(config, *, scenario, environ)``, which returns
+  the generator of one scenario;
+- ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``;
+- ``async validate(task: HarborTask) -> TaskValidationResult``.
+
+``async record_results(results: tuple[TaskPlayResult, ...])`` is optional. The
+default keeps nothing. The built-in generated-task recipe,
+``reef.record2dataset.generated_tasks:GeneratedTaskRecipe``, calls these methods.
+See `Processors <../developer-guide/processors.rst#task-generation-contract>`__
+for the round and its failure behavior.
+
+``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``
+carries source records and non-empty requirements text.
 Each ``AgentRecord`` must have a distinct ID and belong to the same scenario.
 Use an empty record tuple for description-only generation.
 For local materials, pass a tuple of ``Path`` values in ``assets``.
@@ -777,15 +781,31 @@ fields without reading files.
 Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 ...)``. Its HTTP client reads local materials and sends their contents. The
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
-task preserves source record IDs in order. The former import from
-``reef.train.processors.task_generation`` remains supported.
+task preserves source record IDs in order.
+
+``GeneratedTask(task, measurement_arms=())`` holds one task and the
+measurement arms the generator wants played on it. ``PlayArm(name, count,
+extra_instruction_files=())`` names an arm, its number of plays, and the task
+files shown after the instruction. Arm names are unique for each task.
+
+``TaskPlayResult(task, training_rewards=(), measurement_rewards={}, error="")``
+holds the rewards of the training plays and, by arm name, of each measurement
+arm. Each tuple holds only the episodes that ran. ``is_played`` is true when
+``error`` is empty. A task that was not played has no rewards.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
 non-empty explanation of a task defect. Failures to execute the checks raise
 exceptions instead.
-Generation and validation must run outside the synchronous trainer-lock path.
-See `Processors <../developer-guide/processors.rst#task-generation-contract>`__
-for lifecycle requirements.
+
+Migration: ``reef.train.processors.TaskGenerationProcessor`` is removed. Move
+its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
+
+- ``generate`` returns a tuple of ``GeneratedTask`` values instead of one task.
+- ``validate`` receives the ``HarborTask`` instead of a directory path.
+- Import ``TaskValidationResult`` from ``reef.core.tasks``.
+
+Select the class in the ``task-generation`` section and use the generated-task recipe. The recipe plays and trains, so the processor half of the method is
+not needed.
 
 Batch
 -----
@@ -992,7 +1012,7 @@ publish or revert.
 A deployment names each class as ``package.module:ClassName``, or as a mapping
 with ``module`` and ``config``. Reef builds it with the class method
 ``from_config``. ``Proposer``, ``EpisodeScorer`` and ``Promoter`` inherit
-``reef.train.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
+``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
 builds the class with no arguments and refuses a non-empty ``config``.
 
 +------------------------+----------------------------------------------------------+

@@ -55,7 +55,7 @@ affected package's `__init__.py` docstring to find the owner of a change.
 | `reef/artifact/` | Versioned artifacts and repositories |
 | `reef/storage/` | Record storage contracts, persistence, and retention |
 | `reef/harness/` | Harness adapters, rendering, runners, and trajectories |
-| `reef/record2dataset/` | The generator service: a designer prompt for Harbor tasks, the authoring gate and oracle check, task player jobs |
+| `reef/record2dataset/` | The generator service: a designer prompt for Harbor tasks, the authoring gate and oracle check, task player jobs; the built-in generated-task recipe |
 | `recipes/`, `tutorials/` | Method implementations, runnable examples, and tutorials |
 | `tests/`, `docs/`, `docker/` | Verification, documentation, and deployment environments |
 
