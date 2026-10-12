@@ -98,15 +98,17 @@ lists the pairing conditions (full mode, no LoRA rank, one engine per stack).
 
 What this image is not: the Slime layer skips Slime's SGLang patches and the
 Reef stage does not install the reviewed SGLang revision, so SGLang engines
-and LoRA deployments stay on `Dockerfile.reef`. Expect one
-`Failed to import Triton kernels` line per engine start: Triton 3.7 renamed
+and LoRA deployments stay on `Dockerfile.reef`. Expect a few
+`Failed to import Triton kernels` lines at engine start: Triton 3.7 renamed
 the `triton_kernels` MXFP4 MoE module that vLLM 0.29 imports, and dense
 models never use it.
 
-Verified on an 8x H200 host (one training GPU, one engine, Qwen2.5-0.5B, the
-SAO recipe with its critic): three reports produced three training releases
-and the engine reloaded each published weight version over the disk path.
-Tensor parallel above 1 and the SGLang engine have not been run on this image.
+Verified on an 8x H200 host with the image this script builds (one training
+GPU, one engine, Qwen2.5-0.5B, the SAO recipe with its critic, actor training
+from the first step): three reports produced three training releases, and
+the engine's `/weight_info` version advanced after each one as it reloaded the
+published weights over the disk path. Tensor parallel above 1 and the SGLang
+engine have not been run on this image.
 
 ## Demo configs
 
