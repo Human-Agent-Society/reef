@@ -14,7 +14,8 @@ from reef.runtime.executor import Executor, ExecutorConfig, WorkerSpec
 from reef.runtime.executor.config import executor_settings
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.train.cordis_backend.backend import CordisBackend, HarnessCandidate
-from reef.train.cordis_backend.strategies import EpisodeScorer, resolve_proposer
+from reef.train.cordis_backend.strategies import EpisodeScorer
+from ._strategies import resolve_proposer
 
 pytestmark = pytest.mark.skipif(os.environ.get("REEF_TEST_RAY") != "1", reason="opt-in real Ray integration")
 
@@ -23,7 +24,7 @@ class GPUScorer(EpisodeScorer):
     def execution_requirements(self):
         return ExecutionRequirements(gpus_per_worker=1)
 
-    def __call__(self, task, result):
+    def score(self, task, result):
         import ray
 
         gpu_ids = ray.get_gpu_ids()

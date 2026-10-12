@@ -745,28 +745,39 @@ Every ``ingest()`` starts with ``catch_up(now)``, then uses ``track(record)``,
 instead of failing a training step. All correlation state must be
 reconstructible from replay.
 
+While no batch is out, the engine retires candidates that are more than
+``max_staleness`` versions behind the newest candidate, by record arrival. The
+recipe's ``max_staleness`` reaches the processor as
+``ProcessorContext.max_staleness``. With the default value 0, only candidates of
+the newest version stay. Runtime admission still checks each batch against the
+serving version.
+
 Task generation
 ~~~~~~~~~~~~~~~
 
 .. code:: python
 
-   from reef.core.tasks import HarborTask, TaskGenerationRequest
-   from reef.train.processors.task_generation import (
-       TaskGenerationProcessor, TaskValidationResult,
+   from reef.core.tasks import (
+       GeneratedTask, HarborTask, PlayArm, TaskGenerationRequest, TaskGenerator,
+       TaskPlayResult, TaskValidationResult,
    )
 
-``TaskGenerationProcessor`` extends ``DataProcessor`` with two abstract methods:
-``async generate(request: TaskGenerationRequest) -> HarborTask`` and
-``async validate(task_path: Path) -> TaskValidationResult``. Subclasses must
-implement both methods. The ABC supplies no task execution lifecycle.
-Each recipe supplies the lifecycle that runs these methods.
-SPADE uses the reported-feedback engine and the generator service,
-``reef.record2dataset``.
+``TaskGenerator`` is the plugin base class that a deployment's
+``task-generation`` section names. Subclasses implement:
 
-``reef.core.tasks.generation`` defines
-``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``.
-``reef.core.tasks`` exports this type.
-It carries source records and non-empty requirements text.
+- the class method ``from_config(config, *, scenario, environ)``, which returns
+  the generator of one scenario;
+- ``async generate(request: TaskGenerationRequest) -> tuple[GeneratedTask, ...]``;
+- ``async validate(task: HarborTask) -> TaskValidationResult``.
+
+``async record_results(results: tuple[TaskPlayResult, ...])`` is optional. The
+default keeps nothing. The built-in generated-task recipe,
+``reef.record2dataset.generated_tasks:GeneratedTaskRecipe``, calls these methods.
+See `Processors <../developer-guide/processors.rst#task-generation-contract>`__
+for the round and its failure behavior.
+
+``TaskGenerationRequest(source_records, description, assets=(), asset_files={})``
+carries source records and non-empty requirements text.
 Each ``AgentRecord`` must have a distinct ID and belong to the same scenario.
 Use an empty record tuple for description-only generation.
 For local materials, pass a tuple of ``Path`` values in ``assets``.
@@ -777,15 +788,31 @@ fields without reading files.
 Record2dataset accepts the same input through ``DesignerRequest(inputs=request,
 ...)``. Its HTTP client reads local materials and sends their contents. The
 service rebuilds ``TaskGenerationRequest`` from the JSON fields. The generated
-task preserves source record IDs in order. The former import from
-``reef.train.processors.task_generation`` remains supported.
+task preserves source record IDs in order.
+
+``GeneratedTask(task, measurement_arms=())`` holds one task and the
+measurement arms the generator wants played on it. ``PlayArm(name, count,
+extra_instruction_files=())`` names an arm, its number of plays, and the task
+files shown after the instruction. Arm names are unique for each task.
+
+``TaskPlayResult(task, training_rewards=(), measurement_rewards={}, error="")``
+holds the rewards of the training plays and, by arm name, of each measurement
+arm. Each tuple holds only the episodes that ran. ``is_played`` is true when
+``error`` is empty. A task that was not played has no rewards.
 
 ``TaskValidationResult(errors=())`` exposes ``is_valid``. Each error is a
 non-empty explanation of a task defect. Failures to execute the checks raise
 exceptions instead.
-Generation and validation must run outside the synchronous trainer-lock path.
-See `Processors <../developer-guide/processors.rst#task-generation-contract>`__
-for lifecycle requirements.
+
+Migration: ``reef.train.processors.TaskGenerationProcessor`` is removed. Move
+its ``generate`` and ``validate`` methods to a ``TaskGenerator`` subclass:
+
+- ``generate`` returns a tuple of ``GeneratedTask`` values instead of one task.
+- ``validate`` receives the ``HarborTask`` instead of a directory path.
+- Import ``TaskValidationResult`` from ``reef.core.tasks``.
+
+Select the class in the ``task-generation`` section and use the generated-task recipe. The recipe plays and trains, so the processor half of the method is
+not needed.
 
 Batch
 -----
@@ -967,15 +994,33 @@ training payloads, checkpoints and artifact formats are unchanged.
 Harness method
 --------------
 
-A harness-evolution method fills three slots. Reef runs the loop around them:
-snapshot, apply, run the paired episodes, record, publish or revert.
+A harness-evolution method fills three slots with plugin classes. Reef runs
+the loop around them: snapshot, apply, run the paired episodes, record,
+publish or revert.
 
 .. code:: python
 
-   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
-   def evaluate(task, result) -> float: ...
-   class Selection:  # optional
+   from reef.train.cordis_backend import EpisodeScorer, Proposer
+   from reef.train.evaluation import SelectionPlugin
+
+   class MyProposer(Proposer):
+       def propose(self, nodes, samples, models, *, manifest=None, rejected=(), sources=(),
+                   requests=(), entries=(), agent_host=None) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
+
+   class MyScorer(EpisodeScorer):
+       def score(self, task, result) -> float: ...
+
+   class MySelection(SelectionPlugin):  # optional
+       @classmethod
+       def from_config(cls, config, *, candidate_backend) -> "MySelection": ...
+       def evaluate(self, candidate) -> EvaluationResult: ...
        def decide(self, candidate, evaluation) -> SelectionDecision: ...
+
+A deployment names each class as ``package.module:ClassName``, or as a mapping
+with ``module`` and ``config``. Reef builds it with the class method
+``from_config``. ``Proposer``, ``EpisodeScorer`` and ``Promoter`` inherit
+``reef.core.plugins.ConfiguredPlugin``, whose default ``from_config(config)``
+builds the class with no arguments and refuses a non-empty ``config``.
 
 +------------------------+----------------------------------------------------------+
 | Member                 | Contract                                                 |
@@ -988,11 +1033,17 @@ snapshot, apply, run the paired episodes, record, publish or revert.
 |                        | the model under test, ``models["teacher"]`` comes from   |
 |                        | ``evolution.models``                                     |
 +------------------------+----------------------------------------------------------+
-| ``manifest``           | optional, keyword-only: the previous step's              |
-|                        | ``FailureManifest``, the per-task record of which        |
-|                        | episodes failed and how                                  |
+| ``manifest``           | keyword-only: the previous step's ``FailureManifest``,   |
+|                        | the per-task record of which episodes failed and how;    |
+|                        | ``None`` before the first settled step                   |
 +------------------------+----------------------------------------------------------+
-| ``entries``            | optional, keyword-only: the tree as entry options,       |
+| ``reads_requests``     | property, ``False`` by default: ``True`` when the        |
+|                        | proposer answers the ``requests`` of a manual step       |
++------------------------+----------------------------------------------------------+
+| ``runs_agent``         | property, ``False`` by default: ``True`` when the        |
+|                        | proposer uses ``agent_host`` to run a coding agent       |
++------------------------+----------------------------------------------------------+
+| ``entries``            | keyword-only: the tree as entry options,                 |
 |                        | ``{"id", "name", "config"}`` mappings in tree order, so  |
 |                        | an ``update`` or ``remove`` can name its entry           |
 +------------------------+----------------------------------------------------------+
@@ -1013,7 +1064,22 @@ snapshot, apply, run the paired episodes, record, publish or revert.
 |                        | alone                                                    |
 +------------------------+----------------------------------------------------------+
 
-Returning ``None`` from ``propose`` skips the step. The worked examples are in
+Returning ``None`` from ``propose`` skips the step. Reef passes every keyword
+on every call.
+
+Migration:
+
+- Wrap a plain ``propose`` or ``evaluate`` function in a ``Proposer`` or
+  ``EpisodeScorer`` subclass. Its ``propose`` or ``score`` method calls the
+  function. Name the class in the deployment file.
+- Rename ``__call__`` on a ``Proposer``, ``EpisodeScorer`` or ``Promoter``
+  subclass to ``propose``, ``score`` or ``promote``.
+- A proposer that named the ``requests`` or ``agent_host`` keyword overrides
+  ``reads_requests`` or ``runs_agent``.
+- Move the body of a ``CandidatePluginFactory`` or
+  ``CandidateEvaluationPluginFactory`` to the class method ``from_config`` on
+  the plugin. The plugin then inherits ``SelectionPlugin`` or
+  ``ConfiguredEvaluationPlugin``. The worked examples are in
 `Evolve your harness <../user-guide/evolve-your-harness.rst#write-a-method>`__.
 
 Candidate evaluation
@@ -1044,22 +1110,22 @@ exact result it was given.
 A rejection leaves the previous artifact serving. An exception is fail-closed:
 Reef aborts the prepared candidate rather than publishing it. Make evaluations
 idempotent by ``candidate.candidate_id`` because recovery may repeat work whose
-result was not durably committed. The deployment names the factory in its
-``evaluation`` section (`Configuration
+result was not durably committed. The deployment names the plugin class in
+its ``evaluation`` section (`Configuration
 <configuration.rst#the-evaluation-section>`__).
 
-``CandidateEvaluationPluginFactory`` is an abstract base class whose
-``build(config, *, runtime, training_runtime, scenario, environ)`` returns one
-scenario-local plugin. ``evaluation.module`` names its subclass or instance;
-factory subclasses must construct without arguments and without allocating
-model resources. Plain callable factories and objects that merely expose
-matching methods are rejected.
+A configured plugin inherits ``ConfiguredEvaluationPlugin``. It implements the
+class method ``from_config(config, *, runtime, training_runtime, scenario,
+environ)``, which returns one scenario-local plugin. Reef checks the class
+when it loads the configuration and calls ``from_config`` for each scenario.
+Reef rejects functions, abstract classes and objects that only expose
+matching methods.
 
-Harness recipes instead use ``reef.train.evaluation.CandidatePluginFactory``:
-its ``build(candidate_backend)`` binds a plugin to an existing candidate
-backend. ``AlwaysSelectPluginFactory`` and ``ScoreComparisonPluginFactory``
-provide the built-in policies; custom factory classes explicitly inherit the
-same interface.
+Harness recipes instead name a ``reef.train.evaluation.SelectionPlugin``
+class in ``evolution.selection``. Its ``from_config(config, *,
+candidate_backend)`` binds the plugin to the scenario's candidate backend.
+``BackendAlwaysSelectPlugin``, ``ScoreComparisonPlugin`` and ``FloorPlugin``
+are the built-in policies ``always``, ``score_comparison`` and ``floor``.
 
 Surface
 -------

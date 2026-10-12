@@ -160,6 +160,18 @@ def test_stale_runtime_load_ids_drop_by_record_arrival() -> None:
     assert "new" not in processor.releasable_record_ids()
 
 
+def test_candidates_within_max_staleness_of_the_newest_record_stay() -> None:
+    worker = _FakeWorker()
+    processor = _ToyProcessor(ProcessorContext("s", {"batch_size": 3}, max_staleness=1), worker=worker)
+    for name, version in (("v3", "e:3"), ("v4", "e:4"), ("v5", "e:5")):
+        processor.ingest(_record(name, track=True, version=version))
+        processor.ingest(_record(f"done-{name}", completes=name))
+        worker.push(_Judgment(name))
+    assert not processor.ready()  # e:3 is two versions behind e:5
+    assert "v3" in processor.releasable_record_ids()
+    assert {"v4", "v5"}.isdisjoint(processor.releasable_record_ids())
+
+
 def test_correlate_only_mode_without_a_worker() -> None:
     processor = _ToyProcessor(ProcessorContext("s", {"batch_size": 1}), worker=None)
     processor.ingest(_record("r1", track=True))

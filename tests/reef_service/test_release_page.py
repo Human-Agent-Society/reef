@@ -34,7 +34,7 @@ from reef.service.page_chrome import status_label
 from reef.service.release_page import before_release_id, build_release_page, result_of, served_step
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import Mutation
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 MODULE = Path(__file__).parents[2] / "reef" / "service" / "release_page.py"
 CHROME = Path(__file__).parents[2] / "reef" / "service" / "page_chrome.py"

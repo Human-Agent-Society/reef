@@ -700,7 +700,8 @@ def test_a_step_whose_evaluation_raised_keeps_its_proposal_and_says_where_it_fai
     evaluation, and keeps the proposed change and the method's notes, so the pages show what was tried."""
     from reef.harness.tree.mutations import Mutation
     from reef.service.release_page import failed_words
-    from reef.train.cordis_backend.strategies import StepProposal, resolve_episode_scorer
+    from reef.train.cordis_backend.strategies import StepProposal
+    from ._strategies import resolve_episode_scorer
 
     marker = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 

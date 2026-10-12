@@ -1,4 +1,7 @@
-"""Built-in candidate-evaluation mixins and the default plugin.
+"""Built-in candidate-evaluation mixins, the default plugin, and the selection plugin base.
+
+A harness recipe's ``evolution.selection`` names a :class:`SelectionPlugin`
+class, which the recipe builds for each scenario with ``from_config``.
 
 A :class:`~reef.core.evaluation.CandidateEvaluationPlugin` is a single
 class that both measures a candidate (``evaluate``) and decides whether to
@@ -26,8 +29,9 @@ plugin is only concrete once both halves are supplied.
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
-from typing import Any
+from abc import abstractmethod
+from collections.abc import Mapping
+from typing import Any, Self
 
 from reef.core.evaluation import (
     CandidateEvaluationPlugin,
@@ -36,13 +40,19 @@ from reef.core.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.core.plugins import Plugin, PluginConfigError
 
 
-class CandidatePluginFactory(ABC):
-    """Bind one candidate evaluation plugin to a scenario's candidate backend."""
+class SelectionPlugin(CandidateEvaluationPlugin, Plugin):
+    """A candidate evaluation plugin that a harness recipe's ``evolution.selection`` names.
 
+    The recipe builds one for each scenario with ``from_config``, from the
+    setting's configuration and the scenario's candidate backend.
+    """
+
+    @classmethod
     @abstractmethod
-    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin: ...
+    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self: ...
 
 
 class AlwaysSelectMixin(CandidateEvaluationPlugin):
@@ -144,23 +154,23 @@ class BackendEvaluateMixin(CandidateEvaluationPlugin):
         return self._candidate_backend.evaluate(candidate)
 
 
-class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin):
+class BackendAlwaysSelectPlugin(AlwaysSelectMixin, BackendEvaluateMixin, SelectionPlugin):
     """The default plugin: evaluate via the candidate backend, publish every candidate.
 
     What a weight-training deployment gets when it configures no evaluation — the
-    same behaviour reef had before candidate evaluation existed.
+    same behaviour reef had before candidate evaluation existed — and the
+    ``always`` selection of a harness recipe.
     """
 
     def __init__(self, candidate_backend: Any) -> None:
         super().__init__()
         self._candidate_backend = candidate_backend
 
-
-class AlwaysSelectPluginFactory(CandidatePluginFactory):
-    """Bind backend evaluation to unconditional candidate selection."""
-
-    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
-        return BackendAlwaysSelectPlugin(candidate_backend)
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self:
+        if config:
+            raise PluginConfigError(f"the always selection takes no config, got {', '.join(sorted(map(str, config)))}")
+        return cls(candidate_backend)
 
 
 # Compatibility aliases for existing imports.
@@ -168,10 +178,9 @@ RegressionGateMixin = RegressionCheckMixin
 
 __all__ = [
     "AlwaysSelectMixin",
-    "AlwaysSelectPluginFactory",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
-    "CandidatePluginFactory",
     "RegressionCheckMixin",
     "RegressionGateMixin",
+    "SelectionPlugin",
 ]

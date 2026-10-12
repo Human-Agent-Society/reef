@@ -17,7 +17,7 @@ from reef.storage.commit_log import CommitLog
 from reef.storage.commits import CommitRecord
 from reef.train.cordis_backend import CordisBackend, FailureManifest, FailureRecord, Mutation
 from reef.train.cordis_backend.manifest import MANIFEST_KIND, FailureObservation, advance, fingerprint, normalize_cause
-from reef.train.cordis_backend.strategies import Proposer, resolve_episode_scorer, resolve_proposer
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 from .test_harness_recipe import MODEL, RULES, batch, evaluate, make_binary, run_backend_step
 
@@ -154,20 +154,6 @@ def test_three_argument_function_and_lambda_run_against_manifest_state(tmp_path:
         result = run_backend_step(b, batch(), {"steps": 1, "entries": [], "failure_manifest": manifest_state()})
         assert result.metrics["skipped"] == "no proposal"  # the callable ran
         assert result.state["failure_manifest"] == manifest_state()  # a skip carries the manifest untouched
-
-
-def test_pre_manifest_proposer_subclass_runs_against_manifest_state(tmp_path: Path) -> None:
-    calls = []
-
-    class OldStyleProposer(Proposer):
-        def __call__(self, nodes, samples, models):  # type: ignore[override]  # deliberate pre-manifest signature
-            calls.append(nodes)
-            return
-
-    b = backend(str(make_binary(tmp_path)), OldStyleProposer())
-    result = run_backend_step(b, batch(), {"steps": 1, "entries": [], "failure_manifest": manifest_state()})
-    assert calls == [()]
-    assert result.metrics["skipped"] == "no proposal"
 
 
 def test_manifest_keyword_receives_none_when_the_state_has_no_key(tmp_path: Path) -> None:

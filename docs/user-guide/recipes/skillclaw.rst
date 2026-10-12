@@ -44,7 +44,7 @@ How Reef implements it
 skillclaw is a method package on the harness evolution engine
 (``reef/train/cordis_backend/``); `Evolve your harness
 <../evolve-your-harness.rst>`__ describes the mechanism it runs on. The method
-supplies ``propose`` and ``evaluate``; the engine renders the harness, runs
+supplies a ``Proposer`` and an ``EpisodeScorer`` (``harness/plugins.py``); the engine renders the harness, runs
 evaluation tasks, records changes, and rolls back rejected changes.
 ``propose`` runs the night flow and maps its decisions to one composite
 mutation sequence, so a whole night applies under one snapshot
@@ -56,7 +56,7 @@ gate. And the skill catalog must reach the model on every live request, so the
 recipe overrides ``build_surface``, the hook controlling how a published
 artifact reaches the request path (`recipe.py
 <../../../recipes/skillclaw/recipe.py>`__). That override is
-the one extension point beyond the method's own callables; with it the recipe
+the one extension point beyond the method's own plugin classes; with it the recipe
 names no ``harness_adapter``, since no harness tree is installed.
 
 Configuration

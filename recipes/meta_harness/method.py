@@ -28,7 +28,8 @@ from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
-from reef.train.cordis_backend.strategies import Proposer
+from reef.train.cordis_backend.manifest import FailureManifest
+from reef.train.cordis_backend.strategies import AgentHost, Proposer
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TrajectoryItem
 
@@ -163,14 +164,18 @@ class MetaHarnessProposer(Proposer):
         self._max_nodes = max_nodes
         self._evaluation_cost = 2 * len(self._tasks) * episode_repeats
 
-    def __call__(
+    def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
         samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
         *,
-        manifest: Any = None,
+        manifest: FailureManifest | None = None,
         rejected: Sequence[Mapping[str, Any]] = (),
+        sources: Sequence[Mapping[str, Any]] = (),
+        requests: Sequence[Mapping[str, Any]] = (),
+        entries: Sequence[Mapping[str, Any]] = (),
+        agent_host: AgentHost | None = None,
     ) -> tuple[Mutation, ...] | None:
         del nodes, manifest, rejected  # The committed population is the richer history surface.
         population = self._store.active

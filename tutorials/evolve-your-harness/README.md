@@ -30,6 +30,8 @@ evolve-your-harness/
                  the native variant: propose over skills, tools, hooks,
                  the loop graph and its agents, evaluate over the native
                  trajectory; the grader is shared
+    plugins.py   the Proposer and EpisodeScorer classes the serve files
+                 name; each delegates to propose or evaluate above
     materialize_recipe.py
                  copies a serve file's recipe sections where the recipe
                  registry reads them; run.sh and the notebook call it

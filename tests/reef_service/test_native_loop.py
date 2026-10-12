@@ -56,7 +56,7 @@ from reef.harness.tree.nodes import (
 from reef.harness.tree.render import RenderError, render_composition, render_native_module
 from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, _stage_path, tree_files
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 # The seed graph as code: ask the model, run its tool calls while it asks for them, return on text.
 LOOP_CODE = "def run_turn(ctx):\n    while ctx.model() == 'tool_calls':\n        ctx.run_tools()\n"

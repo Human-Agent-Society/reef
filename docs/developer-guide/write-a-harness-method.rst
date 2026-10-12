@@ -8,20 +8,31 @@ records the result, and follows the selection and publication policies.
 See `Evolve your harness <../user-guide/evolve-your-harness.rst>`__ for the
 evolution workflow and a runnable example.
 
-A method provides ``propose`` and ``evaluate``. A custom selection plugin is
-optional:
+A method provides a ``Proposer`` and an ``EpisodeScorer``. A custom selection
+plugin is optional:
 
 .. code:: python
 
-   def propose(nodes, samples, models) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
-   def evaluate(task, result) -> float: ...
-   class SelectionFactory(CandidatePluginFactory):  # optional
-       def build(self, candidate_backend) -> CandidateEvaluationPlugin: ...
+   class MyProposer(Proposer):
+       def propose(self, nodes, samples, models, **keywords) -> Mutation | Sequence[Mutation] | StepProposal | None: ...
+
+   class MyScorer(EpisodeScorer):
+       def score(self, task, result) -> float: ...
+
+   class MySelection(SelectionPlugin):  # optional
+       @classmethod
+       def from_config(cls, config, *, candidate_backend) -> "MySelection": ...
+
+The deployment file names each class, for example
+``propose: methods.mine:MyProposer``. A class with settings uses the mapping
+form ``{module: methods.mine:MyProposer, config: {...}}``. It overrides the
+class method ``from_config(config)``. The default ``from_config`` builds the
+class with no arguments and refuses a non-empty ``config``.
 
 Propose a change
 ~~~~~~~~~~~~~~~~
 
-``propose`` receives three positional arguments:
+``Proposer.propose`` receives three positional arguments:
 
 - ``nodes``: the current tree as ``(kind, config)`` pairs in tree order.
 - ``samples``: a batch of ATIF ``TrajectoryItem`` values. Read the trajectory
@@ -41,31 +52,35 @@ records a JSON mapping of notes under the commit metric ``proposal_notes``;
 Reef does not read the notes to make a decision. Empty mutations skip the
 step, just as ``None`` does.
 
-Declare optional keyword arguments when the method needs more context:
+Reef also passes these keyword arguments on every call:
 
 - ``manifest`` is the previous step's ``FailureManifest``, if there is one.
 - ``rejected`` lists recent rejected proposals, oldest first. Each record
   contains ``step``, ``reason``, and ``mutations``. Each mutation includes its
   ``op``, ``id``, and original ``options`` (``None`` for a remove). Use these
   records to inspect a refusal before proposing the same change again.
+- ``sources`` contains one mapping per sample. See `Untrusted input`_.
+- ``requests`` contains the training instruction of a manual step. See
+  `Manual requests`_.
 - ``entries`` contains the tree as ``{"id", "name", "config"}`` mappings in
   tree order. Use an entry's id to update or remove it.
-- ``agent_host`` is an ``AgentHost`` when ``evolution.proposer_agent`` is
-  configured; otherwise it is ``None``. It provides the agent's adapter,
+- ``agent_host`` is an ``AgentHost`` when the proposer's ``runs_agent``
+  property is true and ``evolution.proposer_agent`` is configured; otherwise
+  it is ``None``. It provides the agent's adapter,
   installed binary, executor, record directory, timeouts, and ``calls``
   budget and record. The agent executor is separate from episode execution.
   See ``reef.recipe.reefine.agent`` for a use of this argument.
 
 For model calls the agent process makes outside ``models``, use
-``agent_host.calls.spend()`` and ``agent_host.calls.record(entry)``. Declare
-``agent_host`` by name to receive it; ``**kwargs`` does not activate it.
+``agent_host.calls.spend()`` and ``agent_host.calls.record(entry)``. A
+proposer that runs an agent overrides ``runs_agent`` to return ``True``.
 
 Manual requests
 ~~~~~~~~~~~~~~~
 
-In ``manual`` or ``hybrid`` training mode, ``propose`` must explicitly declare
-the ``requests`` keyword argument; ``**kwargs`` does not count. Otherwise the
-recipe fails at startup with ``RecipeConfigError``. See `Manual training
+In ``manual`` or ``hybrid`` training mode, the proposer must override
+``reads_requests`` to return ``True``. Otherwise the recipe fails at startup
+with ``RecipeConfigError``. See `Manual training
 <../reference/http-api.rst#manual-training>`__ for the request route.
 
 ``requests`` contains one mapping with ``id``, ``text``, ``session``,
@@ -81,17 +96,19 @@ rechecks cannot take over the step assigned to a request.
 Score an episode
 ~~~~~~~~~~~~~~~~
 
-``evaluate`` scores one completed episode. Reef calls it for each side the
-selection policy evaluates; ``floor`` evaluates only the candidate. The
-``result`` contains the exit code, stdout, stderr, and parsed ``trajectory``.
-Episodes that could not run do not reach ``evaluate``.
+``EpisodeScorer.score(task, result)`` scores one completed episode. Reef
+calls it for each side the selection policy evaluates; ``floor`` evaluates
+only the candidate. The ``result`` contains the exit code, stdout, stderr,
+and parsed ``trajectory``. Episodes that could not run do not reach the
+scorer. ``VerifierRewardScorer`` scores a Harbor task episode by its
+verifier's reward.
 
 Other method options
 ~~~~~~~~~~~~~~~~~~~~
 
 ``promote`` matters only with ``evolution.promote_failures``. This optional
-``Promoter`` subclass or instance receives the step's samples and
-``FailureManifest`` through ``__call__(samples, *, manifest=None)``. It
+``Promoter`` class receives the step's samples and ``FailureManifest``
+through ``promote(samples, *, manifest=None)``. It
 returns prompts to add as permanent evaluation tasks. Reef deduplicates and
 screens the prompts for credentials, then caps how many it adds. Without a
 custom promoter, it uses the user prompt from each failing trace.
@@ -117,32 +134,34 @@ A small method example
 ~~~~~~~~~~~~~~~~~~~~~~
 
 This example uses a ``[fib]`` prefix to look up the expected answer in
-``evaluate``. The prefix is a convention of this method; Reef passes the
+the scorer. The prefix is a convention of this method; Reef passes the
 task string through unchanged.
 
 This method adds a rules node the first time a batch contains a failure:
 
 .. code:: python
 
-   from reef.train.cordis_backend import Mutation
+   from reef.train.cordis_backend import EpisodeScorer, Mutation, Proposer
 
    RULE = "State the final answer alone on the last line.\n"
    EXPECTED = {"[fib]": "2880067194370816120"}
 
 
-   def propose(nodes, samples, models):
-       """Add the rule after a failing batch; once it is in the tree, sit out."""
-       if all((sample.score or 0.0) > 0.0 for sample in samples):
-           return None
-       if any(config.get("text") == RULE for kind, config in nodes if kind == "rules"):
-           return None
-       return Mutation("create", "final-line-rule", {"name": "rules", "config": {"text": RULE}})
+   class FinalLineRule(Proposer):
+       def propose(self, nodes, samples, models, **keywords):
+           """Add the rule after a failing batch; once it is in the tree, sit out."""
+           if all((sample.score or 0.0) > 0.0 for sample in samples):
+               return None
+           if any(config.get("text") == RULE for kind, config in nodes if kind == "rules"):
+               return None
+           return Mutation("create", "final-line-rule", {"name": "rules", "config": {"text": RULE}})
 
 
-   def evaluate(task, result):
-       """1.0 when the final assistant text ends with the task's expected answer."""
-       text = _final_text(result.trajectory) or ""
-       return 1.0 if text.strip().endswith(EXPECTED[task.split()[0]]) else 0.0
+   class ExactAnswer(EpisodeScorer):
+       def score(self, task, result):
+           """1.0 when the final assistant text ends with the task's expected answer."""
+           text = _final_text(result.trajectory) or ""
+           return 1.0 if text.strip().endswith(EXPECTED[task.split()[0]]) else 0.0
 
 
    def _final_text(trajectory):
@@ -161,13 +180,13 @@ Two batching modes
   it when a grader, test, or user action supplies an outcome.
 - ``records`` batches recorded inference requests, without requiring
   reports. It starts a step every ``batch_size`` requests. These samples
-  have ``score=None``, which ``propose`` must handle. The SkillClaw night
+  have ``score=None``, which the proposer must handle. The SkillClaw night
   example judges its own unscored samples later.
 
 Configure it
 ~~~~~~~~~~~~
 
-The recipe config names the callables, the tasks, and the first-boot tree:
+The recipe config names the plugin classes, the tasks, and the first-boot tree:
 
 .. code:: yaml
 
@@ -180,8 +199,8 @@ The recipe config names the callables, the tasks, and the first-boot tree:
        evolution:
          adapter: pi
          binary: pi
-         propose: methods.mine:propose
-         evaluate: methods.mine:evaluate
+         propose: methods.mine:FinalLineRule
+         evaluate: methods.mine:ExactAnswer
          tasks:
            - "[fib] Compute fib(90) exactly. Reply with the integer alone on the last line."
          seed:
@@ -239,13 +258,17 @@ only when at least one task improves and none regresses.
 
 .. code:: python
 
-   from reef import CandidateEvaluationPlugin, CandidateEvaluator, SelectionDecision
-   from reef.train.evaluation import CandidatePluginFactory
+   from reef import CandidateEvaluator, SelectionDecision
+   from reef.train.evaluation import SelectionPlugin
 
 
-   class ParetoPlugin(CandidateEvaluationPlugin):
+   class ParetoPlugin(SelectionPlugin):
        def __init__(self, candidate_backend: CandidateEvaluator):
            self._candidate_backend = candidate_backend
+
+       @classmethod
+       def from_config(cls, config, *, candidate_backend: CandidateEvaluator) -> "ParetoPlugin":
+           return cls(candidate_backend)
 
        def evaluate(self, candidate):
            return self._candidate_backend.evaluate(candidate)
@@ -266,16 +289,11 @@ only when at least one task improves and none regresses.
                evaluation=evaluation,
            )
 
-
-   class ParetoFactory(CandidatePluginFactory):
-       def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
-           return ParetoPlugin(candidate_backend)
-
-Set ``selection: my_pkg.policies:ParetoFactory`` to use this policy. Reef
-constructs the factory without arguments and calls ``build`` for each
-scenario's candidate backend. Python callers can also supply a factory
-instance. A ``CandidateEvaluationPlugin`` must both evaluate and select;
-a selector alone is insufficient. Keep publication in the candidate
+Set ``selection: my_pkg.policies:ParetoPlugin`` to use this policy. Reef
+checks the class when it loads the configuration. It calls ``from_config``
+for each scenario's candidate backend, with the ``config`` of the mapping
+form. A ``SelectionPlugin`` must both evaluate and select; a selector alone
+is insufficient. Keep publication in the candidate
 selection flow so Reef can revert a rejected change.
 
 Untrusted input
@@ -290,14 +308,16 @@ decision depends on who supplied a sample.
 
    import json
 
-   from reef.train.cordis_backend import Mutation, untrusted_text
+   from reef.train.cordis_backend import Proposer, untrusted_text
 
 
-   def propose(nodes, samples, models, sources):
-       tagged = [s for s, p in zip(samples, sources, strict=True) if p["client"] != "untagged"]
-       shown = untrusted_text(json.dumps([s.payload for s in tagged], default=str))
-       reply = models.served.chat([{"role": "user", "content": f"Failing requests:\n{shown}\n\nPropose one skill."}])
-       ...
+   class TaggedFailures(Proposer):
+       def propose(self, nodes, samples, models, *, sources=(), **keywords):
+           tagged = [s for s, p in zip(samples, sources, strict=True) if p["client"] != "untagged"]
+           shown = untrusted_text(json.dumps([s.payload for s in tagged], default=str))
+           prompt = f"Failing requests:\n{shown}\n\nPropose one skill."
+           reply = models.served.chat([{"role": "user", "content": prompt}])
+           ...
 
 ``untrusted_text`` places text inside a block with random delimiters. Text
 inside cannot close the block and pose as the prompt's author.

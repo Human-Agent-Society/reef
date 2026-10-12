@@ -504,11 +504,15 @@ class AgentProposer(Proposer):
         self.adapter = adapter
 
     @property
+    def reads_requests(self) -> bool:
+        return True
+
+    @property
     def runs_agent(self) -> bool:
         """The agent runs for pi alone: off pi the step builds no host for it and notes nothing about one."""
-        return self.adapter == "pi" and super().runs_agent
+        return self.adapter == "pi"
 
-    def __call__(
+    def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
         samples: tuple[TrajectoryItem, ...],
@@ -526,10 +530,6 @@ class AgentProposer(Proposer):
             adapter = self.adapter if agent_host is None else agent_host.descriptor.name
             return evolution.propose(nodes, samples, models, requests=requests, entries=entries, adapter=adapter)
         return answer_with_agent(nodes, requests[0], samples, models, entries, agent_host, self.provider)
-
-
-#: The proposer ``evolution.propose`` names; a recipe that knows the deployment's provider builds its own.
-propose = AgentProposer()
 
 
 def answer_with_agent(
@@ -715,7 +715,6 @@ __all__ = [
     "AgentProposer",
     "AgentRun",
     "answer_with_agent",
-    "propose",
     "read_workspace",
     "workspace_mutations",
     "write_workspace",

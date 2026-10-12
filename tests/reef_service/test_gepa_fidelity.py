@@ -28,7 +28,7 @@ from reef.core.evaluation import EvaluationResult, UpdateCandidate
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.harness.episodes.run import EpisodeResult
-from reef.train.cordis_backend.strategies import resolve_episode_scorer
+from ._strategies import resolve_episode_scorer
 
 TRAIN = [{"input": f"train problem {i}", "answer": "### 1"} for i in range(45)]
 VAL = [{"input": f"validation problem {i}", "answer": "### 1"} for i in range(45)]

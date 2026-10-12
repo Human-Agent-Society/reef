@@ -427,7 +427,11 @@ def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> Non
 def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> None:
     module = tmp_path / "demo_client_models.py"
     module.write_text(
-        "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     import sys
 
@@ -436,8 +440,8 @@ def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> 
         config = {
             "model": {"path": "small"},
             "evolution": {
-                "propose": "demo_client_models:propose",
-                "evaluate": "demo_client_models:evaluate",
+                "propose": "demo_client_models:Propose",
+                "evaluate": "demo_client_models:Evaluate",
                 "tasks": ["t"],
                 "client_models": ["big/one", "big/two"],
             },
@@ -551,7 +555,11 @@ def test_from_config_reads_the_key_from_the_named_environment_variable() -> None
 def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     module = tmp_path / "demo_models.py"
     module.write_text(
-        "def propose(nodes, samples, models):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     import sys
 
@@ -560,8 +568,8 @@ def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
         config = {
             "model": {"path": "small"},
             "evolution": {
-                "propose": "demo_models:propose",
-                "evaluate": "demo_models:evaluate",
+                "propose": "demo_models:Propose",
+                "evaluate": "demo_models:Evaluate",
                 "tasks": ["t"],
                 "models": {"teacher": {"url": "http://big", "model": "large", "api_key_env": "TEACHER_KEY"}},
             },

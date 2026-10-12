@@ -22,7 +22,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
 from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, EpisodeEvaluationWorker, ScoreComparisonPlugin
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 from .test_harness_recipe import (
     MODEL,
@@ -451,7 +451,14 @@ def test_run_episode_keeps_the_trajectory_before_the_root_is_removed(tmp_path: P
 
 def test_recipe_parses_step_record_dir_and_the_backend_refuses_an_unwritable_one(tmp_path: Path) -> None:
     def config(**evolution):
-        return {"evolution": {"propose": lambda n, s, m: None, "evaluate": evaluate, "tasks": ["one"], **evolution}}
+        return {
+            "evolution": {
+                "propose": resolve_proposer(lambda n, s, m: None),
+                "evaluate": resolve_episode_scorer(evaluate),
+                "tasks": ["one"],
+                **evolution,
+            }
+        }
 
     on = CordisRecipe.from_environment({}, config=config(step_record_dir=str(tmp_path / "record")), runtime=runtime())
     assert on.step_record_dir == str(tmp_path / "record")
@@ -483,8 +490,8 @@ def test_a_relative_record_dir_is_made_absolute_at_build(tmp_path: Path, monkeyp
     monkeypatch.chdir(tmp_path)
     config = {
         "evolution": {
-            "propose": lambda n, s, m: None,
-            "evaluate": evaluate,
+            "propose": resolve_proposer(lambda n, s, m: None),
+            "evaluate": resolve_episode_scorer(evaluate),
             "tasks": ["one"],
             "step_record_dir": "rel",
         }

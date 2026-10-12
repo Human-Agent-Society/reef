@@ -87,9 +87,9 @@ class ReefineRecipe(CordisRecipe):
         adapter = str(evolution.get("adapter", "pi"))
         defaults = {
             # A request goes to the agent proposer where the host can jail it; otherwise to the text proposer.
-            "propose": "reef.recipe.reefine.agent:propose",
+            "propose": "reef.recipe.reefine.agent:AgentProposer",
             "proposer_agent": {},
-            "evaluate": "reef.recipe.reefine.evolution:evaluate",
+            "evaluate": "reef.recipe.reefine.evolution:AnswerScorer",
             "requests": True,
             "version_check": True,
             "review_kinds": ["code_extension"],

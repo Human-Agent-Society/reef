@@ -19,8 +19,8 @@ recipe:
       adapter: native
       # The native variant of the method beside this file (harness/): the same
       # grader, a proposer whose vocabulary is skills, tools and hooks.
-      propose: tutorials.evolve-your-harness.harness.native_evolution:propose
-      evaluate: tutorials.evolve-your-harness.harness.native_evolution:evaluate
+      propose: tutorials.evolve-your-harness.harness.plugins:NativeSelfProposer
+      evaluate: tutorials.evolve-your-harness.harness.plugins:NativeAnswerScorer
       # No binary: the native loop is reef's own. run.sh puts a reef-native
       # launcher for this checkout on PATH; an installed reef ships the script.
       tasks:

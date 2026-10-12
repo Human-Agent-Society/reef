@@ -280,7 +280,7 @@ def test_the_agent_writes_the_change_tries_it_and_hands_it_back_reviewed(tmp_pat
     record: list[dict] = []
     host = agent_host(tmp_path, record)
     request = {"id": "r1", "text": "Read my answers aloud with a natural voice", "requires": []}
-    proposal = AgentProposer(provider_of(upstream))(
+    proposal = AgentProposer(provider_of(upstream)).propose(
         NODES, (), served_models(upstream, record, host), requests=[request], entries=ENTRIES, agent_host=host
     )
     assert isinstance(proposal, StepProposal)
@@ -376,12 +376,12 @@ def test_an_agent_that_changes_nothing_or_runs_out_of_time_hands_back_no_mutatio
     mode = Path(host.binary).with_name("mode")
     mode.write_text("idle")
     propose = AgentProposer(provider_of(upstream))
-    idle = propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=host)
+    idle = propose.propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=host)
     assert idle.mutations == () and idle.notes["failure"] == "the agent changed no entry"
 
     mode.write_text("sleep")
     slow_host = replace(host, timeout_s=1.0, step_dir=None)
-    slow = propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=slow_host)
+    slow = propose.propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=slow_host)
     assert slow.mutations == () and "past its" in slow.notes["failure"]
 
 
@@ -390,7 +390,7 @@ def test_an_agent_with_a_failed_model_response_does_not_publish_its_partial_chan
     record: list[dict] = []
     host = agent_host(tmp_path, record)
     Path(host.binary).with_name("mode").write_text("stream-error")
-    proposal = AgentProposer(provider_of(upstream))(
+    proposal = AgentProposer(provider_of(upstream)).propose(
         NODES, (), served_models(upstream, record, host), requests=[{"text": "x"}], entries=ENTRIES, agent_host=host
     )
     assert proposal.mutations == ()
@@ -405,7 +405,7 @@ def test_a_reply_cut_at_its_token_budget_says_so_rather_than_that_nothing_change
     record: list[dict] = []
     host = agent_host(tmp_path, record)
     Path(host.binary).with_name("mode").write_text("budget")
-    proposal = AgentProposer(provider_of(upstream))(
+    proposal = AgentProposer(provider_of(upstream)).propose(
         NODES, (), served_models(upstream, record, host), requests=[{"text": "x"}], entries=ENTRIES, agent_host=host
     )
     assert proposal.mutations == () and proposal.notes["agent"]["exit_code"] == 0
@@ -423,10 +423,10 @@ def test_without_a_request_or_an_agent_the_text_proposer_answers(monkeypatch) ->
     monkeypatch.setattr(reefine_agent.evolution, "propose", text_proposer)
     models = ModelBindings(served=ModelBinding(base_url="http://127.0.0.1:9", model="m"))
     propose = AgentProposer()
-    assert propose(NODES, (), models, entries=ENTRIES).id == "tone"
-    assert propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=None).id == "tone"
+    assert propose.propose(NODES, (), models, entries=ENTRIES).id == "tone"
+    assert propose.propose(NODES, (), models, requests=[{"text": "x"}], entries=ENTRIES, agent_host=None).id == "tone"
     # The recipe names the adapter it serves; the text proposer writes for it when no agent host says otherwise.
-    assert AgentProposer(adapter="dsh")(NODES, (), models, entries=ENTRIES).id == "tone"
+    assert AgentProposer(adapter="dsh").propose(NODES, (), models, entries=ENTRIES).id == "tone"
     assert seen == [((), "pi"), (({"text": "x"},), "pi"), ((), "dsh")]
 
 
@@ -661,7 +661,7 @@ def test_timeout_keeps_candidate_and_progress_without_publishing(tmp_path, upstr
         raise EpisodeTimeout("deadline")
 
     monkeypatch.setattr(reefine_agent, "launch_pi", launch)
-    proposal = AgentProposer()(
+    proposal = AgentProposer().propose(
         NODES, (), served_models(upstream, [], host), requests=[{"text": "x"}], entries=ENTRIES, agent_host=host
     )
     assert proposal.mutations == () and "past its" in proposal.notes["failure"]

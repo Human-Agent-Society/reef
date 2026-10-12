@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.plugins import PluginReference
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.runners.terminus.runner import trial_record
@@ -20,7 +21,7 @@ from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY, evaluate
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend.backend import FloorPluginFactory, ScoreComparisonPluginFactory
+from reef.train.cordis_backend.backend import FloorPlugin, ScoreComparisonPlugin
 
 
 def test_dotted_recipe_defaults_and_config_are_independent() -> None:
@@ -34,8 +35,7 @@ def test_dotted_recipe_defaults_and_config_are_independent() -> None:
     assert built.propose.reads_requests
     assert built.review_kinds == ("code_extension",)
     # The floor: the candidate alone must pass every evaluation task; the current release is not run.
-    assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
-    assert built.candidate_plugin.floor_score == 1.0
+    assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
     assert [entry["id"] for entry in built.seed] == [
         "reef-version-check",
         "reef-requests",
@@ -56,14 +56,14 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
                 "requests": False,
                 "version_check": False,
                 "review_kinds": [],
-                "evaluate": "reef.recipe.reefine.evolution:evaluate",
+                "evaluate": "reef.recipe.reefine.evolution:AnswerScorer",
             },
         },
     )
     assert isinstance(built, ReefineRecipe)
     assert built.training_mode == "hybrid" and built.batch_size == 3
     assert built.seed == () and built.review_kinds == ()
-    assert isinstance(built.candidate_plugin, ScoreComparisonPluginFactory)
+    assert built.selection == PluginReference(ScoreComparisonPlugin)
 
 
 @pytest.mark.parametrize("evolution", [None, [], {"tasks": []}, {"tasks": ["task"], "requests": "yes"}])
@@ -109,7 +109,7 @@ recipe = build_named_recipe('reefine', os.environ, config_directory=path.parent,
 assert isinstance(recipe, ReefineRecipe)
 assert recipe.training_mode == 'manual' and recipe.propose.reads_requests
 assert len(recipe.tasks) == 1 and recipe.tasks[0].startswith('[health] ')
-assert type(recipe.candidate_plugin).__name__ == 'FloorPluginFactory'
+assert recipe.selection.plugin_class.__name__ == 'FloorPlugin'
 assert recipe.base_artifact_files()
 assert recipe.model_binding().model == 'test-model'
 """

@@ -34,8 +34,9 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.registry import build_recipe
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train.cordis_backend.strategies import resolve_episode_scorer
 from reef.train.trainer import Trainer
+
+from ._strategies import resolve_episode_scorer
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the scorer can prefer any composition whose instructions carry the marker.
@@ -386,7 +387,7 @@ def test_a_served_parent_uses_recorded_traffic_and_runs_no_parent_episodes(tmp_p
     episodes = FakeEpisodes()
     models, reflector = bindings()
 
-    proposal = proposer(archive, episodes)(NODES, (SAMPLE,), models)
+    proposal = proposer(archive, episodes).propose(NODES, (SAMPLE,), models)
 
     assert proposal == (Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),)
     assert episodes.prompts == [TASK]  # the child only
@@ -416,7 +417,7 @@ def test_a_parent_that_never_served_is_re_run_on_the_minibatch(tmp_path: Path) -
     episodes = FakeEpisodes()
     models, reflector = bindings()
 
-    proposal = proposer(archive, episodes)(NODES, (SAMPLE,), models)
+    proposal = proposer(archive, episodes).propose(NODES, (SAMPLE,), models)
 
     assert proposal == (Mutation("update", "rules", {"name": "rules", "config": {"text": REFLECTED}}),)
     assert episodes.prompts == [TASK, TASK]  # parent then child
@@ -431,7 +432,7 @@ def test_a_child_that_does_not_beat_its_parent_is_rejected(tmp_path: Path) -> No
     episodes = FakeEpisodes()
     models, _ = bindings("```\nNo marker here.\n```")
 
-    assert proposer(archive, episodes)(NODES, (SAMPLE,), models) is None
+    assert proposer(archive, episodes).propose(NODES, (SAMPLE,), models) is None
     assert (archive.rejections, archive.steps, archive.pending) == (1, 1, None)
     assert len(archive.candidates) == 1
 
@@ -446,7 +447,7 @@ def test_an_episode_that_cannot_run_scores_zero_and_reports_its_error(tmp_path: 
     episodes = FakeEpisodes(failure=EpisodeError("harness binary 'pi' not found"))
     models, reflector = bindings()
 
-    assert proposer(archive, episodes)(NODES, (SAMPLE,), models) is None  # child ties the parent at 0.0
+    assert proposer(archive, episodes).propose(NODES, (SAMPLE,), models) is None  # child ties the parent at 0.0
     (prompt,) = reflector.prompts
     assert "## Feedback\nharness binary 'pi' not found" in prompt
 
@@ -462,7 +463,7 @@ def test_proposer_episodes_use_the_configured_execution_policy(tmp_path: Path) -
         episodes,
         executor=executor,
         episode_timeout_s=12.5,
-    )(NODES, (SAMPLE,), models)
+    ).propose(NODES, (SAMPLE,), models)
 
     assert proposal is not None
     assert episodes.executors == [executor]
@@ -505,7 +506,7 @@ def test_the_budget_short_circuits_before_any_model_call(tmp_path: Path) -> None
     episodes = FakeEpisodes()
     models, reflector = bindings()
 
-    assert proposer(archive, episodes, max_metric_calls=150)(NODES, (SAMPLE,), models) is None
+    assert proposer(archive, episodes, max_metric_calls=150).propose(NODES, (SAMPLE,), models) is None
     assert (episodes.prompts, reflector.prompts) == ([], [])
 
 
@@ -515,10 +516,10 @@ def test_a_perfect_minibatch_short_circuits_before_any_model_call(tmp_path: Path
     models, reflector = bindings()
     solved = recorded_trajectory("a1", dict(recorded_payload(SAMPLE)), 1.0)
 
-    assert proposer(archive, episodes)(NODES, (solved,), models) is None
+    assert proposer(archive, episodes).propose(NODES, (solved,), models) is None
     assert (episodes.prompts, reflector.prompts) == ([], [])
     # The same minibatch is worth reflecting on once the bar is above it.
-    proposer(archive, episodes, perfect_score=2.0)(NODES, (solved,), models)
+    proposer(archive, episodes, perfect_score=2.0).propose(NODES, (solved,), models)
     assert len(reflector.prompts) == 1
 
 
@@ -527,7 +528,7 @@ def test_reflection_falls_back_to_the_model_under_test(tmp_path: Path) -> None:
     episodes = FakeEpisodes()
     models, served = bindings(declared=False)
 
-    assert proposer(archive, episodes)(NODES, (SAMPLE,), models) is not None
+    assert proposer(archive, episodes).propose(NODES, (SAMPLE,), models) is not None
     assert len(served.prompts) == 1
 
 
@@ -538,7 +539,7 @@ def test_a_tree_the_archive_does_not_recognise_is_reseeded(tmp_path: Path) -> No
     episodes = FakeEpisodes()
     models, _ = bindings()
 
-    proposer(archive, episodes)(NODES, (SAMPLE,), models)
+    proposer(archive, episodes).propose(NODES, (SAMPLE,), models)
 
     assert archive.served == 1
     assert archive.candidates[1].texts == {"rules": SEED_TEXT}
@@ -643,7 +644,7 @@ def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
         "evolution": {
             "adapter": "pi",
             "binary": str(tmp_path / "fake-pi"),
-            "evaluate": score_rules,
+            "evaluate": resolve_episode_scorer(score_rules),
             "feedback": feedback_hook,
             "tasks": ["check one", "check two"],
             "seed": list(SEED),
@@ -704,14 +705,15 @@ def test_a_missing_gepa_block_is_refused(tmp_path: Path) -> None:
         build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
 
 
-def test_a_configured_selection_object_is_left_alone(tmp_path: Path) -> None:
+def test_a_configured_selection_is_left_alone(tmp_path: Path) -> None:
     """Only the empty seams are filled: an operator who names a policy keeps it."""
-    from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
+    from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 
     config = sections(tmp_path)
-    config["evolution"]["selection"] = AlwaysSelectPluginFactory()
+    config["evolution"]["selection"] = "always"
     built = build_recipe(str(config["implementation"]), {}, config=config, runtime=runtime())
-    assert isinstance(built.candidate_plugin, AlwaysSelectPluginFactory)
+    assert not built.archive_selection
+    assert built.selection.plugin_class is BackendAlwaysSelectPlugin
 
 
 # -- one full step through the real backend and commit path -----------------
@@ -858,7 +860,7 @@ def test_every_reflection_is_logged_with_its_prompt_reply_and_verdict(tmp_path: 
     archive = Archive(tmp_path / "archive.json")
     models, reflector = bindings()
 
-    proposer(archive, FakeEpisodes())(NODES, (SAMPLE,), models)
+    proposer(archive, FakeEpisodes()).propose(NODES, (SAMPLE,), models)
 
     (row,) = archive.proposals
     assert (row["parent"], row["component"], row["accepted"], row["candidate"]) == (0, "rules", True, 1)

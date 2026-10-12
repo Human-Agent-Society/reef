@@ -8,6 +8,7 @@ import subprocess
 from pathlib import Path
 
 from reef.harness import EpisodeResult
+from reef.train.cordis_backend.strategies import EpisodeScorer
 
 MANIFEST = json.loads(Path(__file__).with_name("tasks.json").read_text(encoding="utf-8"))
 SEED = (
@@ -59,3 +60,10 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     if reward not in (0, 1):
         raise ValueError("Terminal-Bench verifier reward must be binary")
     return float(reward)
+
+
+class VerifierScorer(EpisodeScorer):
+    """:func:`evaluate` as the ``evolution.evaluate`` plugin terminal_bench.yaml names."""
+
+    def score(self, task: str, result: EpisodeResult) -> float:
+        return evaluate(task, result)

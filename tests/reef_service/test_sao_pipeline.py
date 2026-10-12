@@ -482,7 +482,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
         config={
             "data": {"batch_size": 1},
             "evaluation": {
-                "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
+                "module": "reef_service._candidate_evaluation_plugin:CheckpointEvaluator",
                 "config": {
                     "score": 0.25,
                     "threshold": 0.8,

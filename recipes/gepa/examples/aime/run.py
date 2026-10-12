@@ -104,8 +104,8 @@ def load_recipe(tasks: list[str], *, api_key: str, seed: int = 0) -> tuple[str, 
     # into spawn/Ray workers. Bind the example hooks to explicit task data;
     # preserve user-supplied hooks when a config overrides either one.
     scorer = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
-    if evolution.get("evaluate") == "harness.aime:evaluate":
-        evolution["evaluate"] = scorer.evaluate
+    if evolution.get("evaluate") == "harness.aime:AIMEAnswerScorer":
+        evolution["evaluate"] = scorer
     if evolution.get("feedback") == "harness.aime:AIMEFeedback":
         evolution["feedback"] = scorer
     # One --seed drives both random draws: the proposer's parent sampling

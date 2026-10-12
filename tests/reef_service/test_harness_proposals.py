@@ -21,7 +21,7 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, create_harness_surface
 from reef.train.cordis_backend.contracts import ProposalValidator, StepRecords
 from reef.train.cordis_backend.proposals import ProposalInbox
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 CREATE_RULES = {"op": "create", "id": "r1", "options": {"name": "rules", "config": {"text": "marker rules"}}}
 

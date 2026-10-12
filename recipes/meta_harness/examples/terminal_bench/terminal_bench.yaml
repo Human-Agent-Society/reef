@@ -7,7 +7,7 @@ recipe:
     evolution:
       adapter: terminus
       binary: reef-terminus
-      evaluate: harness.benchmark:evaluate
+      evaluate: harness.benchmark:VerifierScorer
       seed: [harness.benchmark:SEED]
       tasks: []  # Filled from the pinned manifest and --tasks-root by run.py.
       episode_repeats: 2

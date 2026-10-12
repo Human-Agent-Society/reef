@@ -2,18 +2,30 @@
 
 from __future__ import annotations
 
+import logging
 import os
+import random
 from dataclasses import dataclass, field
 from typing import Any
 
 import ray
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
 
-from reef.inference.process import EngineGroup, EngineStartup
+from reef.inference.process import (
+    PORT_CONFLICT_ATTEMPTS,
+    PORT_CONFLICT_SPREAD,
+    EngineGroup,
+    EngineStartup,
+    PortConflictError,
+    check_server_owner,
+    ports_in_use,
+)
 from reef.inference.sglang.config import SGLangConfig, SGLangGroupConfig
 from reef.inference.sglang.engine import ReefSGLangEngine
 from reef.inference.sglang.plugin import REEF_SGLANG_PLUGIN_ENV
 from reef.inference.sglang.process import launch_router, node_address_and_port, wait_ready
+
+logger = logging.getLogger(__name__)
 
 SGLANG_PLUGIN_NAME = "reef"
 
@@ -303,24 +315,68 @@ class SGLangCluster:
 
         from sglang_router.launch_router import RouterArgs
 
-        host, port = node_address_and_port(start_port=3000)
-        if index == 0 and self.config.router_port is not None:
-            port = self.config.router_port
-        _, metrics = node_address_and_port(start_port=max(4000, port + 1))
+        configured_port = self.config.router_port if index == 0 else None
         names = {item.name for item in fields(RouterArgs)}
         options = {key: value for key, value in self.config.router_options.items() if key in names}
-        options.update(
-            host=host.strip("[]"),
-            port=port,
-            prometheus_port=metrics,
-            pd_disaggregation=pd,
-            disable_circuit_breaker=True,
-            disable_health_check=True,
-        )
-        process = launch_router(options)
-        self.routers.append(process)
-        wait_ready(f"http://{host}:{port}", process, self.config.startup_timeout, path="/health")
-        return host, port
+        start_port, metrics_start_port, attempt = 3000, 4000, 1
+        while True:
+            host, probed_port = node_address_and_port(start_port=start_port)
+            port = probed_port if configured_port is None else configured_port
+            # Metrics stay near 4000: the port above a configured router port can be another stack's router port.
+            _, probed_metrics_port = node_address_and_port(start_port=metrics_start_port)
+            if probed_metrics_port == port:
+                # The router has not bound its HTTP port yet, so the probe cannot see it.
+                _, metrics_port = node_address_and_port(start_port=port + 1)
+            else:
+                metrics_port = probed_metrics_port
+            options.update(
+                host=host.strip("[]"),
+                port=port,
+                # Without prometheus_host, the router serves metrics on loopback, where the probe cannot see it.
+                prometheus_host=host.strip("[]"),
+                prometheus_port=metrics_port,
+                pd_disaggregation=pd,
+                disable_circuit_breaker=True,
+                disable_health_check=True,
+            )
+            process = launch_router(options)
+            self.routers.append(process)
+            try:
+                wait_ready(f"http://{host}:{port}", process, self.config.startup_timeout, path="/health")
+                # Another stack's router can answer on a port that this router failed to bind.
+                check_server_owner(host, port, process.pid)
+                return host, port
+            except RuntimeError as error:
+                # Stop the router first: its own sockets must not count as held.
+                process.terminate()
+                process.join(timeout=5)
+                if process.is_alive():
+                    process.kill()
+                    process.join(timeout=5)
+                self.routers.remove(process)
+                if isinstance(error, PortConflictError):
+                    held_ports = [port]
+                else:
+                    held_ports = ports_in_use(host, [port, metrics_port])
+                if not held_ports or (configured_port is not None and port in held_ports):
+                    raise
+                held_addresses = ", ".join(f"{host}:{held_port}" for held_port in held_ports)
+                if attempt == PORT_CONFLICT_ATTEMPTS:
+                    raise RuntimeError(
+                        f"inference router ports {held_addresses} were held by other processes "
+                        f"after {attempt} startup attempts"
+                    ) from error
+                logger.warning(
+                    "inference router ports %s are held by other processes; starting attempt %d of %d on new ports",
+                    held_addresses,
+                    attempt + 1,
+                    PORT_CONFLICT_ATTEMPTS,
+                )
+                # Skip ports at random so two stacks that collided usually pick different ports.
+                # A fresh generator seeds from the OS; a trainer may seed the global one identically in every stack.
+                skipped_ports = random.Random().randrange(1, PORT_CONFLICT_SPREAD)
+                start_port, metrics_start_port = port + skipped_ports, metrics_port + skipped_ports
+                attempt += 1
 
     def start(self) -> None:
         if self.config.external_engines:

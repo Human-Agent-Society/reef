@@ -29,6 +29,7 @@ from reef.recipe.registry import build_recipe
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
 from reef.train.trainer import Trainer
+from ._strategies import resolve_episode_scorer
 
 PI_FAKE = """\
 #!/usr/bin/env python3
@@ -137,7 +138,7 @@ def sections(tmp_path: Path, *, scorer=score_rules, adapter: str = "pi", **metho
         "evolution": {
             "adapter": adapter,
             "binary": str(tmp_path / "fake-pi"),
-            "evaluate": scorer,
+            "evaluate": resolve_episode_scorer(scorer),
             "tasks": [TASK],
             "seed": list(SEED),
             "meta_harness": block,
@@ -259,7 +260,7 @@ def test_full_history_proposer_can_branch_from_a_retained_candidate(tmp_path: Pa
         episode_repeats=1,
     )
 
-    mutations = proposer(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat}))
+    mutations = proposer.propose(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat}))
 
     assert mutations == (Mutation("update", "rules", {"config": ALTERNATE[0]["config"]}),)
     assert store.active.pending.parent_id == retained.candidate_id
@@ -287,7 +288,7 @@ def test_an_undeclared_proposer_model_is_refused_rather_than_silently_served(tmp
     )
 
     with pytest.raises(ValueError, match=r"is not declared under evolution\.models"):
-        proposer(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": QueueChat()}))
+        proposer.propose(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": QueueChat()}))
 
 
 def test_incumbent_only_mode_rejects_a_historical_parent_without_losing_the_attempt(tmp_path: Path) -> None:
@@ -307,7 +308,7 @@ def test_incumbent_only_mode_rejects_a_historical_parent_without_losing_the_atte
         mode="incumbent_only",
     )
 
-    assert proposer(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
+    assert proposer.propose(SEED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
     assert store.active.attempts[-1]["status"] == "invalid"
     assert store.active.pending_id is None
 
@@ -335,7 +336,7 @@ def test_component_scope_keeps_non_evolvable_parent_nodes_fixed(tmp_path: Path) 
         kinds=("rules",),
     )
 
-    assert proposer(parent, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
+    assert proposer.propose(parent, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
     assert store.active.attempts[-1]["status"] == "invalid"
     assert "may change only configured components" in store.active.attempts[-1]["error"]
 
@@ -358,7 +359,7 @@ def test_candidate_and_episode_budgets_stop_before_another_model_call(tmp_path: 
         max_candidates=1,
     )
 
-    assert proposer(IMPROVED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
+    assert proposer.propose(IMPROVED, (SAMPLE,), ModelBindings(served=ServedModel(), named={"proposer": chat})) is None
     assert chat.prompts == []
     assert store.active.attempts[-1] == {
         "step": 1,

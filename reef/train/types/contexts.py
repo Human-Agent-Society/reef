@@ -18,10 +18,14 @@ class ProcessorContext:
     #: The contract the scenario's ingress admits, when it is wider than ``report_type``: a report it
     #: accepts and ``report_type`` refuses is another component's, and this processor releases it.
     admitted_report_type: type[ReportBase] | None = None
+    #: How many versions a sample may lag behind and still train; the recipe's ``max_staleness``.
+    max_staleness: int = 0
 
     def __post_init__(self) -> None:
         if self.training_mode not in ("auto", "manual", "hybrid"):
             raise ValueError("training_mode must be 'auto', 'manual' or 'hybrid'")
+        if not isinstance(self.max_staleness, int) or isinstance(self.max_staleness, bool) or self.max_staleness < 0:
+            raise ValueError("max_staleness must be a non-negative integer")
 
     def with_config(self, config: Mapping[str, Any]) -> ProcessorContext:
         return replace(self, config=config)

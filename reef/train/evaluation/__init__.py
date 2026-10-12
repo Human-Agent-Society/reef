@@ -1,8 +1,9 @@
-"""The recipe's candidate evaluation: contracts, built-ins, and factory loading.
+"""The recipe's candidate evaluation: contracts, built-ins, and plugin loading.
 
 Every :class:`reef.recipe.Recipe` carries a ``candidate_evaluation`` plugin —
-built in code by harness recipes, or from the top-level ``evaluation`` config
-section by weight recipes — and :class:`reef.train.Trainer` runs it between
+a :class:`SelectionPlugin` that harness recipes build from ``evolution.selection``,
+or a :class:`ConfiguredEvaluationPlugin` that weight recipes build from the
+top-level ``evaluation`` config section — and :class:`reef.train.Trainer` runs it between
 prepare and settle to decide whether a produced candidate is published. The
 shared contracts live in ``reef.core.evaluation`` and are re-exported here.
 Runtimes import those contracts directly; this package owns the built-in
@@ -20,16 +21,15 @@ from reef.core.evaluation import (
 from reef.train.evaluation.config import (
     CandidateEvaluationConfig,
     CandidateEvaluationConfigError,
-    CandidateEvaluationPluginFactory,
+    ConfiguredEvaluationPlugin,
     build_candidate_evaluation,
 )
 from reef.train.evaluation.evaluators import (
     AlwaysSelectMixin,
-    AlwaysSelectPluginFactory,
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,
-    CandidatePluginFactory,
     RegressionCheckMixin,
+    SelectionPlugin,
 )
 
 # Compatibility aliases for existing imports.
@@ -37,20 +37,19 @@ RegressionGateMixin = RegressionCheckMixin
 
 __all__ = [
     "AlwaysSelectMixin",
-    "AlwaysSelectPluginFactory",
     "BackendAlwaysSelectPlugin",
     "BackendEvaluateMixin",
     "CandidateEvaluationConfig",
     "CandidateEvaluationConfigError",
     "CandidateEvaluationPlugin",
-    "CandidateEvaluationPluginFactory",
     "CandidateEvaluator",
-    "CandidatePluginFactory",
     "CandidateSelector",
+    "ConfiguredEvaluationPlugin",
     "EvaluationResult",
     "RegressionCheckMixin",
     "RegressionGateMixin",
     "SelectionDecision",
+    "SelectionPlugin",
     "UpdateCandidate",
     "build_candidate_evaluation",
 ]

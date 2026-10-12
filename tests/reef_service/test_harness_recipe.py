@@ -17,6 +17,7 @@ import reef.train.cordis_backend.backend as reef_cordis_backend
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
+from reef.core.plugins import PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.dispatcher import Dispatcher
 from reef.harness.adapters import get_adapter
@@ -41,10 +42,11 @@ from reef.train.cordis_backend import (
     ScoreComparisonPlugin,
 )
 from reef.train.cordis_backend.backend import EpisodeEvaluationWorker
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
-from reef.train.evaluation.evaluators import AlwaysSelectPluginFactory
+from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
 from reef.train.trainer import Trainer
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch, TrainStepResult
+
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 # The fake harness scores itself: its trajectory carries the rules text, so
 # the episode scorer can prefer compositions containing the marker.
@@ -171,15 +173,19 @@ def test_recipe_resolves_by_dotted_reference() -> None:
 def test_yaml_config_boots_the_recipe_through_dotted_references(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_evolution.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     built = CordisRecipe.from_environment(
         {},
         config={
             "evolution": {
-                "propose": "demo_evolution:propose",
-                "evaluate": "demo_evolution:evaluate",
+                "propose": "demo_evolution:Propose",
+                "evaluate": "demo_evolution:Evaluate",
                 "tasks": ["task one"],
                 "adapter": "pi",
             }
@@ -188,7 +194,7 @@ def test_yaml_config_boots_the_recipe_through_dotted_references(tmp_path: Path, 
     )
     assert built.adapter == "pi"
     assert built.tasks == ("task one",)
-    assert built.propose((), (), MODEL) is None
+    assert built.propose.propose((), (), MODEL) is None
 
 
 def test_config_without_evolution_section_is_rejected() -> None:
@@ -1057,15 +1063,19 @@ def test_pregate_recovered_state_refuses_the_step_and_writes_nothing(tmp_path: P
 def test_yaml_seed_must_be_a_list_of_mappings(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_evolution.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(seed):
         return {
             "evolution": {
-                "propose": "demo_evolution:propose",
-                "evaluate": "demo_evolution:evaluate",
+                "propose": "demo_evolution:Propose",
+                "evaluate": "demo_evolution:Evaluate",
                 "tasks": ["task one"],
                 "seed": seed,
             }
@@ -1082,18 +1092,22 @@ def test_yaml_seed_must_be_a_list_of_mappings(tmp_path: Path, monkeypatch) -> No
 def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, monkeypatch) -> None:
     module = tmp_path / "demo_method.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\n"
-        "def evaluate(task, result):\n    return 0.0\n\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
+        "\n"
         "def accept(candidate, current):\n    return True\n\n"
-        "not_a_factory = 3\n"
+        "not_a_plugin = 3\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_method:propose",
-                "evaluate": "demo_method:evaluate",
+                "propose": "demo_method:Propose",
+                "evaluate": "demo_method:Evaluate",
                 "tasks": ["task one"],
                 **evolution,
             }
@@ -1101,55 +1115,58 @@ def test_recipe_rejects_removed_acceptance_and_raw_selection_callable(tmp_path, 
 
     with pytest.raises(RecipeConfigError, match=r"evolution\.acceptance was removed"):
         CordisRecipe.from_environment({}, config=config(acceptance="always"))
-    # evolution.selection now names a plugin factory, so a reference to
-    # something that cannot be called at all is the misconfiguration.
-    with pytest.raises(RecipeConfigError, match=r"plugin factory"):
-        CordisRecipe.from_environment({}, config=config(selection="demo_method:not_a_factory"))
+    # evolution.selection names a SelectionPlugin class, so a reference to
+    # anything else is the misconfiguration.
+    with pytest.raises(RecipeConfigError, match=r"inherits SelectionPlugin"):
+        CordisRecipe.from_environment({}, config=config(selection="demo_method:not_a_plugin"))
+    with pytest.raises(RecipeConfigError, match=r"inherits SelectionPlugin"):
+        CordisRecipe.from_environment({}, config=config(selection="demo_method:accept"))
 
 
-def test_recipe_resolves_candidate_plugin(tmp_path, monkeypatch) -> None:
+def test_recipe_resolves_selection_plugin(tmp_path, monkeypatch) -> None:
     module = tmp_path / "demo_selection.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\n"
-        "def evaluate(task, result):\n    return 0.0\n\n"
-        "from reef.core.evaluation import CandidateEvaluationPlugin\n"
-        "from reef.train.evaluation.evaluators import CandidatePluginFactory\n\n"
-        "class DemoPlugin(CandidateEvaluationPlugin):\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
+        "\n"
+        "from reef.train.evaluation import SelectionPlugin\n\n"
+        "class DemoPlugin(SelectionPlugin):\n"
         "    def __init__(self, backend):\n"
         "        self._backend = backend\n\n"
+        "    @classmethod\n"
+        "    def from_config(cls, config, *, candidate_backend):\n"
+        "        return cls(candidate_backend)\n\n"
         "    def evaluate(self, candidate):\n"
         "        return self._backend.evaluate(candidate)\n\n"
         "    def decide(self, candidate, evaluation):\n"
         "        from reef.train.evaluation import SelectionDecision\n"
         "        return SelectionDecision('select', 'demo', '1', 'selected by demo', evaluation)\n"
-        "\nclass DemoFactory(CandidatePluginFactory):\n"
-        "    def build(self, candidate_backend):\n"
-        "        return DemoPlugin(candidate_backend)\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_selection:propose",
-                "evaluate": "demo_selection:evaluate",
+                "propose": "demo_selection:Propose",
+                "evaluate": "demo_selection:Evaluate",
                 "tasks": ["task one"],
                 **evolution,
             }
         }
 
     compared = CordisRecipe.from_environment({}, config=config())
-    assert compared.candidate_plugin is not None
-    assert type(compared.candidate_plugin.build(object())).__name__ == "ScoreComparisonPlugin"
+    assert compared.selection == PluginReference(ScoreComparisonPlugin)
+    assert type(compared.selection_plugin(object())).__name__ == "ScoreComparisonPlugin"
 
     named = CordisRecipe.from_environment({}, config=config(selection="always"))
-    assert named.candidate_plugin is not None
-    assert isinstance(named.candidate_plugin, AlwaysSelectPluginFactory)
+    assert named.selection == PluginReference(BackendAlwaysSelectPlugin)
 
-    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoFactory"))
-    assert dotted.candidate_plugin is not None
-    assert type(dotted.candidate_plugin).__name__ == "DemoFactory"
-    assert type(dotted.candidate_plugin.build(object())).__name__ == "DemoPlugin"
+    dotted = CordisRecipe.from_environment({}, config=config(selection="demo_selection:DemoPlugin"))
+    assert dotted.selection.plugin_class.__name__ == "DemoPlugin"
+    assert type(dotted.selection_plugin(object())).__name__ == "DemoPlugin"
 
     with pytest.raises(RecipeConfigError, match="acceptance was removed"):
         CordisRecipe.from_environment(
@@ -1306,15 +1323,19 @@ def test_littering_episodes_are_counted_and_forbid_residue_fails_them(tmp_path: 
 def test_recipe_parses_and_validates_the_episode_gate_knobs(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_gate_knobs.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_gate_knobs:propose",
-                "evaluate": "demo_gate_knobs:evaluate",
+                "propose": "demo_gate_knobs:Propose",
+                "evaluate": "demo_gate_knobs:Evaluate",
                 "tasks": ["task one"],
                 **evolution,
             }
@@ -1365,7 +1386,11 @@ def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch)
     reported window."""
     module = tmp_path / "demo_batch_policy.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
@@ -1374,8 +1399,8 @@ def test_recipe_selects_the_record_driven_processor(tmp_path: Path, monkeypatch)
         return {
             "data": data,
             "evolution": {
-                "propose": "demo_batch_policy:propose",
-                "evaluate": "demo_batch_policy:evaluate",
+                "propose": "demo_batch_policy:Propose",
+                "evaluate": "demo_batch_policy:Evaluate",
                 "tasks": ["task one"],
                 "binary": str(make_binary(tmp_path)),
             },
@@ -1490,15 +1515,19 @@ def test_recipe_selects_the_episode_executor(tmp_path: Path, monkeypatch) -> Non
     sandbox that cannot isolate refuses at recipe build."""
     module = tmp_path / "demo_executor.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_executor:propose",
-                "evaluate": "demo_executor:evaluate",
+                "propose": "demo_executor:Propose",
+                "evaluate": "demo_executor:Evaluate",
                 "tasks": ["task one"],
                 "binary": str(make_binary(tmp_path)),
                 **evolution,
@@ -1742,15 +1771,19 @@ def test_promotion_off_by_default_leaves_the_gate_frozen(tmp_path: Path) -> None
 def test_recipe_parses_promotion_config(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_promote.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_promote:propose",
-                "evaluate": "demo_promote:evaluate",
+                "propose": "demo_promote:Propose",
+                "evaluate": "demo_promote:Evaluate",
                 "tasks": ["t"],
                 "binary": str(make_binary(tmp_path)),
                 **evolution,
@@ -1774,15 +1807,19 @@ def test_recipe_parses_promotion_config(tmp_path: Path, monkeypatch) -> None:
 def test_recipe_seed_expands_a_dotted_reference_in_place(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_seed.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(seed):
         evolution = {
             "adapter": "native",
-            "propose": "demo_seed:propose",
-            "evaluate": "demo_seed:evaluate",
+            "propose": "demo_seed:Propose",
+            "evaluate": "demo_seed:Evaluate",
             "tasks": ["t"],
             "binary": str(make_binary(tmp_path)),
             "seed": seed,
@@ -1812,7 +1849,7 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
     key = "sk-476-POLICY-KEY-0123456789abcdef"
 
     class KeepMarked(Promoter):
-        def __call__(self, samples, *, manifest=None):
+        def promote(self, samples, *, manifest=None):
             return [
                 prompt
                 for prompt in (reef_cordis_backend._prompt_of(sample) for sample in samples)
@@ -1839,11 +1876,11 @@ def test_promote_callback_picks_the_candidates_and_reef_screens_them(tmp_path: P
     assert key not in json.dumps(first.state)
 
 
-def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path) -> None:
+def test_promote_callback_receives_the_manifest(tmp_path: Path) -> None:
     seen: list[object] = []
 
     class WithManifest(Promoter):
-        def __call__(self, samples, *, manifest=None):
+        def promote(self, samples, *, manifest=None):
             seen.append(manifest)
             return []
 
@@ -1868,17 +1905,22 @@ def test_promote_callback_receives_the_manifest_when_it_names_it(tmp_path: Path)
 def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_promote_policy.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
+        "\n"
         "from reef.train.cordis_backend.strategies import Promoter\n\n"
-        "class Promote(Promoter):\n    def __call__(self, samples, *, manifest=None):\n        return []\n"
+        "class Promote(Promoter):\n    def promote(self, samples, *, manifest=None):\n        return []\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_promote_policy:propose",
-                "evaluate": "demo_promote_policy:evaluate",
+                "propose": "demo_promote_policy:Propose",
+                "evaluate": "demo_promote_policy:Evaluate",
                 "tasks": ["t"],
                 "binary": str(make_binary(tmp_path)),
                 **evolution,
@@ -1886,7 +1928,7 @@ def test_recipe_resolves_promote_by_dotted_reference(tmp_path: Path, monkeypatch
         }
 
     on = CordisRecipe.from_environment({}, config=config(promote_failures=True, promote="demo_promote_policy:Promote"))
-    assert isinstance(on.promote, Promoter) and on.promote(()) == []
+    assert isinstance(on.promote, Promoter) and on.promote.promote(()) == []
     assert CordisRecipe.from_environment({}, config=config()).promote is None
 
 
@@ -1939,7 +1981,14 @@ def test_episode_workers_run_both_sides_in_one_wave(tmp_path: Path) -> None:
 
 def test_episode_workers_config_is_a_positive_integer(tmp_path: Path) -> None:
     def config(**evolution):
-        return {"evolution": {"propose": lambda n, s, m: None, "evaluate": evaluate, "tasks": ["one"], **evolution}}
+        return {
+            "evolution": {
+                "propose": resolve_proposer(lambda n, s, m: None),
+                "evaluate": resolve_episode_scorer(evaluate),
+                "tasks": ["one"],
+                **evolution,
+            }
+        }
 
     assert CordisRecipe.from_environment({}, config=config(episode_workers=3)).episode_workers == 3
     assert CordisRecipe.from_environment({}, config=config(episode_workers="16")).episode_workers == 16  # ${VAR}
@@ -1980,7 +2029,12 @@ def test_evolution_worker_selector_is_independent_of_sandbox_selector():
 
     config = {
         "execution": {"evolution": "mp"},
-        "evolution": {"propose": lambda n, s, m: None, "evaluate": evaluate, "tasks": ["one"], "episode_workers": 2},
+        "evolution": {
+            "propose": resolve_proposer(lambda n, s, m: None),
+            "evaluate": resolve_episode_scorer(evaluate),
+            "tasks": ["one"],
+            "episode_workers": 2,
+        },
     }
     recipe = CordisRecipe.from_environment({}, config=config)
     assert recipe.worker_executor == ExecutorSettings("mp", workers=2)
@@ -1997,8 +2051,8 @@ def test_evolution_explicit_ray_does_not_require_local_gpus(monkeypatch):
     monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ())
     config = {
         "evolution": {
-            "propose": lambda n, s, m: None,
-            "evaluate": evaluate,
+            "propose": resolve_proposer(lambda n, s, m: None),
+            "evaluate": resolve_episode_scorer(evaluate),
             "tasks": ["one"],
             "worker_resources": {"num_gpus": 1},
             "worker_executor": "ray",
@@ -2105,15 +2159,19 @@ def test_recheck_rolls_back_a_regression_the_grown_suite_reveals(tmp_path: Path)
 def test_recipe_parses_recheck_config(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_recheck.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_recheck:propose",
-                "evaluate": "demo_recheck:evaluate",
+                "propose": "demo_recheck:Propose",
+                "evaluate": "demo_recheck:Evaluate",
                 "tasks": ["t"],
                 "binary": str(make_binary(tmp_path)),
                 **evolution,
@@ -2223,15 +2281,19 @@ def test_rejected_proposals_reach_a_proposer_that_declares_the_keyword(tmp_path:
 def test_recipe_parses_search_quality_config(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_search.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_search:propose",
-                "evaluate": "demo_search:evaluate",
+                "propose": "demo_search:Propose",
+                "evaluate": "demo_search:Evaluate",
                 "tasks": ["t"],
                 "binary": str(make_binary(tmp_path)),
                 **evolution,
@@ -2331,15 +2393,19 @@ def test_review_kinds_hold_only_wins_that_touch_a_listed_kind(tmp_path: Path) ->
 def test_recipe_parses_publish_config(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_publish.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_publish:propose",
-                "evaluate": "demo_publish:evaluate",
+                "propose": "demo_publish:Propose",
+                "evaluate": "demo_publish:Evaluate",
                 "tasks": ["t"],
                 "binary": str(make_binary(tmp_path)),
                 **evolution,
@@ -2500,15 +2566,19 @@ def test_a_published_tree_carries_the_entries_list_where_the_adapter_declares_on
 def test_recipe_parses_the_proposal_inbox_config(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_inbox.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_inbox:propose",
-                "evaluate": "demo_inbox:evaluate",
+                "propose": "demo_inbox:Propose",
+                "evaluate": "demo_inbox:Evaluate",
                 "tasks": ["task one"],
                 **evolution,
             }
@@ -2580,7 +2650,11 @@ def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: 
 
     module = tmp_path / "demo_evolution.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     root = tmp_path / "tasks"
@@ -2596,8 +2670,8 @@ def test_yaml_config_takes_the_evaluation_tasks_from_a_split_manifest(tmp_path: 
         )
     write_split_manifest(tmp_path / "split.json", TaskSplit(("train-1",), ("held-1", "held-2"), 0, 0.5))
     evolution = {
-        "propose": "demo_evolution:propose",
-        "evaluate": "demo_evolution:evaluate",
+        "propose": "demo_evolution:Propose",
+        "evaluate": "demo_evolution:Evaluate",
         "task_manifest": str(tmp_path / "split.json"),
         "tasks_root": str(root),
         "adapter": "terminus",

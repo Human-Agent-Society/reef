@@ -64,6 +64,17 @@ class RuntimeLoadId:
     def __str__(self) -> str:
         return f"{self.incarnation}:{self.sequence}"
 
+    def lag_behind(self, serving: RuntimeLoadId) -> int | None:
+        """Return how many versions this load is behind ``serving``.
+
+        The result is negative when this load is newer than ``serving``. None
+        means that the two loads belong to different incarnations, so their
+        sequences cannot be compared.
+        """
+        if self.incarnation != serving.incarnation:
+            return None
+        return serving.sequence - self.sequence
+
     @classmethod
     def parse(cls, value: str) -> RuntimeLoadId:
         if not isinstance(value, str):

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import signal
 import subprocess
@@ -14,12 +15,14 @@ from reef_service.runtime_stubs import StubTrainingRuntime
 
 
 from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.recipe.errors import RecipeConfigError
 from reef.service import deploy
 from reef.service.assembly import _repository_location
 from reef.service.deploy.service_config import ServiceConfig
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
+GENERATED_TASK_RECIPE = "reef.record2dataset.generated_tasks:GeneratedTaskRecipe"
 
 
 def test_configured_handler_rejects_a_function() -> None:
@@ -148,6 +151,17 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
     args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
 
     assert args.evaluation_settings == evaluation
+
+
+@pytest.mark.unit
+def test_service_config_reads_the_task_generation_section() -> None:
+    section = {"module": "recipes.beta.spade:SpadeTaskGenerator", "config": {"count": 8}}
+
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "task-generation": section})
+
+    assert args.task_generation_settings == section
+    with pytest.raises(ValueError, match="task-generation must be an object"):
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "task-generation": "spade"})
 
 
 @pytest.mark.unit
@@ -327,7 +341,11 @@ def test_build_dispatcher_uses_the_recipe_name_for_a_dotted_reference(monkeypatc
 def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypatch, tmp_path) -> None:
     module = tmp_path / "demo_evolution.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setattr(
@@ -341,8 +359,8 @@ def test_build_dispatcher_passes_recipe_settings_to_a_dotted_reference(monkeypat
             recipe="reef.recipe.cordis:CordisRecipe",
             recipe_settings={
                 "evolution": {
-                    "propose": "demo_evolution:propose",
-                    "evaluate": "demo_evolution:evaluate",
+                    "propose": "demo_evolution:Propose",
+                    "evaluate": "demo_evolution:Evaluate",
                     "tasks": ["task one"],
                     "adapter": "pi",
                 }
@@ -389,7 +407,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
         lambda *args, **kwargs: lambda scenario: object(),
     )
     evaluation = {
-        "module": "reef_service._candidate_evaluation_plugin:CheckpointFactory",
+        "module": "reef_service._candidate_evaluation_plugin:CheckpointEvaluator",
         "config": {"score": 1.0, "threshold": 0.0},
     }
 
@@ -405,7 +423,7 @@ def test_build_dispatcher_injects_candidate_evaluation_into_weight_recipe(monkey
 
     recipe = dispatcher._recipe
     assert recipe.candidate_evaluation is not None
-    assert recipe.candidate_evaluation.module == evaluation["module"]
+    assert recipe.candidate_evaluation.plugin.plugin_class.__name__ == evaluation["module"].rpartition(":")[2]
 
 
 @pytest.mark.unit
@@ -423,6 +441,61 @@ def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(mon
                 evaluation_settings={"module": "cookbook.evaluation:CheckpointFactory"},
                 agent_record_dir=str(tmp_path / "agent-record"),
             )
+        )
+
+
+@pytest.mark.unit
+def test_build_dispatcher_hands_the_task_generation_section_to_the_generated_task_recipe(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        deploy.GitLFSRepositoryBackend,
+        "factory",
+        lambda *args, **kwargs: lambda scenario: object(),
+    )
+    task_generation = {"module": "reef_service.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
+
+    settings = _settings(
+        recipe=GENERATED_TASK_RECIPE,
+        task_generation_settings=task_generation,
+        agent_record_dir=str(tmp_path / "agent-record"),
+    )
+    dispatcher = deploy.build_dispatcher(
+        dataclasses.replace(settings, recipe_settings={"plays_per_task": 2}),
+        connector=lambda **kwargs: stub_runtimes(),
+    )
+
+    recipe = dispatcher._recipe
+    assert recipe.task_generation is not None
+    assert recipe.task_generation.plugin.plugin_class.__name__ == "ScriptedGenerator"
+    assert recipe.task_generation.plugin.config == {"count": 1}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("recipe", "error", "message"),
+    [
+        (OPENCLAWRL_RECIPE, RecipeConfigError, "does not train on generated tasks"),
+        ("recipe", ValueError, "task-generation section requires a weight-training recipe"),
+    ],
+)
+def test_build_dispatcher_rejects_task_generation_for_another_recipe(
+    monkeypatch, tmp_path, recipe, error, message
+) -> None:
+    monkeypatch.setattr(
+        deploy.GitLFSRepositoryBackend,
+        "factory",
+        lambda *args, **kwargs: lambda scenario: object(),
+    )
+
+    with pytest.raises(error, match=message):
+        deploy.build_dispatcher(
+            _settings(
+                recipe=recipe,
+                task_generation_settings={"module": "reef_service.test_generated_tasks:ScriptedGenerator"},
+                agent_record_dir=str(tmp_path / "agent-record"),
+            ),
+            connector=lambda **kwargs: stub_runtimes(),
         )
 
 

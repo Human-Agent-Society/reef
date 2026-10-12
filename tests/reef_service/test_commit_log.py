@@ -37,10 +37,10 @@ from reef.surface.harnesses import create_harness_surface
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
 from reef.train.algos import StepScheduling
 from reef.train.cordis_backend import CordisBackend, ScoreComparisonPlugin
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import EvaluationResult, SelectionDecision, UpdateCandidate
 
 from ._policy_recipe import TestPolicyRecipe
+from ._strategies import resolve_episode_scorer, resolve_proposer
 from ._threshold_processor import ThresholdProcessor
 
 

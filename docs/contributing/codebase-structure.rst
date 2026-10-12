@@ -246,8 +246,11 @@ The extension points those packages expose are in `Python API
   or play them with an agent? Put it in ``reef/record2dataset/``, the
   generator service ``reef serve`` starts beside the HTTP service from a
   ``generator`` section; ``reef/service/deploy/generator.py`` assembles that
-  child. What a method asks the designer for, and what it does with the
-  episodes, stays in the method's processor under ``recipes/``.
+  child. The built-in generated-task recipe, which plays generated tasks
+  through that service and trains on them, is in
+  ``reef/record2dataset/generated_tasks/``. The ``TaskGenerator`` contract is in
+  ``reef/core/tasks/``. What a method asks the designer for, and what it does
+  with the results, stays in the method's task generator under ``recipes/``.
 - Does it implement storage? Put it in ``reef/storage/``. ``sql_records.py``
   shares SQL record and retention operations; ``sqlite.py`` supplies SQLite
   schema, connections, transactions, and file maintenance. ``postgres.py`` supplies

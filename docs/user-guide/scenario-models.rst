@@ -59,18 +59,20 @@ worker processes. A configuration change affects new inference requests and
 new steps. An active step continues with its captured settings; a revoked
 key fails without falling back to another provider.
 
-Use the supplied bindings for every model call. A callable judge can declare
-the ``models`` keyword::
+Use the supplied bindings for every model call. A model-based judge is an
+``EpisodeScorer`` that overrides ``score_with_models(task, result, models)``::
 
-    def evaluate(task, result, *, models):
-        verdict = models["judge"].chat([
-            {"role": "user", "content": "Evaluate the episode: " + str(result.trajectory)}
-        ])
-        return float(verdict.strip() == "pass")
+    class Judge(EpisodeScorer):
+        def score(self, task, result):
+            raise ValueError("the judge needs the step's model bindings")
 
-An ``EpisodeScorer`` subclass overrides ``score_with_models(task, result,
-models)``. Deterministic scorers with ``evaluate(task, result)`` continue to
-work. Methods that construct clients from environment credentials must use
+        def score_with_models(self, task, result, models):
+            verdict = models["judge"].chat([
+                {"role": "user", "content": "Evaluate the episode: " + str(result.trajectory)}
+            ])
+            return float(verdict.strip() == "pass")
+
+A deterministic scorer implements ``score(task, result)`` only. Methods that construct clients from environment credentials must use
 these bindings to participate in scenario model selection.
 
 Install scripts use the current scenario protocol and model while pointing

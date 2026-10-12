@@ -18,7 +18,7 @@ recipe:
       # hands the entries back. Jailed with bubblewrap and pasta where the host has them; without them the text
       # proposer answers, unless proposer_agent.sandbox (or REEF_PROPOSER_SANDBOX) is e2b, an E2B cloud sandbox
       # (E2B_API_KEY), or none, which runs the agent unisolated (trusted clients only).
-      propose: reef.recipe.reefine.agent:propose
+      propose: reef.recipe.reefine.agent:AgentProposer
       proposer_agent:
         timeout_s: 1800
         trial_timeout_s: 300
@@ -29,7 +29,7 @@ recipe:
       multimodal:
         preset: openrouter
         api_key: ${REEF_MULTIMODAL_API_KEY}
-      evaluate: reef.recipe.reefine.evolution:evaluate
+      evaluate: reef.recipe.reefine.evolution:AnswerScorer
       # The seed carries the /reefine command and the pi extension API skill the proposer reads.
       requests: true
       # The notice at session start offers the update once the head moved.

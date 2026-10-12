@@ -117,7 +117,7 @@ def record_rollout(scenario: Scenario, recipe: MetaHarnessRecipe) -> None:
             timeout=recipe.episode_timeout_s,
             executor=recipe.executor,
         )
-        score = 0.0 if recipe.forbid_residue and result.residue else float(recipe.score_episode(task, result))
+        score = 0.0 if recipe.forbid_residue and result.residue else float(recipe.score_episode.score(task, result))
         if not math.isfinite(score):
             raise ValueError("rollout scorer returned a non-finite score")
         inference = scenario.records.append(

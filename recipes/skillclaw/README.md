@@ -34,6 +34,8 @@ skillclaw/
     skillclaw.py      the method: propose runs the sealed night flow and
                       maps its decisions to one composite mutation
                       sequence; evaluate grades the probe episodes
+    plugins.py        NightProposer and ProbeScorer, the classes
+                      skillclaw.yaml names; they call skillclaw.py
     night.py          the sealed night step: one decision per skill group
                       plus the no-skill bucket, merge and registry semantics
     evolver.py        the evolve server's LLM stages (summarize, judge,

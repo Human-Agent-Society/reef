@@ -22,7 +22,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from io import BytesIO
 from pathlib import Path
-from typing import Any
+from typing import Any, Self
 
 from reef.artifact.artifact import Artifact
 from reef.core.evaluation import (
@@ -32,6 +32,7 @@ from reef.core.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.core.plugins import PluginConfigError
 from reef.core.requirements import MAX_REQUIRES, merge_requires, parse_requires
 from reef.core.trajectories import recorded_payload, source_record_id
 from reef.harness.adapters.descriptor import AdapterDescriptor
@@ -77,10 +78,8 @@ from reef.train.cordis_backend.strategies import (
     Proposer,
     ProposerCalls,
     StepProposal,
-    accepts_keyword,
-    accepts_manifest,
 )
-from reef.train.evaluation.evaluators import BackendEvaluateMixin, CandidatePluginFactory
+from reef.train.evaluation.evaluators import BackendEvaluateMixin, SelectionPlugin
 from reef.train.types import TrainingBatch, TrainStepResult, TrajectoryItem, trajectories
 
 
@@ -183,7 +182,7 @@ class EpisodeEvaluationWorker:
             stage = "loop" if _root_header(result.trajectory).get("loop") else "graph"
             return _ScoredEpisode(None, FailureObservation(task=task, stage=stage, cause=cause), residue, agents, path)
         score = float(
-            self.scorer(task, result) if models is None else self.scorer.score_with_models(task, result, models)
+            self.scorer.score(task, result) if models is None else self.scorer.score_with_models(task, result, models)
         )
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
@@ -567,22 +566,19 @@ class ScoreComparisonMixin(CandidateEvaluationPlugin):
         )
 
 
-class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin):
+class ScoreComparisonPlugin(ScoreComparisonMixin, BackendEvaluateMixin, SelectionPlugin):
     """Cordis's default evaluation: measure through the candidate backend, decide by score comparison."""
 
     def __init__(self, candidate_backend: Any, *, min_win_margin: int = 0) -> None:
         super().__init__(min_win_margin=min_win_margin)
         self._candidate_backend = candidate_backend
 
-
-@dataclass(frozen=True)
-class ScoreComparisonPluginFactory(CandidatePluginFactory):
-    """Bind a scenario's score comparison policy with its configured margin."""
-
-    min_win_margin: int = 0
-
-    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
-        return ScoreComparisonPlugin(candidate_backend, min_win_margin=self.min_win_margin)
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self:
+        unknown = sorted(str(key) for key in config if key != "min_win_margin")
+        if unknown:
+            raise PluginConfigError(f"the score_comparison selection takes min_win_margin, not {', '.join(unknown)}")
+        return cls(candidate_backend, min_win_margin=config.get("min_win_margin", 0))
 
 
 class FloorMixin(CandidateEvaluationPlugin):
@@ -623,7 +619,7 @@ class FloorMixin(CandidateEvaluationPlugin):
         )
 
 
-class FloorPlugin(FloorMixin, BackendEvaluateMixin):
+class FloorPlugin(FloorMixin, BackendEvaluateMixin, SelectionPlugin):
     """Evaluate the candidate alone through the candidate backend, decide by the floor; the current release is not run."""
 
     def __init__(self, candidate_backend: Any, *, floor_score: float = 1.0) -> None:
@@ -633,15 +629,12 @@ class FloorPlugin(FloorMixin, BackendEvaluateMixin):
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
         return self._candidate_backend.evaluate(candidate, sides=("candidate",))
 
-
-@dataclass(frozen=True)
-class FloorPluginFactory(CandidatePluginFactory):
-    """Bind a scenario's floor policy with its configured floor score."""
-
-    floor_score: float = 1.0
-
-    def build(self, candidate_backend: CandidateEvaluator) -> CandidateEvaluationPlugin:
-        return FloorPlugin(candidate_backend, floor_score=self.floor_score)
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, candidate_backend: CandidateEvaluator) -> Self:
+        unknown = sorted(str(key) for key in config if key != "floor_score")
+        if unknown:
+            raise PluginConfigError(f"the floor selection takes floor_score, not {', '.join(unknown)}")
+        return cls(candidate_backend, floor_score=config.get("floor_score", 1.0))
 
 
 def _score_vectors(
@@ -741,12 +734,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         # here so an adapter without a matching model_binding refuses boot,
         # not the first step.
         self._binding_nodes = models.served.compose_nodes(descriptor)
-        # Checked once at boot: an out-of-tree Proposer subclass whose
-        # ``__call__`` predates the manifest keyword is called without it.
-        self._propose_accepts_manifest = accepts_manifest(propose.__call__)
-        self._propose_accepts_rejected = accepts_keyword(propose.__call__, "rejected")
-        self._propose_accepts_sources = accepts_keyword(propose.__call__, "sources")
-        self._propose_accepts_entries = accepts_keyword(propose.__call__, "entries")
         if (
             isinstance(episode_timeout_s, bool)
             or not isinstance(episode_timeout_s, (int, float))
@@ -792,7 +779,6 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         self._max_promoted_tasks = max_promoted_tasks
         self._max_promoted_per_client = max_promoted_per_client
         self._promote_task = promote
-        self._promote_accepts_manifest = promote is not None and accepts_manifest(promote.__call__)
         self._recheck_every = recheck_every
         self._max_rejected_history = max_rejected_history
         if publish not in ("auto", "review"):
@@ -1078,10 +1064,8 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
         if self._promote_failures:
             if self._promote_task is None:
                 candidates: Sequence[str] = _default_promote(samples)
-            elif self._promote_accepts_manifest:
-                candidates = self._promote_task(samples, manifest=manifest)
             else:
-                candidates = self._promote_task(samples)
+                candidates = self._promote_task.promote(samples, manifest=manifest)
             clients = {prompt: _client_of(sample) for sample in samples if (prompt := _prompt_of(sample))}
             promoted = _admit_promoted(
                 promoted,
@@ -1174,30 +1158,31 @@ class CordisBackend(CandidateBackend, ProposalValidator, StepRecords, StepProgre
             calls = _StepCalls(self._max_model_calls_per_step, record)
             self._step_calls = calls
             models = _budgeted_bindings(self._models, calls)
-            extra: dict[str, Any] = {}
+            agent_host = None
             if self._propose.runs_agent:
                 # No agent executor configured: the proposer gets None and answers without an agent.
-                extra["agent_host"] = self._agent_host(step_dir, calls)
-                if extra["agent_host"] is None and batch.request is not None:
+                agent_host = self._agent_host(step_dir, calls)
+                if agent_host is None and batch.request is not None:
                     calls.note("proposer", "the agent proposer is off on this host; the text proposer answers")
-            if self._propose_accepts_manifest:
-                extra["manifest"] = manifest
-            if self._propose_accepts_rejected:
-                extra["rejected"] = tuple(rejected)
-            if self._propose_accepts_sources:
-                extra["sources"] = tuple(_source_of(sample) for sample in samples)
-            if self._propose_accepts_entries:
-                # The tree as entry options, so a method can name the entry an update or remove targets.
-                extra["entries"] = tuple(dict(entry) for entry in snapshot)
             handed: dict[str, Any] | None = None
             if batch.request is not None:
                 if not self._propose.reads_requests:
-                    raise ValueError("an instruction step requires a proposer that accepts 'requests'")
+                    raise ValueError("an instruction step requires a proposer whose reads_requests is true")
                 # A fresh dict the method may extend: the requires items it adds join the commit's after the screens.
                 handed = {"id": batch.request.id, **batch.request.to_dict(), "untrusted": True}
-                extra["requests"] = (handed,)
             try:
-                proposal = self._propose(self._nodes(), samples, models, **extra)
+                proposal = self._propose.propose(
+                    self._nodes(),
+                    samples,
+                    models,
+                    manifest=manifest,
+                    rejected=tuple(rejected),
+                    sources=tuple(_source_of(sample) for sample in samples),
+                    requests=() if handed is None else (handed,),
+                    # The tree as entry options, so a method can name the entry an update or remove targets.
+                    entries=tuple(dict(entry) for entry in snapshot),
+                    agent_host=agent_host,
+                )
             finally:
                 # Written even when propose raised: the calls before the failure are the decision's record.
                 self._write_record(step_dir, RECORD_PROPOSER_FILE, record)

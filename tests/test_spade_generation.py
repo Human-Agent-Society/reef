@@ -16,7 +16,6 @@ from recipes.beta.spade.generation import (
     recorded_generations,
     write_generation_report,
 )
-from reef.harness.client.tasks import TaskPlay
 
 
 def record(name: str, without: float, with_hint: float, code: str = "", skill: str | None = "deduction") -> PlayRecord:
@@ -129,20 +128,14 @@ def test_experience_for_puts_this_skill_and_the_frontier_first_and_caps_the_reco
     assert [item.name for item in experience_for(unskilled, None)] == ["t-c", "t-a", "t-b"]
 
 
-def test_mean_reward_counts_an_unscored_run_as_a_loss_and_skips_an_episode_that_never_ran(tmp_path: Path) -> None:
-    def play(reward: float | None, error: str = "") -> TaskPlay:
-        return TaskPlay(tmp_path, "t", "e", reward, {}, error, (), 0, (), None)
-
-    assert mean_reward([play(1.0), play(None)]) == 0.5 and mean_reward([]) == 0.0
-    assert mean_reward([play(1.0), play(None, "the trial raised")]) == 1.0
-    assert mean_reward([play(None, "the trial raised")]) == 0.0
+def test_mean_reward_is_the_mean_of_the_rewards_that_ran_and_zero_without_any() -> None:
+    assert mean_reward((1.0, 0.0)) == 0.5 and mean_reward(()) == 0.0
 
 
 def test_a_generation_report_keeps_the_proposals_the_measures_and_the_experience(tmp_path: Path) -> None:
     measure = TaskMeasure(
         name="harbor-00002-000",
         skill=None,
-        task_path=tmp_path / "tasks" / "harbor-00002-000",
         digest="ab" * 32,
         plain_rewards=(0.0, 1.0),
         hint_rewards=(1.0,),

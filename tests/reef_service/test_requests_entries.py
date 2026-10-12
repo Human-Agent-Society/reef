@@ -34,7 +34,7 @@ from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.cordis_backend import CordisBackend
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 EXTENSION = "export default function (pi) {\n  if (process.env.PI_OFFLINE) return;\n}\n"
 SKILL = "---\nname: reef-pi-extension-api\ndescription: placeholder\n---\n# pi extension API\n"
@@ -44,8 +44,8 @@ SHIPPED = requests._ASSETS["pi"]
 def _config(**evolution: object) -> dict[str, object]:
     return {
         "evolution": {
-            "propose": lambda nodes, samples, model: None,
-            "evaluate": lambda task, result: 0.0,
+            "propose": resolve_proposer(lambda nodes, samples, model: None),
+            "evaluate": resolve_episode_scorer(lambda task, result: 0.0),
             "tasks": ["probe"],
             **evolution,
         }

@@ -35,7 +35,8 @@ from reef.harness.episodes.version_check import VERSION_CHECK_ENTRY_ID, ships_ve
 from reef.harness.tree.mutations import admit_mutations
 from reef.harness.tree.nodes import RESERVED_ENTRY_IDS
 from reef.train.cordis_backend import Mutation, StepProposal, untrusted_text
-from reef.train.cordis_backend.strategies import verifier_reward
+from reef.train.cordis_backend.manifest import FailureManifest
+from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer, Proposer, verifier_reward
 from reef.train.types import TrajectoryItem
 
 Proposal = tuple[str, str, dict[str, Any]]
@@ -1309,6 +1310,40 @@ def evaluate(task: str, result: EpisodeResult) -> float:
     if task == HEALTH_TASK_DIRECTORY:
         return verifier_reward(task, result)
     return grade_text(task, final_assistant_text(result.trajectory))
+
+
+class TextProposer(Proposer):
+    """The text proposer as an ``evolution.propose`` plugin: :func:`propose` for the deployment's adapter."""
+
+    def __init__(self, adapter: str = EXTENSION_ADAPTER) -> None:
+        self.adapter = adapter
+
+    @property
+    def reads_requests(self) -> bool:
+        return True
+
+    def propose(
+        self,
+        nodes: tuple[tuple[str, object], ...],
+        samples: tuple[TrajectoryItem, ...],
+        models: ModelBindings,
+        *,
+        manifest: FailureManifest | None = None,
+        rejected: Sequence[Mapping[str, Any]] = (),
+        sources: Sequence[Mapping[str, Any]] = (),
+        requests: Sequence[Mapping[str, Any]] = (),
+        entries: Sequence[Mapping[str, Any]] = (),
+        agent_host: AgentHost | None = None,
+    ) -> Mutation | StepProposal | None:
+        # The text proposer reads none of manifest, rejected, sources or agent_host; they are the contract's.
+        return propose(nodes, samples, models, requests=requests, entries=entries, adapter=self.adapter)
+
+
+class AnswerScorer(EpisodeScorer):
+    """:func:`evaluate` as an ``evolution.evaluate`` plugin."""
+
+    def score(self, task: str, result: EpisodeResult) -> float:
+        return evaluate(task, result)
 
 
 def grade_text(task: str, text: str | None) -> float:

@@ -16,13 +16,14 @@ from types import ModuleType
 import pytest
 from reef_service.config_helpers import load_harness_deployment as load_config
 
+from reef.core.plugins import PluginReference
 from reef.dispatcher import training_request_refusal
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.recipe import reefine
 from reef.recipe.reefine import ReefineRecipe, evolution
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend import FloorPluginFactory
+from reef.train.cordis_backend import FloorPlugin
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "reefine"
@@ -103,7 +104,7 @@ def test_deployment_yaml_builds_the_recipe_with_the_requests_defaults_and_the_fl
     assert built.review_kinds == ("code_extension",)
     # Manual mode needs a proposer that names requests, which Reefine does; the build refuses otherwise.
     assert built.training_mode == "manual" and built.propose.reads_requests
-    assert isinstance(built.candidate_plugin, FloorPluginFactory) and built.floor_score == 1.0
+    assert built.selection == PluginReference(FloorPlugin) and built.floor_score == 1.0
     assert built.model_binding().model == "provider/model-a"
     assert [entry["id"] for entry in built.seed] == [
         "answer-style",

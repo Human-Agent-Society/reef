@@ -309,7 +309,7 @@ def test_service_connects_the_training_runtime_of_a_composite_weight_component()
             "evaluation": {"module": "no.such.module:Factory"},
         }
     )
-    with pytest.raises(RecipeConfigError, match=r"candidate evaluation plugin factory 'no\.such\.module:Factory'"):
+    with pytest.raises(RecipeConfigError, match=r"cannot import evaluation 'no\.such\.module:Factory'"):
         _serving_recipe("reef.recipe.composite:CompositeRecipe", evaluated, {}, None)
 
 

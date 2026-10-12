@@ -10,11 +10,22 @@ from typing import Any
 import ray
 import torch
 import torch.distributed as dist
+from slime.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
+
+# Megatron's gradient buffer binds ``torch.distributed.reduce_scatter_tensor``,
+# ``all_gather_into_tensor`` and ``_coalescing_manager`` when it is imported. Slime
+# applies this patch later, inside ``MegatronTrainRayActor.init``, so the bound
+# functions receive ``ReloadableProcessGroup`` objects and run through torch's
+# Python process-group trampoline, whose work handle crashes in ``wait`` on
+# torch 2.13. Patching before the Slime actor import makes Megatron bind the
+# wrappers, which unwrap the group first. Slime's later call is a per-process no-op.
+monkey_patch_torch_dist()
+
+# isort: split
 from slime.backends.megatron_utils.actor import MegatronTrainRayActor
 from slime.utils.distributed_utils import get_gloo_group
 from slime.utils.memory_utils import clear_memory, print_memory
 from slime.utils.misc import Box
-from slime.utils.reloadable_process_group import destroy_process_groups, reload_process_groups
 from slime.utils.timer import Timer, timer
 from torch_memory_saver import torch_memory_saver
 

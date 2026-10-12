@@ -32,6 +32,7 @@ from statistics import fmean
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EpisodeExecutor
@@ -40,7 +41,8 @@ from reef.harness.episodes.run import EpisodeError, EpisodeResult, run_episode
 from reef.harness.episodes.trajectory import TrajectoryError
 from reef.harness.tree.mutations import Mutation
 from reef.harness.tree.render import render_composition
-from reef.train.cordis_backend.strategies import EpisodeScorer
+from reef.train.cordis_backend.manifest import FailureManifest
+from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer, Proposer
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
 from reef.train.types import TrajectoryItem
 
@@ -58,7 +60,7 @@ OUTPUTS_KEY = "Generated Outputs"
 FEEDBACK_KEY = "Feedback"
 
 
-class Feedback(ABC):
+class Feedback(ConfiguredPlugin, ABC):
     """The ``evolution.feedback`` hook: what the reflection model is told."""
 
     @abstractmethod
@@ -126,7 +128,7 @@ class _Example:
     error: str = ""
 
 
-class GEPAProposer:
+class GEPAProposer(Proposer):
     """GEPA's reflective mutation, as the evolution mechanism's ``propose``."""
 
     def __init__(
@@ -180,11 +182,18 @@ class GEPAProposer:
         if not isinstance(self._episode_runner, EpisodeRunner):
             raise TypeError("GEPA episode_runner must inherit EpisodeRunner")
 
-    def __call__(
+    def propose(
         self,
         nodes: tuple[tuple[str, object], ...],
         samples: tuple[TrajectoryItem, ...],
         models: ModelBindings,
+        *,
+        manifest: FailureManifest | None = None,
+        rejected: Sequence[Mapping[str, Any]] = (),
+        sources: Sequence[Mapping[str, Any]] = (),
+        requests: Sequence[Mapping[str, Any]] = (),
+        entries: Sequence[Mapping[str, Any]] = (),
+        agent_host: AgentHost | None = None,
     ) -> tuple[Mutation, ...] | None:
         archive = self._archive
         archive.refresh()
@@ -320,7 +329,7 @@ class GEPAProposer:
         if result.residue and self._forbid_residue:
             cause = f"{len(result.residue)} file(s) outside the cleanup whitelist: {result.residue[0]}"
             return 0.0, "", cause
-        score = float(self._score_episode(task, result))
+        score = float(self._score_episode.score(task, result))
         if not math.isfinite(score):
             raise ValueError(f"episode scorer returned a non-finite score {score!r} for task {task!r}")
         return score, _episode_output(result), ""

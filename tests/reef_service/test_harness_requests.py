@@ -38,9 +38,10 @@ from reef.train.backend import PreparedStep
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.backend import merged_requires
 from reef.train.cordis_backend.processor import RecordDrivenTraceProcessor
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.trainer import Trainer
 from reef.train.types import TrainingBatch
+
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 
 @pytest.mark.parametrize("has_receipts", [False, True])

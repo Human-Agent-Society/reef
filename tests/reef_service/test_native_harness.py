@@ -47,9 +47,10 @@ from reef.harness.tree.nodes import NODE_KINDS
 from reef.harness.tree.render import RenderError, render_composition
 from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonPlugin
 from reef.train.cordis_backend.backend import tree_files
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import BackendAlwaysSelectPlugin
 from reef.train.types import TrainingBatch
+
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 TOOL = (
     "native_tool",

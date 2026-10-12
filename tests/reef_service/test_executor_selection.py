@@ -151,7 +151,7 @@ def test_scorer_can_declare_gpu_needs_without_yaml(monkeypatch):
         def execution_requirements(self):
             return ExecutionRequirements(gpus_per_worker=1)
 
-        def __call__(self, task, result):
+        def score(self, task, result):
             return 1.0
 
     monkeypatch.setattr("reef.runtime.executor.config.visible_cuda_devices", lambda: ("0", "1"))

@@ -10,7 +10,7 @@ from reef.runtime.executor.config import ExecutorSettings, WorkerResources, exec
 from reef.runtime.executor.requirements import ExecutionRequirements
 from reef.service.deploy.execution import service_executor_config
 from reef.train.cordis_backend.execution import evaluation_executor_config, evaluation_selection
-from reef.train.cordis_backend.strategies import resolve_episode_scorer
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 
 def scorer(task, result):
@@ -20,7 +20,12 @@ def scorer(task, result):
 def recipe_config(execution, **legacy):
     return {
         "execution": {"evolution": execution},
-        "evolution": {"propose": lambda *args: None, "evaluate": scorer, "tasks": ["one"], **legacy},
+        "evolution": {
+            "propose": resolve_proposer(lambda *args: None),
+            "evaluate": resolve_episode_scorer(scorer),
+            "tasks": ["one"],
+            **legacy,
+        },
     }
 
 

@@ -86,7 +86,7 @@ def test_scorer_snapshot_and_feedback_survive_serialization_without_registry(aim
     aime.register([{"input": "problem", "answer": "### 17", "additional_context": {"solution": "explanation"}}])
     scorer = aime.AIMEScorer(aime.ANSWERS, aime.CONTEXTS)
     aime.CONTEXTS["problem"]["solution"] = "changed"
-    evaluate, feedback = pickle.loads(pickle.dumps((scorer.evaluate, scorer.feedback)))
+    evaluate, feedback = pickle.loads(pickle.dumps((scorer.score, scorer.feedback)))
     aime.ANSWERS.clear()
     aime.CONTEXTS.clear()
     assert evaluate("problem", pi_episode("### 17")) == 1.0
@@ -192,19 +192,21 @@ def test_driver_keeps_custom_task_hooks(load, monkeypatch):
     driver = load("run")
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
 
-    def scorer(task, result):
-        return 0.5
-
     from recipes.gepa.method import Feedback
+    from reef.train.cordis_backend.strategies import EpisodeScorer
+
+    class HalfScorer(EpisodeScorer):
+        def score(self, task, result):
+            return 0.5
 
     class CustomFeedback(Feedback):
         def feedback(self, task, output, score):
             return "custom"
 
-    config["recipe"]["config"]["evolution"].update(evaluate=scorer, feedback=CustomFeedback())
+    config["recipe"]["config"]["evolution"].update(evaluate=HalfScorer(), feedback=CustomFeedback())
     monkeypatch.setattr(driver, "load_config", lambda path: config)
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
-    assert recipe.score_episode("problem", pi_episode("anything")) == 0.5
+    assert recipe.score_episode.score("problem", pi_episode("anything")) == 0.5
     assert recipe.feedback.feedback("problem", "anything", 0.5) == "custom"
 
 

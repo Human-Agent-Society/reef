@@ -29,6 +29,7 @@ from typing import Any, TypedDict, cast
 
 from recipes.gepa.method import Feedback
 from reef.harness.episodes.run import EpisodeResult
+from reef.train.cordis_backend.strategies import EpisodeScorer
 
 # The Pi release the retained record ran and the example still targets; run.py
 # refuses any other binary version before it spends anything.
@@ -76,7 +77,7 @@ CONTEXTS: dict[str, dict[str, str]] = {}
 
 
 @dataclass(frozen=True)
-class AIMEScorer(Feedback):
+class AIMEScorer(Feedback, EpisodeScorer):
     """A pickleable snapshot, independent of any worker's module globals.
 
     The driver registry is only an input at recipe construction time. Later
@@ -94,11 +95,18 @@ class AIMEScorer(Feedback):
     def answer_for(self, task: str) -> str:
         return _answer_for(self.answers, task)
 
-    def evaluate(self, task: str, result: EpisodeResult) -> float:
+    def score(self, task: str, result: EpisodeResult) -> float:
         return _evaluate(self.answers, task, result)
 
     def feedback(self, task: str, output: str, score: float) -> str:
         return _feedback(self.answers, self.contexts, task, output, score)
+
+
+class AIMEAnswerScorer(EpisodeScorer):
+    """:func:`evaluate` over the benchmark splits registered in this process, as ``evolution.evaluate`` names it."""
+
+    def score(self, task: str, result: EpisodeResult) -> float:
+        return _evaluate(ANSWERS, task, result)
 
 
 class AIMEFeedback(Feedback):

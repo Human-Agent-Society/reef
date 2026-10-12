@@ -99,7 +99,7 @@ one block of its own under ``evolution``:
 .. code:: yaml
 
    evolution:
-     evaluate: harness.aime:evaluate
+     evaluate: harness.aime:AIMEAnswerScorer
      feedback: harness.aime:feedback     # optional; the score restated when absent
      tasks: [...]                        # the validation set
      models:

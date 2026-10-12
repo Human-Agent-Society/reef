@@ -2,11 +2,7 @@
 
 Feedback either arrives as reports referencing inference records — where it is
 whatever the report carries, scores, text, or structured objects, not only
-numbers — or is mined from the traffic itself. ``TaskGenerationProcessor``
-declares asynchronous generation and validation hooks for task-producing
-processors; a method pairs them with an engine and a worker of its own, as
-SPADE does with the reported engine and the generator service.
-``DistillProcessor`` is the reported engine of the distilling
+numbers — or is mined from the traffic itself. ``DistillProcessor`` is the reported engine of the distilling
 recipes: the student's rollout plus the teacher's prompt, which a recipe
 composes from the recorded request and the report's teacher context.
 
@@ -23,12 +19,10 @@ from reef.train.processors.base import DataProcessor
 from reef.train.processors.computed import ComputedFeedbackProcessor
 from reef.train.processors.distill import DistillProcessor
 from reef.train.processors.reported import ReportedFeedbackProcessor
-from reef.train.processors.task_generation import TaskGenerationProcessor
 
 __all__ = [
     "ComputedFeedbackProcessor",
     "DataProcessor",
     "DistillProcessor",
     "ReportedFeedbackProcessor",
-    "TaskGenerationProcessor",
 ]

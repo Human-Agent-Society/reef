@@ -9,7 +9,7 @@ import pytest
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.episodes.trajectory import primary_reward
 from reef.harness.runners.terminus.runner import trial_record
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, verifier_reward
+from reef.train.cordis_backend.strategies import EpisodeScorer, VerifierRewardScorer, verifier_reward
 
 TASK = "/tasks/openenv-00012-003-deduction"
 
@@ -73,9 +73,12 @@ def test_an_older_row_without_the_rewards_mapping_still_scores() -> None:
     assert verifier_reward(TASK, episode(row)) == 0.5
 
 
-def test_the_scorer_resolves_from_its_dotted_reference() -> None:
-    scorer = resolve_episode_scorer("reef.train.cordis_backend.strategies:verifier_reward")
-    assert scorer(TASK, episode(verifier({"reward": 0.5}))) == 0.5
+def test_the_scorer_resolves_from_its_class_reference() -> None:
+    scorer = EpisodeScorer.from_setting(
+        "reef.train.cordis_backend.strategies:VerifierRewardScorer", setting="evolution.evaluate"
+    )
+    assert isinstance(scorer, VerifierRewardScorer)
+    assert scorer.score(TASK, episode(verifier({"reward": 0.5}))) == 0.5
 
 
 def test_the_terminus_row_carries_harbor_primary_reward(tmp_path: Path) -> None:

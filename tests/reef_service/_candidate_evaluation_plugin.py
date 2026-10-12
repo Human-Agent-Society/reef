@@ -6,9 +6,8 @@ from dataclasses import dataclass
 
 from reef.runtime.interfaces import ModelCandidate
 from reef.train.evaluation import (
-    CandidateEvaluationPlugin,
-    CandidateEvaluationPluginFactory,
     CandidateEvaluator,
+    ConfiguredEvaluationPlugin,
     EvaluationResult,
     SelectionDecision,
     UpdateCandidate,
@@ -16,11 +15,21 @@ from reef.train.evaluation import (
 
 
 @dataclass(frozen=True)
-class CheckpointEvaluator(CandidateEvaluationPlugin):
+class CheckpointEvaluator(ConfiguredEvaluationPlugin):
     score: float
     threshold: float
     scenario: str
     token: str | None
+
+    @classmethod
+    def from_config(cls, config, *, runtime, training_runtime, scenario, environ):
+        token_env = config.get("token_env")
+        return cls(
+            score=float(config["score"]),
+            threshold=float(config["threshold"]),
+            scenario=scenario,
+            token=environ.get(token_env) if token_env else None,
+        )
 
     def evaluate(self, candidate: UpdateCandidate) -> EvaluationResult:
         if not isinstance(candidate, ModelCandidate):
@@ -59,30 +68,6 @@ class EvaluatorOnly(CandidateEvaluator):
         )
 
 
-class CheckpointFactory(CandidateEvaluationPluginFactory):
-    def build(self, config, *, runtime, training_runtime, scenario, environ):
-        del runtime
-        token_env = config.get("token_env")
-        return CheckpointEvaluator(
-            score=float(config["score"]),
-            threshold=float(config["threshold"]),
-            scenario=scenario,
-            token=environ.get(token_env) if token_env else None,
-        )
-
-
-class EvaluatorOnlyFactory(CandidateEvaluationPluginFactory):
-    def build(self, config, *, runtime, training_runtime, scenario, environ):
-        del runtime, scenario, environ
-        return EvaluatorOnly(score=float(config["score"]))
-
-
-class InvalidFactory(CandidateEvaluationPluginFactory):
-    def build(self, config, *, runtime, training_runtime, scenario, environ):
-        del config, runtime, scenario, environ
-        return object()
-
-
 class DuckPlugin:
     def evaluate(self, candidate):
         raise AssertionError("a structural lookalike must be rejected before evaluation")
@@ -91,14 +76,9 @@ class DuckPlugin:
         raise AssertionError("a structural lookalike must be rejected before selection")
 
 
-class DuckFactory(CandidateEvaluationPluginFactory):
-    def build(self, config, *, runtime, training_runtime, scenario, environ):
-        return DuckPlugin()
-
-
-class IncompleteFactory(CandidateEvaluationPluginFactory):
+class IncompletePlugin(ConfiguredEvaluationPlugin):
     pass
 
 
-def plain_factory(config, *, runtime, training_runtime, scenario, environ):
-    raise AssertionError("a callable without the factory contract must not be invoked")
+def plain_function(config, *, runtime, training_runtime, scenario, environ):
+    raise AssertionError("a function must not be invoked as a plugin")

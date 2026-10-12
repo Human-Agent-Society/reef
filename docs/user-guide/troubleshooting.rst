@@ -67,18 +67,18 @@ Reports and training
 
 **After a restart the previous live weights are gone.** Weights between checkpoints exist only in engine memory; a restart restores the last checkpoint and the step counter continues from there. Keep ``checkpoint_every_n_versions`` at 1 unless you can afford to lose live versions.
 
-**A restart fails with ambiguous training job <id>.** Reef stopped or failed while that Slime training job trained or saved its checkpoint. So the job marker ``.reef-latest-job.json`` in the HF checkpoint directory (``--save-hf``) still says ``RUNNING``. The checkpoint directories cannot always show whether the job saved its optimizer step. They also cannot show whether the job before it was committed. If Reef trains the job's batch again, it can apply the step twice. So the Slime driver refuses to start. The error lists:
+**A restart fails with ambiguous training job <id>.** Reef stopped or failed while that Slime training job trained or saved its checkpoint. So the job marker ``.reef-latest-job.json`` still says ``RUNNING``. The marker is in the HF checkpoint directory, for example ``/data/ckpt/hf`` for ``--save-hf /data/ckpt/hf/{rollout_id}``. The checkpoint directories cannot always show whether the job saved its optimizer step. They also cannot show whether the job before it was committed. If Reef trains the job's batch again, it can apply the step twice. So the Slime driver refuses to start. The error lists:
 
 - the marker's rollout, ``N`` below
 - what Megatron's tracker, ``latest_checkpointed_iteration.txt`` in the Megatron checkpoint directory (``--save``), says: the iteration it names, ``P`` below, or that it is missing or unreadable
 - the paths for rollout ``N`` that exist, including its checkpoint record
 - whether the run trains per-scenario LoRA adapters
 
-Reef keeps no copy of the settled marker that ``RUNNING`` replaced. So recovery is manual. The checkpoint root is the directory that holds the HF and Megatron checkpoint directories, the marker, and ``.reef-retention``. Unless all the conditions below hold, restore the checkpoint root from a copy. Use a copy from a time when no job ran and the marker said ``COMPLETE``. That is after the last committed job and before the next job started.
+Reef keeps no copy of the settled marker that ``RUNNING`` replaced. So recovery is manual. The checkpoint root is the directory that holds the HF and Megatron checkpoint directories and ``.reef-retention``. A run with a critic also keeps its critic checkpoint directory there: ``--critic-save``, by default ``<save>-critic``. Unless all the conditions below hold, replace the whole checkpoint root with a copy. Use a copy from a time when no job ran and the marker said ``COMPLETE``. That is after the last committed job and before the next job started.
 
-The preflight also refuses a copy whose marker says ``REJECTED``. So if the job before this one was rejected, the copy must be older than that job. Reef does not take these copies. Automatic recovery is tracked in `#333 <https://github.com/Human-Agent-Society/reef/issues/333>`__.
+The preflight also refuses a copy whose marker says ``REJECTING`` or ``REJECTED``. So if the job before this one was rejected, the copy must be older than that job. Reef does not take these copies. Automatic recovery is tracked in `#333 <https://github.com/Human-Agent-Society/reef/issues/333>`__.
 
-For a first job, restore an empty checkpoint root. This reset discards the interrupted job's batch. No marker existed before the first job, so Reef starts under a new runtime load ID, as on a first start. In a full-weight run, Reef then drops the batch as stale. The reset also removes the Megatron checkpoint, the scenario history and the adapter snapshots, so no weights keep the job's step.
+For a first job, empty the checkpoint root, including the hidden ``.reef-retention`` directory. The preflight refuses a checkpoint record left in it. This reset discards the interrupted job's batch. No marker existed before the first job, so Reef starts under a new runtime load ID, as on a first start. In a full-weight run, Reef then drops the batch as stale. The reset also removes the Megatron checkpoint, the scenario history and the adapter snapshots, so no weights keep the job's step.
 
 *Full-weight run, the job saved nothing.* Recover by hand only when all of these hold:
 
@@ -96,6 +96,8 @@ For a first job, restore an empty checkpoint root. This reset discards the inter
 
    A printed file name means that the job was committed. No output means that the job was rejected, or that its commit cannot be confirmed.
 4. The ``RUNNING`` marker has a ``parent_runtime_load_id``: the runtime load ID that rollout ``P`` is served under.
+
+Before you replace the marker, back up the ``RUNNING`` marker to a directory outside the checkpoint root. The preflight refuses any extra file or directory in the HF, Megatron or critic checkpoint directory as ``unowned checkpoint assets``. It also refuses any extra ``*.json`` file in ``.reef-retention/records/``.
 
 Then replace the marker with the settled marker of rollout ``P``. For example, with ``P`` = 4 and ``--save-hf /data/ckpt/hf/{rollout_id}``:
 

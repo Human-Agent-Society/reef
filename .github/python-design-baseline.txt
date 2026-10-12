@@ -8,8 +8,6 @@ PYD002|reef/harness/episodes/trajectory.py|_CallableTrajectoryReader.__init__|fn
 PYD002|reef/runtime/interfaces.py|InferenceStream.__init__|close
 PYD002|reef/runtime/deployment.py|_CallableRuntimeFactory.__init__|fn
 PYD002|reef/harness/compose/loader.py|Loader.__init__|resolver
-PYD002|reef/train/cordis_backend/strategies.py|_CallableEpisodeScorer.__init__|fn
-PYD002|reef/train/cordis_backend/strategies.py|_CallableProposer.__init__|fn
 PYD002|reef/train/processors/computed.py|JudgingWorker.__init__|judge
 PYD002|reef/train/slime_backend/reef_adapters/training_job/storage.py|CheckpointStorage.__init__|measure,disk_usage
 PYD003|reef/harness/tree/nodes.py|<module>|NODE_KINDS

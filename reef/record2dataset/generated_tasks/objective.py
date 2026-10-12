@@ -1,4 +1,4 @@
-"""The Reasoning Agent's objective: group relative advantages over the episodes of one task, on Tinker's importance sampling loss."""
+"""The generated-task objective: group relative advantages over the episodes of one task, on the importance sampling loss."""
 
 from __future__ import annotations
 
@@ -15,10 +15,10 @@ from reef.train.types import TrainingBatch, trajectory_groups
 
 
 @register_objective
-class SpadeObjective(TrainingObjective):
+class TaskGroupObjective(TrainingObjective):
     """Each episode's advantage is its reward centered and scaled within its task group; a constant group gets 0."""
 
-    name = "spade"
+    name = "task_group"
     # Tinker's built in loss: the advantage on every response token, the rollout log probs as the reference.
     loss_family = "importance_sampling"
 

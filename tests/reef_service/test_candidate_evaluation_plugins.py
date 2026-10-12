@@ -8,14 +8,14 @@ from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 from recipes.sao import SAORecipe
 from reef.recipe import RecipeConfigError
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
+from reef.train.evaluation import CandidateEvaluationConfig, build_candidate_evaluation
 
 PLUGIN = "reef_service._candidate_evaluation_plugin"
 
 
 def evaluation_config(*, score: float = 0.25, threshold: float = 0.8) -> dict:
     return {
-        "module": f"{PLUGIN}:CheckpointFactory",
+        "module": f"{PLUGIN}:CheckpointEvaluator",
         "config": {
             "score": score,
             "threshold": threshold,
@@ -25,7 +25,7 @@ def evaluation_config(*, score: float = 0.25, threshold: float = 0.8) -> dict:
 
 
 @pytest.mark.unit
-def test_dotted_factory_builds_scenario_local_candidate_evaluator() -> None:
+def test_plugin_class_builds_scenario_local_candidate_evaluator() -> None:
     runtime = StubTrainingRuntime()
     config = CandidateEvaluationConfig.from_dict(
         evaluation_config(),
@@ -62,33 +62,16 @@ def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    ("factory", "match"),
-    [
-        (f"{PLUGIN}:InvalidFactory", r"must inherit CandidateEvaluationPlugin"),
-        (f"{PLUGIN}:EvaluatorOnlyFactory", r"must inherit CandidateEvaluationPlugin"),
-        (f"{PLUGIN}:DuckFactory", r"must inherit CandidateEvaluationPlugin"),
-    ],
-)
-def test_factory_must_return_the_declared_evaluator_contract(factory, match) -> None:
-    config = CandidateEvaluationConfig(
-        module=factory,
-        config={"score": 1.0, "threshold": 0.8},
-    )
-
-    with pytest.raises(CandidateEvaluationConfigError, match=match):
-        build_candidate_evaluation(config, **runtime_bindings(StubTrainingRuntime()), scenario="math")
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize(
     ("config", "match"),
     [
         ({}, r"evaluation\.module"),
-        ({"module": "not-dotted"}, r"must be 'package\.module:factory_name'"),
-        ({"module": f"{PLUGIN}:missing"}, r"cannot import candidate evaluation plugin factory"),
-        ({"module": f"{PLUGIN}:plain_factory"}, r"must name a CandidateEvaluationPluginFactory"),
-        ({"module": f"{PLUGIN}:IncompleteFactory"}, r"cannot construct.*abstract"),
-        ({"module": f"{PLUGIN}:CheckpointFactory", "extra": True}, r"unknown key.*'extra'"),
+        ({"module": "not-dotted"}, r"must be 'package\.module:ClassName'"),
+        ({"module": f"{PLUGIN}:missing"}, r"cannot import evaluation"),
+        ({"module": f"{PLUGIN}:plain_function"}, r"must name a class that inherits ConfiguredEvaluationPlugin"),
+        ({"module": f"{PLUGIN}:EvaluatorOnly"}, r"must name a class that inherits ConfiguredEvaluationPlugin"),
+        ({"module": f"{PLUGIN}:DuckPlugin"}, r"must name a class that inherits ConfiguredEvaluationPlugin"),
+        ({"module": f"{PLUGIN}:IncompletePlugin"}, r"names an abstract class"),
+        ({"module": f"{PLUGIN}:CheckpointEvaluator", "extra": True}, r"unknown key.*extra"),
     ],
 )
 def test_invalid_evaluation_plugins_fail_before_training(config, match) -> None:

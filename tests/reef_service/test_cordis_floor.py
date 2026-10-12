@@ -14,6 +14,7 @@ import pytest
 from reef_service.test_harness_recipe import MODEL, backend, batch, evaluate, make_binary, run_backend_step
 
 import reef.train.cordis_backend.backend as reef_cordis_backend
+from reef.core.plugins import PluginReference
 from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
 from reef.harness.adapters import get_adapter
@@ -22,7 +23,6 @@ from reef.recipe.cordis import CordisRecipe
 from reef.train.cordis_backend import (
     CordisBackend,
     FloorPlugin,
-    FloorPluginFactory,
     Mutation,
     ScoreComparisonPlugin,
     StepProgress,
@@ -30,9 +30,10 @@ from reef.train.cordis_backend import (
 )
 from reef.train.cordis_backend.backend import RECORD_TEXT_CAP
 from reef.train.cordis_backend.manifest import FailureObservation, advance
-from reef.train.cordis_backend.strategies import resolve_episode_scorer, resolve_proposer
 from reef.train.evaluation import EvaluationResult, UpdateCandidate
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch
+
+from ._strategies import resolve_episode_scorer, resolve_proposer
 
 MARKER = Mutation("create", "r1", {"name": "rules", "config": {"text": "marker rules"}})
 PLAIN = Mutation("create", "r1", {"name": "rules", "config": {"text": "no help"}})
@@ -186,15 +187,19 @@ def test_a_candidate_that_misses_the_floor_reverts_and_carries_the_manifest_unto
 def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_floor.py"
     module.write_text(
-        "def propose(nodes, samples, model):\n    return None\n\ndef evaluate(task, result):\n    return 0.0\n"
+        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "class Propose(Proposer):\n"
+        "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
+        "class Evaluate(EpisodeScorer):\n"
+        "    def score(self, task, result):\n        return 0.0\n"
     )
     monkeypatch.syspath_prepend(str(tmp_path))
 
     def config(**evolution):
         return {
             "evolution": {
-                "propose": "demo_floor:propose",
-                "evaluate": "demo_floor:evaluate",
+                "propose": "demo_floor:Propose",
+                "evaluate": "demo_floor:Evaluate",
                 "tasks": ["t"],
                 "binary": str(make_binary(tmp_path)),
                 **evolution,
@@ -202,10 +207,10 @@ def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
         }
 
     floored = CordisRecipe.from_environment({}, config=config(selection="floor"))
-    assert floored.candidate_plugin == FloorPluginFactory(floor_score=1.0) and floored.floor_score == 1.0
+    assert floored.selection == PluginReference(FloorPlugin) and floored.floor_score == 1.0
     lowered = CordisRecipe.from_environment({}, config=config(selection="floor", floor_score=0.5))
-    assert lowered.floor_score == 0.5 and lowered.candidate_plugin == FloorPluginFactory(floor_score=0.5)
-    plugin = lowered.candidate_plugin.build(DecideOnlyBackend())
+    assert lowered.floor_score == 0.5 and lowered.selection == PluginReference(FloorPlugin, {"floor_score": 0.5})
+    plugin = lowered.selection_plugin(DecideOnlyBackend())
     assert isinstance(plugin, FloorPlugin)
     assert plugin.decide(UpdateCandidate("c"), _evaluation((0.5,))).metrics["floor_score"] == 0.5
     with pytest.raises(RecipeConfigError, match="floor_score applies only to the floor selection"):
@@ -420,8 +425,8 @@ def test_the_served_binding_targets_the_scenario_evaluation_route(tmp_path: Path
     config = {
         "model": {"path": "qwen3-8b"},
         "evolution": {
-            "propose": "demo_floor:propose",
-            "evaluate": "demo_floor:evaluate",
+            "propose": "demo_floor:Propose",
+            "evaluate": "demo_floor:Evaluate",
             "tasks": ["t"],
             "binary": str(make_binary(tmp_path)),
             "on_stale": "reevaluate",

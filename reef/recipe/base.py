@@ -32,6 +32,7 @@ from reef.train.algos.registry import resolve_objective
 from reef.train.evaluation import CandidateEvaluationConfig, CandidateEvaluationConfigError, build_candidate_evaluation
 from reef.train.processors.base import DataProcessor
 from reef.train.trainer import ComponentTrainer, Trainer
+from reef.train.types import ProcessorContext
 
 
 @dataclass(frozen=True)
@@ -364,11 +365,13 @@ class WeightTrainingRecipe(Recipe):
 
     ``max_staleness`` is the shared stale-sample admission window. Zero keeps
     exact-version training; a positive value admits same-incarnation samples
-    up to that lag before the existing training path runs.
+    up to that lag before the existing training path runs. The default
+    :meth:`build` also gives it to the processor as
+    ``ProcessorContext.max_staleness``.
 
     ``candidate_evaluation`` is framework-owned configuration derived from an
-    optional top-level ``evaluation`` section. Its dotted factory builds one
-    candidate evaluator per scenario, replacing the backend's default
+    optional top-level ``evaluation`` section. The plugin class it names builds one
+    candidate evaluator per scenario with ``from_config``, replacing the backend's default
     metrics-only evaluator and selection policy without changing the recipe's
     method-specific config fields.
 
@@ -480,6 +483,8 @@ class WeightTrainingRecipe(Recipe):
     @classmethod
     def _recipe_kwargs(cls, settings: Mapping[str, Any], values: Mapping[str, str]) -> dict[str, Any]:
         cls._validate_config(settings)
+        if settings.get("task_generation") is not None:
+            raise RecipeConfigError(f"{cls.__name__} does not train on generated tasks; remove task-generation")
         evaluation = settings.get("evaluation")
         if evaluation is None:
             return {}
@@ -503,15 +508,26 @@ class WeightTrainingRecipe(Recipe):
         """The config mapping the default :meth:`build` hands the processor.
 
         Defaults to this recipe's data config field values. The shared
-        ``max_staleness`` field configures the runtime and bridge, not data
-        retention, so it is not included in processor config. Override this
-        method to rename keys or add processor-only entries.
+        ``max_staleness`` field is not included: the default :meth:`build`
+        passes it as the typed ``ProcessorContext.max_staleness`` instead.
+        Override this method to rename keys or add processor-only entries.
         """
         return {
             name: getattr(self, name)
             for name in recipe_config_fields(type(self))
             if name not in ("max_staleness", "training_mode")
         }
+
+    def build_processor(self, context: ProcessorContext) -> DataProcessor:
+        """Build the processor of one scenario with :meth:`processor_config`.
+
+        Override this method to give the processor more than its config, for
+        example a plugin built for the scenario.
+        """
+        processor_class = type(self).training_spec().processor
+        if processor_class is None:
+            raise TypeError(f"{type(self).__name__} declares no processor")
+        return processor_class(context.with_config(self.processor_config()))
 
     def build(
         self,
@@ -561,7 +577,6 @@ class WeightTrainingRecipe(Recipe):
         # runtime carries the reference and the schedule to the backend, which
         # resolves the objective in its own process before batch partitioning.
         resolve_objective(spec.objective).validate_scheduling(spec.scheduling)
-        config = self.processor_config()
         candidate_evaluator = None
         if self.candidate_evaluation is not None:
             candidate_evaluator = build_candidate_evaluation(
@@ -573,7 +588,7 @@ class WeightTrainingRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: processor_class(context.with_config(config)),
+            processor_factory=self.build_processor,
             candidate_backend=RuntimeCandidateBackend(
                 self.training_runtime,
                 spec.objective,
@@ -587,4 +602,5 @@ class WeightTrainingRecipe(Recipe):
             report_type=self.report_type,
             experiment_logger=experiment_logger,
             training_mode=self.training_mode,
+            max_staleness=self.max_staleness,
         )

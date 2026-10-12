@@ -94,6 +94,7 @@ class Trainer:
         report_type: type[ReportBase] | None = None,
         experiment_logger: ExperimentLogger | None = None,
         training_mode: str = "auto",
+        max_staleness: int = 0,
     ) -> Trainer:
         if candidate_backend is None and candidate_evaluator is not None:
             raise ValueError("candidate evaluation requires a candidate backend")
@@ -105,6 +106,7 @@ class Trainer:
                 report_type=report_type,
                 experiment_logger=(experiment_logger if experiment_logger is not None else NullExperimentLogger()),
                 training_mode=training_mode,
+                max_staleness=max_staleness,
             )
         )
         if processor.training_mode != training_mode:

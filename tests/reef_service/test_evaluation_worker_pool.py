@@ -15,9 +15,11 @@ from reef.storage.sqlite import SQLiteRecordStore
 from reef.train import ProcessorContext
 from reef.train.cordis_backend.backend import CordisBackend
 from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
-from reef.train.cordis_backend.strategies import EpisodeScorer, resolve_proposer
+from reef.train.cordis_backend.strategies import EpisodeScorer
 from reef.train.processors import DataProcessor
 from reef.train.trainer import Trainer
+
+from ._strategies import resolve_proposer
 
 
 class StatefulWorker:
@@ -35,7 +37,7 @@ class StatefulWorker:
 
 
 class Scorer(EpisodeScorer):
-    def __call__(self, task, result):
+    def score(self, task, result):
         return 1.0
 
 
@@ -93,7 +95,7 @@ class IsolationScorer(EpisodeScorer):
     def __init__(self):
         self.calls = 0
 
-    def __call__(self, task, result):
+    def score(self, task, result):
         row = result.trajectory[-1]
         if Path(row["workspace"]).exists() or row["rules"] != task:
             raise ValueError("episode files leaked or were not cleaned")

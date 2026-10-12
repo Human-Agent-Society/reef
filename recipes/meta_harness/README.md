@@ -21,7 +21,7 @@ model:
 
 evolution:
   adapter: pi
-  evaluate: my_harness.scoring:score_episode
+  evaluate: my_harness.scoring:EpisodeScore
   tasks:
     - First validation task
     - Second validation task
@@ -43,19 +43,17 @@ evolution:
     max_nodes: 32
 ```
 
-`evaluate` has the standard Reef episode-scorer signature:
+`evaluate` names a standard Reef episode scorer class:
 
 ```python
-def score_episode(task: str, result: EpisodeResult) -> float:
-    ...
+class EpisodeScore(EpisodeScorer):
+    def score(self, task: str, result: EpisodeResult) -> float:
+        ...
 ```
 
-The built-in proposal policy also has the standard Reef proposer signature:
-
-```python
-def propose(nodes, samples, models, *, manifest=None, rejected=()):
-    ...
-```
+The built-in proposal policy is a standard Reef `Proposer`: its
+`propose(nodes, samples, models, *, manifest, rejected, ...)` receives every
+proposer keyword.
 
 It calls `evolution.models.proposer`, and refuses to run when
 that name is not configured. The model sees all retained candidate
