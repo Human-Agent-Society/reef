@@ -56,7 +56,7 @@ class _TestAlgorithm(SlimeAlgorithm):
 
 
 #: The cookbook families plus the two plain ones tests/conftest.py registers.
-_ALL_FAMILIES = ("openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "tttd")
+_ALL_FAMILIES = ("opd", "openclawrl", "pg", "sao", "sdft", "sdpo", "sft", "tttd")
 
 
 @pytest.mark.unit
@@ -367,7 +367,7 @@ def test_sao_config_freezes_critic_attention_only_for_moe() -> None:
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _ADAPTERS_ROOT = _REPO_ROOT / "reef" / "train" / "slime_backend" / "reef_adapters"
-_BUNDLED_FAMILIES = ("openclawrl", "sao", "sdft", "sdpo", "tttd")
+_BUNDLED_FAMILIES = ("openclawrl", "opd", "sao", "sdft", "sdpo", "tttd")
 #: Deprecated flag spellings allowed alongside the canonical --<pkg>-* form.
 _DEPRECATED_FLAG_PREFIXES = ("--openclaw-topk-",)
 #: @objective channel -> required entry-point name for package <pkg>.
@@ -387,6 +387,7 @@ _EXPECTED_OBJECTIVE_CHANNELS = {
             "reef_actor_pre_train_hook_path",
         }
     ),
+    "opd": frozenset({"custom_loss_function_path", "reef_actor_pre_train_hook_path"}),
     "sao": frozenset({"custom_advantage_function_path", "custom_pg_loss_function_path"}),
     "sdft": frozenset({"custom_loss_function_path", "reef_actor_pre_train_hook_path"}),
     "sdpo": frozenset({"custom_loss_function_path", "reef_actor_pre_train_hook_path"}),

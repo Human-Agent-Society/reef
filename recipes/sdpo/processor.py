@@ -9,9 +9,11 @@ when enabled, the environment feedback the report carried.
 
 from __future__ import annotations
 
+import json
 import math
 import re
 from collections.abc import Hashable, Mapping, Sequence
+from copy import deepcopy
 from typing import Any
 
 from recipes.sdpo.report import SDPOReport
@@ -66,7 +68,7 @@ class SDPOProcessor(DistillProcessor):
         self.failed_steps: dict[int, str] = {}
         # A batch is one unit: the whole step.
         super().__init__(context.with_config({**config, "batch_size": 1}))
-        if not 0 < self.max_teacher_prompt_tokens <= self._max_teacher_tokens:
+        if not 0 < self.max_teacher_prompt_tokens <= self.max_teacher_tokens:
             raise ValueError("SDPO needs 0 < max_teacher_prompt_tokens <= max_teacher_tokens")
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
@@ -83,6 +85,16 @@ class SDPOProcessor(DistillProcessor):
         if not messages or messages[-1].get("role") != "user":
             raise ValueError("SDPO's reprompt template needs a request that ends with the user's question")
         artifact_ref = context.inferences[0].artifact_ref
+        response = recorded_response(payload)
+        if len(context.inferences) > 1:
+            demonstration_steps = deepcopy(sample.trajectory["steps"])
+            for step in demonstration_steps:
+                step.pop("extra", None)
+                for observation in (step.get("observation") or {}).get("results", []):
+                    observation.pop("extra", None)
+                if self.remove_thinking_from_demonstration:
+                    step.pop("reasoning_content", None)
+            response = json.dumps(demonstration_steps, ensure_ascii=False)
         return sample.with_metadata(
             sdpo={
                 "step": parsed.step,
@@ -91,7 +103,7 @@ class SDPOProcessor(DistillProcessor):
                 "release_id": None if artifact_ref is None else artifact_ref.release_id,
                 "messages": messages,
                 "tools": tools,
-                "response": recorded_response(payload),
+                "response": response,
                 "feedback": parsed.teacher_context,
             }
         )
@@ -125,7 +137,7 @@ class SDPOProcessor(DistillProcessor):
         return {**super().status(), "failed_steps": failed}
 
     def demonstration(self, sample: TrajectoryItem, samples: Sequence[TrajectoryItem]) -> str | None:
-        """The response of the first successful sibling in rollout order, or None when the question has none."""
+        """Return the first successful sibling's response, or its complete trajectory in episode mode."""
         group = sample.metadata["sdpo"]["group"]
         for candidate in samples:
             if candidate.metadata["sdpo"]["group"] != group:
@@ -170,7 +182,7 @@ class SDPOProcessor(DistillProcessor):
                 max_prompt_tokens=self.max_teacher_prompt_tokens,
                 enable_thinking=self.enable_thinking,
             )
-            if len(teacher_tokens) > self._max_teacher_tokens:
+            if len(teacher_tokens) > self.max_teacher_tokens:
                 raise ValueError(
                     "SDPO teacher sequence exceeds max_teacher_tokens; increase the trainer and teacher windows"
                 )

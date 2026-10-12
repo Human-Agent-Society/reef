@@ -41,6 +41,11 @@ class SDPORecipe(WeightTrainingRecipe):
     (``environment_feedback_only_without_solution``). ``enable_thinking`` is
     the chat template's switch, set as the engine sampled.
 
+    ``accept_multi_turn_policy_samples`` consumes one complete episode per report.
+    It requires exact same-release history and retains every assistant token.
+    The teacher reads the privileged initial request followed by the unchanged episode suffix.
+    Episode windows fail explicitly instead of truncating or skipping training data.
+
     Objective settings such as the divergence, the top-K and the teacher's
     update rate belong to the training backend; for Slime they are
     ``--sdpo-*`` flags in ``training.options``.
@@ -50,6 +55,7 @@ class SDPORecipe(WeightTrainingRecipe):
     groups_per_step: int = config_field(32)
     rollouts_per_group: int = config_field(8)
     tokenizer_path: str = config_field("")
+    accept_multi_turn_policy_samples: bool = config_field(False)
     max_teacher_prompt_tokens: int = config_field(10240)
     max_teacher_tokens: int = config_field(18432)
     success_reward_threshold: float = config_field(0.5)
@@ -76,6 +82,8 @@ class SDPORecipe(WeightTrainingRecipe):
         super().__post_init__()
         if self.groups_per_step <= 0 or self.rollouts_per_group < 2:
             raise ValueError("SDPO needs positive groups_per_step and at least two rollouts_per_group")
+        if not isinstance(self.accept_multi_turn_policy_samples, bool):
+            raise ValueError("accept_multi_turn_policy_samples must be a boolean")
         if not self.tokenizer_path.strip():
             raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
         if not 0 < self.max_teacher_prompt_tokens <= self.max_teacher_tokens:

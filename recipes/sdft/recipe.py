@@ -31,6 +31,11 @@ class SDFTRecipe(WeightTrainingRecipe):
     to the request's final user message as ``context_template`` (with
     ``{context}`` as its placeholder).
 
+    ``accept_multi_turn_policy_samples`` consumes one complete episode per report.
+    It requires exact same-release history and retains every assistant token.
+    The teacher reads the privileged initial request followed by the unchanged episode suffix.
+    Episode windows fail explicitly instead of truncating or skipping training data.
+
     Objective settings such as the KL direction belong to the training
     backend; for Slime they are ``--sdft-*`` flags in ``training.options``.
     ``batch_size`` must equal the Slime driver's ``--global-batch-size``: each
@@ -40,6 +45,7 @@ class SDFTRecipe(WeightTrainingRecipe):
     name: str = "sdft"
     batch_size: int = config_field(1, env="REEF_SDFT_BATCH_SIZE")
     tokenizer_path: str = config_field("")
+    accept_multi_turn_policy_samples: bool = config_field(False)
     max_teacher_tokens: int = config_field(0)
     context_template: str = config_field(DEFAULT_CONTEXT_TEMPLATE)
 
@@ -60,6 +66,8 @@ class SDFTRecipe(WeightTrainingRecipe):
         super().__post_init__()
         if self.batch_size <= 0:
             raise ValueError("batch_size must be positive")
+        if not isinstance(self.accept_multi_turn_policy_samples, bool):
+            raise ValueError("accept_multi_turn_policy_samples must be a boolean")
         if not self.tokenizer_path.strip():
             raise ValueError("tokenizer_path is required: the served model's tokenizer renders the teacher prompt")
         if self.max_teacher_tokens < 0:

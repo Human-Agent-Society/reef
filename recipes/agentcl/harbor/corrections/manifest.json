@@ -1,0 +1,72 @@
+{
+  "version": "agentcl-coding-overlay-v1",
+  "source_revision": "a01e2ca6e33fd07d9cf80e4bd69a5b3585d3400f",
+  "task_counts": {
+    "training": 96,
+    "independent": 120
+  },
+  "changes": [
+    {
+      "id": "raw-269-tests",
+      "dataset": "bigcodebench",
+      "category": "raw",
+      "task_id": "BigCodeBench/269",
+      "operation": "replace_test_code",
+      "original_sha256": "7cea6941798961aa13f8e4369ca903ce93c17acb7c9af6f989ce1392a2b4d73a",
+      "replacement_file": "bigcodebench-269.test.txt",
+      "replacement_sha256": "d306b26c8009c2bb12dcc16c0860195ce6f29d6508e873b4b4e76afc8a62fbea",
+      "upstream_dataset": "bigcode/bigcodebench",
+      "upstream_revision": "b74c0d0bf70d2c0bc459be537895cca163007f1a",
+      "upstream_file": "data/v0.1.4-00000-of-00001.parquet",
+      "upstream_file_sha256": "d9a4965821c9507ebdfb551c288656b2d5fe553234f5183044333ca8a4018267",
+      "upstream_task_id": "BigCodeBench/296",
+      "reason": "AgentCL raw269 problem and solution exactly match upstream296, while its original tests target a different plot."
+    },
+    {
+      "id": "humaneval-41-definition-order",
+      "dataset": "humaneval",
+      "category": "new",
+      "task_id": "41",
+      "operation": "tests_before_candidate_definition",
+      "reason": "Original hidden helper redefines the submitted entry point; execute that unchanged helper before candidate and retain every original assertion after candidate."
+    },
+    {
+      "id": "reference-import-prefix",
+      "operation": "gold_only_prefix_top_level_test_imports",
+      "reason": "Reference signatures use aliases imported only in original hidden test code. No hidden import prefix is injected into student candidates."
+    },
+    {
+      "id": "reference-problem-separator",
+      "operation": "gold_only_insert_newline_between_problem_and_solution",
+      "reason": "Always preserve a newline between source fragments."
+    },
+    {
+      "id": "unittest-assertEquals",
+      "operation": "restore_unittest_legacy_alias",
+      "reason": "Python3.12 removed assertEquals used in original raw325 tests."
+    },
+    {
+      "id": "sklearn-defaults",
+      "operation": "pin_scikit_learn_1.3.2",
+      "reason": "Historical KMeans default n_init preserves labels expected by original raw598 tests."
+    },
+    {
+      "id": "new-217-test-and-reference",
+      "dataset": "bigcodebench",
+      "category": "new",
+      "task_id": "BigCodeBench/217",
+      "operation": "invoke_dormant_test_and_correct_aggregation_expectations_and_reference",
+      "original_sha256": "958b4a72a8e9a617e4056cdf33d9b9a67d7141f11353460611b951147519c11b",
+      "replacement_file": "bigcodebench-217.test.txt",
+      "replacement_sha256": "6755231b76d37e948ca001de48eb0c424d4c6e7ce9d7f12294b7bc7097adca2d",
+      "reference_file": "bigcodebench-217.reference.txt",
+      "reference_sha256": "3c5e5aebfe3020c7417e2127c5756417329f0f4ca3391dd0fac0f73f8729a247",
+      "reason": "Original test function was never invoked. For the supplied dictionaries after adding a=1, rounded means are2,3.33,4.67; mean of means3.33, median of medians4, mode of modes1. Original gold unpacked the helper3outputs into2and shadowed scipy.stats. All changes are explicit; task problem and identity retained."
+    },
+    {
+      "id": "original-test-function-invocation",
+      "operation": "invoke_declared_zero_argument_test_functions",
+      "reason": "Execute original test_* functions containing hidden assertions; unchanged definitions alone do not score the candidate."
+    }
+  ]
+}

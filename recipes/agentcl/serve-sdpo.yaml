@@ -1,0 +1,132 @@
+schema-version: 2
+reef:
+  host: 127.0.0.1
+  port: ${REEF_PORT:?}
+  token: ${REEF_TOKEN}
+  ready-timeout: 3600
+  run-dir: ${AGENTCL_RUN_ROOT:?}/service
+inference:
+  model-path: ${AGENTCL_MODEL_PATH:?}
+  timeout-s: 3600
+  num-gpus: '4'
+  tensor-parallel-size: '1'
+  options:
+    router-port: ${AGENTCL_ROUTER_PORT:?}
+    context-length: '8192'
+    mem-fraction-static: '0.55'
+  handler-factory: reef.inference.sglang.chat.SGLangInferenceHandler
+  handler-config:
+    sampling_defaults:
+      top_p: 1.0
+      top_k: -1
+      repetition_penalty: 1.0
+      max_new_tokens: 2048
+recipe:
+  implementation: recipes.sdpo.recipe:SDPORecipe
+  config:
+    tokenizer-path: ${AGENTCL_MODEL_PATH:?}
+    max-teacher-tokens: 16384
+    max-staleness: 0
+    accept-multi-turn-policy-samples: true
+    checkpoint-every-n-versions: 96
+    groups-per-step: 1
+    rollouts-per-group: ${AGENTCL_BATCH_SIZE:?}
+    max-teacher-prompt-tokens: 16384
+    success-reward-threshold: 0.5
+    include-environment-feedback: true
+    enable-thinking: false
+training:
+  backend: slime
+  colocate: true
+  ready-timeout: 3600
+  timeout-s: 7200
+  config:
+    checkpoint_dir: ${AGENTCL_RUN_ROOT:?}/checkpoints
+    checkpoint_retention:
+      max_storage: 300GB
+      max_storage_fraction: 0.8
+      min_free_space_fraction: 0.1
+      policy: latest
+    global_batch_size: ${AGENTCL_BATCH_SIZE:?}
+  options:
+    bf16: true
+    reef-checkpoint-max-storage: ${training.config.checkpoint_retention.max_storage}
+    reef-checkpoint-max-storage-fraction: ${training.config.checkpoint_retention.max_storage_fraction}
+    reef-checkpoint-min-free-space-fraction: ${training.config.checkpoint_retention.min_free_space_fraction}
+    reef-checkpoint-policy: ${training.config.checkpoint_retention.policy}
+    megatron-to-hf-mode: bridge
+    hf-checkpoint: ${inference.model-path}
+    load: ${training.config.checkpoint_dir}/megatron
+    save: ${training.config.checkpoint_dir}/megatron
+    save-hf: ${training.config.checkpoint_dir}/hf/{rollout_id}
+    save-interval: '1'
+    num-rollout: ${AGENTCL_STEPS:?}
+    rollout-batch-size: ${training.config.global_batch_size}
+    global-batch-size: ${training.config.global_batch_size}
+    micro-batch-size: '1'
+    actor-num-nodes: '1'
+    actor-num-gpus-per-node: '4'
+    num-gpus-per-node: '4'
+    tensor-model-parallel-size: '4'
+    pipeline-model-parallel-size: '1'
+    context-parallel-size: '1'
+    seq-length: '16384'
+    rollout-max-response-len: '2048'
+    rollout-max-context-len: '8192'
+    padded-vocab-size: '152064'
+    position-embedding-type: rope
+    swiglu: true
+    disable-bias-linear: true
+    normalization: RMSNorm
+    attention-dropout: '0.0'
+    hidden-dropout: '0.0'
+    attention-softmax-in-fp32: true
+    accumulate-allreduce-grads-in-fp32: true
+    attention-backend: flash
+    sequence-parallel: true
+    use-dynamic-batch-size: true
+    max-tokens-per-gpu: '32768'
+    log-probs-chunk-size: '1024'
+    optimizer: adam
+    lr: 1e-5
+    lr-decay-style: cosine
+    lr-warmup-iters: ${AGENTCL_WARMUP:?}
+    weight-decay: '0.0'
+    clip-grad: '1.0'
+    loss-type: custom_loss
+    use-rollout-logprobs: true
+    disable-compute-advantages-and-returns: true
+    num-steps-per-rollout: '1'
+    n-samples-per-prompt: '1'
+    rollout-temperature: '0.7'
+    sdpo-teacher: self
+    sdpo-divergence: jsd
+    sdpo-jsd-beta: '0.5'
+    sdpo-top-k: '100'
+    sdpo-top-k-source: student
+    sdpo-top-k-distribution: tail
+    sdpo-teacher-update-rate: '0.05'
+    sdpo-importance-sampling-level: token
+    sdpo-importance-sampling-cap: '2.0'
+    lr-decay-iters: ${AGENTCL_STEPS:?}
+    ckpt-fully-parallel-save: true
+    add-qkv-bias: true
+    sdpo-skip-response-tokens: '0'
+storage:
+  artifact-repository: ${AGENTCL_RUN_ROOT:?}/artifacts.git
+  artifact-work-dir: ${AGENTCL_RUN_ROOT:?}/artifact-work
+  artifact-cache-dir: ${AGENTCL_RUN_ROOT:?}/artifact-cache
+  agent-record-dir: ${AGENTCL_RUN_ROOT:?}/agent-record
+execution:
+  training: ray
+  rollout: ray
+observability:
+  wandb:
+    enabled: false
+    project: reef-agentcl
+    tags:
+    - agentcl
+    - sdpo
+    mode: online
+    directory: ${AGENTCL_RUN_ROOT:?}/wandb
+    upload_checkpoints: false

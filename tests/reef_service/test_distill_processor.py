@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Mapping, Sequence
+from dataclasses import replace
 from types import SimpleNamespace
 from typing import Any
 
@@ -201,7 +202,7 @@ def test_teacher_tokens_render_the_request_cut_the_prompt_and_append_the_respons
 
 @pytest.mark.unit
 def test_the_processor_requires_one_recorded_request_per_report(tokenizer: CountingTokenizer) -> None:
-    processor = _processor(accept_multi_turn_policy_samples=True)
+    processor = _processor()
     processor.ingest(_inference("i1"))
     processor.ingest(_inference("i2"))
 
@@ -228,3 +229,215 @@ def test_recorded_response_reads_the_final_assistant_message() -> None:
         == "x"
     )
     assert recorded_response({"messages": []}) == ""
+
+
+def episode_inferences(prefix: str = "i") -> tuple[AgentRecord, ...]:
+    """Three recorded assistant turns with exact tool observations between them."""
+    messages = [{"role": "user", "content": QUESTION}]
+    tokens = [5, 6, 7]
+    records = []
+    for index, (response_ids, context_ids) in enumerate((([1, 2, 3], [20, 21]), ([4, 5], [22]), ([6], []))):
+        response: dict[str, Any] = {"role": "assistant", "content": f"<think>private</think>Action {prefix}-{index}"}
+        if index < 2:
+            response["tool_calls"] = [
+                {
+                    "id": f"call-{prefix}-{index}",
+                    "type": "function",
+                    "function": {"name": "python", "arguments": '{"code":"1+1"}'},
+                }
+            ]
+        tokens = [*tokens, *response_ids]
+        base = _inference(f"{prefix}{index + 1}", messages=list(messages))
+        payload = {
+            "messages": [{"role": "user", "content": "not the authoritative request"}],
+            "response": {
+                "training": {
+                    "request_messages": list(messages),
+                    "request_tools": base.payload["tools"],
+                    "response_message": response,
+                    "tokens": list(tokens),
+                    "loss_mask": [1] * len(response_ids),
+                    "rollout_log_probs": [-value / 10 for value in response_ids],
+                    "runtime_load_id": "slime-v3",
+                }
+            },
+        }
+        records.append(replace(base, payload=payload))
+        messages = [*messages, response]
+        if context_ids:
+            messages.append(
+                {"role": "tool", "tool_call_id": f"call-{prefix}-{index}", "content": f"Observation {prefix}-{index}"}
+            )
+            tokens.extend(context_ids)
+    return tuple(records)
+
+
+@pytest.mark.unit
+def test_episode_keeps_all_selected_positions_and_reserved_sources(tokenizer: CountingTokenizer) -> None:
+    target = _processor(accept_multi_turn_policy_samples=True)
+    records = episode_inferences()
+    references = tuple(record.agent_record_id for record in records)
+    report = _report("episode-report", references)
+    for record in records:
+        target.ingest(record)
+    target.ingest(report)
+    target.ingest(report)
+    batch = target.build_batch()
+    assert target.build_batch() is batch
+    (sample,) = batch.items
+    assert source_record_id(sample) == "episode-report"
+    assert sample.source_agent_record_ids == (*references, "episode-report")
+    assert sample.training["turn_count"] == 3
+    assert sample.training["tokens"] == [5, 6, 7, 1, 2, 3, 20, 21, 4, 5, 22, 6]
+    assert sample.training["loss_mask"] == [1, 1, 1, 0, 0, 1, 1, 0, 1]
+    assert sample.training["rollout_log_probs"] == [-0.1, -0.2, -0.3, 0.0, 0.0, -0.4, -0.5, 0.0, -0.6]
+    assert sum(sample.training["loss_mask"]) == 6
+    assert tokenizer.calls[0][0] == [{"role": "user", "content": QUESTION}]
+    assert sample.training["teacher_tokens"][-9:] == sample.training["tokens"][-9:]
+    assert target.releasable_record_ids() == frozenset()
+    target.release_batch(batch.batch_id)
+    retry = target.build_batch()
+    assert retry.items == batch.items
+    assert target.acknowledge(retry.batch_id) == frozenset((*references, "episode-report"))
+    assert not target.ready()
+    assert target.releasable_record_ids() == frozenset((*references, "episode-report"))
+    target.ingest(_report("duplicate-source", references))
+    assert not target.ready()
+    target.release_records(target.releasable_record_ids())
+    assert target.releasable_record_ids() == frozenset()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("field", ["realign_threshold", "scaffold_tolerance"])
+def test_episode_rejects_alignment_tolerances(tokenizer: CountingTokenizer, field: str) -> None:
+    with pytest.raises(ValueError, match="requires realign_threshold=0 and scaffold_tolerance=0"):
+        _processor(accept_multi_turn_policy_samples=True, **{field: 1})
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("turn_index", [0, 1, 2])
+@pytest.mark.parametrize(
+    "fault", ["mask", "log_probs", "nonfinite", "release", "runtime", "missing_release", "mixed_spans"]
+)
+def test_episode_rejects_invalid_turns_without_releasing_sources(
+    tokenizer: CountingTokenizer, turn_index: int, fault: str
+) -> None:
+    target = _processor(accept_multi_turn_policy_samples=True)
+    records = list(episode_inferences())
+    record = records[turn_index]
+    training = dict(record.payload["response"]["training"])
+    artifact_ref = record.artifact_ref
+    if fault == "mask":
+        training["loss_mask"] = [0, *training["loss_mask"][1:]]
+    elif fault == "log_probs":
+        training["rollout_log_probs"] = []
+    elif fault == "nonfinite":
+        training["rollout_log_probs"] = [float("nan"), *training["rollout_log_probs"][1:]]
+    elif fault == "release":
+        artifact_ref = replace(artifact_ref, release_id="slime-v4")
+    elif fault == "runtime":
+        training["runtime_load_id"] = "slime-v4"
+    elif fault == "missing_release":
+        artifact_ref = None
+    else:
+        training["runtime_load_id"] = None
+        response_length = len(training["loss_mask"])
+        training["runtime_load_spans"] = [{"start": 0, "end": response_length, "runtime_load_id": "slime-v4"}]
+    records[turn_index] = replace(record, artifact_ref=artifact_ref, payload={"response": {"training": training}})
+    for record in records:
+        target.ingest(record)
+    report = _report("invalid-episode", tuple(record.agent_record_id for record in records))
+    with pytest.raises(ValueError, match="episode"):
+        target.ingest(report)
+    assert not target.ready()
+    assert target.releasable_record_ids() == frozenset()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("position", [0, 6, 8])
+def test_episode_rejects_fork_response_drift_and_scaffold_drift(tokenizer: CountingTokenizer, position: int) -> None:
+    target = _processor(accept_multi_turn_policy_samples=True)
+    records = list(episode_inferences())
+    training = dict(records[2].payload["response"]["training"])
+    tokens = list(training["tokens"])
+    tokens[position] = 999
+    training["tokens"] = tokens
+    records[2] = replace(records[2], payload={"response": {"training": training}})
+    for record in records:
+        target.ingest(record)
+    with pytest.raises(ValueError, match="cannot assemble"):
+        target.ingest(_report("fork", tuple(record.agent_record_id for record in records)))
+    assert not target.ready()
+    assert target.releasable_record_ids() == frozenset()
+
+
+@pytest.mark.unit
+def test_episode_rejects_out_of_order_references(tokenizer: CountingTokenizer) -> None:
+    target = _processor(accept_multi_turn_policy_samples=True)
+    records = episode_inferences()
+    for record in records:
+        target.ingest(record)
+    with pytest.raises(ValueError, match="first assistant turn"):
+        target.ingest(_report("reversed", tuple(record.agent_record_id for record in reversed(records))))
+    assert target.releasable_record_ids() == frozenset()
+
+
+@pytest.mark.unit
+def test_episode_overflow_raises_and_keeps_all_sources(tokenizer: CountingTokenizer) -> None:
+    target = _processor(accept_multi_turn_policy_samples=True, max_teacher_tokens=5)
+    records = episode_inferences()
+    for record in records:
+        target.ingest(record)
+    with pytest.raises(ValueError, match="episode teacher sequence exceeds"):
+        target.ingest(_report("overflow", tuple(record.agent_record_id for record in records)))
+    assert target.operational_metrics()["teacher_overflow_reports"] == 0
+    assert target.releasable_record_ids() == frozenset()
+
+
+@pytest.mark.unit
+def test_episode_single_turn_matches_default_exactly(tokenizer: CountingTokenizer) -> None:
+    samples = []
+    inference = _inference("single")
+    report = _report("single-report", ("single",))
+    for enabled in (False, True):
+        target = _processor(accept_multi_turn_policy_samples=enabled)
+        target.ingest(inference)
+        target.ingest(report)
+        samples.append(target.build_batch().items[0])
+    assert samples[0] == samples[1]
+
+
+@pytest.mark.unit
+def test_episode_rejects_missing_assistant_turn_in_references(tokenizer: CountingTokenizer) -> None:
+    target = _processor(accept_multi_turn_policy_samples=True)
+    records = episode_inferences()
+    for record in records:
+        target.ingest(record)
+    with pytest.raises(ValueError, match="include every assistant turn"):
+        target.ingest(_report("incomplete", (records[0].agent_record_id, records[2].agent_record_id)))
+    assert not target.ready()
+    assert target.releasable_record_ids() == frozenset()
+
+
+@pytest.mark.unit
+def test_episode_rejects_duplicate_receipts(tokenizer: CountingTokenizer) -> None:
+    from reef.core.reports import ReportValidationError
+
+    target = _processor(accept_multi_turn_policy_samples=True)
+    record = episode_inferences()[0]
+    target.ingest(record)
+    with pytest.raises(ReportValidationError, match="unique"):
+        target.ingest(_report("duplicate", (record.agent_record_id, record.agent_record_id)))
+    assert not target.ready()
+
+
+@pytest.mark.unit
+def test_episode_rejects_missing_initial_receipt(tokenizer: CountingTokenizer) -> None:
+    target = _processor(accept_multi_turn_policy_samples=True)
+    records = episode_inferences()
+    for record in records:
+        target.ingest(record)
+    with pytest.raises(ValueError, match="start before the first assistant turn"):
+        target.ingest(_report("missing-initial", tuple(record.agent_record_id for record in records[1:])))
+    assert not target.ready()
+    assert target.releasable_record_ids() == frozenset()
