@@ -4156,7 +4156,7 @@ requires-dist = [
     { name = "sglang-router", marker = "extra == 'slime'", specifier = ">=0.3.2" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "tensorboard", marker = "extra == 'slime'" },
-    { name = "tinker", marker = "extra == 'tinker'", specifier = "==0.31.0" },
+    { name = "tinker", marker = "extra == 'tinker'", specifier = "==0.33.1" },
     { name = "tinker-cookbook", marker = "extra == 'tinker'", specifier = "==0.5.7" },
     { name = "tomli-w" },
     { name = "transformers", marker = "extra == 'slime'" },
@@ -4924,7 +4924,7 @@ wheels = [
 
 [[package]]
 name = "tinker"
-version = "0.31.0"
+version = "0.33.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "anyio" },
@@ -4942,9 +4942,9 @@ dependencies = [
     { name = "typing-extensions" },
     { name = "zstandard" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/bc/ca/938340f6fbbdb24bc028604258acb138640ba37d757410ced0983ad10935/tinker-0.31.0.tar.gz", hash = "sha256:df582ffe75b131477cc924dffb7383f6925b5d05ddd4d85be6315603afd58395", size = 293478, upload-time = "2026-09-30T00:24:45.535Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/93/07/546ad32cedcb8267bf0371c46deb0ea86590005caeb36d15ae0f8a534838/tinker-0.33.1.tar.gz", hash = "sha256:6ccf24a8eb7c72f3b983e7de669babb25fec0a8c507a5b19498cb119e2730fca", size = 301885, upload-time = "2026-10-08T23:49:42.827Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/91/66/251dea0540d19f1a3bfe52749ec4bd81c32da1e2a70c68d63de32e080b9d/tinker-0.31.0-py3-none-any.whl", hash = "sha256:c5387d6d447f4aa0bba5d6f1303c6309242160f728d4f9031bb81fe02d554e4c", size = 279801, upload-time = "2026-09-30T00:24:43.709Z" },
+    { url = "https://files.pythonhosted.org/packages/8e/52/e5e826fa4fa52aaf0e19de1ffcdae06fcd91409071a4e744300f071914e0/tinker-0.33.1-py3-none-any.whl", hash = "sha256:e9b0d1b5849638b0b76e9e0167393de93331fafb348e2924f1cc9a140c74bf26", size = 287595, upload-time = "2026-10-08T23:49:41.169Z" },
 ]
 
 [[package]]
@@ -5291,14 +5291,14 @@ wheels = [
 
 [[package]]
 name = "werkzeug"
-version = "3.1.8"
+version = "3.1.9"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "markupsafe" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/dd/b2/381be8cfdee792dd117872481b6e378f85c957dd7c5bca38897b08f765fd/werkzeug-3.1.8.tar.gz", hash = "sha256:9bad61a4268dac112f1c5cd4630a56ede601b6ed420300677a869083d70a4c44", size = 875852, upload-time = "2026-04-02T18:49:14.268Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/a4/34/4dd12fc8bb7d61c91467ec3efe415ffa7d5456f799954b40c5bbaeae470e/werkzeug-3.1.9.tar.gz", hash = "sha256:55ca7c70a75689be937aa27f8ff4b018f06ff4838fc73045560bf0f5a1291060", size = 940188, upload-time = "2026-09-27T18:33:41.637Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/93/8c/2e650f2afeb7ee576912636c23ddb621c91ac6a98e66dc8d29c3c69446e1/werkzeug-3.1.8-py3-none-any.whl", hash = "sha256:63a77fb8892bf28ebc3178683445222aa500e48ebad5ec77b0ad80f8726b1f50", size = 226459, upload-time = "2026-04-02T18:49:12.72Z" },
+    { url = "https://files.pythonhosted.org/packages/a1/38/df03f564f43cec2684823f3cccae1a652ee7face1cbaa76fb223096e64d7/werkzeug-3.1.9-py3-none-any.whl", hash = "sha256:6392e50c78460ba618e5b21f08a71f59c99ce99cdc6cf6e3dd7e6ccca8754fab", size = 228700, upload-time = "2026-09-27T18:33:39.685Z" },
 ]
 
 [[package]]
