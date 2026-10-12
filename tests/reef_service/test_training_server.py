@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import os
 import signal
 import subprocess
@@ -14,12 +15,14 @@ from reef_service.runtime_stubs import StubTrainingRuntime
 
 
 from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.recipe.errors import RecipeConfigError
 from reef.service import deploy
 from reef.service.assembly import _repository_location
 from reef.service.deploy.service_config import ServiceConfig
 
 OPENCLAWRL_RECIPE = "recipes.openclawrl.recipe:OpenClawRLRecipe"
 SAO_RECIPE = "recipes.sao.recipe:SAORecipe"
+GENERATED_TASK_RECIPE = "reef.record2dataset.generated_tasks:GeneratedTaskRecipe"
 
 
 def test_configured_handler_rejects_a_function() -> None:
@@ -148,6 +151,17 @@ def test_service_config_preserves_candidate_evaluation_section() -> None:
     args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "evaluation": evaluation})
 
     assert args.evaluation_settings == evaluation
+
+
+@pytest.mark.unit
+def test_service_config_reads_the_task_generation_section() -> None:
+    section = {"module": "recipes.beta.spade:SpadeTaskGenerator", "config": {"count": 8}}
+
+    args = deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "task-generation": section})
+
+    assert args.task_generation_settings == section
+    with pytest.raises(ValueError, match="task-generation must be an object"):
+        deploy.service_config_from_mapping({"reef": {"recipe": SAO_RECIPE}, "task-generation": "spade"})
 
 
 @pytest.mark.unit
@@ -427,6 +441,61 @@ def test_build_dispatcher_rejects_candidate_evaluation_for_non_weight_recipe(mon
                 evaluation_settings={"module": "cookbook.evaluation:CheckpointFactory"},
                 agent_record_dir=str(tmp_path / "agent-record"),
             )
+        )
+
+
+@pytest.mark.unit
+def test_build_dispatcher_hands_the_task_generation_section_to_the_generated_task_recipe(
+    monkeypatch, tmp_path
+) -> None:
+    monkeypatch.setattr(
+        deploy.GitLFSRepositoryBackend,
+        "factory",
+        lambda *args, **kwargs: lambda scenario: object(),
+    )
+    task_generation = {"module": "reef_service.test_generated_tasks:ScriptedGenerator", "config": {"count": 1}}
+
+    settings = _settings(
+        recipe=GENERATED_TASK_RECIPE,
+        task_generation_settings=task_generation,
+        agent_record_dir=str(tmp_path / "agent-record"),
+    )
+    dispatcher = deploy.build_dispatcher(
+        dataclasses.replace(settings, recipe_settings={"plays_per_task": 2}),
+        connector=lambda **kwargs: stub_runtimes(),
+    )
+
+    recipe = dispatcher._recipe
+    assert recipe.task_generation is not None
+    assert recipe.task_generation.plugin.plugin_class.__name__ == "ScriptedGenerator"
+    assert recipe.task_generation.plugin.config == {"count": 1}
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("recipe", "error", "message"),
+    [
+        (OPENCLAWRL_RECIPE, RecipeConfigError, "does not train on generated tasks"),
+        ("recipe", ValueError, "task-generation section requires a weight-training recipe"),
+    ],
+)
+def test_build_dispatcher_rejects_task_generation_for_another_recipe(
+    monkeypatch, tmp_path, recipe, error, message
+) -> None:
+    monkeypatch.setattr(
+        deploy.GitLFSRepositoryBackend,
+        "factory",
+        lambda *args, **kwargs: lambda scenario: object(),
+    )
+
+    with pytest.raises(error, match=message):
+        deploy.build_dispatcher(
+            _settings(
+                recipe=recipe,
+                task_generation_settings={"module": "reef_service.test_generated_tasks:ScriptedGenerator"},
+                agent_record_dir=str(tmp_path / "agent-record"),
+            ),
+            connector=lambda **kwargs: stub_runtimes(),
         )
 
 

@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from reef.core.plugins import PluginReference
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.runners.terminus.runner import trial_record
@@ -21,7 +22,6 @@ from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
 from reef.train.cordis_backend.backend import FloorPlugin, ScoreComparisonPlugin
-from reef.train.plugins import PluginReference
 
 
 def test_dotted_recipe_defaults_and_config_are_independent() -> None:

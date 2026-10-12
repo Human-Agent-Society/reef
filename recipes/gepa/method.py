@@ -32,6 +32,7 @@ from statistics import fmean
 from typing import Any
 
 from reef.core.evaluation import CandidateEvaluationPlugin, EvaluationResult, SelectionDecision, UpdateCandidate
+from reef.core.plugins import ConfiguredPlugin
 from reef.core.trajectories import recorded_payload
 from reef.harness.adapters.descriptor import AdapterDescriptor
 from reef.harness.episodes.executor import EpisodeExecutor
@@ -43,7 +44,6 @@ from reef.harness.tree.render import render_composition
 from reef.train.cordis_backend.manifest import FailureManifest
 from reef.train.cordis_backend.strategies import AgentHost, EpisodeScorer, Proposer
 from reef.train.evaluation.evaluators import BackendEvaluateMixin
-from reef.train.plugins import ConfiguredPlugin
 from reef.train.types import TrajectoryItem
 
 from . import components, reflection

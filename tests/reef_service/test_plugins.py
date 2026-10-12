@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
+from reef.core.plugins import ConfiguredPlugin, PluginConfigError, PluginReference
 from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer, VerifierRewardScorer
-from reef.train.plugins import ConfiguredPlugin, PluginConfigError, PluginReference
 
 MODULE = "reef_service.test_plugins"
 

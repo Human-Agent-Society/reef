@@ -1,16 +1,13 @@
-"""SPADE (arXiv:2608.19197): self play in adaptive synthetic executable environments, one method, one package.
+"""SPADE (arXiv:2608.19197): self play in adaptive synthetic executable environments, as a task generator.
 
 Reef knows one task format, Harbor, and writes, checks and plays Harbor tasks in ``reef.record2dataset``.
-What SPADE adds is the method: the Environment Designer's adversarial experience section, the two arms
-each task is played with (as it is, and with the hint), the hint based regret as the Designer's signal,
-and the Reasoning Agent's group relative training on the plain arm's episodes.
+The built-in generated-task recipe plays the tasks and trains on them. What SPADE adds is the generator:
+the Environment Designer's adversarial experience section, the hint arm each task asks for, and the hint
+based regret as the Designer's signal.
 
 - ``generation``: the experience section (results sorted by regret into the frontier, the mastered and the
   out of reach), a generation's records and its report file.
-- ``processor``: the reported feedback half (episodes grouped by task) and the task generation half (the
-  Designer's generations, run on a worker through the generator service).
-- ``objective``: group relative advantages per task group on Tinker's importance sampling loss.
-- ``recipe``: the configuration that binds them.
+- ``generator``: ``SpadeTaskGenerator``, the Designer's generations through the generator service.
 
 The Designer's own training follows.
 """
@@ -24,18 +21,13 @@ from recipes.beta.spade.generation import (
     experience_text,
     load_experience,
 )
-from recipes.beta.spade.objective import SpadeObjective
-from recipes.beta.spade.processor import ProposalRefused, SpadeProcessor
-from recipes.beta.spade.recipe import SpadeRecipe
+from recipes.beta.spade.generator import SpadeTaskGenerator
 
 __all__ = [
     "GenerationRecord",
     "PlayRecord",
     "ProposalRecord",
-    "ProposalRefused",
-    "SpadeObjective",
-    "SpadeProcessor",
-    "SpadeRecipe",
+    "SpadeTaskGenerator",
     "TaskMeasure",
     "experience_for",
     "experience_text",

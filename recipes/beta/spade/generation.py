@@ -6,7 +6,7 @@ regret of Sec. 4.2 into the frontier (the hint turns losses into wins), the mast
 the out of reach (lost even with it), so the next environment lands where the agent fails without a hint
 and passes with one. ``experience_text`` is that section of the prompt; the generic task designer in
 ``reef.record2dataset`` carries it as data. The rest of this module is the bookkeeping of one generation,
-which ``SpadeProcessor`` writes under its state directory and reads back after a restart.
+which ``SpadeTaskGenerator`` writes under its state directory and reads back after a restart.
 """
 
 from __future__ import annotations
@@ -18,7 +18,6 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from reef.core.tasks.harbor import TASK_NAME_PATTERN
-from reef.harness.client.tasks import TaskPlay
 from reef.record2dataset.designer import SKILL_PATTERN
 from reef.train.cordis_backend.strategies import untrusted_text
 
@@ -151,11 +150,10 @@ class ProposalRecord:
 
 @dataclass(frozen=True)
 class TaskMeasure:
-    """A written task after both arms played: the rewards, the regret and the band."""
+    """A task after both arms played: the rewards, the regret and the band."""
 
     name: str
     skill: str | None
-    task_path: Path
     digest: str
     plain_rewards: tuple[float, ...]
     hint_rewards: tuple[float, ...]
@@ -190,21 +188,9 @@ def skill_tag(skill: str | None) -> dict[str, str]:
     return {} if skill is None else {"skill": skill}
 
 
-def is_unplayed(play: TaskPlay) -> bool:
-    """An episode that never ran: no reward and an error (the agent could not start, the trial raised)."""
-    return play.reward is None and bool(play.error)
-
-
-def mean_reward(plays: Sequence[TaskPlay]) -> float:
-    """The mean reward of the episodes of an arm that ran; a run that scored nothing counts as 0, like a loss."""
-    ran = [play for play in plays if not is_unplayed(play)]
-    if not ran:
-        return 0.0
-    return statistics.fmean(play.reward if play.reward is not None else 0.0 for play in ran)
-
-
-def rewards_of(plays: Sequence[TaskPlay]) -> tuple[float, ...]:
-    return tuple(play.reward if play.reward is not None else 0.0 for play in plays if not is_unplayed(play))
+def mean_reward(rewards: Sequence[float]) -> float:
+    """The mean reward of an arm's episodes that ran; an arm without any counts as 0, like a loss."""
+    return statistics.fmean(rewards) if rewards else 0.0
 
 
 def report_path_for(state_dir: Path, generation: int) -> Path:
@@ -224,7 +210,6 @@ def write_generation_report(state_dir: Path, record: GenerationRecord) -> Path:
             {
                 "name": measure.name,
                 "skill": measure.skill,
-                "path": str(measure.task_path),
                 "digest": measure.digest,
                 "plain_rewards": list(measure.plain_rewards),
                 "hint_rewards": list(measure.hint_rewards),

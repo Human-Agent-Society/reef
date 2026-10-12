@@ -40,7 +40,7 @@ from reef.core.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
-from reef.train.plugins import Plugin, PluginConfigError
+from reef.core.plugins import Plugin, PluginConfigError
 
 
 class SelectionPlugin(CandidateEvaluationPlugin, Plugin):

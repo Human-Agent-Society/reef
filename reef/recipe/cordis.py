@@ -25,6 +25,7 @@ from urllib.parse import quote
 from reef.core.errors import ReefError
 from reef.core.evaluation import CandidateEvaluationPlugin
 from reef.core.model_metadata import ModelMetadata
+from reef.core.plugins import PluginConfigError, PluginReference
 from reef.core.reports import ScoredRolloutReport
 from reef.core.tasks import TaskSplitError, manifest_task_paths
 from reef.harness.adapters import get_adapter
@@ -57,7 +58,6 @@ from reef.train.cordis_backend.execution import evaluation_selection, legacy_wor
 from reef.train.cordis_backend.processor import CordisProcessor, RecordDrivenTraceProcessor
 from reef.train.cordis_backend.strategies import EpisodeScorer, Promoter, Proposer
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin, SelectionPlugin
-from reef.train.plugins import PluginConfigError, PluginReference
 from reef.train.trainer import Trainer
 
 #: The built-in ``evolution.selection`` names.

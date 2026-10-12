@@ -18,6 +18,7 @@ import yaml
 from reef_service._trajectories import recorded_trajectory
 
 from reef.core import AgentRecord, RequestType
+from reef.core.plugins import PluginReference
 from reef.core.trajectories import recorded_payload
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
 from reef.inference.http import InferenceProxyRuntime
@@ -27,7 +28,6 @@ from reef.recipe.registry import build_recipe
 from reef.train.cordis_backend import Mutation
 from reef.train.cordis_backend.processor import CordisProcessor
 from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
-from reef.train.plugins import PluginReference
 from reef.train.types import ProcessorContext
 
 from ._strategies import resolve_episode_scorer, resolve_proposer
