@@ -151,6 +151,9 @@ _MEGATRON_ONLY_FLAGS = frozenset(
         "--use-precision-aware-optimizer",
         "--override-opt-param-scheduler",
         "--padded-vocab-size",
+        "--vocab-size",
+        "--norm-epsilon",
+        "--untie-embeddings-and-output-weights",
         "--pipeline-model-parallel-size",
         "--position-embedding-type",
         "--qk-layernorm",
@@ -175,6 +178,10 @@ _MEGATRON_ONLY_FLAGS = frozenset(
 # example's ``run.sh`` normally supplies these before invoking ``reef serve``;
 # setting them here makes the generated command testable without a GPU stack.
 _CONFIG_ENV = {
+    "OPD_MODEL_PATH": "/root/models/Qwen3.5-9B-SFT",
+    "OPD_RUN_DIR": "/tmp/reef-opd-config-test",
+    "OPD_ADAPTER_PATH": "/root/models/Qwen3.5-9B-SFT-adapter",
+    "OPD_TEACHER_PATH": "/root/models/Qwen3.5-9B",
     "REEF_TOKEN": "config-test-token",
     "SDPO_MODEL_PATH": "/root/models/Qwen3-8B",
     "SDPO_RUN_DIR": "/tmp/reef-config-test/sdpo",
