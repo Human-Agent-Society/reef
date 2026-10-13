@@ -103,12 +103,13 @@ and LoRA deployments stay on `Dockerfile.reef`. Expect a few
 the `triton_kernels` MXFP4 MoE module that vLLM 0.29 imports, and dense
 models never use it.
 
-Verified on an 8x H200 host with the image this script builds (one training
-GPU, one engine, Qwen2.5-0.5B, the SAO recipe with its critic, actor training
-from the first step): three reports produced three training releases, and
-the engine's `/weight_info` version advanced after each one as it reloaded the
-published weights over the disk path. Tensor parallel above 1 and the SGLang
-engine have not been run on this image.
+Verified on two 8x H200 hosts with the image this script builds (Qwen2.5-0.5B,
+the SAO recipe with its critic, actor training from the first step): with one
+training GPU and one engine, and with a tensor-parallel-2 trainer on two GPUs
+plus one engine, three reports produced three training releases each, and the
+engine's `/weight_info` version advanced after every release as it reloaded
+the published weights over the disk path. The SGLang engine has not been run
+on this image.
 
 ## Demo configs
 
