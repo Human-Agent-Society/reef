@@ -6,9 +6,9 @@ import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
+from reef.evaluation import CandidateEvaluationConfig, build_candidate_evaluation
 from reef.recipe import RecipeConfigError
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train.evaluation import CandidateEvaluationConfig, build_candidate_evaluation
 
 PLUGIN = "reef_service._candidate_evaluation_plugin"
 
@@ -42,10 +42,8 @@ def test_plugin_class_builds_scenario_local_candidate_evaluator() -> None:
 @pytest.mark.unit
 def test_recipe_carries_evaluation_config_into_each_trainer() -> None:
     runtime = StubTrainingRuntime()
-    config = SAORecipe.service_config(
-        {"batch_size": 1},
-        model_path="/models/student",
-    )
+    config = SAORecipe.service_config({}, model_path="/models/student")
+    config["pipeline"] = {"task2batch": {"config": {"batch_size": 1}}}
     config["evaluation"] = evaluation_config()
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},

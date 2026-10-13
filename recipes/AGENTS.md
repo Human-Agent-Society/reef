@@ -104,7 +104,6 @@ trial result, not in the training scenario's report contract.
 Reef service config. The minimal record-only config (no training stack) is:
 
 ```yaml
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: ${REEF_PORT}
@@ -122,16 +121,15 @@ storage:
   artifact-cache-dir: ${REEF_WORK}/artifact-cache
 ```
 
-Keep shipped Reef configuration in the versioned public layout. Training
-examples put native training flags in `training.options`, engine flags in
+Training examples put native training flags in `training.options`, engine flags in
 `inference.options`, and inference GPU capacity/parallelism in `inference.num-gpus`
-and `inference.tensor-parallel-size`; Reef assembles their worker topology. Do not add `service` or `services` to version 2 YAML. HTTP
+and `inference.tensor-parallel-size`; Reef assembles their worker topology. Do not add `service` or `services` to Reef YAML. HTTP
 settings belong in `reef`. Deploy method-owned services independently and pass
 their endpoints through recipe fields; Reef coordinates only native inference
 and training. See `recipes/openclawrl/examples/openclawrl/docker-compose.yaml`
 for external service startup and GPU isolation. Recipe fields and owned sections go
 under `recipe.config`. Docker Compose and third-party task files retain their
-own schemas. Legacy Reef layouts belong in compatibility tests.
+own schemas.
 
 ## `run.sh`
 

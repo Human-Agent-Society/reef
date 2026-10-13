@@ -196,7 +196,7 @@ The report schema is already open (``score``, ``feedback``, ``references``,
 
 - ``score``: scalar consumed by scored-rollout processors, as today.
 - ``metadata.training.eligible: false``: the existing framework-neutral
-  opt-out (`reported.py <../../reef/train/processors/reported.py>`__,
+  opt-out (``reef/train/processors/reported.py``, since removed,
   ``_report_is_trainable``): how a method submits a record-keeping report
   that must not train.
 - ``feedback.<method>.*``: structured method signal. For OpenClaw-RL's OPD

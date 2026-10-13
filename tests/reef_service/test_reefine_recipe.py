@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from reef.core.plugins import PluginReference
+from reef.evaluation.harness import FloorPlugin, ScoreComparisonPlugin
 from reef.harness.episodes.requests import REQUESTS_ENTRY_ID
 from reef.harness.episodes.run import EpisodeResult
 from reef.harness.runners.terminus.runner import trial_record
@@ -21,7 +22,6 @@ from reef.recipe.reefine.evolution import HEALTH_TASK_DIRECTORY, evaluate
 from reef.recipe.registry import build_recipe, recipe_class_for
 from reef.service.deploy.orchestrator import _prepare_profile
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend.backend import FloorPlugin, ScoreComparisonPlugin
 
 
 def test_dotted_recipe_defaults_and_config_are_independent() -> None:
@@ -49,7 +49,8 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
     built = ReefineRecipe.from_environment(
         {},
         config={
-            "data": {"training_mode": "hybrid", "batch_size": 3},
+            "data": {"training_mode": "hybrid"},
+            "pipeline": {"task2batch": {"config": {"batch_size": 3}}},
             "evolution": {
                 "tasks": ["[fib] Compute fib(90)."],
                 "selection": "score_comparison",
@@ -61,7 +62,7 @@ def test_evolution_overrides_and_training_fields_remain_available() -> None:
         },
     )
     assert isinstance(built, ReefineRecipe)
-    assert built.training_mode == "hybrid" and built.batch_size == 3
+    assert built.training_mode == "hybrid" and built.stages().task2batch.config == {"batch_size": 3}
     assert built.seed == () and built.review_kinds == ()
     assert built.selection == PluginReference(ScoreComparisonPlugin)
 

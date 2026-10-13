@@ -819,14 +819,18 @@ class TrainingPublication:
         return marker
 
     def acknowledge(self, job_id: str) -> None:
-        """Persist Reef's commit acknowledgement before allowing requests again."""
+        """Record the scenario acknowledgement, then finish the runtime publication.
+
+        HEAD_COMMITTED survives a failed resume or completion write. Retrying
+        finishes that same publication; COMPLETE requires no engine operation.
+        """
         marker = self._job_marker(job_id)
         if marker["status"] == "COMPLETE":
             if marker.get("commit_acknowledged") is not True:
                 self._require_store().write({**marker, "commit_acknowledged": True})
             return
         if marker["status"] == "READY_TO_COMMIT":
-            self._require_store().transition(marker, "HEAD_COMMITTED", commit_acknowledged=True)
+            marker = self._require_store().transition(marker, "HEAD_COMMITTED", commit_acknowledged=True)
         if marker["status"] != "HEAD_COMMITTED":
             raise RuntimeError(f"cannot acknowledge training job {job_id!r} from {marker['status']}")
         self._publisher.resume()

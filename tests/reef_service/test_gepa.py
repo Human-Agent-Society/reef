@@ -650,7 +650,7 @@ def sections(tmp_path: Path, **gepa: Any) -> dict[str, Any]:
             "seed": list(SEED),
             "gepa": block,
         },
-        "data": {"batch_size": 1},
+        "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
     }
 
 
@@ -707,7 +707,7 @@ def test_a_missing_gepa_block_is_refused(tmp_path: Path) -> None:
 
 def test_a_configured_selection_is_left_alone(tmp_path: Path) -> None:
     """Only the empty seams are filled: an operator who names a policy keeps it."""
-    from reef.train.evaluation.evaluators import BackendAlwaysSelectPlugin
+    from reef.evaluation.evaluators import BackendAlwaysSelectPlugin
 
     config = sections(tmp_path)
     config["evolution"]["selection"] = "always"

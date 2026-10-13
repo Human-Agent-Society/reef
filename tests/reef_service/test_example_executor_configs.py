@@ -6,7 +6,7 @@ import pytest
 import yaml
 from reef_service.config_helpers import deployment_layout
 
-from reef.recipe.config import recipe_config_from_mapping
+from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.executor.config import role_executor_settings, select_executor
 from reef.service.deploy.execution import service_executor_selection, validate_services
 from reef.train.slime_backend.launch import driver_arguments
@@ -95,7 +95,7 @@ def test_examples_select_service_executors_from_resources_and_slime_workers_on_r
 
 @pytest.mark.parametrize("relative", EVOLUTION_CONFIGS)
 def test_cpu_evolution_examples_select_uni_then_mp_without_changing_isolation(relative):
-    config = recipe_config_from_mapping(yaml.safe_load((ROOT / relative).read_text()))
+    config = recipe_config_from_file_layout(yaml.safe_load((ROOT / relative).read_text()))
     evolution = config["evolution"]
     assert config["execution"]["evolution"]["workers"] == 1
     assert set(config["execution"]["evolution"]) == {"workers"}
@@ -135,8 +135,9 @@ def test_openclawrl_isolates_external_models_from_reef_training():
         assert int(command[command.index("--tp") + 1]) == len(pools[name])
         assert "RAY_ADDRESS" not in compose[name].get("environment", {})
     prm = compose["prm"]["command"]
-    assert config["reef"]["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
-    assert config["reef"]["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
+    judging = config["pipeline"]["record2record"]["config"]
+    assert judging["prm_url"] == f"http://127.0.0.1:{prm[prm.index('--port') + 1]}"
+    assert judging["prm_tokenizer_path"] == prm[prm.index("--model-path") + 1]
     assert compose["reef"]["depends_on"] == {"prm": {"condition": "service_healthy"}}
     flags = dict(argument.removeprefix("--").split("=", 1) for argument in driver_arguments(config) if "=" in argument)
     training_gpus = int(flags["actor-num-nodes"]) * int(flags["actor-num-gpus-per-node"])

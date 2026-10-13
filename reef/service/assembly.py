@@ -121,8 +121,8 @@ def _training_recipe(
     recipe_config = recipe_type.service_config(_recipe_owned_settings(settings), model_path=model_path)
     if settings.evaluation_settings is not None:
         recipe_config["evaluation"] = dict(settings.evaluation_settings)
-    if settings.task_generation_settings is not None:
-        recipe_config["task_generation"] = dict(settings.task_generation_settings)
+    if settings.pipeline_settings is not None:
+        recipe_config["pipeline"] = dict(settings.pipeline_settings)
     # The runtime must exist before the recipe can be constructed, so
     # resolve the shared runtime-owned config field from the same inputs first.
     # WeightTrainingRecipe then verifies that both resolved the same value.
@@ -174,7 +174,7 @@ def composed_training_recipe(
     if unknown:
         raise ValueError(
             f"reef.{unknown[0]} is not a setting of {recipe_type.__name__}; a component's settings go under "
-            "components.<name>.data"
+            "components.<name>.config"
         )
     resolved_weight_data = resolve_config_field_values(weight_type, weight_config.get("data", {}), env)
     training_runtime, runtime = _connect_training_runtime(
@@ -188,15 +188,16 @@ def composed_training_recipe(
         key: value
         for key, value in (
             ("evaluation", settings.evaluation_settings),
-            ("task_generation", settings.task_generation_settings),
+            ("pipeline", settings.pipeline_settings),
         )
         if value is not None
     }
     if framework_sections:
+        # The component that trains weights keeps these sections under its own config.
         components = dict(config["components"])
-        for name, component_config in components.items():
-            if component_config is weight_config:
-                components[name] = {**component_config, **framework_sections}
+        for name, section in components.items():
+            if recipe_class_for(section["implementation"]) is weight_type:
+                components[name] = {**section, "config": {**section.get("config", {}), **framework_sections}}
         config = {**config, "components": components}
     try:
         return build_recipe(selected, env, config=config, runtime=runtime, training_runtime=training_runtime)
@@ -208,13 +209,9 @@ def composed_training_recipe(
 
 
 def refuse_weight_training_sections(settings: ServiceConfig) -> None:
-    """Refuse the top-level sections that only a recipe that trains weights reads."""
-    for section, value in (
-        ("evaluation", settings.evaluation_settings),
-        ("task-generation", settings.task_generation_settings),
-    ):
-        if value is not None:
-            raise ValueError(f"the top-level {section} section requires a weight-training recipe")
+    """Refuse the top-level section that only a recipe that trains weights reads."""
+    if settings.evaluation_settings is not None:
+        raise ValueError("the top-level evaluation section requires a weight-training recipe")
 
 
 def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, str], connector: Any) -> Recipe:
@@ -249,6 +246,8 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
                 selected, recipe_type, config, weight_type, weight_config, settings, env, connector
             )
         refuse_weight_training_sections(settings)
+        if settings.pipeline_settings is not None:
+            config["pipeline"] = dict(settings.pipeline_settings)
         runtime_config = config.get("runtime")
         runtime = (
             RuntimeRegistry().build(
@@ -272,9 +271,9 @@ def _serving_recipe(selected: str, settings: ServiceConfig, env: Mapping[str, st
                         component.shutdown()
             raise
     refuse_weight_training_sections(settings)
-    return build_named_recipe(
-        selected, env, default_runtime=_upstream_runtime(settings), preset_config=settings.preset_config
-    )
+    if settings.pipeline_settings is not None:
+        raise ValueError(f"recipe {selected!r} is a preset: set its pipeline section in the preset file")
+    return build_named_recipe(selected, env, default_runtime=_upstream_runtime(settings))
 
 
 def default_served_url(host: str, port: int) -> str:

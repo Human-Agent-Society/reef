@@ -12,7 +12,7 @@ from __future__ import annotations
 import pytest
 
 from reef.core.evaluation import CandidateEvaluationPlugin
-from reef.train.evaluation import EvaluationResult, RegressionCheckMixin, UpdateCandidate
+from reef.evaluation import EvaluationResult, RegressionCheckMixin, UpdateCandidate
 
 
 class CheckedPlugin(RegressionCheckMixin, CandidateEvaluationPlugin):

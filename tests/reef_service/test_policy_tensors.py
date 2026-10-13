@@ -5,8 +5,8 @@ import pytest
 from reef.core import AgentRecord, RequestType
 from reef.core.artifact_ref import parse_runtime_load_spans
 from reef.core.trajectories import source_record_id, trajectory_reward
+from reef.record2task.samples import make_multi_turn_policy_trajectory, make_policy_trajectory
 from reef.service.request_service import client_inference_response
-from reef.train.processors.common import make_multi_turn_policy_trajectory, make_policy_trajectory
 
 
 def _inference(payload) -> AgentRecord:

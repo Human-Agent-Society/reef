@@ -68,6 +68,18 @@ MAX_NAME_COMPONENT_BYTES = 255
 MAX_NAME_BYTES = 1024
 
 
+def primary_reward(rewards: Mapping[str, object]) -> object:
+    """Return the ``reward`` entry, the sole entry, or None when no primary reward is named.
+
+    Preserve the selected value; callers validate its type and range.
+    """
+    if "reward" in rewards:
+        return rewards["reward"]
+    if len(rewards) == 1:
+        return next(iter(rewards.values()))
+    return None
+
+
 class HarborTaskError(ReefError):
     """A task spec or task directory that Harbor could not run."""
 

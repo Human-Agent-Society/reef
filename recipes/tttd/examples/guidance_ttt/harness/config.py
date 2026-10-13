@@ -77,13 +77,13 @@ class RunConfig:
             raise ValueError(f"unknown GUIDANCE_TASK {task!r}; choose {', '.join(TASKS)}")
         config_path = Path(os.environ.get("GUIDANCE_CONFIG", EXAMPLE_DIR / "serve.yaml")).resolve()
         stack = yaml.safe_load(config_path.read_text())
-        grid = stack["recipe"]["config"]
+        grid = stack["pipeline"]["record2record"]["config"]
         training = stack["training"]["config"]
-        groups, rollouts = int(grid["groups-per-step"]), int(grid["rollouts-per-group"])
+        groups, rollouts = int(grid["groups_per_step"]), int(grid["rollouts_per_group"])
         if groups < 1 or rollouts < 2:
             raise ValueError("Guidance-TTT needs at least one group and two rollouts per group")
         if int(stack["training"]["options"]["global-batch-size"]) != groups * rollouts:
-            raise ValueError("global-batch-size must equal groups-per-step * rollouts-per-group")
+            raise ValueError("global-batch-size must equal groups_per_step * rollouts_per_group")
         workers = int(os.environ.get("GUIDANCE_MAX_WORKERS", "8"))
         executor = os.environ.get("GUIDANCE_EXECUTOR", "local")
         if executor == "local":

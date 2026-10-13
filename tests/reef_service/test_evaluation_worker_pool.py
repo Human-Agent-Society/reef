@@ -7,16 +7,14 @@ from pathlib import Path
 
 import pytest
 
+from reef.evaluation.harness import EpisodeScorer, EvaluationWorkerPool, evaluation_selection
 from reef.harness.adapters import get_adapter
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.runtime.executor import ExecutorFailedError, WorkerSpec
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.sqlite import SQLiteRecordStore
-from reef.train import ProcessorContext
+from reef.train import PipelineContext, TrainingPipeline
 from reef.train.cordis_backend.backend import CordisBackend
-from reef.train.cordis_backend.execution import EvaluationWorkerPool, evaluation_selection
-from reef.train.cordis_backend.strategies import EpisodeScorer
-from reef.train.processors import DataProcessor
 from reef.train.trainer import Trainer
 
 from ._strategies import resolve_proposer
@@ -131,15 +129,15 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
     trainer = Trainer(
         scenario="test",
         records=records,
-        processor=DataProcessor(ProcessorContext("test")),
+        pipeline=TrainingPipeline(PipelineContext("test")),
         candidate_backend=backend,
         candidate_evaluator=None,
         state=backend.initial_state(),
     )
     try:
         for cycle in range(2):
-            pairings = [({"pi-agent/AGENTS.md": "candidate"}, "candidate"), ({}, "")]
-            scores = backend._evaluate_pairings(pairings)
+            pairings = [({"pi-agent/AGENTS.md": "candidate"}, "candidate", None), ({}, "", None)]
+            scores = backend._episode_evaluator.run_episodes(pairings)
             expected = [cycle * 2 + 1, cycle * 2 + 2] if workers == 1 else [cycle + 1, cycle + 1]
             assert [row.score for row in scores] == expected
         paths = roots.read_text().splitlines()
@@ -149,6 +147,6 @@ def test_backend_reuses_scorers_but_isolates_real_episode_files(tmp_path, execut
         trainer.close()
         records.close()
     trainer.close()
-    assert backend._evaluation_pool._closed
+    assert backend._episode_evaluator._worker_pool._closed
     with pytest.raises(RuntimeError, match="closed"):
-        backend._evaluate_pairings([({}, "")])
+        backend._episode_evaluator.run_episodes([({}, "", None)])

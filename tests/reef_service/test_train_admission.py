@@ -128,7 +128,7 @@ def test_requests_beyond_eight_are_accepted_and_pending_status_tracks_consumptio
                 ids.append((await response.json())["agent_record_id"])
             assert await asyncio.to_thread(entered.wait, 5)
             # One is in flight and nine wait unread: the processor buffers one instruction at a time.
-            assert scenario.trainer.processor_status()["buffered_requests"] == 1
+            assert scenario.trainer.pipeline_status()["buffered_requests"] == 1
             assert scenario.trainer.pending_instructions() == 10
             status = await client.get("/reef/status")
             assert status.status == 200, await status.text()

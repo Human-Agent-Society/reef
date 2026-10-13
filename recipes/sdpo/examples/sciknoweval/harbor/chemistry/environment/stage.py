@@ -33,8 +33,9 @@ from pathlib import Path
 
 import chemistry
 
-GROUPS_PER_STEP = int(os.environ.get("SDPO_GROUPS_PER_STEP", "32"))  # MUST equal serve.yaml's groups-per-step
-ROLLOUTS_PER_GROUP = int(os.environ.get("SDPO_ROLLOUTS_PER_GROUP", "8"))  # MUST equal serve.yaml's rollouts-per-group
+# The grid MUST equal serve.yaml's pipeline.record2record.config: groups_per_step and rollouts_per_group.
+GROUPS_PER_STEP = int(os.environ.get("SDPO_GROUPS_PER_STEP", "32"))
+ROLLOUTS_PER_GROUP = int(os.environ.get("SDPO_ROLLOUTS_PER_GROUP", "8"))
 EPOCHS = int(os.environ.get("SDPO_EPOCHS", "30"))  # the reference's total_epochs ceiling
 SEED = int(os.environ.get("SDPO_SEED", "42"))
 EVAL_EVERY = int(os.environ.get("SDPO_EVAL_EVERY", "5"))  # the reference's test_freq

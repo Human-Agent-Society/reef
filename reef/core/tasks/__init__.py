@@ -13,6 +13,7 @@ from reef.core.tasks.harbor import (
     HarborTask,
     HarborTaskConflict,
     HarborTaskError,
+    primary_reward,
     read_harbor_task,
     write_harbor_task,
 )
@@ -39,6 +40,7 @@ __all__ = [
     "TaskSplitError",
     "TaskValidationResult",
     "manifest_task_paths",
+    "primary_reward",
     "read_harbor_task",
     "read_split_manifest",
     "split_by_source",

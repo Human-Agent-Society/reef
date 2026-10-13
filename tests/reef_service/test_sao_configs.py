@@ -41,6 +41,7 @@ from __future__ import annotations
 import argparse
 import importlib.machinery
 import os
+import re
 import sys
 import types
 from pathlib import Path
@@ -87,7 +88,7 @@ def _discover_example_deployments() -> list[Path]:
     deployments: list[Path] = []
     for path in _iter_config_files():
         text = path.read_text()
-        if "\nreef:" in text:
+        if re.search(r"(?m)^reef:", text):
             deployments.append(path)
     return sorted(deployments)
 
@@ -397,7 +398,7 @@ def test_config_discovery_excludes_materialized_runtime_files(tmp_path, monkeypa
     generated = tmp_path / "example" / "work" / "deployment" / "runtime.yaml"
     for path in (shipped, generated):
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text("schema-version: 2\nreef: {}\ntraining:\n  backend: slime\n")
+        path.write_text("reef: {}\ntraining:\n  backend: slime\n")
     monkeypatch.setattr(sys.modules[__name__], "CONFIG_ROOTS", (tmp_path,))
     assert _discover_example_deployments() == [shipped]
 

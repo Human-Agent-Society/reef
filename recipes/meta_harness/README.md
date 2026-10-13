@@ -14,33 +14,34 @@ the population-aware proposal and selection policies.
 ## Configuration
 
 ```yaml
-implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
+recipe:
+  implementation: recipes.meta_harness.recipe:MetaHarnessRecipe
+  config:
+    evolution:
+      adapter: pi
+      evaluate: my_harness.scoring:EpisodeScore
+      tasks:
+        - First validation task
+        - Second validation task
+      seed:
+        - id: rules
+          name: rules
+          config:
+            text: Work carefully and verify the result.
+      models:
+        proposer:
+          url: https://api.openai.com
+          model: gpt-5
+          api_key_env: OPENAI_API_KEY
+      meta_harness:
+        archive: ${REEF_WORK}/meta-harness
+        mode: full_history
+        max_candidates: 20
+        max_target_episodes: 200
+        max_nodes: 32
 
-model:
-  path: model-under-test
-
-evolution:
-  adapter: pi
-  evaluate: my_harness.scoring:EpisodeScore
-  tasks:
-    - First validation task
-    - Second validation task
-  seed:
-    - id: rules
-      name: rules
-      config:
-        text: Work carefully and verify the result.
-  models:
-    proposer:
-      url: https://api.openai.com
-      model: gpt-5
-      api_key_env: OPENAI_API_KEY
-  meta_harness:
-    archive: ${REEF_WORK}/meta-harness
-    mode: full_history
-    max_candidates: 20
-    max_target_episodes: 200
-    max_nodes: 32
+inference:
+  upstream-model: model-under-test
 ```
 
 `evaluate` names a standard Reef episode scorer class:
@@ -67,9 +68,9 @@ selected parent must remain byte-for-byte equivalent in the proposed
 composition:
 
 ```yaml
-  meta_harness:
-    archive: ${REEF_WORK}/meta-harness
-    components: [rules, skill]
+      meta_harness:
+        archive: ${REEF_WORK}/meta-harness
+        components: [rules, skill]
 ```
 
 With no `components` setting, every node kind the selected adapter exposes is
@@ -83,24 +84,26 @@ behavior. It accepts one self-contained module defining `Agent(Terminus2)`.
 Start from a no-op subclass so the proposer sees the adapter contract:
 
 ```yaml
-evolution:
-  adapter: terminus
-  executor: sandbox
-  sandbox:
-    egress_hosts: [api.e2b.dev, api.openai.com]
-    env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
-  seed:
-    - id: agent
-      name: code_extension
-      config:
-        name: agent
-        code: |
-          from harbor.agents.terminus_2 import Terminus2
-          class Agent(Terminus2):
-              pass
-  meta_harness:
-    archive: ./meta-harness
-    components: [code_extension]
+recipe:
+  config:
+    evolution:
+      adapter: terminus
+      executor: sandbox
+      sandbox:
+        egress_hosts: [api.e2b.dev, api.openai.com]
+        env_from: [REEF_TERMINUS_ENVIRONMENT, E2B_API_KEY]
+      seed:
+        - id: agent
+          name: code_extension
+          config:
+            name: agent
+            code: |
+              from harbor.agents.terminus_2 import Terminus2
+              class Agent(Terminus2):
+                  pass
+      meta_harness:
+        archive: ./meta-harness
+        components: [code_extension]
 ```
 
 Combine this with the tasks, scorer, model, and proposer settings above. Export

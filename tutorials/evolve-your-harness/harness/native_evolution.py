@@ -66,7 +66,8 @@ def propose(nodes, samples, models):
     """
     if not samples:
         return None
-    from reef.train.cordis_backend import Mutation, untrusted_text  # lazy: keeps run.py reef-free
+    from reef.core.prompts import untrusted_text  # lazy: keeps run.py reef-free
+    from reef.train.cordis_backend import Mutation
 
     current = [{"kind": kind, **config} for kind, config in nodes if kind in KINDS]
     # The requests and their feedback are client text: fenced as data so nothing inside them can speak as this prompt.

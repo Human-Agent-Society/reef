@@ -13,6 +13,7 @@ from reef_service.runtime_stubs import ExecutorRuntimeFixture
 
 from reef.artifact import LiveWeightArtifactRef
 from reef.core import RuntimeLoadSpan
+from reef.evaluation import EvaluationResult, SelectionDecision
 from reef.observability.operations import OperationMetrics
 from reef.runtime.executor import ray as ray_executor
 from reef.runtime.executor.connection import RayCoordinatorClient, RayRuntimeError, RemoteRayCoordinatorClient
@@ -28,7 +29,6 @@ from reef.service.app import RequestService
 from reef.service.streaming import stream_record
 from reef.surface import RuntimeLoadMismatch, create_weight_surface
 from reef.train.algos import StepScheduling, StepSignal, TrainingObjective
-from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step as slime_prepare_step
 from reef.train.types import TaskItem, TrainingBatch, trajectories
 

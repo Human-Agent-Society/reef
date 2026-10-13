@@ -1,4 +1,4 @@
-"""CoralProcessor: CORAL sibling groups -> grouped policy batches.
+"""CoralBatches: CORAL sibling groups -> grouped policy batches.
 
 Requires the reef package (and its train stack) importable; skipped
 otherwise so the adapter suite stays standalone.
@@ -13,15 +13,24 @@ from reef.train.types import trajectory_groups
 
 reef_types = pytest.importorskip("reef.train.types", reason="requires a reef checkout")
 
-from recipes.beta.coral.processor import ROOT_GROUP, CoralProcessor
+from recipes.beta.coral.processor import ROOT_GROUP, CoralAssemblySettings, CoralBatches, CoralTasks
+from recipes.beta.coral.recipe import CoralGroupSettings, CoralRecord2Record
 from reef.core import AgentRecord, RequestType
-from reef.train.types import ProcessorContext, TrainingBatch
+from reef.pipeline_context import PipelineContext
+from reef.train.pipeline import TrainingPipeline
+from reef.train.types import TrainingBatch
 
 SCENARIO = "coral-demo"
 
 
 def _processor(group_size=2):
-    return CoralProcessor(ProcessorContext(SCENARIO, {"group_size": group_size}))
+    context = PipelineContext(SCENARIO)
+    return TrainingPipeline(
+        context,
+        record2record=CoralRecord2Record(context, CoralGroupSettings(group_size=group_size)),
+        record2task=CoralTasks(CoralAssemblySettings()),
+        task2batch=CoralBatches(context),
+    )
 
 
 def _inference(record_id, tokens, loss_mask, log_probs):
@@ -156,4 +165,4 @@ def test_status_is_a_mapping_even_before_any_discard():
     status() call .items() on the base's discard set."""
     processor = _processor()
     status = processor.status()
-    assert status == {"discarded_groups": []}
+    assert status["discarded_groups"] == []

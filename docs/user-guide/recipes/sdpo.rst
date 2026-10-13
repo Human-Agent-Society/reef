@@ -19,7 +19,7 @@ reports that SDPO reaches GRPO's accuracy with fewer samples.
 +-------------+------------------------------------------------------------+
 | Package     | ``recipes/sdpo/``                                          |
 +-------------+------------------------------------------------------------+
-| Processor   | reported feedback, one batch per sampling grid             |
+| Pipeline    | reported feedback, one batch per sampling grid             |
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a backend that captures tokens and log-probs     |
 +-------------+------------------------------------------------------------+
@@ -45,14 +45,16 @@ grid. The recipe waits for the whole grid and trains on it in one step.
 How Reef implements it
 ----------------------
 
-The processor is ``SDPOProcessor`` on the shared ``DistillProcessor``
-(`Processors <../../developer-guide/processors.rst>`__). One batch is one
-complete grid. The teacher's request is the question with the first correct
-attempt by another rollout appended, in the reference implementation's
-words. An attempt whose question no other rollout got right keeps the plain
+SDPO has three pipeline stages
+(`Training pipeline <../../developer-guide/processors.rst>`__).
+``SDPORecord2Record`` groups the reports of one grid. ``SDPOTasks`` turns
+each rollout's report into a task. ``SDPOBatches`` batches one complete grid.
+
+The teacher's request is the question with the first correct attempt by
+another rollout appended, in the reference implementation's words. An attempt whose question no other rollout got right keeps the plain
 request and a sample weight of 0. It stays in the step's mean and has no
 target. A grid whose attempts came from different policy versions is dropped
-and listed in the processor's status. A teacher sequence over
+and listed in the pipeline's status. A teacher sequence over
 ``max_teacher_tokens`` fails the step.
 
 The ``sdpo`` loss family is a thin family on the Slime backend's
@@ -83,20 +85,58 @@ example leaves it empty.
 Configuration
 -------------
 
+The deployment's top-level ``pipeline`` section configures the three stages.
+Each stage reads only its own ``config``. A later stage reads the values it
+needs from an earlier stage:
+
+- ``record2record`` (``SDPORecord2Record``) sets the grid. ``SDPOTasks``
+  reads the grid from it.
+- ``record2task`` (``SDPOTasks``) sets the teacher's tokenizer and windows.
+  ``SDPOBatches`` reads them from it.
+- ``task2batch`` (``SDPOBatches``) sets what the teacher reads.
+
+.. code:: yaml
+
+   recipe:
+     implementation: recipes.sdpo.recipe:SDPORecipe
+     config:
+       max-staleness: 0
+   pipeline:
+     record2record:
+       config:
+         groups_per_step: 32
+         rollouts_per_group: 8
+     record2task:
+       config:
+         tokenizer_path: /models/Qwen3-8B
+         max_teacher_tokens: 18944
+     task2batch:
+       config:
+         include_environment_feedback: false
+
+Reef checks each stage's config when it loads the recipe. A stage key under
+``recipe.config`` fails the deployment, and the error names the key's place
+in ``pipeline``.
+
 .. config::
 
-   groups_per_step | 32 | questions in a grid.
-   rollouts_per_group | 8 | attempts at each question.
-   tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
-   max_teacher_prompt_tokens | 10240 | the rendered teacher prompt is cut to this many tokens.
-   max_teacher_tokens | 18432 | a longer teacher sequence fails the step. Set it to the trainer's window.
-   success_reward_threshold | 0.5 | an attempt at or above this score is correct.
-   allow_own_success_as_demonstration | false | let a correct attempt read its own response.
-   remove_thinking_from_demonstration | true | strip ``<think>`` blocks from the demonstration.
-   include_environment_feedback | false | add the report's ``teacher_context`` to the teacher's prompt.
-   environment_feedback_only_without_solution | true | use the feedback only when no correct sibling exists.
-   enable_thinking | false | the chat template's thinking switch, set as the engine sampled.
-   max_staleness | 0 | accepted lag between the producing and serving version.
+   pipeline.record2record.config.groups_per_step | 32 | questions in a grid.
+   pipeline.record2record.config.rollouts_per_group | 8 | attempts at each question. At least 2.
+   pipeline.record2task.config.tokenizer_path | required | the served model's tokenizer directory. It renders the teacher prompt with the engine's chat template.
+   pipeline.record2task.config.max_teacher_prompt_tokens | 10240 | the rendered teacher prompt is cut to this many tokens.
+   pipeline.record2task.config.max_teacher_tokens | 18432 | a longer teacher sequence fails the step. Set it to the trainer's window. Must be at least ``max_teacher_prompt_tokens``.
+   pipeline.record2task.config.enable_thinking | false | the chat template's thinking switch, set as the engine sampled.
+   pipeline.task2batch.config.success_reward_threshold | 0.5 | an attempt at or above this score is correct.
+   pipeline.task2batch.config.allow_own_success_as_demonstration | false | let a correct attempt read its own response.
+   pipeline.task2batch.config.remove_thinking_from_demonstration | true | strip ``<think>`` blocks from the demonstration.
+   pipeline.task2batch.config.include_environment_feedback | false | add the report's ``teacher_context`` to the teacher's prompt.
+   pipeline.task2batch.config.environment_feedback_only_without_solution | true | use the feedback only when no correct sibling exists.
+   recipe.config.max-staleness | 0 | accepted lag between the producing and serving version.
+
+``SDPOTasks`` also takes the sample assembly's keys
+(``accept_multi_turn_policy_samples``, ``realign_threshold`` and
+``scaffold_tolerance``). One batch is always one grid, so ``SDPOBatches``
+takes no ``batch_size``.
 
 The Slime driver takes ``--loss-type custom_loss`` and
 ``--use-rollout-logprobs`` and ``--disable-compute-advantages-and-returns``.

@@ -143,7 +143,7 @@ def campaign(driver, monkeypatch, tmp_path):
         return episode(task, int("# improved" in files["terminus/context/agent.py"]))
 
     monkeypatch.setattr(driver, "run_episode", launch)
-    monkeypatch.setattr("reef.train.cordis_backend.backend.run_episode", launch)
+    monkeypatch.setattr("reef.evaluation.harness.run_episode", launch)
     config = driver.configuration(("task",), 1, 1)
     recipe = driver.load_recipe(config, tmp_path)
     chat = Proposals(driver.benchmark.SEED)

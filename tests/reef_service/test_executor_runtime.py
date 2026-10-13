@@ -11,6 +11,7 @@ from reef_service.runtime_stubs import ExecutorRuntimeFixture, runtime_bindings,
 
 from reef.artifact import InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.evaluation import EvaluationResult, SelectionDecision
 from reef.inference.runtime import ExecutorInferenceRuntime
 from reef.recipe import Recipe
 from reef.recipe.errors import RecipeConfigError
@@ -34,7 +35,6 @@ from reef.service.deploy.service_config import ServiceConfig
 from reef.service.runtime import connect_ray_runtime
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train.algos import StepScheduling
-from reef.train.evaluation import EvaluationResult, SelectionDecision
 from reef.train.runtime import ExecutorTrainingRuntime
 
 from .test_ray_runtime import DeferredWeightUpdateTrainGroupHandle, policy_batch
@@ -260,17 +260,18 @@ def test_named_ray_connection_honors_namespace_even_in_an_existing_session(monke
 
 def test_named_recipe_yaml_launches_a_configured_executor(tmp_path):
     (tmp_path / "local.yaml").write_text(
-        """implementation: recipe
-model:
-  path: test-model
-runtime:
-  type: executor_training
-  executor:
-    backend: uni
-    workers:
-      - worker_cls: reef_service.test_executor_runtime:Coordinator
-        kwargs:
-          inference_url: http://configured-router
+        """recipe:
+  implementation: recipe
+  runtime:
+    type: executor_training
+    executor:
+      backend: uni
+      workers:
+        - worker_cls: reef_service.test_executor_runtime:Coordinator
+          kwargs:
+            inference_url: http://configured-router
+inference:
+  upstream-model: test-model
 """
     )
     recipe = build_named_recipe("local", config_directory=tmp_path, environ={})
@@ -286,13 +287,14 @@ runtime:
 
 def test_invalid_named_recipe_releases_its_configured_runtime(tmp_path):
     (tmp_path / "invalid.yaml").write_text(
-        """implementation: recipe
-model:
-  path: test-model
-artifact:
-  checkpoint_every_n_versions: 0
-runtime:
-  type: injected
+        """recipe:
+  implementation: recipe
+  config:
+    training_mode: sideways
+  runtime:
+    type: injected
+inference:
+  upstream-model: test-model
 """
     )
     worker = Coordinator()
@@ -300,7 +302,7 @@ runtime:
         train_group_handle=ExecutorCoordinatorClient(UniProcExecutor.from_workers((worker,), owned=True))
     )
     registry = RuntimeRegistry({"injected": lambda *args: runtime})
-    with pytest.raises(RecipeConfigError, match="checkpoint_every_n_versions"):
+    with pytest.raises(RecipeConfigError, match="training_mode must be"):
         build_named_recipe("invalid", config_directory=tmp_path, environ={}, runtime_registry=registry)
     assert worker.shutdown_events == ["shutdown"]
 

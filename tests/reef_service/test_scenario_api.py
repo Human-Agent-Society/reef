@@ -71,7 +71,7 @@ def test_scenario_contract_returns_processor_and_request_types(tmp_path) -> None
     contract = dispatcher.scenario_contract("math")
     assert contract["scenario"] == "math"
     assert "recipe" not in contract
-    assert contract["processor"] == "DataProcessor"
+    assert contract["processor"] == "NoBatches"
     assert contract["required_request_types"] == ["inference", "report"]
 
 

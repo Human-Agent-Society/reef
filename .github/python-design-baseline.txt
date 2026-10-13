@@ -8,7 +8,6 @@ PYD002|reef/harness/episodes/trajectory.py|_CallableTrajectoryReader.__init__|fn
 PYD002|reef/runtime/interfaces.py|InferenceStream.__init__|close
 PYD002|reef/runtime/deployment.py|_CallableRuntimeFactory.__init__|fn
 PYD002|reef/harness/compose/loader.py|Loader.__init__|resolver
-PYD002|reef/train/processors/computed.py|JudgingWorker.__init__|judge
 PYD002|reef/train/slime_backend/reef_adapters/training_job/storage.py|CheckpointStorage.__init__|measure,disk_usage
 PYD003|reef/harness/tree/nodes.py|<module>|NODE_KINDS
 PYD003|reef/scenario/registry.py|ScenarioRegistry|self._on_training_scenario_resolved
@@ -18,6 +17,5 @@ PYD003|reef/harness/compose/fiber.py|Fiber|self._hooks
 PYD003|reef/harness/compose/fiber.py|Fiber|self._remove_from_runtime
 PYD003|reef/harness/compose/reflect.py|Impl|check
 PYD003|reef/harness/compose/registry.py|Runtime|callback
-PYD003|reef/train/processors/reported.py|SampleAssembly|make_sample
 PYD003|reef/train/slime_backend/reef_adapters/weight_updaters/base.py|SynchronizedWeightUpdateMixin|_on_chunk
 PYD004|reef/harness/compose/fiber.py|_drive|collect,live

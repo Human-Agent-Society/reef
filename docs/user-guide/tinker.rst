@@ -128,7 +128,6 @@ engines, ``inference.tensor-parallel-size``:
 
 .. code:: yaml
 
-   schema-version: 2
    inference:
      model-path: /models/Qwen3-8B
      backend: sglang

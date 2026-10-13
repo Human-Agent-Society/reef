@@ -115,11 +115,11 @@ def test_a_local_cycle_stands_aside_while_admission_is_closed_and_runs_once_it_r
         training.inference.pause_admission()
         assert dispatcher._process_local_backend_step("agent", HARNESS) is False
         assert dispatcher._recipe.backends[HARNESS].prepared == 0
-        assert ("agent", HARNESS) in dispatcher._training.stood_aside
+        assert HARNESS in dispatcher.workers.scenarios["agent"].waiting_for_admission
         training.inference.resume_admission()
         assert dispatcher._process_local_backend_step("agent", HARNESS) is True
         assert dispatcher._recipe.backends[HARNESS].prepared == 1
-        assert ("agent", HARNESS) not in dispatcher._training.stood_aside
+        assert HARNESS not in dispatcher.workers.scenarios["agent"].waiting_for_admission
     finally:
         dispatcher.close()
 
@@ -162,13 +162,13 @@ def test_a_local_cycle_that_waited_for_a_job_stands_aside_when_the_job_left_admi
             scenario.records.append(record)
         outcomes: list[bool] = []
         asked_for_the_lock = threading.Event()
-        cycle_lock = dispatcher.local_cycle_lock
+        cycle_lock = dispatcher.workers.cycle_lock
 
         def signalling_lock(name: str):
             asked_for_the_lock.set()
             return cycle_lock(name)
 
-        dispatcher.local_cycle_lock = signalling_lock  # type: ignore[method-assign]
+        dispatcher.workers.cycle_lock = signalling_lock  # type: ignore[method-assign]
         with cycle_lock("agent"):
             worker = threading.Thread(
                 target=lambda: outcomes.append(dispatcher._process_local_backend_step("agent", HARNESS))
@@ -180,7 +180,7 @@ def test_a_local_cycle_that_waited_for_a_job_stands_aside_when_the_job_left_admi
         worker.join(10)
         assert outcomes == [False]
         assert dispatcher._recipe.backends[HARNESS].prepared == 0
-        assert ("agent", HARNESS) in dispatcher._training.stood_aside
+        assert HARNESS in dispatcher.workers.scenarios["agent"].waiting_for_admission
     finally:
         dispatcher.close()
 

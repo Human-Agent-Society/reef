@@ -260,7 +260,6 @@ def test_the_trainer_delivers_files_and_never_sends(tmp_path, objective):
 
 def _local_engine_config(tmp_path):
     return {
-        "schema-version": 2,
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "inference": {"model-path": str(tmp_path / "model"), "backend": "sglang", "num-gpus": 2},
         "training": {"backend": "tinker", "options": {"state-dir": str(tmp_path / "state"), "lora-rank": 16}},

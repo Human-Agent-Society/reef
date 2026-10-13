@@ -19,6 +19,8 @@ import pytest
 from reef_service._trajectories import recorded_trajectory
 from reef_service.test_native_enforce import PROBE, _ConstantToolRun, require_nested_jail
 
+from reef.evaluation import BackendAlwaysSelectPlugin
+from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.adapters import available_adapters, get_adapter
 from reef.harness.episodes.executor import SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding
@@ -44,10 +46,8 @@ from reef.harness.runners.native.enforce import BwrapEnforcer
 from reef.harness.runners.native.host import NativeHost
 from reef.harness.runners.native.seed import SEED_GRAPH, SEED_NODES, SEED_TOOLS
 from reef.harness.tree.nodes import NODE_KINDS
-from reef.harness.tree.render import RenderError, render_composition
-from reef.train.cordis_backend import CordisBackend, Mutation, ScoreComparisonPlugin
-from reef.train.cordis_backend.backend import tree_files
-from reef.train.evaluation import BackendAlwaysSelectPlugin
+from reef.harness.tree.render import RenderError, render_composition, tree_files
+from reef.train.cordis_backend import CordisBackend, Mutation
 from reef.train.types import TrainingBatch
 
 from ._strategies import resolve_episode_scorer, resolve_proposer
@@ -1707,9 +1707,9 @@ def test_a_subagent_stage_runs_the_agent_in_its_own_session_and_hands_its_text_b
         checker_request = next(r for r in model.requests if "You are the checker" in r["messages"][0]["content"])
         assert [t["function"]["name"] for t in checker_request["tools"]] == ["read_file"]
         # Per agent work, as the verdict will carry it.
-        from reef.train.cordis_backend.backend import _agent_work
+        from reef.harness.episodes.trajectory import agent_work
 
-        assert _agent_work(result.trajectory) == {
+        assert agent_work(result.trajectory) == {
             "checker": {
                 "turns": 1,
                 "steps": 1,
@@ -2121,7 +2121,7 @@ def test_the_native_backend_carries_the_entries_list_into_episodes_and_the_publi
         binary=_launcher(tmp_path),
         seed=SEED_NODES,
     )
-    episode = backend._render_for_episode(SEED_NODES)
+    episode = backend._episode_evaluator.render(SEED_NODES)
     assert json.loads(episode["native/tree.json"]) == [dict(entry) for entry in SEED_NODES]
     assert "base_url" in episode["native/models.json"]  # the binding rides beside the list, never in it
     batch = TrainingBatch("demo:trace:tree", (recorded_trajectory("a1", {"messages": []}, 0.0),))

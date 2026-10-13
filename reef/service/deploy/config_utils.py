@@ -113,8 +113,7 @@ def _load_yaml_document(handle: Any) -> tuple[Any, list[str]]:
 def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dict[str, Any]:
     """Read a config relative to the working directory; optionally defer interpolation.
 
-    A ``schema-version: 2`` file that repeats a YAML key is an error naming
-    both lines; unversioned files keep YAML's last-occurrence-wins reading.
+    A file that repeats a YAML key is an error naming both lines.
     """
     path = Path(config_path).expanduser().resolve()
     if not path.exists():
@@ -130,7 +129,7 @@ def load_config(config_path: str | Path, *, interpolate_env: bool = True) -> dic
         config = {}
     if not isinstance(config, dict):
         raise DeployConfigError(f"config {path} must be a YAML object at the root, not {type(config).__name__}")
-    if repeated and config.get("schema-version") == 2:
+    if repeated:
         raise DeployConfigError(f"config {path} repeats YAML keys: {'; '.join(repeated)}")
     return interpolate_environment(config, path) if interpolate_env else config
 

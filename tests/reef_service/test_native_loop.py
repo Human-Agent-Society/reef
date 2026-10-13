@@ -32,12 +32,14 @@ from reef_service.test_native_serve import (
     _wait,
 )
 
+from reef.evaluation.harness import EpisodeEvaluationWorker
 from reef.harness.adapters import get_adapter
 from reef.harness.compose import Context, FiberState
 from reef.harness.compose.loader import Loader
 from reef.harness.episodes.executor import LocalExecutor
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.harness.episodes.run import EpisodeResult
+from reef.harness.episodes.trajectory import stage_path
 from reef.harness.runners.native import LoadError, LoopModule, load_loop, run_loop, serve
 from reef.harness.runners.native.enforce import ToolFailed
 from reef.harness.runners.native.graph import LOOP_LOG_CHARS, TRANSITIONS_PER_STEP
@@ -53,9 +55,9 @@ from reef.harness.tree.nodes import (
     NODE_KINDS,
     validate_native_loop,
 )
-from reef.harness.tree.render import RenderError, render_composition, render_native_module
+from reef.harness.tree.render import RenderError, render_composition, render_native_module, tree_files
 from reef.train.cordis_backend import CordisBackend, Mutation
-from reef.train.cordis_backend.backend import EpisodeEvaluationWorker, _stage_path, tree_files
+
 from ._strategies import resolve_episode_scorer, resolve_proposer
 
 # The seed graph as code: ask the model, run its tool calls while it asks for them, return on text.
@@ -568,9 +570,9 @@ def test_a_loop_turn_has_no_stages_and_a_loop_error_is_the_path_error() -> None:
         {"type": "loop/exit", "data": {"reason": "error"}},
         {"type": "turn/end", "data": {"turn": 1, "reason": {"kind": "error", "error": error}}},
     ]
-    assert _stage_path(trajectory) == {"stages": [], "reason": "error", "error": error}
+    assert stage_path(trajectory) == {"stages": [], "reason": "error", "error": error}
     completed = [*trajectory[:4], {"type": "turn/end", "data": {"turn": 1, "reason": {"kind": "completed"}}}]
-    assert _stage_path(completed) == {"stages": [], "reason": "completed"}
+    assert stage_path(completed) == {"stages": [], "reason": "completed"}
 
 
 # -- the context API and the serve form (the interpreter half) --------------------------------------------
@@ -707,7 +709,7 @@ def test_the_seed_loop_as_code_logs_the_same_events_as_the_seed_graph(tmp_path: 
     assert _typed(from_loop, "loop/enter") == [{"name": "main"}]
     assert _typed(from_loop, "loop/exit") == [{"reason": "completed"}]
     assert from_loop[-1]["data"]["reason"] == {"kind": "completed"}
-    assert _stage_path(from_loop) == {"stages": [], "reason": "completed"}
+    assert stage_path(from_loop) == {"stages": [], "reason": "completed"}
 
 
 def test_the_context_reads_the_turn_and_say_is_a_loop_message(tmp_path: Path) -> None:
@@ -804,7 +806,7 @@ def test_a_loop_that_raises_ends_the_turn_with_loop_error(tmp_path: Path) -> Non
         "kind": "error",
         "error": {"code": "LOOP_ERROR", "message": "RuntimeError: boom"},
     }
-    path = _stage_path(events)
+    path = stage_path(events)
     assert path["stages"] == [] and path["reason"] == "error" and path["error"]["code"] == "LOOP_ERROR"
 
 
@@ -944,7 +946,7 @@ def test_an_agents_abort_is_the_turns_end_for_the_loop(tmp_path: Path) -> None:
     trajectory: list[dict[str, Any]] = []
     for file in sorted((tmp_path / "sessions").rglob("*.jsonl")):
         trajectory.extend(json.loads(line) for line in file.read_text().splitlines() if line.strip())
-    path = _stage_path(tuple(trajectory))
+    path = stage_path(tuple(trajectory))
     assert path["errored_agent"] == "checker" and path["error"]["code"] == "MODEL_ERROR"
 
 
@@ -1103,7 +1105,7 @@ def test_except_base_exception_cannot_act_past_the_turns_end(tmp_path: Path) -> 
     assert exit_code == 0 and _ends(events) == [{"kind": "max-steps", "steps": 1}]
     assert "loop/after" not in {event["type"] for event in events}
     assert [event["type"] for event in events][-2:] == ["loop/exit", "turn/end"]
-    assert _stage_path(events) == {"stages": [], "reason": "max-steps"}
+    assert stage_path(events) == {"stages": [], "reason": "max-steps"}
 
 
 def test_a_finally_cannot_replace_an_abort_with_its_own_end(tmp_path: Path) -> None:
@@ -1142,7 +1144,7 @@ def test_a_return_in_finally_keeps_the_max_steps_end(tmp_path: Path) -> None:
     code = "def run_turn(ctx):\n    try:\n        while True:\n            ctx.model()\n    finally:\n        return\n"
     exit_code, events = _text_turn(tmp_path, code, max_steps=1)
     assert exit_code == 0 and _ends(events) == [{"kind": "max-steps", "steps": 1}]
-    assert _stage_path(events) == {"stages": [], "reason": "max-steps"}
+    assert stage_path(events) == {"stages": [], "reason": "max-steps"}
 
 
 def test_a_bare_except_gets_the_end_again_and_writes_nothing(tmp_path: Path) -> None:
@@ -1178,7 +1180,7 @@ def test_system_exit_out_of_run_turn_is_a_loop_error(tmp_path: Path) -> None:
     assert exit_code == 1
     assert _ends(events) == [{"kind": "error", "error": {"code": "LOOP_ERROR", "message": "SystemExit: 3"}}]
     assert [event["type"] for event in events][-4:] == ["assistant/message", "step/end", "loop/exit", "turn/end"]
-    assert _stage_path(events)["error"]["code"] == "LOOP_ERROR"
+    assert stage_path(events)["error"]["code"] == "LOOP_ERROR"
 
 
 def test_log_writes_keys_that_are_not_strings_as_text(tmp_path: Path) -> None:

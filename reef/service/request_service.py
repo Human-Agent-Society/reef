@@ -820,7 +820,7 @@ class RequestService:
         head = self.harness_release_id(scenario)
         proposal_id = ProposalInbox.new_id()
         # Only an automatic step claims the inbox, and a manual scenario runs instruction steps only.
-        if self.files_trainer(scenario).training_mode == "manual":
+        if self.files_trainer(scenario).pipeline.training_mode == "manual":
             return {
                 "proposal_id": proposal_id,
                 "admitted": False,

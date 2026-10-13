@@ -18,12 +18,12 @@ from reef_service.config_helpers import load_harness_deployment as load_config
 
 from reef.core.plugins import PluginReference
 from reef.dispatcher import training_request_refusal
+from reef.evaluation.harness import FloorPlugin
 from reef.harness.tree.nodes import directive_shaped, secret_shaped
 from reef.recipe import reefine
 from reef.recipe.reefine import ReefineRecipe, evolution
 from reef.service.deploy.service_config import service_config_from_mapping
 from reef.service.profiles import profile_path
-from reef.train.cordis_backend import FloorPlugin
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 TUTORIAL = REPO_ROOT / "tutorials" / "reefine"

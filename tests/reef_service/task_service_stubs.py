@@ -9,7 +9,7 @@ from pathlib import Path
 
 from reef.core.tasks import HarborTask, HarborTaskConflict, read_harbor_task, write_harbor_task, write_split_manifest
 from reef.harness.client.tasks import TaskPlay
-from reef.record2dataset import (
+from reef.record2task.generator import (
     DesignerRequest,
     DuplicateTask,
     Generator,

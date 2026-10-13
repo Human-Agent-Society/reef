@@ -101,7 +101,7 @@ def test_request_entries_pass_the_backends_seed_validation_and_a_recovered_state
         binary=str(make_binary(tmp_path)),
     )
     entries = [dict(entry) for entry in seed]
-    rendered = backend._render_for_episode(entries)
+    rendered = backend._episode_evaluator.render(entries)
     assert "pi-agent/tree.json" not in rendered and rendered["pi-agent/extensions/reef-requests.ts"] == EXTENSION
     # A recovered state carrying reef's own entries meets the admission gate and steps on.
     result = backend.prepare_step(batch(), {"steps": 1, "entries": entries}, 0)

@@ -31,8 +31,8 @@ from pathlib import Path, PurePosixPath
 from types import ModuleType
 from typing import Any
 
+from reef.core.tasks import primary_reward
 from reef.harness.episodes.executor import ISOLATION_ENV
-from reef.harness.episodes.trajectory import primary_reward
 from reef.harness.runners.terminus.tree import (
     ENVIRONMENT_ENV,
     TerminusTreeError,

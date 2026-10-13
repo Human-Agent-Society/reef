@@ -8,15 +8,18 @@ parity tests.
 
 from __future__ import annotations
 
+from pathlib import Path
 from threading import Event
 from typing import Any
 
 import pytest
+import yaml
 from reef_service._trajectories import policy_trajectory
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
 from recipes.sao import SAORecipe
-from recipes.sao.processor import SAOProcessor
+from recipes.sao.processor import SAOBatches, SAOTasks
+from recipes.sao.recipe import SAORecord2Record
 from reef.artifact import InMemoryRepositoryBackend
 from reef.artifact.artifact import LiveWeightArtifactRef
 from reef.core import AgentRecord, RequestType
@@ -24,15 +27,37 @@ from reef.core.reports import ReportValidationError
 from reef.core.trajectories import source_record_id, trajectory_reward
 from reef.dispatcher import Dispatcher
 from reef.recipe.checkpoint_strategy import EveryNVersions
+from reef.recipe.errors import RecipeConfigError
 from reef.recipe.registry import build_recipe, recipe_class_for
+from reef.record2task.assembly import SampleAssemblySettings
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep, StaleCandidate
 from reef.storage.sqlite import SQLiteRecordStore, SQLiteScenarioStorage
-from reef.train import ProcessorContext, Trainer
+from reef.train import PipelineContext, Trainer
 from reef.train.algos import StepScheduling
 from reef.train.backend import CandidateBackend, PreparedStep
+from reef.train.pipeline import PipelineConfig, TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.reef_adapters.preparation import prepare_slime_step
 from reef.train.types import TrainingBatch
+
+
+EXAMPLES = Path(__file__).resolve().parents[2] / "recipes" / "sao" / "examples"
+
+
+def sao_processor(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
+    return TrainingPipeline(
+        context,
+        record2record=SAORecord2Record(context),
+        record2task=SAOTasks(SampleAssemblySettings()),
+        task2batch=SAOBatches(context, batch_size),
+    )
+
+
+def single_rollout_steps() -> PipelineConfig:
+    """SAO's stages with one rollout per optimizer step, as a ``pipeline`` section would configure them."""
+    return PipelineConfig.from_setting(
+        {"task2batch": {"config": {"batch_size": 1}}}, spec=SAORecipe.pipeline_spec(), environ={}
+    )
 
 
 class _StateOnlySaoBackend(CandidateBackend):
@@ -123,8 +148,14 @@ def test_sao_recipe_defaults_are_reef_side_only() -> None:
     recipe = SAORecipe(**runtime_bindings(_StubTrainingRuntime()))
 
     # Objective defaults live with the Slime implementation. The Reef recipe
-    # owns only batching and checkpoint cadence.
-    assert recipe.batch_size == 128
+    # owns only its stages and checkpoint cadence.
+    stages = recipe.stages()
+    assert (stages.record2record.plugin_class, stages.record2task.plugin_class, stages.task2batch.plugin_class) == (
+        SAORecord2Record,
+        SAOTasks,
+        SAOBatches,
+    )
+    assert recipe.build_pipeline(PipelineContext("math")).batch_size == 128
     assert recipe.checkpoint_strategy == EveryNVersions(1)
 
 
@@ -133,14 +164,54 @@ def test_sao_recipe_reads_reef_side_config() -> None:
     recipe = SAORecipe.from_environment(
         {},
         config={
-            "data": {"batch_size": 2},
+            "pipeline": {"task2batch": {"config": {"batch_size": 2}}},
             "artifact": {"checkpoint_every_n_versions": 4},
         },
         **runtime_bindings(_StubTrainingRuntime()),
     )
 
-    assert recipe.batch_size == 2
+    assert recipe.build_pipeline(PipelineContext("math")).batch_size == 2
     assert recipe.checkpoint_strategy == EveryNVersions(4)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("example", ["imo_answerbench/serve.yaml", "ceobench/serve.yaml"])
+def test_example_pipeline_section_builds_the_sao_stages(example: str) -> None:
+    deployment = yaml.safe_load((EXAMPLES / example).read_text(encoding="utf-8"))
+    recipe = SAORecipe.from_environment(
+        {}, config={"pipeline": deployment["pipeline"]}, **runtime_bindings(_StubTrainingRuntime())
+    )
+
+    pipeline = recipe.build_pipeline(PipelineContext("math"))
+
+    assert isinstance(pipeline.record2record, SAORecord2Record)
+    assert isinstance(pipeline.record2task, SAOTasks)
+    assert isinstance(pipeline.task2batch, SAOBatches)
+    assert pipeline.batch_size == deployment["training"]["config"]["global_batch_size"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("key", ["batch_size", "batch-size"])
+def test_sao_recipe_refuses_batch_size_in_the_recipe_config(key: str) -> None:
+    with pytest.raises(RecipeConfigError, match="does not consume"):
+        SAORecipe.from_environment({}, config={"data": {key: 2}}, **runtime_bindings(_StubTrainingRuntime()))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("pipeline", "message"),
+    [
+        ({"task2batch": {"config": {"batch_size": 0}}}, "batch_size must be positive"),
+        ({"task2batch": {"config": {"groups_per_step": 2}}}, "groups_per_step"),
+        ({"record2record": {"config": {"batch_size": 2}}}, "SAORecord2Record takes no config"),
+    ],
+)
+def test_sao_recipe_refuses_a_bad_stage_config_when_the_pipeline_builds(
+    pipeline: dict[str, Any], message: str
+) -> None:
+    recipe = SAORecipe.from_environment({}, config={"pipeline": pipeline}, **runtime_bindings(_StubTrainingRuntime()))
+    with pytest.raises(RecipeConfigError, match=message):
+        recipe.build_pipeline(PipelineContext("math"))
 
 
 @pytest.mark.unit
@@ -160,7 +231,7 @@ def test_sao_recipe_rejects_backend_objective_config() -> None:
 
 @pytest.mark.unit
 def test_processor_emits_one_independently_scheduled_sample_per_rollout() -> None:
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     processor.ingest(_sao_inference("i1"))
     processor.ingest(_sao_report("r1", "i1", 0.75))
 
@@ -198,7 +269,7 @@ def test_processor_reads_runtime_load_id_from_the_payload_when_ref_is_not_live()
         agent_record_id="i1",
         artifact_ref=None,
     )
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     processor.ingest(inference)
     processor.ingest(_sao_report("r1", "i1", 0.5))
 
@@ -209,7 +280,7 @@ def test_processor_reads_runtime_load_id_from_the_payload_when_ref_is_not_live()
 
 @pytest.mark.unit
 def test_processor_preserves_explicit_observation_boundaries() -> None:
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     # Response tokens: action, observation, action. loss_mask trains only the
     # action tokens.
     processor.ingest(
@@ -234,7 +305,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
     # loss_mask trains index 1, but the action mask marks it an observation.
     # Skip-observation GAE would give it zero advantage: reject the rollout
     # rather than silently waste gradient on it.
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     processor.ingest(
         _sao_inference(
             "i1",
@@ -254,7 +325,7 @@ def test_backend_rejects_rollout_that_trains_a_non_action_token() -> None:
 
 @pytest.mark.unit
 def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     processor.ingest(_sao_inference("i1", loss_mask=(1, 1, 1), rollout_log_probs=(-0.1, -0.2)))
     processor.ingest(_sao_report("r1", "i1", 1.0))
 
@@ -267,7 +338,7 @@ def test_backend_rejects_rollout_with_logprob_length_mismatch() -> None:
 
 @pytest.mark.unit
 def test_processor_rejects_non_finite_report_scores() -> None:
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     processor.ingest(_sao_inference("i1"))
     with pytest.raises(ReportValidationError, match="finite"):
         processor.ingest(_sao_report("r1", "i1", float("nan")))
@@ -277,7 +348,7 @@ def test_processor_rejects_non_finite_report_scores() -> None:
 
 @pytest.mark.unit
 def test_malformed_training_data_is_preserved_until_backend_validation() -> None:
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     processor.ingest(_sao_inference("i1", loss_mask=(0, 0, 0)))
     processor.ingest(_sao_report("r1", "i1", 1.0))
     batch = processor.build_batch()
@@ -292,7 +363,7 @@ def test_malformed_training_data_is_preserved_until_backend_validation() -> None
 def test_invalid_eligibility_report_does_not_block_valid_feedback(dead_report_first: bool) -> None:
     # Invalid eligibility flags never claim or consume the source record;
     # a valid report is processed independently of arrival order.
-    processor = SAOProcessor(ProcessorContext("math", {"batch_size": 1}))
+    processor = sao_processor(PipelineContext("math"))
     processor.ingest(_sao_inference("i1"))
     dead = AgentRecord.create(
         scenario="math",
@@ -446,7 +517,7 @@ def test_dispatcher_runs_a_full_sao_train_step_per_rollout(tmp_path) -> None:
     initial.mkdir()
 
     dispatcher = Dispatcher(
-        SAORecipe(batch_size=1, **runtime_bindings(runtime)),
+        SAORecipe(**runtime_bindings(runtime), pipeline_stages=single_rollout_steps()),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -480,7 +551,7 @@ def test_external_checkpoint_evaluation_rejects_before_serving_activation(tmp_pa
     recipe = SAORecipe.from_environment(
         {"EVALUATION_TOKEN": "secret"},
         config={
-            "data": {"batch_size": 1},
+            "pipeline": {"task2batch": {"config": {"batch_size": 1}}},
             "evaluation": {
                 "module": "reef_service._candidate_evaluation_plugin:CheckpointEvaluator",
                 "config": {
@@ -530,7 +601,11 @@ def test_sao_train_step_swaps_the_served_runtime_load_id(tmp_path) -> None:
     runtime = _StubTrainingRuntime(tmp_path / "checkpoints")
 
     dispatcher = Dispatcher(
-        SAORecipe(batch_size=1, **runtime_bindings(runtime), checkpoint_strategy=EveryNVersions(99)),
+        SAORecipe(
+            **runtime_bindings(runtime),
+            pipeline_stages=single_rollout_steps(),
+            checkpoint_strategy=EveryNVersions(99),
+        ),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),
@@ -569,7 +644,7 @@ def test_sao_recovers_step_from_the_commit_log_after_restart(tmp_path) -> None:
 
     def _make_dispatcher() -> Dispatcher:
         return Dispatcher(
-            SAORecipe(batch_size=1, **runtime_bindings(runtime)),
+            SAORecipe(**runtime_bindings(runtime), pipeline_stages=single_rollout_steps()),
             backend,
             local_artifact_dir=tmp_path / "staged",
             agent_record_dir=agent_dir,
@@ -629,7 +704,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         first = Trainer.build(
             "math",
             first_store,
-            processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=lambda context: sao_processor(context),
             candidate_backend=_StateOnlySaoBackend(),
         )
         batch = first.reserve_training_batch()
@@ -644,7 +719,7 @@ def test_sao_train_step_recovers_across_a_restart(tmp_path) -> None:
         second = Trainer.build(
             "math",
             second_store,
-            processor_factory=lambda context: SAOProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=lambda context: sao_processor(context),
             candidate_backend=_StateOnlySaoBackend(),
             algorithm_state=prepared.algorithm_state,
         )

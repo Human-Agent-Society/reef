@@ -15,6 +15,7 @@ from reef_service._trajectories import recorded_trajectory
 
 from reef.artifact import Artifact, InMemoryRepositoryBackend
 from reef.dispatcher import Dispatcher
+from reef.evaluation.harness import ScoreComparisonPlugin
 from reef.harness.episodes.model_binding import ModelBinding
 from reef.inference.http import InferenceProxyRuntime
 from reef.inference.model_config import ModelConfig
@@ -22,7 +23,7 @@ from reef.recipe.cordis import CordisRecipe
 from reef.runtime.executor.config import ExecutorSettings
 from reef.storage.model_config import read_model_config, write_model_config
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.cordis_backend import Mutation, ScoreComparisonPlugin
+from reef.train.cordis_backend import Mutation
 from reef.train.types import TrainingBatch
 
 from ._strategies import resolve_episode_scorer, resolve_proposer

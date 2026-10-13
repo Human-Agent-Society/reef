@@ -1,7 +1,7 @@
 """The training thread's wait policy: when may it sleep forever?
 
 Regression suite for a dropped wire: #289 introduced
-``DataProcessor.derivation_pending`` so judgments landing asynchronously
+``TrainingPipeline.background_jobs_running`` so judgments landing asynchronously
 wake the training thread on a bounded poll, but the dispatcher-side
 polling was lost in a merge and never reached main — on a quiet workload
 a landed judgment sat unabsorbed until the next record happened to
@@ -46,18 +46,17 @@ def _bind(
     *,
     pending: bool,
     batch_ready: bool = False,
-    processor_status: dict | None = None,
+    pipeline_status: dict | None = None,
     runtime=None,
     last_committed_step: dict | None = None,
 ) -> None:
-    processor = SimpleNamespace(derivation_pending=lambda: pending)
+    pipeline = SimpleNamespace(background_jobs_running=lambda: pending, training_mode="auto")
     trainer = SimpleNamespace(
-        processor=processor,
-        training_mode="auto",
+        pipeline=pipeline,
         fail_pending_instruction=lambda error: False,
         instruction_failures=dict,
         batch_ready=lambda: batch_ready,
-        processor_status=lambda: dict(processor_status or {}),
+        pipeline_status=lambda: dict(pipeline_status or {}),
     )
     scenario = SimpleNamespace(
         trainer=trainer,
@@ -76,6 +75,7 @@ def _bind(
         get_optional=lambda name: scenario if name == "s" else None,
         preload_errors=(),
     )
+    dispatcher.workers.registry = dispatcher._registry
 
 
 def test_no_training_scenario_sleeps_until_the_next_accept() -> None:
@@ -89,13 +89,13 @@ def test_quiet_processor_sleeps_until_the_next_accept() -> None:
     assert dispatcher._training_wait_timeout() is None
 
 
-def test_pending_derivation_polls_on_a_bounded_interval() -> None:
+def test_running_background_jobs_poll_on_a_bounded_interval() -> None:
     # The regression: judgments land on the worker without a new record
     # ever setting the ready event; sleeping forever here stalls training
     # on a quiet workload.
     dispatcher = _dispatcher()
     _bind(dispatcher, pending=True)
-    assert dispatcher._training_wait_timeout() == dispatcher.derivation_poll_seconds
+    assert dispatcher._training_wait_timeout() == dispatcher.background_job_poll_seconds
 
 
 def test_blocked_storage_keeps_the_tighter_cadence() -> None:
@@ -103,7 +103,7 @@ def test_blocked_storage_keeps_the_tighter_cadence() -> None:
     _bind(dispatcher, pending=True)
     dispatcher._training.storage_status = {"state": "blocked"}
     assert dispatcher._training_wait_timeout() == min(
-        dispatcher.storage_retry_seconds, dispatcher.derivation_poll_seconds
+        dispatcher.storage_retry_seconds, dispatcher.background_job_poll_seconds
     )
 
 
@@ -179,7 +179,7 @@ def test_status_exposes_terminal_processor_outcomes() -> None:
             }
         ]
     }
-    _bind(dispatcher, pending=False, processor_status=outcome)
+    _bind(dispatcher, pending=False, pipeline_status=outcome)
 
     assert dispatcher.build_training_status()["scenarios"]["s"]["processor"] == outcome
 

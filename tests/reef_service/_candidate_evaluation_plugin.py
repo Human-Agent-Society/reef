@@ -4,14 +4,14 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from reef.runtime.interfaces import ModelCandidate
-from reef.train.evaluation import (
+from reef.evaluation import (
     CandidateEvaluator,
     ConfiguredEvaluationPlugin,
     EvaluationResult,
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.runtime.interfaces import ModelCandidate
 
 
 @dataclass(frozen=True)

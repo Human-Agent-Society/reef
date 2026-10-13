@@ -112,7 +112,7 @@ One round is: pull the served tree, take the method's plan for the iteration
 (its parent choice and its three training problems), run each as a Pi episode against that tree with a
 model binding pointed back at the embedded service, score it, find its recorded
 request by problem text, and report the score against it. The third report
-closes the batch (`data.batch_size: 3`) and schedules the training step, which
+closes the batch (`pipeline.task2batch.config.batch_size: 3`) and schedules the training step, which
 is where the method proposes, evaluates, and publishes. Rounds stop when the
 archive reaches the metric-call budget.
 

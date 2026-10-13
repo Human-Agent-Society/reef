@@ -20,10 +20,12 @@ from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError, UnknownScenario
 from reef.core.reports import ReportValidationError, ScoredRolloutReport
 from reef.dispatcher import Dispatcher
+from reef.evaluation import EvaluationResult, UpdateCandidate
+from reef.pipeline_context import PipelineContext
 from reef.recipe import CompositeRecipe, Recipe, RecipeConfigError, build_recipe
 from reef.recipe.base import ServedEndpoint
 from reef.recipe.checkpoint_strategy import EveryNVersions
-from reef.recipe.config import recipe_config_from_mapping
+from reef.recipe.config import recipe_config_from_file_layout
 from reef.runtime.interfaces import InferenceHandler
 from reef.service.app import create_app
 from reef.service.request_service import RequestService
@@ -31,9 +33,9 @@ from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.surface import Surface, TextFileTree, create_config_surface, create_harness_surface
 from reef.surface.config import CONFIG_FILE, ConfigInferenceHooks, ConfigValidator
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
-from reef.train.evaluation import EvaluationResult, UpdateCandidate
+from reef.train.pipeline import TrainingPipeline
 
-from ._threshold_processor import ThresholdProcessor
+from ._threshold_processor import ThresholdBatches, threshold_pipeline
 
 
 class _FileBackend(CandidateBackend):
@@ -84,7 +86,7 @@ class _TreeRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=threshold_pipeline,
             candidate_backend=_FileBackend(self.label, self.artifact_dir),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
@@ -93,21 +95,26 @@ class _TreeRecipe(Recipe):
         )
 
 
-class _HybridThresholdProcessor(ThresholdProcessor):
-    """The same processor, taking instructions too."""
+class HybridThresholdBatches(ThresholdBatches):
+    """The same batches, taking instructions too."""
 
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
 
 
+def hybrid_threshold_pipeline(context: PipelineContext) -> TrainingPipeline:
+    """The threshold pipeline, one report per batch, taking instructions too."""
+    return threshold_pipeline(context, task2batch=HybridThresholdBatches(context, 1))
+
+
 @dataclass(frozen=True)
 class _HybridTreeRecipe(_TreeRecipe):
-    """The tree recipe with a processor that runs in every mode."""
+    """The tree recipe with a pipeline that runs in every mode."""
 
     def build(self, scenario, records, *, algorithm_state=None, experiment_logger=None):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: _HybridThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=hybrid_threshold_pipeline,
             candidate_backend=_FileBackend(self.label, self.artifact_dir),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
@@ -226,7 +233,7 @@ def test_composite_recipe_builds_from_config() -> None:
                 "components": {
                     "harness": {
                         "implementation": "reef_service.test_composite_recipe:_TreeRecipe",
-                        "data": {"training_mode": "manual"},
+                        "config": {"training_mode": "manual"},
                     },
                     "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
                 },
@@ -247,7 +254,8 @@ def test_composite_recipe_names_its_weight_training_component() -> None:
 
     selected = CompositeRecipe.select_weight_training({"components": _WEIGHTS_AND_HARNESS})
     assert selected is not None
-    assert selected[0] is SAORecipe and selected[1] is _WEIGHTS_AND_HARNESS["weights"]
+    # The selected component's config comes back flat, as its recipe reads it.
+    assert selected == (SAORecipe, {"implementation": "recipes.sao.recipe:SAORecipe", "data": {}})
     assert CompositeRecipe.select_weight_training({"components": {"harness": _WEIGHTS_AND_HARNESS["harness"]}}) is None
     assert _TreeRecipe.select_weight_training({}) is None
     assert SAORecipe.select_weight_training({"data": {}}) == (SAORecipe, {"data": {}})
@@ -320,7 +328,6 @@ def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_p
     from reef.service.training_driver import _resolve_training_recipe
 
     raw = {
-        "schema-version": 2,
         "recipe": {
             "implementation": "reef.recipe.composite:CompositeRecipe",
             "config": {"components": _WEIGHTS_AND_HARNESS},
@@ -361,25 +368,41 @@ def test_deployment_treats_a_composite_with_a_weight_component_as_training(tmp_p
 
 
 @pytest.mark.unit
-def test_composite_recipe_reads_components_from_the_versioned_layout() -> None:
-    settings = recipe_config_from_mapping(
-        {
-            "schema-version": 2,
+def test_composite_recipe_reads_components_from_the_file_layout() -> None:
+    harness = {"implementation": "reef_service.test_composite_recipe:_TreeRecipe", "config": {"training-mode": "auto"}}
+
+    def file_layout(harness_section: Any) -> dict[str, Any]:
+        return {
             "recipe": {
                 "implementation": "reef.recipe.composite:CompositeRecipe",
                 "config": {
                     "components": {
-                        "harness": {"implementation": "reef_service.test_composite_recipe:_TreeRecipe"},
+                        "harness": harness_section,
                         "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
                     }
                 },
             },
             "inference": {"upstream-model": "served-model"},
         }
-    )
+
+    settings = recipe_config_from_file_layout(file_layout(harness))
     assert sorted(settings["components"]) == ["config", "harness"]
     recipe = build_recipe(settings["implementation"], {}, config=settings)
     assert isinstance(recipe, CompositeRecipe)
+    assert recipe.components["harness"].training_mode == "auto"
+
+    # The flat recipe config a component used to take is refused with the place its fields now go.
+    flat = recipe_config_from_file_layout(
+        file_layout({"implementation": harness["implementation"], "data": {"training_mode": "auto"}})
+    )
+    with pytest.raises(
+        RecipeConfigError, match=r"components\.harness\.data is not accepted: .*components\.harness\.config"
+    ):
+        build_recipe(flat["implementation"], {}, config=flat)
+    # Every component shares the deployment's runtime.
+    own_runtime = recipe_config_from_file_layout(file_layout({**harness, "runtime": {"type": "upstream"}}))
+    with pytest.raises(RecipeConfigError, match=r"components\.harness\.runtime is not accepted"):
+        build_recipe(own_runtime["implementation"], {}, config=own_runtime)
 
 
 @pytest.mark.unit
@@ -395,7 +418,7 @@ def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
             {},
             config={**base, "artifact": {"checkpoint_every_n_versions": 5}, "components": components},
         )
-    with pytest.raises(RecipeConfigError, match=r"components\.harness\.artifact\.checkpoint_every_n_versions"):
+    with pytest.raises(RecipeConfigError, match=r"components\.harness\.config\.checkpoint_every_n_versions"):
         build_recipe(
             base["implementation"],
             {},
@@ -403,16 +426,16 @@ def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
                 **base,
                 "components": {
                     **components,
-                    "harness": {**components["harness"], "artifact": {"checkpoint_every_n_versions": 5}},
+                    "harness": {**components["harness"], "config": {"checkpoint-every-n-versions": 5}},
                 },
             },
         )
-    # The flat deployment spelling and the hyphenated one are refused too.
+    # The flat deployment spelling is refused too.
     with pytest.raises(RecipeConfigError, match=r"recipe\.checkpoint_every_n_versions has no effect"):
         build_recipe(
             base["implementation"], {}, config={**base, "checkpoint_every_n_versions": 5, "components": components}
         )
-    with pytest.raises(RecipeConfigError, match=r"components\.harness\.artifact\.checkpoint-every-n-versions"):
+    with pytest.raises(RecipeConfigError, match=r"components\.harness\.config\.artifact\.checkpoint_every_n_versions"):
         build_recipe(
             base["implementation"],
             {},
@@ -420,7 +443,7 @@ def test_composite_recipe_refuses_a_checkpoint_cadence() -> None:
                 **base,
                 "components": {
                     **components,
-                    "harness": {**components["harness"], "artifact": {"checkpoint-every-n-versions": 5}},
+                    "harness": {**components["harness"], "config": {"artifact": {"checkpoint_every_n_versions": 5}}},
                 },
             },
         )
@@ -597,11 +620,11 @@ def test_components_with_different_report_contracts_admit_what_any_of_them_accep
         surface=mixed.build_surface("agent"),
         algorithm_states={},
     )
-    assert [bound.trainer.processor.context.admitted_report_type is mixed.report_type for bound in trainers] == [
+    assert [bound.trainer.pipeline.context.admitted_report_type is mixed.report_type for bound in trainers] == [
         True,
         True,
     ]
-    assert trainers[0].trainer.report_type is ScoredRolloutReport
+    assert trainers[0].trainer.pipeline.context.report_type is ScoredRolloutReport
 
 
 @pytest.mark.unit
@@ -783,7 +806,7 @@ class _EpisodeTreeRecipe(_TreeRecipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=threshold_pipeline,
             candidate_backend=_ClosingBackend(self.label, self.artifact_dir, self.closing, self.episode_done),
             algorithm_state=algorithm_state,
             report_type=self.report_type,
@@ -1185,9 +1208,9 @@ def test_a_rollback_or_promote_runs_the_checks_its_commit_ran_and_never_judges_a
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("data", [[["training_mode", "hybrid"]], "hybrid", [], "", None])
-def test_a_component_data_section_that_is_not_an_object_is_refused_under_a_composite_mode(data: Any) -> None:
-    with pytest.raises(RecipeConfigError, match="recipe config 'data' must be an object"):
+@pytest.mark.parametrize("component_config", [[["training_mode", "hybrid"]], "hybrid", [], "", None])
+def test_a_component_config_that_is_not_an_object_is_refused_under_a_composite_mode(component_config: Any) -> None:
+    with pytest.raises(RecipeConfigError, match=r"components\.harness\.config must be an object"):
         build_recipe(
             "reef.recipe.composite:CompositeRecipe",
             {},
@@ -1198,7 +1221,7 @@ def test_a_component_data_section_that_is_not_an_object_is_refused_under_a_compo
                 "components": {
                     "harness": {
                         "implementation": "reef_service.test_composite_recipe:_HybridTreeRecipe",
-                        "data": data,
+                        "config": component_config,
                     },
                     "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
                 },
@@ -1221,8 +1244,8 @@ def test_a_component_without_a_step_does_not_hold_the_training_mode(tmp_path: Pa
         assert scenario is not None
         assert dispatcher.set_training_mode("agent", "hybrid") == {"scenario": "agent", "training_mode": "hybrid"}
         assert scenario.training_mode == "hybrid"
-        assert scenario.trainer_for("harness").training_mode == "hybrid"
-        assert scenario.trainer_for("config").training_mode == "auto"
+        assert scenario.trainer_for("harness").pipeline.training_mode == "hybrid"
+        assert scenario.trainer_for("config").pipeline.training_mode == "auto"
     finally:
         dispatcher.close()
 
@@ -1288,12 +1311,12 @@ def test_status_and_contract_speak_of_the_trainer_that_steps(tmp_path: Path) -> 
         block = dispatcher.build_training_status()["scenarios"]["agent"]
         assert block["training_mode"] == "hybrid"
         assert block["processor"] == {
-            **harness.processor_status(),
+            **harness.pipeline_status(),
             "pending_instructions": harness.pending_instructions(),
         }
         contract = dispatcher.scenario_contract("agent")
         assert contract["training_mode"] == "hybrid"
-        assert contract["processor"] == type(harness.processor).__name__
+        assert contract["processor"] == type(harness.pipeline.task2batch).__name__
     finally:
         dispatcher.close()
 
@@ -1323,8 +1346,8 @@ def test_a_composite_mode_is_every_components_mode_and_a_stepless_component_runs
         scenario = dispatcher.get_or_create_scenario("agent")
         assert scenario is not None
         assert scenario.training_mode == "hybrid"
-        assert scenario.trainer_for("harness").training_mode == "hybrid"
-        assert scenario.trainer_for("config").training_mode == "auto"
+        assert scenario.trainer_for("harness").pipeline.training_mode == "hybrid"
+        assert scenario.trainer_for("config").pipeline.training_mode == "auto"
     finally:
         dispatcher.close()
 
@@ -1343,7 +1366,7 @@ def test_a_composite_reads_the_hyphenated_mode_and_a_component_agreeing_in_it() 
             "components": {
                 "harness": {
                     "implementation": "reef_service.test_composite_recipe:_HybridTreeRecipe",
-                    "data": {"training-mode": "hybrid"},
+                    "config": {"training-mode": "hybrid"},
                 },
                 "config": {"implementation": "reef_service.test_composite_recipe:_ConfigRecipe"},
             },

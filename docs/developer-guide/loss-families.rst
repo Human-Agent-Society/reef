@@ -14,7 +14,7 @@ the backend's forward passes.
 - Methods can also supply a Tinker loss implementation. TTTD shares one
   preparation method between its Slime and Tinker implementations.
 
-A recipe binds ``WeightTrainingSpec(objective=..., processor=..., scheduling=...)``.
+A recipe binds ``WeightTrainingSpec(objective=..., scheduling=...)``.
 ``WeightTrainingSpec.loss_family`` derives the family from that objective;
 ``StepSignal`` carries advantages, metrics and proposed state, and the recipe's
 ``StepScheduling`` says how the runtime cuts the batch into optimizer steps.
@@ -163,7 +163,7 @@ and each such recipe's family is a thin subclass of it:
 - ``DistillAlgorithm`` is the driver-side base: the seven-column wire row
   (the policy row plus ``teacher_tokens``, the teacher's prompt ids followed
   by the student's response ids verbatim, and ``sample_weight``, the factor
-  on that sample's mean divergence, 1 unless the recipe's processor sets
+  on that sample's mean divergence, 1 unless the recipe's stages set
   ``distill_sample_weight`` on the sample), the ``--<name>-*`` flags under
   the family's own prefix (``teacher``, ``divergence``, ``top-k``,
   ``top-k-source``, ``top-k-distribution``, ``teacher-update-rate``,

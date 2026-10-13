@@ -35,6 +35,7 @@ from dataclasses import replace
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from reef.core.prompts import untrusted_text
 from reef.harness.episodes.e2b import E2BExecutor, E2BSession
 from reef.harness.episodes.executor import EpisodeExecutor, EpisodeLaunchError, EpisodeTimeout, SandboxExecutor
 from reef.harness.episodes.model_binding import ModelBinding, ModelBindings
@@ -47,7 +48,7 @@ from reef.recipe.reefine import evolution
 from reef.recipe.reefine.agent_gateway import AgentGateway, WorkspaceTools
 from reef.recipe.reefine.multimodal import MultimodalProvider
 from reef.train.cordis_backend.manifest import FailureManifest
-from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal, untrusted_text
+from reef.train.cordis_backend.strategies import AgentHost, Proposer, StepProposal
 from reef.train.types import TrajectoryItem
 
 logger = logging.getLogger(__name__)

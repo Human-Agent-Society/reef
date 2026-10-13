@@ -31,10 +31,11 @@ Implementation
   ``reef/recipe/``.
 - Declare recipe-owned settings with ``config_field``. Do not parse those
   settings again in ``reef/service/``.
-- Put the method's record-to-batch behavior in
-  ``<method-package>/processor.py``, subclassing a processor contract
-  from ``reef/train/processors/``; extend those contracts only when they do
-  not already express it.
+- Put the method's record-to-task and task-to-batch stages in
+  ``<method-package>/processor.py``, subclassing ``ReportTasks`` or
+  ``JudgedTasks`` (``reef/record2task/``) and ``Task2Batch``
+  (``reef/task2batch/``), and its record stage in the recipe module.
+  Extend those contracts only when they do not already express it.
 - Put the method's backend-neutral training objective in
   ``<method-package>/objective.py`` (``reef/train/algos/`` holds the
   contract). Backend-specific payload
@@ -59,7 +60,7 @@ Surrounding changes
   ``recipes/<name>/examples/``; only a stack that binds no method belongs in
   ``recipes/basic/``.
 - Add ``docs/user-guide/recipes/<name>.rst`` and update the public README recipe
-  table when the cookbook carries the method. Update the relevant processor, objective, or surface
+  table when the cookbook carries the method. Update the relevant pipeline stage, objective, or surface
   reference if its public contract changes.
 
 Add a training integration

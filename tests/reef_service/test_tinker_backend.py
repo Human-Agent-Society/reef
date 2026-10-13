@@ -382,7 +382,6 @@ def test_malformed_training_rows_are_rejected(field, value):
 
 def test_deployment_preserves_remote_model_and_discovers_without_sdk(tmp_path):
     raw = {
-        "schema-version": 2,
         "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
         "inference": {"model-path": "Qwen/Qwen3-8B"},
         "training": {"backend": "tinker", "options": {"state-dir": str(tmp_path / "state")}},
@@ -413,7 +412,6 @@ def test_serve_skips_the_model_download_for_a_hosted_backend(tmp_path, monkeypat
     path.write_text(
         yaml.safe_dump(
             {
-                "schema-version": 2,
                 "reef": {"run-dir": str(tmp_path / "stack")},
                 "recipe": {"implementation": "recipes.tttd.recipe:TTTDRecipe"},
                 "inference": {"model-path": "Qwen/Qwen3-8B"},
@@ -460,22 +458,27 @@ def test_scenario_commits_recovers_and_rolls_back_remote_checkpoint(tmp_path, ob
     import time
     from dataclasses import dataclass
 
-    from reef_service._threshold_processor import ThresholdProcessor
+    from reef_service._threshold_processor import ThresholdBatches, ThresholdTasks
 
     from reef.artifact import InMemoryRepositoryBackend
     from reef.core import AgentRecord, RequestType
     from reef.dispatcher import Dispatcher
     from reef.recipe.base import WeightTrainingRecipe, WeightTrainingSpec
-    from reef.recipe.config_fields import config_field
+    from reef.record2record import ReportRecord2Record
     from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.train.pipeline import PipelineSpec
 
     @dataclass(frozen=True)
     class PolicyRecipe(WeightTrainingRecipe):
-        batch_size: int = config_field(1)
-
         @classmethod
         def training_spec(cls):
-            return WeightTrainingSpec(objective.name, ThresholdProcessor)
+            return WeightTrainingSpec(objective.name)
+
+        @classmethod
+        def pipeline_spec(cls):
+            return PipelineSpec(
+                record2record=ReportRecord2Record, record2task=ThresholdTasks, task2batch=ThresholdBatches
+            )
 
     initial = tmp_path / "initial"
     initial.mkdir()
@@ -569,13 +572,19 @@ def test_documented_smoke_runs_through_http_and_ttdd_recipe(tmp_path, monkeypatc
     from reef.dispatcher import Dispatcher
     from reef.service.app import create_app
     from reef.storage.sqlite import SQLiteScenarioStorage
+    from reef.train.pipeline import PipelineConfig
 
     initial = tmp_path / "initial"
     initial.mkdir()
     remote = RemoteClient()
     runtime = Deployment(TinkerConfig(state_dir=str(tmp_path / "runtime")), remote)
+    step_grid = PipelineConfig.from_setting(
+        {"record2record": {"config": {"groups_per_step": 1, "rollouts_per_group": 4}}},
+        spec=TTTDRecipe.pipeline_spec(),
+        environ={},
+    )
     dispatcher = Dispatcher(
-        TTTDRecipe(runtime.training, runtime=runtime.inference, groups_per_step=1, rollouts_per_group=4),
+        TTTDRecipe(runtime.training, runtime=runtime.inference, pipeline_stages=step_grid),
         InMemoryRepositoryBackend.factory(initial, root=tmp_path / "repository"),
         local_artifact_dir=tmp_path / "staged",
         scenario_storage=SQLiteScenarioStorage(),

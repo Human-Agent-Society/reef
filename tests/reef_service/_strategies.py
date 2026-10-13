@@ -8,7 +8,8 @@ when its signature names it (or takes ``**kwargs``), and the function declares
 
 import inspect
 
-from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer
+from reef.evaluation.harness import EpisodeScorer
+from reef.train.cordis_backend.strategies import Proposer
 
 
 def _accepts(fn, name):

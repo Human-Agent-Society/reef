@@ -5,7 +5,7 @@ processor that groups reports by ``metadata.comparison_set`` and an objective
 that turns the resulting ``TrainingBatch`` into group-relative
 advantages. Both live here rather than in ``reef`` because no bundled recipe
 uses them — the grouping machinery they exercise (group keys, slots, the
-``decide_group`` barrier, ``TrainingBatch`` through the trainer and the
+``ReportGrouping.decide`` barrier, ``TrainingBatch`` through the trainer and the
 runtime) IS production code, and these suites are what keep it pinned.
 
 ``GROUPED_PG_OBJECTIVE`` is the dotted ``module:Objective`` spelling the
@@ -21,10 +21,15 @@ from typing import Any
 
 from reef.core.records_types import AgentRecord
 from reef.core.trajectories import trajectory_reward
+from reef.pipeline_context import PipelineContext
+from reef.record2record import GroupDecision, ReportContext, ReportGrouping, ReportRecord2Record
+from reef.record2task import ReportTasks
+from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
+from reef.task2batch import Task2Batch
 from reef.train.algos import StepSignal, TrainingObjective
 from reef.train.algos.helpers import next_steps
-from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
-from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectory_groups
+from reef.train.pipeline import TrainingPipeline
+from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectory_groups
 
 GROUPED_PG_OBJECTIVE = "reef_service._grouped_pg:GroupedPolicyObjective"
 
@@ -51,25 +56,39 @@ def _comparison_set_id(report: AgentRecord) -> str | None:
     return set_id if isinstance(set_id, str) and set_id else None
 
 
-class GroupedPolicyProcessor(ReportedFeedbackProcessor):
-    output_schema = TrainingBatch
+class ComparisonSetGrouping(ReportGrouping):
+    """Reports with one ``metadata.comparison_set`` form one group, ready at two members."""
 
-    def __init__(self, context: ProcessorContext) -> None:
-        self._assembly = SampleAssembly.from_config(context)
-        super().__init__(context)
+    def placement(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
+        return _comparison_set_id(context.report), None
+
+    def decide(self, key: Hashable, members: tuple[ReportContext, ...]) -> GroupDecision:
+        return GroupDecision.READY if len(members) >= 2 else GroupDecision.INCOMPLETE
+
+
+class ComparisonSetTasks(ReportTasks):
+    """One report as one sample in its comparison set."""
+
+    def __init__(self, settings: SampleAssemblySettings | None = None) -> None:
+        self.assembly = SampleAssembly(SampleAssemblySettings() if settings is None else settings)
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
         set_id = _comparison_set_id(context.report)
         if set_id is None:
             raise ValueError("grouped training requires metadata.comparison_set")
-        return replace(self._assembly.build(context, context.require_score()), group_id=set_id)
+        return replace(self.assembly.build(context, context.require_score()), group_id=set_id)
 
-    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
-        return _comparison_set_id(context.report), None
 
-    def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
-        del key
-        return GroupDecision.READY if len(items) >= 2 else GroupDecision.INCOMPLETE
+class GroupedPolicyBatches(Task2Batch):
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"{self.scenario}:grouped:{batch_number}", tasks)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:grouped:{batch_number}", items)
+
+def grouped_policy_pipeline(context: PipelineContext, batch_size: int = 1) -> TrainingPipeline:
+    """Reports grouped by ``metadata.comparison_set``, two to a group."""
+    return TrainingPipeline(
+        context,
+        record2record=ReportRecord2Record(context, ComparisonSetGrouping()),
+        record2task=ComparisonSetTasks(),
+        task2batch=GroupedPolicyBatches(context, batch_size),
+    )

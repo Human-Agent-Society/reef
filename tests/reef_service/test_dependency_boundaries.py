@@ -103,6 +103,13 @@ def test_core_package_does_not_depend_on_artifacts() -> None:
         assert _imports_of(imported, "reef.artifact") == [], name
 
 
+def test_harbor_task_values_and_validation_do_not_depend_on_harness() -> None:
+    for module_name in ("reef.core.tasks.harbor", "reef.record2task.generator.harbor"):
+        module = importlib.import_module(module_name)
+        imported = _imported_modules(ast.parse(inspect.getsource(module)), package=module_name.rpartition(".")[0])
+        assert _imports_of(imported, "reef.harness") == [], module_name
+
+
 def test_release_id_chain_does_not_depend_on_scenario_or_trainer() -> None:
     module = importlib.import_module("reef.artifact.release_chain")
     tree = ast.parse(inspect.getsource(module))
@@ -531,5 +538,64 @@ def test_training_backends_never_import_inference_implementations() -> None:
 def test_task_generation_input_definition_does_not_depend_on_consumers() -> None:
     module = importlib.import_module("reef.core.tasks.generation")
     imported = _imported_modules(ast.parse(inspect.getsource(module)), package="reef.core.tasks")
-    for dependency in ("reef.train", "reef.record2dataset", "recipes"):
+    for dependency in ("reef.train", "reef.record2task.generator", "recipes"):
         assert _imports_of(imported, dependency) == []
+
+
+def test_background_jobs_depend_only_on_the_standard_library() -> None:
+    # Processors in every package use the worker, so it imports no Reef module.
+    tree = ast.parse((REPO_ROOT / "reef" / "background_jobs.py").read_text(encoding="utf-8"))
+    targets = _imported_modules(tree, package="reef")
+    assert not [target for target in targets if target == "reef" or target.startswith("reef.")]
+
+
+def test_record_to_record_stage_depends_only_on_contracts_below_training() -> None:
+    # Record-to-task and the trainer both use this stage, so it never imports either of them.
+    allowed = (
+        "reef.core",
+        "reef.runtime.interfaces",
+        "reef.observability",
+        "reef.background_jobs",
+        "reef.pipeline_context",
+        "reef.record2record",
+    )
+    for path in sorted((REPO_ROOT / "reef" / "record2record").rglob("*.py")):
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):
+            if target == "reef" or target.startswith("reef."):
+                assert any(
+                    target == prefix or target.startswith(prefix + ".") for prefix in allowed
+                ), f"{path.relative_to(REPO_ROOT)} imports {target}"
+
+
+def test_record_to_task_contract_depends_only_on_record2record() -> None:
+    # The trainer and the recipes import the contract, so it never imports them or the generator service.
+    allowed = ("reef.core", "reef.record2record", "reef.record2task", "reef.pipeline_context")
+    for path in sorted((REPO_ROOT / "reef" / "record2task").glob("*.py")):
+        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package="reef.record2task"):
+            if target.startswith("reef.record2task.generator"):
+                raise AssertionError(f"{path.relative_to(REPO_ROOT)} imports the generator service: {target}")
+            if target == "reef" or target.startswith("reef."):
+                assert any(
+                    target == prefix or target.startswith(prefix + ".") for prefix in allowed
+                ), f"{path.relative_to(REPO_ROOT)} imports {target}"
+
+
+def test_task_to_batch_stage_depends_only_on_contracts_below_training() -> None:
+    # The pipeline and the recipes import the stage, so it never imports them.
+    allowed = (
+        "reef.core",
+        "reef.observability",
+        "reef.pipeline_context",
+        "reef.record2record",
+        "reef.record2task",
+        "reef.task2batch",
+    )
+    paths = [*sorted((REPO_ROOT / "reef" / "task2batch").rglob("*.py")), REPO_ROOT / "reef" / "pipeline_context.py"]
+    for path in paths:
+        package = ".".join(path.parent.relative_to(REPO_ROOT).parts)
+        for target in _imported_modules(ast.parse(path.read_text(encoding="utf-8")), package=package):
+            if target == "reef" or target.startswith("reef."):
+                assert any(
+                    target == prefix or target.startswith(prefix + ".") for prefix in allowed
+                ), f"{path.relative_to(REPO_ROOT)} imports {target}"

@@ -22,8 +22,8 @@ The learning loop
    Train* :: minimize sampled-token reverse KL with one optimizer update
    Publish :: serve the updated student weights
 
-Teacher and student see identical token sequences. The processor uses the
-captured inference tokens, preserving thinking switches and assistant
+Teacher and student see identical token sequences. The record-to-task stage
+(``OPDTasks``) uses the captured inference tokens, preserving thinking switches and assistant
 prefixes, and loads no tokenizer. It rejects a non-empty teacher context. A
 reported score is kept as metadata and does not enter the loss.
 
@@ -42,14 +42,25 @@ Each report references exactly one inference receipt:
 Configuration
 -------------
 
-Select ``recipes.opd.recipe:OPDRecipe``. ``batch_size`` responses form one
-optimizer step. ``max_staleness`` defaults to zero: wait for each published
-update before sampling the next batch.
+Select ``recipes.opd.recipe:OPDRecipe``. ``max_staleness`` in
+``recipe.config`` defaults to zero: wait for each published update before
+sampling the next batch. The stage settings go in the deployment's top-level
+``pipeline`` section:
+
+.. code:: yaml
+
+   pipeline:
+     record2task:
+       config:
+         max_teacher_tokens: 8192
+     task2batch:
+       config:
+         batch_size: 32
 
 .. config::
 
-   batch_size | 1 | responses in one optimizer step.
-   max_teacher_tokens | 0 | maximum recorded sequence length; a longer report is released and counted in ``teacher_overflow_reports``. 0 disables the check.
+   pipeline.task2batch.config.batch_size | 1 | responses in one optimizer step.
+   pipeline.record2task.config.max_teacher_tokens | 0 | maximum recorded sequence length; a longer report is skipped and counted in ``teacher_overflow_reports``. 0 disables the check.
 
 The Slime options belong in ``training.options``:
 

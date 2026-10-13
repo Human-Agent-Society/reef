@@ -23,10 +23,10 @@ from reef.artifact import (
 )
 from reef.core import AgentRecord, RequestType
 from reef.dispatcher import Dispatcher, build_default_dispatcher
+from reef.evaluation import SelectionDecision
 from reef.recipe.checkpoint_strategy import EveryNVersions
 from reef.runtime.interfaces import ActivatedModel, ModelCandidate, PreparedTrainingStep
 from reef.storage.sqlite import SQLiteScenarioStorage
-from reef.train.evaluation import SelectionDecision
 from reef.train.types import TrainStepResult
 
 from ._policy_recipe import TestPolicyRecipe

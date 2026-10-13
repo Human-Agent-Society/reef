@@ -430,8 +430,8 @@ def test_experiment_provider_observes_the_generic_commit_boundary(start_dispatch
     assert event.training_job_id == "job-0"
     assert event.source_runtime_load_id == "v0"
     assert event.produced_runtime_load_id == "job:job-0"
-    assert scenario.trainer.processor.experiment_logger is tracker.loggers["math"]
-    scenario.trainer.processor.experiment_logger.log({"accepted": 1}, namespace="processor")
+    assert scenario.trainer.pipeline.experiment_logger is tracker.loggers["math"]
+    scenario.trainer.pipeline.experiment_logger.log({"accepted": 1}, namespace="processor")
     assert tracker.loggers["math"].logged == [
         ("recipe", {"batch_size": 1}),
         ("processor", {"accepted": 1}),

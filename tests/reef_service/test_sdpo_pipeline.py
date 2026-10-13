@@ -10,19 +10,21 @@ from __future__ import annotations
 import sys
 from argparse import Namespace
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import fields, replace
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from reef_service.runtime_stubs import StubTrainingRuntime, runtime_bindings
 
-from recipes.sdpo import SDPOProcessor, SDPORecipe, SDPOReport
+from recipes.sdpo import SDPOBatches, SDPORecipe, SDPORecord2Record, SDPOReport, SDPOTasks
+from recipes.sdpo.processor import SDPODemonstrationSettings, SDPOGridSettings, SDPOTeacherSettings
 from recipes.sdpo.slime import SdpoAlgorithm, SdpoSettings
 from reef.core import AgentRecord, RequestType
 from reef.recipe.errors import RecipeConfigError
-from reef.train import ProcessorContext
+from reef.train import PipelineContext
 from reef.train.algos import StepScheduling
+from reef.train.pipeline import TrainingPipeline
 from reef.train.slime_backend.data_builder import to_slime_rollout_data
 from reef.train.slime_backend.distill.algorithm import settings_from_args
 from reef.train.types import TrainingBatch
@@ -51,24 +53,33 @@ def tokenizer(monkeypatch: pytest.MonkeyPatch) -> SDPOTokenizer:
     return fake
 
 
-def processor(**config: Any) -> SDPOProcessor:
-    return SDPOProcessor(
-        ProcessorContext(
-            "science",
-            {
-                "groups_per_step": 1,
-                "rollouts_per_group": 2,
-                "tokenizer_path": "/models/test",
-                "max_teacher_tokens": 18432,
-                **config,
-            },
-            SDPOReport,
-        )
+def processor(**config: Any) -> TrainingPipeline:
+    context = PipelineContext("science", SDPOReport)
+    config = {
+        "groups_per_step": 1,
+        "rollouts_per_group": 2,
+        "tokenizer_path": "/models/test",
+        "max_teacher_tokens": 18432,
+        **config,
+    }
+
+    def _settings(settings_type: type):
+        # Each stage takes its own keys of the shared test config.
+        names = {field.name for field in fields(settings_type)}
+        return settings_type(**{key: value for key, value in config.items() if key in names})
+
+    record2record = SDPORecord2Record(context, _settings(SDPOGridSettings))
+    record2task = SDPOTasks(_settings(SDPOTeacherSettings), record2record)
+    return TrainingPipeline(
+        context,
+        record2record=record2record,
+        record2task=record2task,
+        task2batch=SDPOBatches(context, _settings(SDPODemonstrationSettings), record2task),
     )
 
 
 def ingest(
-    target: SDPOProcessor,
+    target: SDPOBatches,
     rollout: int,
     *,
     group: int = 0,
@@ -109,7 +120,7 @@ def test_waits_for_entire_grid_and_uses_successful_sibling(tokenizer: SDPOTokeni
     ingest(target, 1, score=0.0)
     ingest(target, 0, group=1, score=0.0)
     ingest(target, 1, group=1, score=0.0)
-    with pytest.raises(RuntimeError, match="batch is not ready"):
+    with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
     ingest(target, 0, score=1.0)
     batch = target.build_batch()
@@ -141,7 +152,7 @@ def test_first_report_wins_a_retry_slot(tokenizer: SDPOTokenizer) -> None:
     target = processor()
     ingest(target, 0, score=0.0)
     ingest(target, 0, score=1.0, suffix="retry")
-    with pytest.raises(RuntimeError, match="batch is not ready"):
+    with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
     ingest(target, 1, score=0.0)
     batch = target.build_batch()
@@ -155,7 +166,7 @@ def test_rejects_steps_without_one_known_policy_release(tokenizer: SDPOTokenizer
     target = processor()
     ingest(target, 0)
     ingest(target, 1, release=release)
-    with pytest.raises(RuntimeError, match="batch is not ready"):
+    with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
     assert target.status()["failed_steps"] == [{"step": 0, "reason": "missing_or_mixed_release_ids"}]
 
@@ -165,7 +176,7 @@ def test_rejects_different_questions_in_one_group(tokenizer: SDPOTokenizer) -> N
     target = processor()
     ingest(target, 0)
     ingest(target, 1, question=[{"role": "user", "content": "A different question"}])
-    with pytest.raises(RuntimeError, match="batch is not ready"):
+    with pytest.raises(RuntimeError, match="no batch ready"):
         target.build_batch()
     assert target.status()["failed_steps"][0]["reason"] == "different_requests_in_group"
 
@@ -214,20 +225,88 @@ def test_the_prompt_window_sits_inside_the_teacher_window(tokenizer: SDPOTokeniz
         processor(max_teacher_tokens=0)
 
 
+def recipe_from(config: Mapping[str, Any]) -> SDPORecipe:
+    recipe = SDPORecipe.from_environment({}, config=config, **runtime_bindings(StubTrainingRuntime()))
+    assert isinstance(recipe, SDPORecipe)
+    return recipe
+
+
+#: The deployment's ``pipeline`` section with only the required key.
+PIPELINE = {"record2task": {"config": {"tokenizer_path": "/models/test"}}}
+
+
 @pytest.mark.unit
-def test_sdpo_recipe_uses_one_actual_sized_step() -> None:
-    recipe = SDPORecipe(tokenizer_path="/models/test", **runtime_bindings(StubTrainingRuntime()))
+def test_sdpo_recipe_uses_one_actual_sized_step(tokenizer: SDPOTokenizer) -> None:
+    recipe = recipe_from({"pipeline": PIPELINE})
     assert recipe.report_type is SDPOReport
-    assert recipe.groups_per_step == 32 and recipe.rollouts_per_group == 8
-    assert recipe.allow_own_success_as_demonstration is False
-    assert recipe.processor_config()["max_teacher_tokens"] == 18432
     assert recipe.training_spec().scheduling == StepScheduling(unit="sample", batch_size="actual")
+    pipeline = recipe.build_pipeline(PipelineContext("science", SDPOReport))
+    record2record, record2task, task2batch = pipeline.record2record, pipeline.record2task, pipeline.task2batch
+    assert isinstance(record2record, SDPORecord2Record)
+    assert isinstance(record2task, SDPOTasks)
+    assert isinstance(task2batch, SDPOBatches)
+    assert record2record.step_grouping.groups_per_step == 32 and record2record.step_grouping.rollouts_per_group == 8
+    assert (record2task.max_teacher_prompt_tokens, record2task.max_teacher_tokens) == (10240, 18432)
+    assert task2batch.allow_own_success_as_demonstration is False
+    assert task2batch.batch_size == 1
     with pytest.raises(RecipeConfigError, match=r"training\.options"):
-        SDPORecipe.from_environment(
-            {},
-            config={"data": {"tokenizer_path": "/models/test"}, "optimization": {"divergence": "forward"}},
-            **runtime_bindings(StubTrainingRuntime()),
-        )
+        recipe_from({"pipeline": PIPELINE, "optimization": {"divergence": "forward"}})
+
+
+@pytest.mark.unit
+def test_the_pipeline_section_configures_each_stage_and_later_stages_read_earlier_ones(
+    tokenizer: SDPOTokenizer,
+) -> None:
+    recipe = recipe_from(
+        {
+            "pipeline": {
+                "record2record": {"config": {"groups_per_step": 4, "rollouts_per_group": 2}},
+                "record2task": {
+                    "config": {
+                        "tokenizer_path": "/models/test",
+                        "max_teacher_prompt_tokens": 2048,
+                        "max_teacher_tokens": 4096,
+                        "enable_thinking": True,
+                    }
+                },
+                "task2batch": {"config": {"success_reward_threshold": 1.0, "include_environment_feedback": True}},
+            }
+        }
+    )
+    pipeline = recipe.build_pipeline(PipelineContext("science", SDPOReport))
+    record2task, task2batch = pipeline.record2task, pipeline.task2batch
+    assert isinstance(record2task, SDPOTasks) and isinstance(task2batch, SDPOBatches)
+    # The tasks read the grid from the record stage; the batches read the renderer and windows from the tasks.
+    assert (record2task.groups_per_step, record2task.rollouts_per_group) == (4, 2)
+    assert task2batch.renderer is record2task.renderer
+    assert (task2batch.max_teacher_prompt_tokens, task2batch.max_teacher_tokens) == (2048, 4096)
+    assert task2batch.enable_thinking is True
+    assert (task2batch.success_reward_threshold, task2batch.include_environment_feedback) == (1.0, True)
+
+
+@pytest.mark.unit
+def test_the_recipe_refuses_stage_settings_in_the_wrong_place() -> None:
+    # A recipe config key that a stage reads is refused: the stage reads it from the pipeline section.
+    with pytest.raises(RecipeConfigError, match="does not consume"):
+        recipe_from({"data": {"groups_per_step": 4}, "pipeline": PIPELINE})
+    with pytest.raises(RecipeConfigError, match="does not consume"):
+        SDPORecipe.service_config({"tokenizer-path": "/models/test"}, model_path="/models/test")
+    # A key in the wrong stage, and a missing tokenizer, fail when the pipeline builds.
+    context = PipelineContext("science", SDPOReport)
+    with pytest.raises(RecipeConfigError, match="success_reward_threshold"):
+        recipe_from(
+            {
+                "pipeline": {
+                    "record2task": {"config": {"tokenizer_path": "/models/test", "success_reward_threshold": 1}}
+                }
+            }
+        ).build_pipeline(context)
+    with pytest.raises(RecipeConfigError, match="tokenizer_path"):
+        recipe_from({}).build_pipeline(context)
+    with pytest.raises(RecipeConfigError, match="max_teacher_prompt_tokens"):
+        recipe_from(
+            {"pipeline": {"record2task": {"config": {"tokenizer_path": "/models/test", "max_teacher_tokens": 0}}}}
+        ).build_pipeline(context)
 
 
 def wire(weights: list[float]) -> dict[str, Any]:

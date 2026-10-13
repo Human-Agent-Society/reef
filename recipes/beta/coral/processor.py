@@ -3,11 +3,11 @@
 CORAL's attempt tree already has the shape reef's grouped relative-reward
 training wants: every attempt names its ``parent_hash``, so the siblings of
 one parent form one comparison group — attempts that started from the same
-code and diverged. This processor groups reports by parent commit and
-releases a group as one training unit once ``group_size`` scored siblings
-accrued.
+code and diverged. The record stage (``CoralRecord2Record`` in
+:mod:`recipes.beta.coral.recipe`) groups reports by parent commit and releases
+a group as one training unit once ``group_size`` scored siblings accrued.
 
-The reports it consumes are exactly what :mod:`recipes.beta.coral.reporter` emits:
+The stages consume exactly the reports that :mod:`recipes.beta.coral.reporter` emits:
 ``score``, ordered inference ``references``, and ``metadata.coral`` with
 ``agent_id``/``commit_hash``/``parent_hash``. Root attempts (no parent)
 compare against each other under a sentinel group — they all diverged from
@@ -15,19 +15,25 @@ the task seed.
 
 Token/loss-mask/logprob materialization is reef's ``SampleAssembly`` over the
 referenced INFERENCE records; a CORAL attempt is a multi-call trajectory, so
-multi-turn assembly is on by default.
+``CoralTasks`` turns multi-turn assembly on by default.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Hashable, Mapping
-from dataclasses import replace
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from typing import Any, Self
 
+from reef.core.config import config_option
+from reef.core.plugins import NoSettings
 from reef.core.trajectories import trajectory_reward
-from reef.train.processors.reported import GroupDecision, ReportContext, ReportedFeedbackProcessor, SampleAssembly
-from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
+from reef.pipeline_context import PipelineContext
+from reef.record2record import Record2Record, ReportContext
+from reef.record2task import Record2Task, ReportTasks
+from reef.record2task.assembly import SampleAssembly, SampleAssemblySettings
+from reef.task2batch import Task2Batch
+from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem, trajectories
 
 logger = logging.getLogger(__name__)
 
@@ -36,96 +42,105 @@ logger = logging.getLogger(__name__)
 ROOT_GROUP = "__coral_root__"
 
 
-class CoralProcessor(ReportedFeedbackProcessor):
-    """One CORAL sibling group = one grouped relative-reward training unit.
+def coral_metadata(context: ReportContext) -> Mapping[str, Any] | None:
+    """The report's ``metadata.coral``, or None when it has no commit hash."""
+    metadata = context.report.payload.get("metadata")
+    if not isinstance(metadata, Mapping):
+        return None
+    coral = metadata.get("coral")
+    if not isinstance(coral, Mapping):
+        return None
+    if not isinstance(coral.get("commit_hash"), str) or not coral["commit_hash"]:
+        return None
+    return coral
 
-    Config:
 
-    - ``group_size`` (default 4, min 2): scored siblings required before a
-      parent's group trains. CORAL sibling counts are dynamic, so this is a
-      recipe-level barrier, not a CORAL invariant; parents that never accrue
-      enough scored children simply never train.
+def sibling_group(context: ReportContext) -> tuple[str, str]:
+    """The attempt's sibling group (its parent commit, or ``ROOT_GROUP``) and its own commit hash."""
+    coral = coral_metadata(context)
+    if coral is None:
+        raise ValueError("CoralBatches requires metadata.coral with a commit_hash")
+    parent = coral.get("parent_hash")
+    return (parent if isinstance(parent, str) and parent else ROOT_GROUP), coral["commit_hash"]
+
+
+def attempt_release_ids(context: ReportContext) -> set[str]:
+    """The releases that served the attempt's inference records."""
+    return {
+        inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
+    }
+
+
+@dataclass(frozen=True)
+class CoralAssemblySettings(SampleAssemblySettings):
+    """The config of ``CoralTasks``: the sample-assembly keys, with multi-turn samples on by default."""
+
+    accept_multi_turn_policy_samples: bool = config_option(
+        True, help="Train on an attempt that references several model calls as one multi-turn sample."
+    )
+
+
+class CoralTasks(ReportTasks):
+    """One scored attempt as one task, with its CORAL metadata, sibling group, and release.
+
+    Config: the sample-assembly keys of ``CoralAssemblySettings``.
     """
 
-    output_schema = TrainingBatch
-    exclusive_sources = True
-    ordered_groups = False  # sibling groups close in whatever order grading lands
+    def __init__(self, settings: CoralAssemblySettings) -> None:
+        self.assembly = SampleAssembly(settings)
 
-    def __init__(self, context: ProcessorContext) -> None:
-        config = dict(context.config)
-        self.group_size = int(config.get("group_size", 4))
-        if self.group_size < 2:
-            raise ValueError("group_size must be at least two (relative rewards need contrast)")
-        config.setdefault("accept_multi_turn_policy_samples", True)
-        assembly_config = context.with_config(config)
-        self._assembly = SampleAssembly.from_config(assembly_config)
-        self._mixed_release_groups: dict[str, tuple[str, ...]] = {}
-        super().__init__(context.with_config({**config, "batch_size": 1}))
-
-    @staticmethod
-    def _coral_metadata(context: ReportContext) -> Mapping[str, Any] | None:
-        metadata = context.report.payload.get("metadata")
-        if not isinstance(metadata, Mapping):
-            return None
-        coral = metadata.get("coral")
-        if not isinstance(coral, Mapping):
-            return None
-        if not isinstance(coral.get("commit_hash"), str) or not coral["commit_hash"]:
-            return None
-        return coral
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        environ: Mapping[str, str],
+    ) -> Self:
+        return cls(CoralAssemblySettings.parse(config, plugin_class=cls))
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
-        coral = self._coral_metadata(context)
+        coral = coral_metadata(context)
         if coral is None:
-            raise ValueError("CoralProcessor requires metadata.coral with a commit_hash")
-        sample = self._assembly.build(context, context.require_score())
-        release_ids = {
-            inference.artifact_ref.release_id for inference in context.inferences if inference.artifact_ref is not None
-        }
+            raise ValueError("CoralBatches requires metadata.coral with a commit_hash")
+        sample = self.assembly.build(context, context.require_score())
+        release_ids = attempt_release_ids(context)
         if len(release_ids) > 1:
             raise ValueError(f"attempt {coral['commit_hash'][:12]} spans releases {sorted(release_ids)}")
         return sample.with_metadata(
-            coral={**coral, "group": self.grouping(context)[0], "release_id": next(iter(release_ids), None)}
+            coral={**coral, "group": sibling_group(context)[0], "release_id": next(iter(release_ids), None)}
         )
 
-    def grouping(self, context: ReportContext) -> tuple[Hashable | None, Hashable | None]:
-        coral = self._coral_metadata(context)
-        if coral is None:
-            raise ValueError("CoralProcessor requires metadata.coral with a commit_hash")
-        parent = coral.get("parent_hash")
-        group = parent if isinstance(parent, str) and parent else ROOT_GROUP
-        return group, coral["commit_hash"]
 
-    def decide_group(self, key: Hashable, items: tuple[TrainDataItem, ...]) -> GroupDecision:
-        if len(items) < self.group_size:
-            return GroupDecision.INCOMPLETE
-        versions = {
-            item.metadata["coral"]["release_id"] for item in items if item.metadata["coral"]["release_id"] is not None
-        }
-        if len(versions) <= 1:
-            return GroupDecision.READY
-        ordered = tuple(sorted(versions))
-        self._mixed_release_groups[str(key)] = ordered
-        logger.error(
-            "CORAL sibling group %s discarded: %d attempts span releases %s",
-            key,
-            len(items),
-            list(ordered),
-        )
-        return GroupDecision.DISCARD
+class CoralBatches(Task2Batch):
+    """One CORAL sibling group, one batch: the siblings of one parent are one relative-reward group.
 
-    def status(self) -> Mapping[str, Any]:
-        return {
-            "discarded_groups": [
-                {"parent": parent, "reason": "mixed_release_ids", "release_ids": list(versions)}
-                for parent, versions in sorted(self._mixed_release_groups.items())
-            ],
-        }
+    The record stage decides when a group is complete (``group_size`` in
+    ``pipeline.record2record.config``). This stage takes no config.
+    """
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        record2task: Record2Task,
+        environ: Mapping[str, str],
+    ) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(context)
+
+    def __init__(self, context: PipelineContext) -> None:
+        # One batch is one sibling group.
+        super().__init__(context, 1)
 
     def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
         parents = {item.metadata["coral"]["group"] for item in items}
         if len(parents) != 1:
-            raise RuntimeError("CoralProcessor batches exactly one sibling group per step")
+            raise RuntimeError("CoralBatches batches exactly one sibling group per step")
         parent = next(iter(parents))
         batch = TrainingBatch(f"{self.scenario}:coral:{parent}:{batch_number}", items)
         group = trajectories(batch)

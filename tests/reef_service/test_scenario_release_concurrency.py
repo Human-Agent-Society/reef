@@ -13,14 +13,14 @@ from reef.artifact import Artifact, ArtifactConflict, ArtifactPublicationError, 
 from reef.core import AgentRecord, RequestType
 from reef.core.errors import ReefError
 from reef.dispatcher import Dispatcher
+from reef.evaluation import EvaluationResult, UpdateCandidate
 from reef.recipe import Recipe
 from reef.scenario import Scenario
 from reef.storage.commit_log import CommitLogScenarioStore
 from reef.storage.sqlite import SQLiteScenarioStorage
 from reef.train import CandidateBackend, PreparedStep, Trainer, TrainStepResult
-from reef.train.evaluation import EvaluationResult, UpdateCandidate
 
-from ._threshold_processor import ThresholdProcessor
+from ._threshold_processor import threshold_pipeline
 
 
 class _LocalBackend(CandidateBackend):
@@ -74,7 +74,7 @@ class _LocalRecipe(Recipe):
         return Trainer.build(
             scenario,
             records,
-            processor_factory=lambda context: ThresholdProcessor(context.with_config({"batch_size": 1})),
+            pipeline_factory=threshold_pipeline,
             candidate_backend=self.backend,
             algorithm_state=algorithm_state,
             experiment_logger=experiment_logger,

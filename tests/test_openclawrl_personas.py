@@ -16,6 +16,9 @@ from recipes.openclawrl.examples.openclawrl.user_sim.personas import (
     student_style_violations,
     student_violations,
 )
+from recipes.openclawrl.judging import OpenClawRLJudgingSettings, OpenClawRLRecord2Record
+from recipes.openclawrl.processor import OpenClawRLBatchSettings, OpenClawRLTasks
+from reef.train.pipeline import TrainingPipeline
 
 CLEAN_REPLY = """Sure, here is the working.
 
@@ -136,11 +139,18 @@ def _judged_turns(processor, worker, versions: list[str], score: float = 1.0) ->
 
 @pytest.mark.unit
 def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> None:
-    from recipes.openclawrl import OpenClawRLProcessor
-    from reef.train.types import ProcessorContext
+    from recipes.openclawrl import OpenClawRLBatches
+    from reef.pipeline_context import PipelineContext
 
     worker = _FakeWorker()
-    processor = OpenClawRLProcessor(ProcessorContext("s", {"batch_size": 3}), worker=worker)
+    context = PipelineContext("s")
+    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), worker=worker)
+    processor = TrainingPipeline(
+        context,
+        record2record=stage,
+        record2task=OpenClawRLTasks(),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=3), stage),
+    )
     # Two stale leftovers from before a weight swap, then a fresh generation.
     _judged_turns(processor, worker, ["v1", "v1", "v2", "v2", "v2"])
 
@@ -152,11 +162,18 @@ def test_openclawrl_processor_drops_unfillable_stale_version_candidates() -> Non
 
 @pytest.mark.unit
 def test_openclawrl_processor_keeps_single_version_queue_intact() -> None:
-    from recipes.openclawrl import OpenClawRLProcessor
-    from reef.train.types import ProcessorContext
+    from recipes.openclawrl import OpenClawRLBatches
+    from reef.pipeline_context import PipelineContext
 
     worker = _FakeWorker()
-    processor = OpenClawRLProcessor(ProcessorContext("s", {"batch_size": 3}), worker=worker)
+    context = PipelineContext("s")
+    stage = OpenClawRLRecord2Record(context, OpenClawRLJudgingSettings(), worker=worker)
+    processor = TrainingPipeline(
+        context,
+        record2record=stage,
+        record2task=OpenClawRLTasks(),
+        task2batch=OpenClawRLBatches(context, OpenClawRLBatchSettings(batch_size=3), stage),
+    )
     _judged_turns(processor, worker, ["v1", "v1"])
     # All-one-version queue below batch size: nothing is dropped, not ready yet.
     assert not processor.ready()

@@ -279,3 +279,61 @@ def test_a_settled_job_an_earlier_release_left_without_its_step_is_left_alone():
     training.journal.update(commit_acknowledged=False)
     with pytest.raises(TrainingRuntimeError, match="missing its durable identity"):
         scheduler.recover_pending_step(3)
+
+
+@pytest.mark.parametrize(
+    "status,committed_step,job_id,legacy,finished",
+    [
+        ("READY_TO_COMMIT", 0, "job-1", False, False),
+        ("READY_TO_COMMIT", 3, None, False, False),
+        ("READY_TO_COMMIT", 3, "job-1", False, True),
+        ("HEAD_COMMITTED", 3, "different-job", False, False),
+        ("COMPLETE", 1, None, True, True),
+        ("COMPLETE", 2, None, True, False),
+        ("COMPLETE", 1, None, False, False),
+        ("READY_TO_COMMIT", 1, None, True, False),
+        ("COMPLETE", 1, "different-job", True, False),
+    ],
+)
+def test_recovery_requires_job_identity_or_exact_legacy_training_commit(
+    status: str, committed_step: int, job_id: str | None, legacy: bool, finished: bool
+) -> None:
+    training = CheckpointTrainer()
+    staged_journal(training, state=status)
+    inference = WeightReceiver()
+    inference.loaded = "engine:1"
+    scheduler = RuntimeScheduler(training, inference)
+    scheduler.recover_pending_step(
+        committed_step, committed_training_job_id=job_id, committed_training_without_job_id=legacy
+    )
+    assert inference.inference_admission_status["open"] is finished
+    assert inference.calls == ([("acknowledge", "job-1")] if finished else [])
+    assert training.calls == []
+
+
+def test_failed_candidate_commit_keeps_admission_closed_until_completion_retries(monkeypatch):
+    training = CheckpointTrainer()
+    inference = WeightReceiver()
+    scheduler = RuntimeScheduler(training, inference)
+    scheduler.activate_candidate(scheduler.train_candidate({}))
+    staged_journal(training)
+    committed: list[str] = []
+
+    def fail_commit(training_job_id: str) -> None:
+        raise OSError("candidate commit unavailable")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(training, "commit_candidate", fail_commit)
+        with pytest.raises(OSError, match="candidate commit unavailable"):
+            scheduler.acknowledge_commit(1, "job-1")
+    assert not inference.inference_admission_status["open"]
+    assert inference.current_runtime_load_id() == "engine:0"
+    assert inference.serving_runtime_load_id() == "engine:1"
+
+    monkeypatch.setattr(training, "commit_candidate", committed.append)
+    scheduler.acknowledge_commit(1, "job-1")
+    assert committed == ["job-1"]
+    assert inference.calls == [("activate", "job-1"), ("acknowledge", "job-1"), ("acknowledge", "job-1")]
+    assert training.calls == [("train", {})]
+    assert inference.current_runtime_load_id() == "engine:1"
+    assert inference.inference_admission_status["open"]

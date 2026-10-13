@@ -13,10 +13,7 @@ from __future__ import annotations
 
 import pytest
 
-from reef.runtime.interfaces import ActivatedModel, ModelCandidate
-from reef.train.backend import CandidateBackend
-from reef.train.cordis_backend import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
-from reef.train.evaluation import (
+from reef.evaluation import (
     AlwaysSelectMixin,
     BackendAlwaysSelectPlugin,
     BackendEvaluateMixin,
@@ -28,6 +25,9 @@ from reef.train.evaluation import (
     SelectionDecision,
     UpdateCandidate,
 )
+from reef.evaluation.harness import FloorMixin, FloorPlugin, ScoreComparisonMixin, ScoreComparisonPlugin
+from reef.runtime.interfaces import ActivatedModel, ModelCandidate
+from reef.train.backend import CandidateBackend
 
 
 class DecideOnlyBackend(CandidateEvaluator):

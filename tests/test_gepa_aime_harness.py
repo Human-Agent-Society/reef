@@ -122,16 +122,19 @@ def test_default_driver_pool_uses_a_stable_answer_snapshot(load, monkeypatch, tm
     config["execution"]["evolution"]["workers"] = 1
     config["recipe"]["config"]["evolution"]["gepa"]["archive"] = str(tmp_path / "archive")
     monkeypatch.setattr(driver, "load_config", lambda path: config)
-    monkeypatch.setattr("reef.train.cordis_backend.backend.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
+    monkeypatch.setattr("reef.evaluation.harness.run_episode", lambda *args, **kwargs: pi_episode("### 17"))
     _, recipe = driver.load_recipe(["problem"], api_key="dummy")
     with SQLiteRecordStore() as records:
         trainer = recipe.build("test", records)
         try:
             backend = trainer.candidate_backend
-            assert backend._worker_selection.settings.backend == "uni"
-            assert [row.score for row in backend._evaluate_pairings([({}, "problem"), ({}, "problem")])] == [1.0, 1.0]
+            assert backend._episode_evaluator.worker_selection.settings.backend == "uni"
+            assert [
+                row.score
+                for row in backend._episode_evaluator.run_episodes([({}, "problem", None), ({}, "problem", None)])
+            ] == [1.0, 1.0]
             driver.aime.register([{"input": "problem", "answer": "### 18"}])
-            assert backend._evaluate_pairings([({}, "problem")])[0].score == 1.0
+            assert backend._episode_evaluator.run_episodes([({}, "problem", None)])[0].score == 1.0
         finally:
             trainer.close()
 
@@ -179,11 +182,13 @@ def test_driver_evaluates_with_isolated_workers(load, monkeypatch, tmp_path, exe
         trainer = recipe.build("isolated", records)
         try:
             backend = trainer.candidate_backend
-            assert backend._worker_selection.settings.backend == ("mp" if executor == "auto" else executor)
-            rows = backend._evaluate_pairings([({}, "problem"), ({}, "problem")])
+            assert backend._episode_evaluator.worker_selection.settings.backend == (
+                "mp" if executor == "auto" else executor
+            )
+            rows = backend._episode_evaluator.run_episodes([({}, "problem", None), ({}, "problem", None)])
             assert [row.score for row in rows] == [1.0, 1.0]
             with pytest.raises(Exception, match="no AIME answer is registered"):
-                backend._evaluate_pairings([({}, "unknown")])
+                backend._episode_evaluator.run_episodes([({}, "unknown", None)])
         finally:
             trainer.close()
 
@@ -193,7 +198,7 @@ def test_driver_keeps_custom_task_hooks(load, monkeypatch):
     config = driver.load_config(EXAMPLE_DIR / "gepa.yaml")
 
     from recipes.gepa.method import Feedback
-    from reef.train.cordis_backend.strategies import EpisodeScorer
+    from reef.evaluation.harness import EpisodeScorer
 
     class HalfScorer(EpisodeScorer):
         def score(self, task, result):

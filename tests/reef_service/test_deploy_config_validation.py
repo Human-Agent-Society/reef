@@ -13,8 +13,6 @@ from reef.service.deploy.config_utils import DeployConfigError, load_config
 from reef.service.deploy.execution import validate_services
 from reef.service.deploy.process import _command_argv
 
-VALID = "services:\n  - name: worker\n    command: python -c 'print(1)'\n"
-
 
 def _write(tmp_path: Path, text: str) -> Path:
     path = tmp_path / "stack.yaml"
@@ -64,15 +62,17 @@ def test_cli_config_paths_and_child_config_follow_working_directory(tmp_path: Pa
     monkeypatch.setattr(orchestrator, "_Stack", StackStub)
     monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: False)
     path = tmp_path / "stack.yaml"
-    path.write_text("run_dir: work/stack\n" + VALID)
+    path.write_text(
+        "reef:\n  run-dir: work/stack\ninference:\n  upstream-url: http://localhost:8000\n  upstream-model: demo\n"
+    )
     arguments = ["serve", "-c", path.name]
 
     with pytest.raises(SystemExit) as caught:
         cli_main(arguments)
 
     assert caught.value.code == 0
-    assert captured["path"] == path
-    assert captured["config"]["services"][0]["name"] == "worker"
+    assert captured["path"] != path
+    assert captured["config"]["reef"]["upstream_model"] == "demo"
     assert captured["run_dir"] == tmp_path / "work" / "stack"
 
 
@@ -268,17 +268,14 @@ def test_invalid_stack_never_downloads_or_launches(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(orchestrator, "resolve_model_paths", must_not_run)
     monkeypatch.setattr(orchestrator, "_Stack", must_not_run)
-    path = _write(
-        tmp_path, "services:\n  - name: worker\n    command: sleep 60\n  - name: worker\n    command: echo 1\n"
-    )
-    with pytest.raises(DeployConfigError, match="duplicated: worker"):
+    path = _write(tmp_path, "inference:\n  model-pth: /models/demo\n")
+    with pytest.raises(DeployConfigError, match=r"unknown config fields: inference\.model-pth"):
         orchestrator._run_orchestrator(str(path))
     assert not (tmp_path / "reef-stack").exists()
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("override_required_env", [False, True])
-def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeypatch, override_required_env) -> None:
+def test_cli_overrides_satisfy_required_environment_references(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     class StackStub:
@@ -302,39 +299,18 @@ def test_orchestrator_uses_exactly_the_declared_services(tmp_path: Path, monkeyp
     monkeypatch.setattr(orchestrator, "resolve_model_paths", lambda config: False)
     monkeypatch.delenv("REEF_TEST_URL", raising=False)
     monkeypatch.delenv("REEF_TEST_MODEL", raising=False)
-    upstream_fields = (
-        "  upstream_url: ${REEF_TEST_URL:?}\n  upstream_model: ${REEF_TEST_MODEL:?}\n" if override_required_env else ""
-    )
     path = _write(
         tmp_path,
-        f"run_dir: {tmp_path / 'run'}\n"
-        "reef:\n"
-        "  recipe: recipe\n"
-        f"{upstream_fields}"
-        "services:\n"
-        "  - name: model\n"
-        "    command: model-server\n"
-        "  - name: reef\n"
-        '    command: ["${REEF_PYTHON}", "-m", "reef.service"]\n'
-        "    depends_on: [model]\n",
+        f"reef:\n  run-dir: {tmp_path / 'run'}\n"
+        "inference:\n  upstream-url: ${REEF_TEST_URL:?}\n  upstream-model: ${REEF_TEST_MODEL:?}\n",
     )
 
-    overrides = (
-        {"reef.upstream_url": "http://127.0.0.1:8000/v1", "upstream_model": "provider/model"}
-        if override_required_env
-        else None
-    )
+    overrides = {"inference.upstream-url": "http://127.0.0.1:8000/v1", "upstream-model": "provider/model"}
     assert orchestrator._run_orchestrator(str(path), overrides) == 0
-    if override_required_env:
-        for key in ("config", "child_config"):
-            assert captured[key]["reef"]["upstream_url"] == "http://127.0.0.1:8000/v1"
-            assert captured[key]["reef"]["upstream_model"] == "provider/model"
-    services = captured["services"]
-    assert isinstance(services, list)
-    assert services == [
-        {"name": "model", "command": "model-server"},
-        {"name": "reef", "command": [sys.executable, "-m", "reef.service"], "depends_on": ["model"]},
-    ]
+    for key in ("config", "child_config"):
+        assert captured[key]["reef"]["upstream_url"] == "http://127.0.0.1:8000/v1"
+        assert captured[key]["reef"]["upstream_model"] == "provider/model"
+    assert [service["name"] for service in captured["services"]] == ["reef"]
 
 
 @pytest.mark.unit

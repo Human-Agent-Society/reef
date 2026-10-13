@@ -4,7 +4,6 @@
 # count are the reduced integration smoke the recipe page describes.
 # TTTD_STATE_DIR is the absolute root all durable state hangs off.
 
-schema-version: 2
 reef:
   host: 127.0.0.1
   port: 8900
@@ -20,16 +19,21 @@ inference:
 recipe:
   implementation: recipes.tttd.recipe:TTTDRecipe
   config:
-    groups-per-step: 2
-    rollouts-per-group: 2
     checkpoint-every-n-versions: 1
+# TTTD's stages. The record stage owns the step grid; the later stages read it from there.
+# harness/harbor_agent.py reads this grid, so the harness and the stack cannot disagree about the step.
+pipeline:
+  record2record:
+    config:
+      groups_per_step: 2
+      rollouts_per_group: 2
 training:
   backend: tinker
   ready-timeout: 1800
   timeout-s: 7200
   config:
-    # The grid and completion limit. harness/harbor_agent.py reads these same
-    # keys, so the harness and the stack cannot disagree about the step.
+    # The step count and completion limit. harness/harbor_agent.py reads these
+    # same keys, so the harness and the stack cannot disagree about the run.
     steps: 1
     max_new_tokens: 26000
     enable_thinking: true
@@ -39,7 +43,7 @@ training:
     learning-rate: 0.00004
     kl-coef: 0.1
     # One optimizer step over the whole grid, as global-batch-size does for Slime.
-    batch-size: "${recipe.config.groups-per-step}"
+    batch-size: "${pipeline.record2record.config.groups_per_step}"
 storage:
   artifact-repository: ${TTTD_STATE_DIR}/artifacts.git
   artifact-work-dir: ${TTTD_STATE_DIR}/artifact-work

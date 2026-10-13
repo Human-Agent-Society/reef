@@ -13,24 +13,18 @@ from pathlib import Path
 import pytest
 from reef_service.test_harness_recipe import MODEL, backend, batch, evaluate, make_binary, run_backend_step
 
-import reef.train.cordis_backend.backend as reef_cordis_backend
+import reef.evaluation.harness as reef_evaluation_harness
 from reef.core.plugins import PluginReference
 from reef.core.requirements import REQUIRE_KINDS
 from reef.core.training_request import TrainingRequest
+from reef.evaluation import EvaluationResult, UpdateCandidate
+from reef.evaluation.harness import FailureObservation, FloorPlugin, ScoreComparisonPlugin
 from reef.harness.adapters import get_adapter
+from reef.harness.tree.nodes import RECORD_TEXT_CAP
 from reef.recipe import RecipeConfigError
 from reef.recipe.cordis import CordisRecipe
-from reef.train.cordis_backend import (
-    CordisBackend,
-    FloorPlugin,
-    Mutation,
-    ScoreComparisonPlugin,
-    StepProgress,
-    StepProposal,
-)
-from reef.train.cordis_backend.backend import RECORD_TEXT_CAP
-from reef.train.cordis_backend.manifest import FailureObservation, advance
-from reef.train.evaluation import EvaluationResult, UpdateCandidate
+from reef.train.cordis_backend import CordisBackend, Mutation, StepProgress, StepProposal
+from reef.train.cordis_backend.manifest import advance
 from reef.train.types import NoArtifactPublication, SavedArtifactPublication, TrainingBatch
 
 from ._strategies import resolve_episode_scorer, resolve_proposer
@@ -104,13 +98,13 @@ def test_the_floor_plugin_gates_the_candidate_alone() -> None:
 
 def test_a_candidate_only_evaluation_runs_no_current_episode_and_still_settles(tmp_path: Path, monkeypatch) -> None:
     sides: list[str] = []
-    original = reef_cordis_backend.run_episode
+    original = reef_evaluation_harness.run_episode
 
     def spy(descriptor, files, prompt, **kwargs):
         sides.append("candidate" if "marker" in files.get("pi-agent/AGENTS.md", "") else "current")
         return original(descriptor, files, prompt, **kwargs)
 
-    monkeypatch.setattr(reef_cordis_backend, "run_episode", spy)
+    monkeypatch.setattr(reef_evaluation_harness, "run_episode", spy)
     b = backend(tmp_path, lambda n, s, m: MARKER)
     prepared = b.prepare_step(batch(), b.initial_state(), 0)
     candidate = prepared.candidate
@@ -187,7 +181,8 @@ def test_a_candidate_that_misses_the_floor_reverts_and_carries_the_manifest_unto
 def test_recipe_parses_the_floor_selection(tmp_path: Path, monkeypatch) -> None:
     module = tmp_path / "demo_floor.py"
     module.write_text(
-        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
         "class Evaluate(EpisodeScorer):\n"

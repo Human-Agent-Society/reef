@@ -14,6 +14,7 @@ from reef.core.tasks import (
     HarborTask,
     HarborTaskConflict,
     HarborTaskError,
+    primary_reward,
     read_harbor_task,
     write_harbor_task,
 )
@@ -22,6 +23,21 @@ VERIFIER = (
     "#!/bin/sh\nset -eu\n"
     '[ "$(cat /workspace/answer.txt)" = 391 ] && echo 1 > /logs/verifier/reward.txt || echo 0 > /logs/verifier/reward.txt\n'
 )
+
+
+@pytest.mark.parametrize(
+    ("rewards", "expected"),
+    [
+        ({"accuracy": 1.0, "reward": 0.0}, 0.0),
+        ({"accuracy": 0.5}, 0.5),
+        ({"accuracy": 1.0, "style": 0.0}, None),
+        ({}, None),
+        ({"accuracy": 1.0, "reward": None}, None),
+        ({"reward": "invalid"}, "invalid"),
+    ],
+)
+def test_primary_reward_selection(rewards: dict[str, object], expected: object) -> None:
+    assert primary_reward(rewards) == expected
 
 
 def task(**overrides: object) -> HarborTask:

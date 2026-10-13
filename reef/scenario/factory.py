@@ -365,7 +365,8 @@ class ScenarioFactory:
                 experiment_logger=experiment_logger,
             )
             if any(
-                bound.trainer.candidate_backend is not None and bound.trainer.training_mode != recipe.training_mode
+                bound.trainer.candidate_backend is not None
+                and bound.trainer.pipeline.training_mode != recipe.training_mode
                 for bound in trainers
             ):
                 # A trainer that runs no step keeps no mode; every stepping trainer runs the recipe's.

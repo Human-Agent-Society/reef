@@ -12,10 +12,25 @@ import pytest
 import yaml
 
 from reef.cli import main as cli_main
+from reef.service.deploy import orchestrator
+
+
+def _write_stack(path: Path, run_dir: Path) -> None:
+    """A provider deployment; each test replaces the processes Reef assembles for it."""
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "reef": {"run-dir": str(run_dir)},
+                "inference": {"upstream-url": "http://127.0.0.1:9", "upstream-model": "demo"},
+            }
+        )
+    )
 
 
 @pytest.mark.parametrize("failure", ["exit", "timeout", "missing-command"])
-def test_startup_failure_reports_reason_and_logs_then_stops_processes(tmp_path: Path, capfd, failure) -> None:
+def test_startup_failure_reports_reason_and_logs_then_stops_processes(
+    tmp_path: Path, capfd, monkeypatch, failure
+) -> None:
     pid_file = tmp_path / "worker.pid"
     command = [
         sys.executable,
@@ -30,21 +45,16 @@ def test_startup_failure_reports_reason_and_logs_then_stops_processes(tmp_path: 
         command = [str(tmp_path / "missing-program")]
     run_dir = tmp_path / "logs"
     config_path = tmp_path / "stack.yaml"
-    config_path.write_text(
-        yaml.safe_dump(
-            {
-                "run_dir": str(run_dir),
-                "services": [
-                    {"name": "model", "command": command, "ready": "false", "ready_timeout": 1},
-                    {
-                        "name": "api",
-                        "command": [sys.executable, "-c", "raise RuntimeError('must not start')"],
-                        "depends_on": ["model"],
-                    },
-                ],
-            }
-        )
-    )
+    _write_stack(config_path, run_dir)
+    services = [
+        {"name": "model", "command": command, "ready": "false", "ready_timeout": 1},
+        {
+            "name": "api",
+            "command": [sys.executable, "-c", "raise RuntimeError('must not start')"],
+            "depends_on": ["model"],
+        },
+    ]
+    monkeypatch.setattr(orchestrator, "validate_services", lambda config, path: services)
 
     with pytest.raises(SystemExit) as caught:
         cli_main(["serve", "-c", str(config_path)])
@@ -70,31 +80,31 @@ def test_startup_failure_reports_reason_and_logs_then_stops_processes(tmp_path: 
 
 def test_sigterm_during_startup_stops_the_service_process(tmp_path: Path) -> None:
     pid_file = tmp_path / "service.pid"
-    path = tmp_path / "stack.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "run_dir": str(tmp_path / "logs"),
-                "services": [
-                    {
-                        "name": "loading-model",
-                        "command": [
-                            sys.executable,
-                            "-c",
-                            "import os,time; from pathlib import Path; "
-                            f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(120)",
-                        ],
-                        "ready": "false",
-                        "ready_timeout": 60,
-                    }
-                ],
-            }
-        )
+    _write_stack(tmp_path / "stack.yaml", tmp_path / "logs")
+    services = [
+        {
+            "name": "loading-model",
+            "command": [
+                sys.executable,
+                "-c",
+                "import os,time; from pathlib import Path; "
+                f"Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(120)",
+            ],
+            "ready": "false",
+            "ready_timeout": 60,
+        }
+    ]
+    script = tmp_path / "serve.py"
+    script.write_text(
+        "from reef.cli import main\n"
+        "from reef.service.deploy import orchestrator\n"
+        f"orchestrator.validate_services = lambda config, path: {services!r}\n"
+        "main(['serve', '-c', 'stack.yaml'])\n"
     )
     root = Path(__file__).resolve().parents[2]
     env = {**os.environ, "PYTHONPATH": os.pathsep.join(filter(None, (str(root), os.environ.get("PYTHONPATH"))))}
     process = subprocess.Popen(
-        [sys.executable, "-m", "reef", "serve", "-c", path.name],
+        [sys.executable, script.name],
         cwd=tmp_path,
         env=env,
         stdout=subprocess.PIPE,

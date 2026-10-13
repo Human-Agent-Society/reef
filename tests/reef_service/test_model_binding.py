@@ -196,7 +196,8 @@ def test_the_budgeted_binding_records_each_calls_usage_for_the_step(monkeypatch)
 
 
 def test_chat_record_keeps_provider_reasoning_separate_from_reply(monkeypatch) -> None:
-    from reef.train.cordis_backend.backend import RECORD_TEXT_CAP, _BudgetedBinding, _StepCalls
+    from reef.harness.tree.nodes import RECORD_TEXT_CAP
+    from reef.train.cordis_backend.backend import _BudgetedBinding, _StepCalls
 
     response = {
         "id": "response-1",
@@ -427,7 +428,8 @@ def test_compose_nodes_repeats_the_model_entries_for_every_client_model() -> Non
 def test_recipe_reads_client_models_into_the_harness_surface(tmp_path: Path) -> None:
     module = tmp_path / "demo_client_models.py"
     module.write_text(
-        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
         "class Evaluate(EpisodeScorer):\n"
@@ -555,7 +557,8 @@ def test_from_config_reads_the_key_from_the_named_environment_variable() -> None
 def test_recipe_declares_named_models_under_evolution_models(tmp_path) -> None:
     module = tmp_path / "demo_models.py"
     module.write_text(
-        "from reef.train.cordis_backend.strategies import EpisodeScorer, Proposer\n\n"
+        "from reef.evaluation.harness import EpisodeScorer\n"
+        "from reef.train.cordis_backend.strategies import Proposer\n\n"
         "class Propose(Proposer):\n"
         "    def propose(self, nodes, samples, models, **keywords):\n        return None\n\n"
         "class Evaluate(EpisodeScorer):\n"

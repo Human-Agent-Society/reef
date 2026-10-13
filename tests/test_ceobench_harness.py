@@ -17,6 +17,7 @@ from types import ModuleType, SimpleNamespace
 import httpx
 import openai
 import pytest
+import yaml
 
 from tests.test_example_entrypoints import EXAMPLE_DIRS, _load_harness
 
@@ -1132,7 +1133,9 @@ def test_task_pins_the_upstream_commit_and_ships_no_credentials() -> None:
             text = path.read_text(encoding="utf-8", errors="replace")
             assert "sk-ant-" not in text and "AKIA" not in text, path
     serve = (EXAMPLE_DIR / "serve.yaml").read_text(encoding="utf-8")
-    assert "batch-size: 8" in serve and "recipes.sao.recipe:SAORecipe" in serve
+    deployment = yaml.safe_load(serve)
+    assert deployment["recipe"]["implementation"] == "recipes.sao.recipe:SAORecipe"
+    assert deployment["pipeline"]["task2batch"]["config"]["batch_size"] == 8
 
 
 @pytest.mark.unit

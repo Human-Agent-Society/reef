@@ -228,7 +228,14 @@ def test_mutable_component_defaults_are_independent():
 
 def test_launch_rejects_invalid_extension_before_model_download(extension, tmp_path, monkeypatch):
     path = tmp_path / "stack.yaml"
-    path.write_text(yaml.safe_dump({"reef": {"recipe": "reef_config_extension:Training"}, "services": []}))
+    path.write_text(
+        yaml.safe_dump(
+            {
+                "recipe": {"implementation": "reef_config_extension:Training"},
+                "inference": {"model-path": "/models/demo"},
+            }
+        )
+    )
 
     def forbidden(*args, **kwargs):
         raise AssertionError("invalid configuration reached model download or startup")
@@ -248,7 +255,7 @@ def test_selected_recipe_help_works_without_optional_gpu_modules(tmp_path):
         "    label: str = config_field('default', help='Lightweight label.')\n"
     )
     path = tmp_path / "stack.yaml"
-    path.write_text("reef:\n  recipe: light_recipe:LightRecipe\n")
+    path.write_text("recipe:\n  implementation: light_recipe:LightRecipe\n")
     script = (
         "import sys\nfrom reef.service.deploy.orchestrator import main\n"
         "try:\n    main(['-c', sys.argv[1], '--help'])\n"
@@ -341,30 +348,6 @@ def test_opaque_python_backend_options_preserve_backend_objects():
     assert parsed.options["backend_object"] is marker
 
 
-def test_profile_overrides_reach_the_recipe_without_reloading_original_yaml(extension, tmp_path):
-    from reef.service.assembly import _serving_recipe
-
-    # This source file is deliberately different from the merged deployment.
-    original = tmp_path / "example.yaml"
-    original.write_text("implementation: reef_config_extension:Serving\ndata: {label: original}\n")
-    combined = resolve_deployment(
-        {
-            "reef": {"recipe": "example", "upstream_model": "model"},
-            "implementation": "reef_config_extension:Serving",
-            "data": {"label": "yaml"},
-            "model": {"path": "model"},
-            "runtime": {"type": "reef_config_extension:runtime"},
-        },
-        ["--data.label", "001", "--runtime.label", "true", "--no-runtime.enabled"],
-    )
-    child = service_config_from_mapping(yaml.safe_load(yaml.safe_dump(combined)))
-    recipe = _serving_recipe("example", child, {"REEF_RECIPE_CONFIG_DIR": str(tmp_path)}, None)
-    assert recipe.label == "001"
-    assert recipe.runtime.parsed_config["label"] == "true"
-    assert recipe.runtime.parsed_config["enabled"] is False
-    assert "original" in original.read_text()
-
-
 def test_references_expand_inside_declared_recipe_containers(extension):
     combined = resolve_deployment(
         {
@@ -380,18 +363,7 @@ def test_references_expand_inside_declared_recipe_containers(extension):
     assert combined["reef"]["options"] == {"nested": {"label": "001"}}
 
 
-def test_profile_can_omit_its_runtime_with_an_empty_object(extension):
-    combined = resolve_deployment(
-        {
-            "reef": {"recipe": "example"},
-            "implementation": "reef_config_extension:Serving",
-            "runtime": {},
-        }
-    )
-    assert combined["runtime"] == {}
-
-
-def test_versioned_recipe_layout_uses_selected_schema(extension):
+def test_recipe_layout_uses_selected_schema(extension):
     from reef.service.deploy.deployment_config import (
         normalize_component_layout,
         translate_layout,
@@ -400,7 +372,6 @@ def test_versioned_recipe_layout_uses_selected_schema(extension):
 
     config = translate_layout(
         {
-            "schema-version": 2,
             "recipe": {"implementation": "reef_config_extension:Training", "config": {"label": "001", "count": 2}},
             "inference": {"model-path": "org/model", "options": {"custom": "${recipe.config.count}"}},
         }

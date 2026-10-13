@@ -10,8 +10,8 @@ Reproduction of [Single-Rollout Asynchronous Optimization](https://arxiv.org/abs
 
 ```text
 sao/
-  recipe.py       SAORecipe: training spec, loss family "sao", batching, runtime binding
-  processor.py    reported feedback, singleton: one scored rollout is one unit
+  recipe.py       SAORecipe: training spec, loss family "sao", default stages; SAORecord2Record
+  processor.py    SAOTasks and SAOBatches: one scored rollout is one unit, batch_size units a step
   objective.py    selects the SAO loss; the recipe binds the per-sample step schedule
   slime/          the training-plane objective: DIS ratio, colocated critic
   examples/
@@ -21,4 +21,4 @@ sao/
 
 ## Where the rest is documented
 
-[The sao recipe page](../../docs/user-guide/recipes/sao.rst) covers configuration and runtime metrics, [Evolve your model](../../docs/user-guide/evolve-your-model.rst) walks the training stack, and the [example README](examples/imo_answerbench/README.md) records implementation details, distance from the paper's protocol, and the completed comparison.
+[The sao recipe page](../../docs/user-guide/recipes/sao.rst) covers configuration (the `pipeline` section) and runtime metrics, [Evolve your model](../../docs/user-guide/evolve-your-model.rst) walks the training stack, and the [example README](examples/imo_answerbench/README.md) records implementation details, distance from the paper's protocol, and the completed comparison.

@@ -1,129 +1,120 @@
-"""Harness-evolution processor: pair recorded requests with reported scores, unmodified."""
+"""Harness evolution: recorded requests as traces, with reported scores or unscored, batched unmodified."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
-from dataclasses import dataclass
+from collections.abc import Mapping
+from typing import Any, Self
 
-from reef.core import AgentRecord, RequestType
-from reef.core.training_request import TrainingRequest
+from reef.core import RequestType
+from reef.core.plugins import NoSettings
 from reef.core.trajectories import make_trajectory
-from reef.train.experience import ExperienceBuffer, ExperienceUnit
-from reef.train.processors.base import DataProcessor
-from reef.train.processors.reported import ReportContext, ReportedFeedbackProcessor, reported_task
-from reef.train.types import ProcessorContext, TrainDataItem, TrainingBatch, TrajectoryItem
+from reef.pipeline_context import PipelineContext
+from reef.record2record import (
+    Record2Record,
+    RecordSet,
+    ReportContext,
+    ReportGrouping,
+    ReportRecord2Record,
+    SingleRecordSet,
+)
+from reef.record2task import Record2Task, ReportTasks, TaskResult
+from reef.record2task.assembly import reported_task
+from reef.task2batch import BatchSettings, Task2Batch
+from reef.train.types import TrainDataItem, TrainingBatch, TrajectoryItem
 
 
-class CordisProcessor(ReportedFeedbackProcessor):
-    """Pair recorded requests with reported scores and batch them unmodified.
+class TraceRecord2Record(ReportRecord2Record):
+    """Traces from reports: every valid report trains by itself, as one set with the requests it references.
 
     Requests are recorded post-transform, so a trace shows exactly what the
-    backend served. Every valid report contributes a trace. A report may reference
-    one request or a whole run's worth; several references become one
-    trajectory sample. The backends consume
-    the resulting trace batches without adding processor logic. In ``hybrid``
-    a queued instruction batches with the reported traces an automatic batch
-    would take next, up to ``batch_size``, so the proposer reads the request
-    beside them; in ``manual`` it runs alone.
+    backend served. The default record stage of harness evolution. A
+    deployment without outcome reports names ``InferenceRecord2Record`` and
+    ``InferenceTasks`` instead, to evolve on recorded traffic alone; a
+    measured result beats model self judgment, so a deployment with reports
+    keeps this stage.
     """
 
-    output_schema = TrainingBatch
-    supported_training_modes = frozenset({"auto", "manual", "hybrid"})
-    required_request_types = frozenset(RequestType)
+    def __init__(self, context: PipelineContext) -> None:
+        super().__init__(context, ReportGrouping())
 
-    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
-        if request is not None and self.training_mode == "manual":
-            self.experience_buffer.reserve(0)
-            return TrainingBatch(request.id, ())
-        # In hybrid an instruction takes the units an automatic batch would, none included; the base attaches it.
-        return self._make_pending(batch_number)
+    @classmethod
+    def from_config(cls, config: Mapping[str, Any], *, context: PipelineContext, environ: Mapping[str, str]) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls(context)
+
+
+class TraceTasks(ReportTasks):
+    """One report's referenced requests, as served, as one trace task with the reported score.
+
+    Several references become one trajectory sample.
+    """
+
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        environ: Mapping[str, str],
+    ) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls()
 
     def make_sample(self, context: ReportContext) -> TrajectoryItem:
         sample = make_trajectory(context.inferences, context.require_score(), context.report.payload.get("feedback"))
         task = reported_task(context.report.payload.get("metadata"))
         return sample if task is None else sample.with_metadata(task=task)
 
-    def make_batch(self, items: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
-        return TrainingBatch(f"{self.scenario}:harness_evolve:{batch_number}", items)
 
+class InferenceTasks(Record2Task):
+    """One recorded inference as one unscored trace task, with ``InferenceRecord2Record``.
 
-@dataclass(frozen=True, kw_only=True)
-class RecordUnit(ExperienceUnit):
-    """One inference record in the experience buffer; ``unit_id`` is the record's ID."""
-
-    record: AgentRecord
-
-
-def record_units(units: Sequence[ExperienceUnit]) -> tuple[RecordUnit, ...]:
-    """Return buffer units as record units. The record-driven engine puts only record units in its buffer."""
-    selected = tuple(unit for unit in units if isinstance(unit, RecordUnit))
-    if len(selected) != len(units):
-        raise TypeError("the record-driven experience buffer must hold only record units")
-    return selected
-
-
-class RecordDrivenTraceProcessor(DataProcessor):
-    """Batch recorded inference traffic every ``batch_size`` requests, unscored.
-
-    The report-free half of harness evolution: a deployment that only serves
-    still evolves. Each recorded inference is one unit, in arrival order;
-    when ``batch_size`` have accumulated they batch as trace samples with
-    ``score=None``, and the proposer contract requires handling unscored
-    samples. Reports that arrive under this policy are released untouched;
-    a deployment with real outcome signal selects the reported policy
-    instead, because a measured result beats model self judgment. In ``hybrid``
-    a queued instruction batches with the oldest held records, up to
-    ``batch_size``, as an automatic batch would; in ``manual`` it runs alone.
+    The proposer contract requires handling unscored samples.
     """
 
-    output_schema = TrainingBatch
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        environ: Mapping[str, str],
+    ) -> Self:
+        NoSettings.parse(config, plugin_class=cls)
+        return cls()
+
+    def make_tasks(self, record_set: RecordSet) -> TaskResult:
+        if not isinstance(record_set, SingleRecordSet):
+            raise TypeError(
+                f"{type(self).__name__} makes tasks from single-record sets, not {type(record_set).__name__}"
+            )
+        return TaskResult.ready((make_trajectory((record_set.record,)),))
+
+
+class TraceBatches(Task2Batch):
+    """Batch trace tasks unmodified; the backends consume them without more processing.
+
+    In ``hybrid`` a queued instruction batches with the traces that an
+    automatic batch would take next, up to ``batch_size``, so the proposer
+    reads the request beside them; in ``manual`` it runs alone.
+    """
+
     supported_training_modes = frozenset({"auto", "manual", "hybrid"})
     required_request_types = frozenset(RequestType)
 
-    def make_training_batch(self, batch_number: int, request: TrainingRequest | None) -> TrainingBatch:
-        if request is not None and self.training_mode == "manual":
-            self.experience_buffer.reserve(0)
-            return TrainingBatch(request.id, ())
-        # In hybrid an instruction takes the records an automatic batch would, none included; the base attaches it.
-        return self._make_pending(batch_number)
+    @classmethod
+    def from_config(
+        cls,
+        config: Mapping[str, Any],
+        *,
+        context: PipelineContext,
+        record2record: Record2Record,
+        record2task: Record2Task,
+        environ: Mapping[str, str],
+    ) -> Self:
+        return cls(context, BatchSettings.parse(config, plugin_class=cls).batch_size)
 
-    def __init__(self, context: ProcessorContext) -> None:
-        super().__init__(context)
-        # Each inference record is one unit.
-        self.experience_buffer = ExperienceBuffer()
-        self._released: set[str] = set()
-
-    def ingest(self, item: AgentRecord) -> None:
-        if item.request_type is RequestType.TRAIN:
-            super().ingest(item)
-        elif item.request_type is RequestType.INFERENCE:
-            index = self.experience_buffer.next_arrival_index()
-            self.experience_buffer.put(RecordUnit(unit_id=item.agent_record_id, arrival_index=index, record=item))
-        else:
-            self._released.add(item.agent_record_id)
-
-    def _ready_count(self) -> int:
-        return len(self.experience_buffer)
-
-    def _make_pending(self, batch_number: int) -> TrainingBatch:
-        selected = record_units(self.experience_buffer.reserve(self._batch_size))
-        return TrainingBatch(
-            f"{self.scenario}:harness_evolve:{batch_number}",
-            tuple(make_trajectory((unit.record,)) for unit in selected),
-        )
-
-    def _consume_pending(self) -> frozenset[str]:
-        if self.experience_buffer.reserved is None:
-            raise RuntimeError("no pending trace batch to consume")
-        consumed = frozenset(
-            unit.record.agent_record_id for unit in record_units(self.experience_buffer.consume_reserved())
-        )
-        self._released |= consumed
-        return consumed
-
-    def releasable_record_ids(self) -> frozenset[str]:
-        return frozenset(self._released | self._consumed_requests)
-
-    def release_records(self, agent_record_ids: frozenset[str]) -> None:
-        super().release_records(agent_record_ids)
-        self._released -= agent_record_ids
+    def make_batch(self, tasks: tuple[TrainDataItem, ...], batch_number: int) -> TrainingBatch:
+        return TrainingBatch(f"{self.scenario}:harness_evolve:{batch_number}", tasks)

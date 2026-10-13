@@ -205,7 +205,6 @@ def test_teacher_public_config_resolves_to_owned_dependency(tmp_path):
 
     config, _ = resolve_deployment_config(
         {
-            "schema-version": 2,
             "inference": {"model-path": "/student", "num-gpus": 1},
             "teacher": {"model-path": "/teacher", "num-gpus": 2, "port": 30123},
             "recipe": {"implementation": "recipes.opd.recipe:OPDRecipe"},

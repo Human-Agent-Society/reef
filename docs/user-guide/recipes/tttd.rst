@@ -17,7 +17,7 @@ search step uses the updated adapter.
 +-------------+------------------------------------------------------------+
 | Package     | ``recipes/tttd/``                                          |
 +-------------+------------------------------------------------------------+
-| Processor   | reported feedback, grouped                                 |
+| Pipeline    | reported feedback, grouped                                 |
 +-------------+------------------------------------------------------------+
 | Needs       | GPUs, and a harness that already runs a search loop        |
 +-------------+------------------------------------------------------------+
@@ -60,11 +60,11 @@ records the adapter version with the inference.
 
 The task judge executes the generated program and computes its reward. The
 harness reports that reward with the inference receipt and the rollout's step,
-group, and position. ``TTTDProcessor`` waits for every position in the grid. It
-rejects a grid that contains more than one release. Groups with one
-reward value across all siblings are removed after the grid reaches the barrier.
-If every group is constant, the processor keeps one group so that the training
-runtime receives a zero-signal batch.
+group, and position. The record stage, ``TTTDRecord2Record``, waits for every
+position in the grid. It rejects a grid that contains more than one release.
+``TTTDBatches`` removes the groups with one reward value across all siblings
+after the grid reaches the barrier. If every group is constant, ``TTTDBatches``
+keeps one group so that the training runtime receives a zero-signal batch.
 
 Slime computes adaptive-beta entropic leave-one-out advantages within each
 group. The loss uses the rollout log probabilities without PPO clipping and adds
@@ -80,11 +80,31 @@ phase ``committed`` with the new scenario step and starts the next search step.
 Configuration
 -------------
 
+The recipe has three pipeline stages: ``TTTDRecord2Record``, ``TTTDTasks``, and
+``TTTDBatches``. The deployment's ``pipeline`` section configures them. Write
+the step grid once, in the record stage. ``TTTDTasks`` and ``TTTDBatches`` read
+the grid from the record stage.
+
+.. code:: yaml
+
+   recipe:
+     implementation: recipes.tttd.recipe:TTTDRecipe
+   pipeline:
+     record2record:
+       config:
+         groups_per_step: 8
+         rollouts_per_group: 64
+
 .. config::
 
-   groups_per_step | 8 | comparison groups in one step. Env ``REEF_TTTD_GROUPS_PER_STEP``.
-   rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward. Env ``REEF_TTTD_ROLLOUTS_PER_GROUP``.
-   max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
+   pipeline.record2record.config.groups_per_step | 8 | comparison groups in one step; at least one.
+   pipeline.record2record.config.rollouts_per_group | 64 | siblings per group; at least two, since a group of one has no relative reward.
+   pipeline.record2task.config.accept_multi_turn_policy_samples | false | train on a report that references several model calls as one multi-turn sample.
+   recipe.config.max_staleness | 0 | accepted lag between the producing and serving version. Env ``REEF_MAX_STALENESS``.
+
+``TTTDBatches`` takes no config: one batch is always one complete step. Reef
+refuses ``groups_per_step`` or ``rollouts_per_group`` under ``recipe.config``
+and names the new place of the key.
 
 The report contract
 -------------------
@@ -207,15 +227,16 @@ sum the radii. They do not use the sum reported by the generated program.
 Configure a trajectory
 ----------------------
 
-The grid has one source in ``serve.yaml``. The harness reads the same
-``groups_per_step``, ``rollouts_per_group``, ``steps``, and ``max_new_tokens``
-values when it starts. Slime's ``--global-batch-size`` in that file must equal
+The grid has one source in ``serve.yaml``: ``pipeline.record2record.config``.
+The harness reads the same ``groups_per_step`` and ``rollouts_per_group``
+values, and ``steps`` and ``max_new_tokens`` from ``training.config``, when it
+starts. Slime's ``--global-batch-size`` in that file must equal
 ``groups_per_step x rollouts_per_group``.
 
 .. config::
 
-   reef.groups_per_step | 8 | parent candidates selected for one step, in ``serve.yaml``.
-   reef.rollouts_per_group | 64 | sibling rollouts sampled from each parent, in ``serve.yaml``.
+   pipeline.record2record.config.groups_per_step | 8 | parent candidates selected for one step, in ``serve.yaml``.
+   pipeline.record2record.config.rollouts_per_group | 64 | sibling rollouts sampled from each parent, in ``serve.yaml``.
    training.steps | 1 | search and optimizer steps, in ``serve.yaml``; the Slime command reads it as ``--num-rollout``.
    training.max_new_tokens | 26000 | maximum completion length, in ``serve.yaml``.
    MAX_WORKERS | 512 | concurrent rollout and evaluator calls, derived from the task in ``harness/harbor_agent.py``; packing uses ``256``.
@@ -379,7 +400,7 @@ paths are logged as metadata when ``upload_checkpoints`` is false. `Experiment
 tracking <../../reference/configuration.rst#experiment-tracking>`__ describes grouping,
 rollback behavior, offline mode, and metric names.
 
-When the processor receives a complete search grid, it records the following
+When ``TTTDBatches`` receives a complete search grid, it records the following
 metrics in the ``tttd`` namespace. These values describe every evaluated
 rollout before constant-reward groups are removed from the training batch.
 
@@ -399,7 +420,7 @@ rollout before constant-reward groups are removed from the training batch.
        also the configured reward for an invalid solution.
    * - ``tttd/constant_groups``, ``tttd/constant_groups_removed``
      - Number of constant-reward groups and the number removed before training.
-       If every group is constant, the processor retains one group for the
+       If every group is constant, ``TTTDBatches`` retains one group for the
        zero-gradient step.
    * - ``tttd/grid_groups``, ``tttd/grid_rollouts``
      - Size of the completed search grid.
